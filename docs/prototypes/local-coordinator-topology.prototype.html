@@ -187,7 +187,7 @@ const TOPOLOGIES = {
   A: {
     key: 'A',
     name: 'A — the run belongs to the tool the operator started',
-    summary: 'The engine is a library inside whatever the operator launched: a shell, or the local web UI. That process holds the job\u2019s writer lease and starts a private transfer worker inside the job folder, which dies when it dies.',
+    summary: 'The engine is a library inside whatever the operator launched: a shell, or the local web UI. That process holds the job\u2019s writer lease and starts a transfer worker for that one run, reachable only through a socket in that run\u2019s own folder. Migmate shuts it down on every exit it controls \u2014 but rclone has no way to die with its parent, so a killed owner can leave it behind.',
     workerScope: 'run', workerBind: 'socket', hasService: false,
   },
   B: {
@@ -257,7 +257,8 @@ function attachWorker(w, jobId, ownerProc) {
     const id = 'worker:' + jobId;
     w.workers[id] = {
       id, label: 'Transfer worker for ' + w.jobs[jobId].label, owner: ownerProc,
-      bind: 'job folder socket \u2014 jobs/' + jobId + '/control.sock (0600)', bindKind: 'socket',
+      bind: 'socket for this run only \u2014 jobs/' + jobId + '/run-3/rc.sock, in a 0700 directory',
+      bindKind: 'socket', identifiable: true,
       executeId: 'exec-' + w.nextExecuteId++, activeJob: jobId, state: 'running',
     };
     return null;
@@ -271,7 +272,7 @@ function attachWorker(w, jobId, ownerProc) {
   if (!k) {
     k = w.workers[id] = {
       id, label: 'Shared transfer worker', owner: topo.hasService ? 'service' : 'host',
-      bind: 'loopback port \u2014 127.0.0.1:5572', bindKind: 'tcp',
+      bind: 'loopback port \u2014 127.0.0.1:5572', bindKind: 'tcp', identifiable: false,
       executeId: 'exec-' + w.nextExecuteId++, activeJob: null, state: 'idle',
     };
   }
@@ -325,10 +326,12 @@ const ACTIONS = {
       if (!ks.length) return refuse('No transfer worker is running right now, so there is nothing to poke.');
       const exposed = ks.filter((k) => k.bindKind === 'tcp');
       if (exposed.length) {
-        return ok(w, 'It got in. ' + exposed[0].bind + ' is reachable by every program running as this user. ' +
-          'Listing jobs and reading their status needs no authentication at all, and anything past that is equivalent to shell access as the worker\u2019s user.');
+        return ok(w, 'It got in. Any program on this machine, running as anyone, can connect to ' + exposed[0].bind +
+          ', and driving that interface is equivalent to shell access as the worker\u2019s user. It stays open for as long as the worker lives, which is forever.');
       }
-      return ok(w, 'It was refused: the only way in is ' + ks[0].bind + ', and the file permissions on the job folder are the trust seam.');
+      return ok(w, 'A program belonging to another user was refused: the only way in is ' + ks[0].bind +
+        ', so directory permissions are the trust seam, and Migmate also gives each run its own credential. ' +
+        'A program running as the operator\u2019s own user still gets in \u2014 same-user isolation is not something this buys.');
     },
   },
 
@@ -438,11 +441,14 @@ const ACTIONS = {
       const k = leftoverWorker(w, job);
       if (!k) {
         if (workerFor(w, job)) return refuse('This job still has a live owner, so this is not a recovery situation.');
-        return refuse('There is no leftover transfer to stop: the worker died with the process that owned it, so "no prior writer remains" needed no proving.');
+        return refuse('Nothing answers where a leftover worker would be, so "no prior writer remains" is already proved.');
       }
-      k.state = 'idle';
-      k.activeJob = null;
-      return ok(w, 'The leftover transfer was stopped. Only now can Migmate prove no prior writer remains, which is what a safe resume requires.');
+      const decisive = k.identifiable;
+      if (topoOf(w).workerScope === 'run') delete w.workers[k.id];
+      else { k.state = 'idle'; k.activeJob = null; }
+      return ok(w, decisive
+        ? 'Recovery stopped the group recorded for that run and then killed the process holding that socket \u2014 safe to do, because nothing else could be using it. No prior writer remains, and the resume can start from the checkpoint.'
+        : 'Recovery stopped every job on the shared port, because there was no way to stop only this one. Any other run on this machine would have been stopped with it, and the resume still needs a destination inventory to know where it really got to.');
     },
   },
 };
@@ -466,8 +472,7 @@ function killProc(w, id) {
   const notes = [p.label + ' died without releasing anything.'];
 
   Object.values(w.workers).filter((k) => k.owner === id).forEach((k) => {
-    delete w.workers[k.id];
-    notes.push('Its private transfer worker died with it, so nothing is writing to the destination any more.');
+    notes.push('rclone has no way to die with its parent, so the transfer worker it started is still running.');
   });
 
   JOB_ORDER.forEach((jid) => {
@@ -476,7 +481,11 @@ function killProc(w, id) {
     if (j.phase === 'running' || j.phase === 'stopping') {
       notes.push('The ' + j.label + ' still shows a held lease with a live-looking heartbeat: nobody was there to release it.');
       const left = leftoverWorker(w, jid);
-      if (left) notes.push('The shared transfer worker is a separate long-lived process, so it is STILL running this job\u2019s transfer with nobody accountable for it.');
+      if (left) {
+        notes.push(left.identifiable
+          ? 'A worker is still writing for this job with nobody accountable \u2014 but it is the only thing on that run\u2019s socket, so recovery can name it exactly.'
+          : 'The shared transfer worker is still writing for this job with nobody accountable, and its loopback port answers for every run alike.');
+      }
     }
   });
 
@@ -516,8 +525,10 @@ function startRun(w, jobId, client) {
     }
     const left = leftoverWorker(w, jobId);
     if (left) {
-      return refuse('Refused, recovery report: a transfer worker on ' + left.bind + ' is still ' + left.state +
-        ' this job\u2019s work, submitted by a process that is gone. Migmate will not resubmit while a prior writer could still be writing. Stop the leftover transfer first.');
+      return refuse(left.identifiable
+        ? 'Refused, recovery report: probing ' + left.bind + ' got an answer, so the worker from the dead run is still there and still ' + left.state +
+          ' this job\u2019s work. Nothing else can be on that socket, so recovery knows exactly which process to stop. Stop the leftover transfer, then resume.'
+        : 'Refused, recovery report: ' + left.bind + ' answers, but that port answers for every run on this machine alike, so an answer does not say whose transfer is live. Worse, if the worker restarted since, its executeId and job ids are gone and the recorded ones mean nothing. Recovery has to stop everything on the port and fall back to a destination inventory.');
     }
   }
 
@@ -591,28 +602,31 @@ function checkInvariants(w) {
   const ks = Object.values(w.workers);
   const exposed = ks.filter((k) => k.bindKind === 'tcp');
   out.push(exposed.length
-    ? { status: 'fail', label: 'Only Migmate can drive the transfer worker', detail: 'The worker listens on ' + exposed[0].bind + '. Every program running as this user can reach it, listing jobs needs no authentication, and driving it is equivalent to shell access.' }
-    : { status: 'pass', label: 'Only Migmate can drive the transfer worker', detail: ks.length ? 'The only way in is a 0600 socket inside the job folder, so filesystem permissions are the trust seam.' : 'No worker is running.' });
+    ? { status: 'fail', label: 'Only Migmate can drive the transfer worker', detail: 'The worker listens on ' + exposed[0].bind + ', which every program on this machine can reach for as long as the worker lives, and driving it is equivalent to shell access.' }
+    : { status: 'pass', label: 'Only Migmate can drive the transfer worker', detail: ks.length ? 'The only way in is a socket in a 0700 directory belonging to that one run, plus a credential minted for it. Same-user isolation is not claimed.' : 'No worker is running.' });
 
   const stuck = JOB_ORDER.filter((id) => leftoverWorker(w, id));
   const reclaimable = JOB_ORDER.map((id) => w.jobs[id]).filter((j) => j.lease && !ownerAlive(w, j));
+  const decisive = stuck.length ? leftoverWorker(w, stuck[0]).identifiable : false;
   out.push(stuck.length
-    ? { status: 'fail', label: 'Recovery needs no guesswork', detail: 'Resuming the ' + w.jobs[stuck[0]].label + ' is blocked until the leftover transfer is stopped, because "no prior writer remains" cannot be proved while a surviving worker holds the job.' }
+    ? decisive
+      ? { status: 'warn', label: 'Recovery needs no guesswork', detail: 'Resuming the ' + w.jobs[stuck[0]].label + ' is blocked until the leftover worker is stopped \u2014 but that worker is alone on that run\u2019s socket, so which process to stop is a fact, not a guess.' }
+      : { status: 'fail', label: 'Recovery needs no guesswork', detail: 'Resuming the ' + w.jobs[stuck[0]].label + ' is blocked, and the shared port cannot say whose transfer is live. Recovery has to stop everything on it and reconcile against the destination.' }
     : reclaimable.length
-      ? { status: 'pass', label: 'Recovery needs no guesswork', detail: 'The worker died with its owner, so "no prior writer remains" is provable from the fact that the process is gone. Expire the lease and resume.' }
+      ? { status: 'pass', label: 'Recovery needs no guesswork', detail: 'Nothing answers on the socket recorded for that run, which is what proves no prior writer remains. Expire the lease and resume from the checkpoint.' }
       : { status: 'pass', label: 'Recovery needs no guesswork', detail: 'Nothing to recover.' });
 
   out.push(topo.workerScope === 'run'
-    ? { status: 'pass', label: 'Jobs do not queue behind each other', detail: 'Each run gets its own worker in its own job folder, so two jobs can run at once without admission control.' }
-    : { status: 'warn', label: 'Jobs do not queue behind each other', detail: 'One shared worker admits one active job at a time, so a second job must be refused or queued, and a worker restart is felt by every job on the machine.' });
+    ? { status: 'pass', label: 'Jobs do not queue behind each other', detail: 'Each run gets its own worker on its own socket, so two jobs can run at once without admission control, and stopping one can never touch another.' }
+    : { status: 'warn', label: 'Jobs do not queue behind each other', detail: 'One shared worker admits one active job at a time, so a second job must be refused or queued, and stopping or restarting it is felt by every job on the machine.' });
 
   return out;
 }
 
 const COSTS = [
-  ['A', 'Nothing outlives the operator\u2019s process, so a kill is self-cleaning and "no prior writer remains" is provable from the pid being gone. The trust seam is a 0600 socket in the job folder. Costs: a worker start per run, and no reattach after the owner dies (there is nothing left to reattach to).'],
-  ['B', 'Buys reattach after a CLI dies, and pays for it with the one case that matters: a surviving worker writing to the destination with nobody accountable, recovery that must stop that worker before it may resume, a loopback port every local program can drive, and admission control so two jobs do not collide. The reattach also evaporates exactly when the worker restarts, which is when its executeId and job ids are gone anyway.'],
-  ['C', 'Makes every run detached by construction, which is the thing 0.x deferred, and it moves the lease out of the operator\u2019s reach. It also needs a service lifecycle, an IPC surface, and a version-skew story between client and service before it can do anything the library can already do.'],
+  ['A', 'A killed owner can still leave a worker behind \u2014 rclone has no parent-death mechanism, so that is true of every topology. What A buys is that the leftover is identifiable: one worker, one run, one socket, so probing it proves whether a prior writer remains, and stopping it can never hit another job. The trust seam is a 0700 directory plus a per-run credential. Costs: a process start per run, and no reattach across owner death.'],
+  ['B', 'Buys reattach after a CLI dies, and pays with the case that matters: a surviving worker writing with nobody accountable, on a port that answers for every run alike \u2014 so recovery cannot tell whose transfer is live, has to stop them all, and still needs a destination inventory. It also leaves a permanent local control port open and needs admission control so two jobs do not collide. The reattach evaporates on worker restart, which is exactly when the recorded ids stop meaning anything.'],
+  ['C', 'Makes every run detached by construction, which is the thing 0.x deferred, and moves the lease out of the operator\u2019s reach. It inherits B\u2019s shared port and admission problem, and adds a service lifecycle, an IPC surface, and client/service version skew before it can do anything the library already does.'],
 ];
 
 const SCENARIOS = [
@@ -633,7 +647,7 @@ const SCENARIOS = [
 
   { id: 'power', title: 'The laptop dies mid-run',
     blurb: 'The worst case. The process running the job is killed outright, with no chance to release anything, and the operator tries to pick the job up from another shell.',
-    watch: 'Is anything still writing to the destination? And what does Migmate need in order to prove it is safe to resume?',
+    watch: 'A leftover worker is possible in every topology \u2014 rclone cannot be told to die with its parent. So the question is not whether something survives, it is whether Migmate can tell what survived and stop exactly that.',
     steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'open:shell2' }, { a: 'run:shell1', job: 'files' }, { a: 'chunk', job: 'files' },
              { a: 'kill:shell1', notC: true }, { a: 'kill:service', only: ['C'] },
              { a: 'run:shell2', job: 'files' }, { a: 'expire', job: 'files' }, { a: 'run:shell2', job: 'files' },
