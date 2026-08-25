@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — Migmate local coordinator topology</title>
+<style>
+  :root {
+    --ink: #14181f;
+    --dim: #5b6673;
+    --line: #e2e6eb;
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --warn: #b45309;
+    --fail: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+  }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+  header { padding: 32px 32px 8px; max-width: 1400px; margin: 0 auto; }
+  .badge {
+    display: inline-block; padding: 3px 9px; border-radius: 4px;
+    background: #fde68a; color: #7c4a03; font-size: 11px; letter-spacing: .09em;
+    font-weight: 700; text-transform: uppercase;
+  }
+  h1 { font-size: 27px; margin: 14px 0 6px; letter-spacing: -0.015em; }
+  .question { font-size: 16px; color: var(--ink); max-width: 78ch; }
+  .meta { font-size: 13px; color: var(--dim); max-width: 78ch; margin-top: 10px; }
+  main {
+    max-width: 1400px; margin: 0 auto; padding: 16px 32px 64px;
+    display: grid; grid-template-columns: minmax(360px, 460px) minmax(420px, 1fr); gap: 24px; align-items: start;
+  }
+  @media (max-width: 1080px) { main { grid-template-columns: 1fr; } .sticky { position: static !important; } }
+  .sticky { position: sticky; top: 16px; }
+  section.card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 20px;
+  }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 12px; font-weight: 700; }
+  h3 { font-size: 14px; margin: 18px 0 8px; }
+  h3:first-child { margin-top: 0; }
+  .topo-choices { display: grid; gap: 8px; }
+  .topo {
+    display: block; border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px; cursor: pointer; background: #fff;
+  }
+  .topo.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: #f5f8ff; }
+  .topo input { margin-right: 8px; }
+  .topo b { font-weight: 650; }
+  .topo p { margin: 6px 0 0 22px; color: var(--dim); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13.5px; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: none; }
+  .chip { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11.5px; font-weight: 650; border: 1px solid transparent; }
+  .chip.on   { background: #dcfce7; color: #14532d; }
+  .chip.off  { background: #f1f3f5; color: #6b7280; }
+  .chip.busy { background: #dbeafe; color: #1e3a8a; }
+  .chip.hot  { background: #fee2e2; color: #7f1d1d; }
+  .chip.wait { background: #fef3c7; color: #78350f; }
+  .inv { display: grid; gap: 9px; }
+  .inv .row { display: grid; grid-template-columns: 18px 1fr; gap: 9px; }
+  .inv .dot { width: 10px; height: 10px; border-radius: 99px; margin-top: 6px; }
+  .dot.pass { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.fail { background: var(--fail); }
+  .inv b { font-weight: 640; font-size: 13.5px; }
+  .inv .detail { color: var(--dim); font-size: 13px; }
+  .inv .row.fail b { color: var(--fail); }
+  .btns { display: flex; flex-wrap: wrap; gap: 7px; }
+  button {
+    font: inherit; font-size: 13px; padding: 6px 11px; border-radius: 7px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.step { text-align: left; }
+  button:disabled { opacity: .45; cursor: default; }
+  button:disabled:hover { border-color: var(--line); color: var(--ink); }
+  button.now { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
+  button.now:hover { color: #fff; }
+  .group { margin-bottom: 16px; }
+  .group > .lbl { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); font-weight: 700; margin-bottom: 7px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 14px; }
+  .tabs button.sel { border-color: var(--accent); background: #eef4ff; color: var(--accent); font-weight: 640; }
+  .scen-blurb { color: var(--ink); font-size: 14px; max-width: 74ch; margin: 0 0 14px; }
+  .scen-blurb .watch { color: var(--dim); display: block; margin-top: 6px; }
+  ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+  ol.steps li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start; }
+  ol.steps .n { color: var(--dim); font-size: 12px; padding-top: 7px; }
+  .result { font-size: 13px; margin-top: 4px; }
+  .result.ok { color: var(--ok); }
+  .result.refused { color: var(--fail); }
+  .happened { background: #eef4ff; border: 1px solid #cddcfb; border-radius: 8px; padding: 11px 13px; font-size: 13.5px; }
+  .happened.refused { background: #fef2f2; border-color: #fbd0d0; }
+  .happened .k { font-weight: 700; font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--dim); display: block; margin-bottom: 3px; }
+  ol.log { margin: 0; padding-left: 22px; font-size: 13px; color: var(--dim); display: grid; gap: 6px; max-height: 320px; overflow: auto; }
+  ol.log b { color: var(--ink); font-weight: 640; }
+  ol.log li.refused b { color: var(--fail); }
+  .note { color: var(--dim); font-size: 13px; }
+  .verdict { font-size: 13.5px; }
+  .verdict li { margin-bottom: 7px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="badge">Throwaway prototype</span>
+  <h1>Migmate local coordinator topology</h1>
+  <p class="question">
+    <b>The question this answers:</b> what process and ownership topology should connect the shared engine, the CLI,
+    the local web UI, durable jobs, and the Migmate-managed transfer worker (rclone), so that exactly one thing
+    ever writes a job while anyone may safely watch it? Pick a topology below, then push it through the awkward
+    cases: someone else already running the job, a stop halfway, a laptop that loses power mid-run, two jobs at once,
+    a closed browser tab, and another program on the same machine poking the transfer worker.
+  </p>
+  <p class="meta">
+    Prototype for <a href="https://github.com/devosurf/migmate-cli/issues/5">Choose the local coordinator topology</a>.
+    Nothing here is production code and nothing is persisted; the whole model lives in memory and resets when you
+    switch topology or start a walkthrough. What is worth keeping is the state machine in the first
+    <code>&lt;script&gt;</code> block and, above all, the verdict you reach by clicking.
+  </p>
+</header>
+
+<main>
+  <div>
+    <section class="card">
+      <h2>Topology under test</h2>
+      <div class="topo-choices" id="topo-choices"></div>
+    </section>
+
+    <section class="card sticky">
+      <h2>Current state</h2>
+      <div id="happened" class="happened"></div>
+      <h3>Processes on this machine</h3>
+      <table><tbody id="procs"></tbody></table>
+      <h3>Jobs</h3>
+      <table>
+        <thead><tr><th>Job</th><th>State</th><th>Chunks</th><th>Owned by</th></tr></thead>
+        <tbody id="jobs"></tbody>
+      </table>
+      <h3>Transfer workers (rclone)</h3>
+      <table><tbody id="workers"></tbody></table>
+      <h3>Does the topology hold up?</h3>
+      <div class="inv" id="invariants"></div>
+    </section>
+
+    <section class="card">
+      <h2>Everything that happened</h2>
+      <ol class="log" id="log" reversed></ol>
+    </section>
+  </div>
+
+  <div>
+    <section class="card">
+      <h2>Guided walkthroughs</h2>
+      <div class="tabs" id="scen-tabs"></div>
+      <p class="scen-blurb" id="scen-blurb"></p>
+      <ol class="steps" id="scen-steps"></ol>
+    </section>
+
+    <section class="card">
+      <h2>Free play — press anything, in any order</h2>
+      <div id="free"></div>
+    </section>
+
+    <section class="card">
+      <h2>What each topology costs</h2>
+      <ul class="verdict" id="costs"></ul>
+    </section>
+  </div>
+</main>
+
+<script id="model">
+/* ------------------------------------------------------------------ *
+ * THE MODEL. Pure: no DOM, no globals mutated from the page.
+ * apply(world, actionId, job) -> { world, event }
+ * This is the part worth lifting out once the question is settled.
+ * ------------------------------------------------------------------ */
+
+const CHUNKS = 3;
+
+const TOPOLOGIES = {
+  A: {
+    key: 'A',
+    name: 'A — the run belongs to the tool the operator started',
+    summary: 'The engine is a library inside whatever the operator launched: a shell, or the local web UI. That process holds the job\u2019s writer lease and starts a private transfer worker inside the job folder, which dies when it dies.',
+    workerScope: 'run', workerBind: 'socket', hasService: false,
+  },
+  B: {
+    key: 'B',
+    name: 'B — one long-lived transfer worker for the whole machine',
+    summary: 'The engine is still a library and the operator\u2019s process still holds the lease, but Migmate keeps a single shared transfer worker listening on a loopback port. It outlives every run, so it is still there \u2014 possibly still writing \u2014 after the process that submitted the work is gone.',
+    workerScope: 'host', workerBind: 'tcp', hasService: false,
+  },
+  C: {
+    key: 'C',
+    name: 'C — a background Migmate service owns every run',
+    summary: 'The engine only ever runs inside a background service. The CLI and the web UI are thin clients that ask the service to run a job and then watch it. The service holds every lease and owns the transfer worker.',
+    workerScope: 'host', workerBind: 'tcp', hasService: true,
+  },
+};
+
+const PROC_ORDER = ['shell1', 'shell2', 'web', 'service'];
+const JOB_ORDER = ['files', 'teams'];
+
+function initialWorld(topologyKey) {
+  return {
+    topology: topologyKey,
+    procs: {
+      shell1:  { label: 'Operator shell 1',        kind: 'cli',     alive: false },
+      shell2:  { label: 'Operator shell 2',        kind: 'cli',     alive: false },
+      web:     { label: 'Local web UI (server)',   kind: 'web',     alive: false },
+      service: { label: 'Background Migmate service', kind: 'service', alive: false },
+    },
+    browserOpen: false,
+    jobs: {
+      files: { label: 'File migration job',  phase: 'ready', chunk: 0, checkpoint: 0, lease: null, watchers: [] },
+      teams: { label: 'Teams archive job',   phase: 'ready', chunk: 0, checkpoint: 0, lease: null, watchers: [] },
+    },
+    workers: {},
+    nextExecuteId: 1,
+    log: [],
+  };
+}
+
+const clone = (w) => JSON.parse(JSON.stringify(w));
+const topoOf = (w) => TOPOLOGIES[w.topology];
+const procLabel = (w, id) => (id === 'host' ? 'Migmate (not tied to any process)' : w.procs[id].label);
+const ownerAlive = (w, job) => !!(job.lease && w.procs[job.lease.owner] && w.procs[job.lease.owner].alive);
+const workerFor = (w, jobId) => Object.values(w.workers).find((k) => k.activeJob === jobId) || null;
+const isBusyState = (s) => s === 'running' || s === 'stopping';
+
+function leftoverWorker(w, jobId) {
+  const k = workerFor(w, jobId);
+  if (!k || !isBusyState(k.state)) return null;
+  const j = w.jobs[jobId];
+  if (j.lease && ownerAlive(w, j)) return null;
+  return k;
+}
+
+function holdsOtherRun(w, procId, jobId) {
+  return JOB_ORDER.some((id) => {
+    if (id === jobId) return false;
+    const j = w.jobs[id];
+    return !!j.lease && j.lease.owner === procId && (j.phase === 'running' || j.phase === 'stopping');
+  });
+}
+
+/* Start or claim the transfer worker for a job. Returns a refusal string, or null. */
+function attachWorker(w, jobId, ownerProc) {
+  const topo = topoOf(w);
+  if (topo.workerScope === 'run') {
+    const id = 'worker:' + jobId;
+    w.workers[id] = {
+      id, label: 'Transfer worker for ' + w.jobs[jobId].label, owner: ownerProc,
+      bind: 'job folder socket \u2014 jobs/' + jobId + '/control.sock (0600)', bindKind: 'socket',
+      executeId: 'exec-' + w.nextExecuteId++, activeJob: jobId, state: 'running',
+    };
+    return null;
+  }
+  const id = 'worker:host';
+  let k = w.workers[id];
+  if (k && k.activeJob && k.activeJob !== jobId && isBusyState(k.state)) {
+    return 'Refused: the shared transfer worker is already running the ' + w.jobs[k.activeJob].label +
+      '. Only one active job per worker instance, so this job has to wait for the other one to finish.';
+  }
+  if (!k) {
+    k = w.workers[id] = {
+      id, label: 'Shared transfer worker', owner: topo.hasService ? 'service' : 'host',
+      bind: 'loopback port \u2014 127.0.0.1:5572', bindKind: 'tcp',
+      executeId: 'exec-' + w.nextExecuteId++, activeJob: null, state: 'idle',
+    };
+  }
+  k.activeJob = jobId;
+  k.state = 'running';
+  return null;
+}
+
+function releaseWorker(w, jobId, reaped) {
+  const k = workerFor(w, jobId);
+  if (!k) return;
+  if (topoOf(w).workerScope === 'run' && reaped) delete w.workers[k.id];
+  else { k.state = 'idle'; k.activeJob = null; }
+}
+
+/* ---- actions ---------------------------------------------------- */
+
+const ACTIONS = {
+
+  /* processes -------------------------------------------------- */
+  'open:shell1': { group: 'machine', label: 'Open operator shell 1', run: (w) => startProc(w, 'shell1') },
+  'open:shell2': { group: 'machine', label: 'Open operator shell 2', run: (w) => startProc(w, 'shell2') },
+  'start:web':   { group: 'machine', label: 'Start the local web UI', run: (w) => startProc(w, 'web') },
+  'start:service': { group: 'machine', label: 'Start the background Migmate service', run: (w) => startProc(w, 'service') },
+  'kill:shell1': { group: 'machine', label: 'Shell 1 dies (power loss)', run: (w) => killProc(w, 'shell1') },
+  'kill:shell2': { group: 'machine', label: 'Shell 2 dies (power loss)', run: (w) => killProc(w, 'shell2') },
+  'kill:web':    { group: 'machine', label: 'The web UI server dies', run: (w) => killProc(w, 'web') },
+  'kill:service':{ group: 'machine', label: 'The background service dies', run: (w) => killProc(w, 'service') },
+
+  'close:browser': {
+    group: 'machine', label: 'Close the browser tab',
+    run: (w) => {
+      if (!w.browserOpen) return refuse('No browser tab is open.');
+      w.browserOpen = false;
+      const running = JOB_ORDER.map((id) => w.jobs[id]).filter((j) => j.phase === 'running' && j.lease);
+      const webRun = running.find((j) => j.lease.owner === 'web');
+      if (webRun) {
+        return ok(w, 'The tab is gone, but the web UI server process the operator started is still alive and still ' +
+          'holds the lease, so the run continues. Foreground means "owned by a live process the operator started", not "attached to a terminal".');
+      }
+      const svcRun = running.find((j) => j.lease.owner === 'service');
+      if (svcRun) return ok(w, 'The tab is gone. The run continues inside the background service, with nothing the operator started attached to it.');
+      return ok(w, 'The tab is gone. Nothing was running.');
+    },
+  },
+
+  'probe:worker': {
+    group: 'machine', label: 'Another program on this machine pokes the transfer worker',
+    run: (w) => {
+      const ks = Object.values(w.workers);
+      if (!ks.length) return refuse('No transfer worker is running right now, so there is nothing to poke.');
+      const exposed = ks.filter((k) => k.bindKind === 'tcp');
+      if (exposed.length) {
+        return ok(w, 'It got in. ' + exposed[0].bind + ' is reachable by every program running as this user. ' +
+          'Listing jobs and reading their status needs no authentication at all, and anything past that is equivalent to shell access as the worker\u2019s user.');
+      }
+      return ok(w, 'It was refused: the only way in is ' + ks[0].bind + ', and the file permissions on the job folder are the trust seam.');
+    },
+  },
+
+  /* per job ---------------------------------------------------- */
+  'run:shell1': { group: 'job', label: 'Run it from shell 1', run: (w, job) => startRun(w, job, 'shell1') },
+  'run:shell2': { group: 'job', label: 'Run it from shell 2', run: (w, job) => startRun(w, job, 'shell2') },
+  'run:web':    { group: 'job', label: 'Run it from the web UI', run: (w, job) => startRun(w, job, 'web') },
+
+  'status:shell2': {
+    group: 'job', label: 'Check status from shell 2',
+    run: (w, job) => {
+      if (!w.procs.shell2.alive) return refuse('Shell 2 isn\u2019t open.');
+      const j = w.jobs[job];
+      const who = j.lease ? procLabel(w, j.lease.owner) + (ownerAlive(w, j) ? '' : ' (which is gone)') : 'nobody';
+      return ok(w, 'Read-only: the ' + j.label + ' is ' + phaseText(j) + ', ' + j.chunk + ' of ' + CHUNKS +
+        ' chunks done, last checkpoint at ' + j.checkpoint + ', owned by ' + who + '. No lease was taken and nothing was blocked.');
+    },
+  },
+
+  'chunk': {
+    group: 'job', label: 'Work completes the next chunk and checkpoints',
+    run: (w, job) => {
+      const j = w.jobs[job];
+      if (j.phase !== 'running') return refuse('The ' + j.label + ' is not running.');
+      const k = workerFor(w, job);
+      if (!k || k.state !== 'running') return refuse('No transfer worker is carrying this job\u2019s work right now.');
+      j.chunk += 1;
+      j.checkpoint = j.chunk;
+      if (j.chunk >= CHUNKS) {
+        j.phase = 'done';
+        j.lease = null;
+        releaseWorker(w, job, true);
+        return ok(w, 'Last chunk done. The ' + j.label + ' verified and closed, the lease was released, and the transfer worker was ' +
+          (topoOf(w).workerScope === 'run' ? 'shut down with the run.' : 'left idle for the next job.'));
+      }
+      return ok(w, 'Chunk ' + j.chunk + ' of ' + CHUNKS + ' is durable. Checkpoint moved to ' + j.checkpoint + '.');
+    },
+  },
+
+  'interrupt': {
+    group: 'job', label: 'Operator stops the run (Ctrl-C, or Stop in the UI)',
+    run: (w, job) => {
+      const j = w.jobs[job];
+      if (j.phase !== 'running') return refuse('The ' + j.label + ' is not running, so there is nothing to stop.');
+      const k = workerFor(w, job);
+      if (k) k.state = 'stopping';
+      j.phase = 'stopping';
+      return ok(w, 'Stop is cooperative: the worker keeps writing until it notices. Migmate holds the lease until the worker is proven stopped, ' +
+        'so nothing else can claim the job in the meantime.');
+    },
+  },
+
+  'settle': {
+    group: 'job', label: 'The transfer worker finishes stopping',
+    run: (w, job) => {
+      const j = w.jobs[job];
+      const k = workerFor(w, job);
+      if (!k || k.state !== 'stopping') return refuse('No worker is in the middle of stopping for this job.');
+      releaseWorker(w, job, true);
+      const hadOwner = j.lease && ownerAlive(w, j);
+      if (j.phase === 'stopping') j.phase = 'interrupted';
+      if (hadOwner) j.lease = null;
+      return ok(w, 'The worker stopped' + (hadOwner ? ' and the lease was released' : '') +
+        '. The ' + j.label + ' is resumable from checkpoint ' + j.checkpoint + '; re-running execute picks it up there.');
+    },
+  },
+
+  'expire': {
+    group: 'job', label: 'The writer lease heartbeat expires',
+    run: (w, job) => {
+      const j = w.jobs[job];
+      if (!j.lease) return refuse('No lease is held on the ' + j.label + '.');
+      if (ownerAlive(w, j)) return refuse('The owner is alive and keeps renewing the heartbeat, so it cannot expire.');
+      if (j.lease.heartbeat === 'stale') return refuse('The lease has already expired.');
+      j.lease.heartbeat = 'stale';
+      return ok(w, 'The lease held by ' + procLabel(w, j.lease.owner) + ' has expired. Only now may another process try to take over.');
+    },
+  },
+
+  'killWorker': {
+    group: 'job', label: 'The transfer worker crashes',
+    run: (w, job) => {
+      const j = w.jobs[job];
+      const k = workerFor(w, job);
+      if (!k) return refuse('No transfer worker exists for this job.');
+      const oldExec = k.executeId;
+      delete w.workers[k.id];
+      if (j.phase !== 'running' && j.phase !== 'stopping') {
+        return ok(w, 'The worker is gone. Nothing was in flight.');
+      }
+      if (j.lease && ownerAlive(w, j)) {
+        j.chunk = j.checkpoint;
+        const refusal = attachWorker(w, job, j.lease.owner);
+        if (refusal) return { world: w, event: { kind: 'refused', text: refusal } };
+        j.phase = 'running';
+        return ok(w, 'The worker\u2019s job registry was only ever in memory, so ' + oldExec + ' and every job id under it are meaningless now. ' +
+          'Migmate rewound to checkpoint ' + j.checkpoint + ', started a fresh worker, and carried on. Recovery is Migmate\u2019s, never the worker\u2019s.');
+      }
+      return ok(w, 'The worker died and so did the process that submitted its work. The job is stuck at checkpoint ' + j.checkpoint + ' until someone recovers it.');
+    },
+  },
+
+  'stopOrphan': {
+    group: 'job', label: 'Recovery: stop the leftover transfer',
+    run: (w, job) => {
+      const j = w.jobs[job];
+      const k = leftoverWorker(w, job);
+      if (!k) {
+        if (workerFor(w, job)) return refuse('This job still has a live owner, so this is not a recovery situation.');
+        return refuse('There is no leftover transfer to stop: the worker died with the process that owned it, so "no prior writer remains" needed no proving.');
+      }
+      k.state = 'idle';
+      k.activeJob = null;
+      return ok(w, 'The leftover transfer was stopped. Only now can Migmate prove no prior writer remains, which is what a safe resume requires.');
+    },
+  },
+};
+
+function startProc(w, id) {
+  const p = w.procs[id];
+  if (id === 'service' && !topoOf(w).hasService) {
+    return refuse('Topology ' + w.topology + ' has no background service: the engine only ever runs inside the tool the operator started.');
+  }
+  if (p.alive) return refuse(p.label + ' is already running.');
+  p.alive = true;
+  if (id === 'web') w.browserOpen = true;
+  return ok(w, p.label + ' is up.' + (id === 'web' ? ' A browser tab is open on it.' : ''));
+}
+
+function killProc(w, id) {
+  const p = w.procs[id];
+  if (!p.alive) return refuse(p.label + ' is not running.');
+  p.alive = false;
+  if (id === 'web') w.browserOpen = false;
+  const notes = [p.label + ' died without releasing anything.'];
+
+  Object.values(w.workers).filter((k) => k.owner === id).forEach((k) => {
+    delete w.workers[k.id];
+    notes.push('Its private transfer worker died with it, so nothing is writing to the destination any more.');
+  });
+
+  JOB_ORDER.forEach((jid) => {
+    const j = w.jobs[jid];
+    if (!j.lease || j.lease.owner !== id) return;
+    if (j.phase === 'running' || j.phase === 'stopping') {
+      notes.push('The ' + j.label + ' still shows a held lease with a live-looking heartbeat: nobody was there to release it.');
+      const left = leftoverWorker(w, jid);
+      if (left) notes.push('The shared transfer worker is a separate long-lived process, so it is STILL running this job\u2019s transfer with nobody accountable for it.');
+    }
+  });
+
+  if (topoOf(w).hasService && id !== 'service') {
+    const svc = JOB_ORDER.map((x) => w.jobs[x]).find((j) => j.phase === 'running' && j.lease && j.lease.owner === 'service');
+    if (svc) notes.push('The ' + svc.label + ' keeps running inside the background service, with nothing the operator started attached to it.');
+  }
+  return ok(w, notes.join(' '));
+}
+
+function startRun(w, jobId, client) {
+  const topo = topoOf(w);
+  const j = w.jobs[jobId];
+  const cp = w.procs[client];
+  if (!cp.alive) return refuse(cp.label + ' isn\u2019t running.');
+  if (j.phase === 'done') return refuse('The ' + j.label + ' is already finished.');
+
+  let owner = client;
+  if (topo.hasService) {
+    if (!w.procs.service.alive) return refuse('The background Migmate service is not running, so no client can start a run.');
+    owner = 'service';
+  }
+
+  if (j.lease) {
+    const live = ownerAlive(w, j);
+    if (live && j.lease.owner === owner && owner === 'service') {
+      if (!j.watchers.includes(client)) j.watchers.push(client);
+      return ok(w, cp.label + ' attached to the run the background service already owns. No second writer was created \u2014 but no client owns it either.');
+    }
+    if (live) {
+      return refuse('Refused, lock conflict (exit 3): ' + procLabel(w, j.lease.owner) + ' is running the ' + j.label +
+        '. Reads are still allowed \u2014 status and reports never wait on the lease.');
+    }
+    if (j.lease.heartbeat === 'fresh') {
+      return refuse('Refused: the writer lease is still held by ' + procLabel(w, j.lease.owner) +
+        ' and its heartbeat has not expired yet. Migmate blocks rather than risk two writers on one job.');
+    }
+    const left = leftoverWorker(w, jobId);
+    if (left) {
+      return refuse('Refused, recovery report: a transfer worker on ' + left.bind + ' is still ' + left.state +
+        ' this job\u2019s work, submitted by a process that is gone. Migmate will not resubmit while a prior writer could still be writing. Stop the leftover transfer first.');
+    }
+  }
+
+  if (cp.kind === 'cli' && holdsOtherRun(w, client, jobId)) {
+    return refuse(cp.label + ' is busy: execute waits in the foreground, so that shell cannot start a second run.');
+  }
+
+  const refusal = attachWorker(w, jobId, owner);
+  if (refusal) return { world: w, event: { kind: 'refused', text: refusal } };
+
+  const resuming = j.checkpoint > 0;
+  j.chunk = j.checkpoint;
+  j.phase = 'running';
+  j.lease = { owner, heartbeat: 'fresh' };
+  j.watchers = topo.hasService ? [client] : [];
+  const via = topo.hasService ? cp.label + ' asked the background service, which took the lease' : cp.label + ' took the lease';
+  return ok(w, via + ' on the ' + j.label + (resuming ? ' and resumed from checkpoint ' + j.checkpoint + '.' : ' and started from the top.'));
+}
+
+function phaseText(j) {
+  return { ready: 'waiting to run', running: 'running', stopping: 'stopping', interrupted: 'interrupted and resumable', done: 'finished' }[j.phase];
+}
+
+const ok = (w, text) => ({ world: w, event: { kind: 'ok', text } });
+const refuse = (text) => ({ refused: true, event: { kind: 'refused', text } });
+
+function apply(world, actionId, jobId) {
+  const action = ACTIONS[actionId];
+  const draft = clone(world);
+  const out = action.run(draft, jobId);
+  const base = out.refused ? world : out.world;
+  return { world: withLog(base, out.event, actionId, jobId), event: out.event };
+}
+
+function withLog(w, event, actionId, jobId) {
+  const next = clone(w);
+  const what = labelFor(actionId, jobId, next);
+  next.log = next.log.concat([{ n: next.log.length + 1, kind: event.kind, what, text: event.text }]);
+  next.lastEvent = { kind: event.kind, what, text: event.text };
+  return next;
+}
+
+function labelFor(actionId, jobId, w) {
+  const a = ACTIONS[actionId];
+  return a.group === 'job' ? a.label + ' \u2014 ' + w.jobs[jobId].label : a.label;
+}
+
+/* ---- invariants: the payoff panel -------------------------------- */
+
+function checkInvariants(w) {
+  const topo = topoOf(w);
+  const out = [];
+  const running = JOB_ORDER.map((id) => ({ id, j: w.jobs[id] })).filter(({ j }) => j.phase === 'running' || j.phase === 'stopping');
+
+  const orphanLeases = JOB_ORDER.map((id) => w.jobs[id]).filter((j) => j.lease && !ownerAlive(w, j));
+  out.push(orphanLeases.length
+    ? { status: 'warn', label: 'One writer per job', detail: orphanLeases.map((j) => 'The ' + j.label + ' still shows a lease held by ' + procLabel(w, j.lease.owner) + ', which is gone. Nothing may resume until it expires.').join(' ') }
+    : { status: 'pass', label: 'One writer per job', detail: running.length ? running.map(({ j }) => procLabel(w, j.lease.owner) + ' owns the ' + j.label + '.').join(' ') : 'Nothing holds a lease.' });
+
+  const unowned = JOB_ORDER.map((id) => leftoverWorker(w, id) && w.jobs[id]).filter(Boolean);
+  out.push(unowned.length
+    ? { status: 'fail', label: 'Nothing writes without an accountable owner', detail: 'A transfer worker is still moving data for the ' + unowned[0].label + ' while the process that submitted it is gone. Data is landing at the destination with nobody accountable for it.' }
+    : { status: 'pass', label: 'Nothing writes without an accountable owner', detail: 'Every active transfer has a live owner holding its lease.' });
+
+  const detached = running.filter(({ j }) => j.lease.owner === 'service');
+  const foreground = running.filter(({ j }) => j.lease.owner !== 'service');
+  out.push(detached.length
+    ? { status: 'fail', label: 'Runs stay in the foreground (the 0.x rule)', detail: 'The ' + detached[0].j.label + ' is owned by a background service, so it survives every operator process. That is detached execution, which the operator-journeys decision deferred out of 0.x.' }
+    : { status: 'pass', label: 'Runs stay in the foreground (the 0.x rule)', detail: foreground.length ? 'Owned by ' + procLabel(w, foreground[0].j.lease.owner) + ', a process the operator started. Kill it and the run stops.' : 'Nothing is running.' });
+
+  const ks = Object.values(w.workers);
+  const exposed = ks.filter((k) => k.bindKind === 'tcp');
+  out.push(exposed.length
+    ? { status: 'fail', label: 'Only Migmate can drive the transfer worker', detail: 'The worker listens on ' + exposed[0].bind + '. Every program running as this user can reach it, listing jobs needs no authentication, and driving it is equivalent to shell access.' }
+    : { status: 'pass', label: 'Only Migmate can drive the transfer worker', detail: ks.length ? 'The only way in is a 0600 socket inside the job folder, so filesystem permissions are the trust seam.' : 'No worker is running.' });
+
+  const stuck = JOB_ORDER.filter((id) => leftoverWorker(w, id));
+  const reclaimable = JOB_ORDER.map((id) => w.jobs[id]).filter((j) => j.lease && !ownerAlive(w, j));
+  out.push(stuck.length
+    ? { status: 'fail', label: 'Recovery needs no guesswork', detail: 'Resuming the ' + w.jobs[stuck[0]].label + ' is blocked until the leftover transfer is stopped, because "no prior writer remains" cannot be proved while a surviving worker holds the job.' }
+    : reclaimable.length
+      ? { status: 'pass', label: 'Recovery needs no guesswork', detail: 'The worker died with its owner, so "no prior writer remains" is provable from the fact that the process is gone. Expire the lease and resume.' }
+      : { status: 'pass', label: 'Recovery needs no guesswork', detail: 'Nothing to recover.' });
+
+  out.push(topo.workerScope === 'run'
+    ? { status: 'pass', label: 'Jobs do not queue behind each other', detail: 'Each run gets its own worker in its own job folder, so two jobs can run at once without admission control.' }
+    : { status: 'warn', label: 'Jobs do not queue behind each other', detail: 'One shared worker admits one active job at a time, so a second job must be refused or queued, and a worker restart is felt by every job on the machine.' });
+
+  return out;
+}
+
+const COSTS = [
+  ['A', 'Nothing outlives the operator\u2019s process, so a kill is self-cleaning and "no prior writer remains" is provable from the pid being gone. The trust seam is a 0600 socket in the job folder. Costs: a worker start per run, and no reattach after the owner dies (there is nothing left to reattach to).'],
+  ['B', 'Buys reattach after a CLI dies, and pays for it with the one case that matters: a surviving worker writing to the destination with nobody accountable, recovery that must stop that worker before it may resume, a loopback port every local program can drive, and admission control so two jobs do not collide. The reattach also evaporates exactly when the worker restarts, which is when its executeId and job ids are gone anyway.'],
+  ['C', 'Makes every run detached by construction, which is the thing 0.x deferred, and it moves the lease out of the operator\u2019s reach. It also needs a service lifecycle, an IPC surface, and a version-skew story between client and service before it can do anything the library can already do.'],
+];
+
+const SCENARIOS = [
+  { id: 'happy', title: 'The everyday run',
+    blurb: 'One operator, one job, nothing goes wrong.',
+    watch: 'Watch who ends up holding the lease, and where the transfer worker lives.',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'run:shell1', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'chunk', job: 'files' } ] },
+
+  { id: 'second', title: 'Two operators, one job',
+    blurb: 'A run is already going in a shell when someone opens the web UI and presses Execute on the same job, then a colleague checks status from another shell.',
+    watch: 'The second writer must be refused, and the reader must never be.',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'start:web' }, { a: 'run:shell1', job: 'files' }, { a: 'run:web', job: 'files' }, { a: 'open:shell2' }, { a: 'status:shell2', job: 'files' }, { a: 'chunk', job: 'files' } ] },
+
+  { id: 'interrupt', title: 'Stopped halfway, then resumed',
+    blurb: 'The operator interrupts a run at a chunk boundary and comes back to it later.',
+    watch: 'The lease is held until the worker is proven stopped, and the resume starts from the checkpoint, not from the top.',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'run:shell1', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'interrupt', job: 'files' }, { a: 'settle', job: 'files' }, { a: 'run:shell1', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'chunk', job: 'files' } ] },
+
+  { id: 'power', title: 'The laptop dies mid-run',
+    blurb: 'The worst case. The process running the job is killed outright, with no chance to release anything, and the operator tries to pick the job up from another shell.',
+    watch: 'Is anything still writing to the destination? And what does Migmate need in order to prove it is safe to resume?',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'open:shell2' }, { a: 'run:shell1', job: 'files' }, { a: 'chunk', job: 'files' },
+             { a: 'kill:shell1', notC: true }, { a: 'kill:service', only: ['C'] },
+             { a: 'run:shell2', job: 'files' }, { a: 'expire', job: 'files' }, { a: 'run:shell2', job: 'files' },
+             { a: 'stopOrphan', job: 'files' }, { a: 'run:shell2', job: 'files' }, { a: 'chunk', job: 'files' } ] },
+
+  { id: 'workercrash', title: 'The transfer worker crashes',
+    blurb: 'rclone dies mid-transfer while Migmate is still alive and watching.',
+    watch: 'The worker\u2019s job ids never survive a restart, so recovery has to come from Migmate\u2019s own checkpoint.',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'run:shell1', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'killWorker', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'chunk', job: 'files' } ] },
+
+  { id: 'twojobs', title: 'Two jobs at the same time',
+    blurb: 'A file migration in one shell, a Teams archive in another, on one machine.',
+    watch: 'Does the second job start, or does it have to wait for the first?',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'open:shell2' }, { a: 'run:shell1', job: 'files' }, { a: 'run:shell2', job: 'teams' }, { a: 'chunk', job: 'files' }, { a: 'chunk', job: 'teams' } ] },
+
+  { id: 'browser', title: 'The web UI and the browser tab',
+    blurb: 'A run started from the web UI, then the operator closes the tab and walks away.',
+    watch: 'This is where "foreground" has to be given a meaning that survives a browser tab.',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'start:web' }, { a: 'run:web', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'close:browser' }, { a: 'open:shell2' }, { a: 'status:shell2', job: 'files' }, { a: 'chunk', job: 'files' }, { a: 'chunk', job: 'files' } ] },
+
+  { id: 'stranger', title: 'Another program on the same machine',
+    blurb: 'Something else running as the same user goes looking for the transfer worker\u2019s control interface while a job is in flight.',
+    watch: 'Whatever it reaches, it reaches with the worker\u2019s full authority.',
+    steps: [ { a: 'start:service', only: ['C'] }, { a: 'open:shell1' }, { a: 'run:shell1', job: 'files' }, { a: 'probe:worker' } ] },
+];
+
+function stepsFor(scenario, topologyKey) {
+  return scenario.steps.filter((s) => {
+    if (s.only && !s.only.includes(topologyKey)) return false;
+    if (s.notC && topologyKey === 'C') return false;
+    return true;
+  });
+}
+</script>
+
+<script id="page">
+/* ------------------------------------------------------------------ *
+ * THE PAGE. Throwaway shell over the model above.
+ * ------------------------------------------------------------------ */
+
+let topology = 'A';
+let world = initialWorld(topology);
+let scenarioId = SCENARIOS[0].id;
+let stepIndex = 0;
+let stepResults = [];
+
+function dispatch(actionId, jobId) {
+  const out = apply(world, actionId, jobId);
+  world = out.world;
+  return world.lastEvent;
+}
+
+function reset(newTopology) {
+  if (newTopology) topology = newTopology;
+  world = initialWorld(topology);
+  stepIndex = 0;
+  stepResults = [];
+}
+
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  Object.entries(attrs || {}).forEach(([k, v]) => {
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (k === 'html') n.innerHTML = v;
+    else n.setAttribute(k, v);
+  });
+  kids.flat().forEach((k) => n.appendChild(typeof k === 'string' ? document.createTextNode(k) : k));
+  return n;
+}
+const $ = (id) => document.getElementById(id);
+const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); return node; };
+
+/* ---- topology picker -------------------------------------------- */
+function renderTopologies() {
+  const box = clear($('topo-choices'));
+  Object.values(TOPOLOGIES).forEach((t) => {
+    const lab = el('label', { class: 'topo' + (t.key === topology ? ' sel' : '') },
+      el('input', { type: 'radio', name: 'topo', ...(t.key === topology ? { checked: 'checked' } : {}), onchange: () => { reset(t.key); render(); } }),
+      el('b', {}, t.name),
+      el('p', {}, t.summary));
+    box.appendChild(lab);
+  });
+}
+
+/* ---- state panel ------------------------------------------------ */
+function renderState() {
+  const h = $('happened');
+  const last = world.lastEvent;
+  h.className = 'happened' + (last && last.kind === 'refused' ? ' refused' : '');
+  clear(h).append(
+    el('span', { class: 'k' }, last ? (last.kind === 'refused' ? 'Refused \u2014 ' + last.what : 'What just happened \u2014 ' + last.what) : 'Nothing yet'),
+    el('span', {}, last ? last.text : 'Press a button, or run one of the guided walkthroughs on the right.'));
+
+  const procs = clear($('procs'));
+  PROC_ORDER.forEach((id) => {
+    const p = world.procs[id];
+    if (id === 'service' && !TOPOLOGIES[topology].hasService && !p.alive) return;
+    const holds = JOB_ORDER.filter((j) => world.jobs[j].lease && world.jobs[j].lease.owner === id).map((j) => world.jobs[j].label);
+    procs.appendChild(el('tr', {},
+      el('td', {}, p.label),
+      el('td', {}, el('span', { class: 'chip ' + (p.alive ? 'on' : 'off') }, p.alive ? 'running' : 'not running')),
+      el('td', {}, holds.length ? 'holds the lease on the ' + holds.join(' and the ') : (p.alive && p.kind === 'web' ? (world.browserOpen ? 'browser tab open' : 'browser tab closed') : ''))));
+  });
+
+  const jobs = clear($('jobs'));
+  JOB_ORDER.forEach((id) => {
+    const j = world.jobs[id];
+    const chipClass = { ready: 'off', running: 'busy', stopping: 'wait', interrupted: 'wait', done: 'on' }[j.phase];
+    const owner = j.lease
+      ? procLabel(world, j.lease.owner) + (ownerAlive(world, j) ? '' : ' \u2014 GONE, lease ' + j.lease.heartbeat)
+      : '\u2014';
+    jobs.appendChild(el('tr', {},
+      el('td', {}, j.label),
+      el('td', {}, el('span', { class: 'chip ' + chipClass }, phaseText(j))),
+      el('td', {}, j.chunk + '/' + CHUNKS + (j.checkpoint !== j.chunk ? ' (cp ' + j.checkpoint + ')' : '')),
+      el('td', {}, owner)));
+  });
+
+  const workers = clear($('workers'));
+  const ks = Object.values(world.workers);
+  if (!ks.length) workers.appendChild(el('tr', {}, el('td', { class: 'note' }, 'None running.')));
+  ks.forEach((k) => {
+    workers.appendChild(el('tr', {},
+      el('td', {}, k.label, el('div', { class: 'note' }, k.bind + ' \u00b7 ' + k.executeId)),
+      el('td', {}, el('span', { class: 'chip ' + (k.state === 'running' ? 'busy' : k.state === 'stopping' ? 'wait' : 'off') }, k.state),
+        el('div', { class: 'note' }, k.activeJob ? 'carrying the ' + world.jobs[k.activeJob].label : 'no active job'),
+        el('div', { class: 'note' }, 'owned by ' + procLabel(world, k.owner)))));
+  });
+
+  const inv = clear($('invariants'));
+  checkInvariants(world).forEach((i) => {
+    inv.appendChild(el('div', { class: 'row ' + i.status },
+      el('div', { class: 'dot ' + i.status }),
+      el('div', {}, el('b', {}, i.label), el('div', { class: 'detail' }, i.detail))));
+  });
+
+  const log = clear($('log'));
+  world.log.slice().reverse().forEach((e) => {
+    log.appendChild(el('li', { class: e.kind }, el('b', {}, e.what), ' \u2014 ', e.text));
+  });
+}
+
+/* ---- free play -------------------------------------------------- */
+function renderFree() {
+  const box = clear($('free'));
+  const machine = Object.entries(ACTIONS).filter(([, a]) => a.group === 'machine');
+  const jobActions = Object.entries(ACTIONS).filter(([, a]) => a.group === 'job');
+
+  const g1 = el('div', { class: 'group' }, el('div', { class: 'lbl' }, 'The machine'), el('div', { class: 'btns' },
+    machine.map(([id, a]) => el('button', { onclick: () => { dispatch(id); render(); } }, a.label))));
+  box.appendChild(g1);
+
+  JOB_ORDER.forEach((jid) => {
+    box.appendChild(el('div', { class: 'group' },
+      el('div', { class: 'lbl' }, world.jobs[jid].label),
+      el('div', { class: 'btns' }, jobActions.map(([id, a]) =>
+        el('button', { onclick: () => { dispatch(id, jid); render(); } }, a.label)))));
+  });
+}
+
+/* ---- walkthroughs ----------------------------------------------- */
+function renderScenarios() {
+  const tabs = clear($('scen-tabs'));
+  SCENARIOS.forEach((s) => {
+    tabs.appendChild(el('button', {
+      class: s.id === scenarioId ? 'sel' : '',
+      onclick: () => { scenarioId = s.id; reset(); render(); },
+    }, s.title));
+  });
+
+  const s = SCENARIOS.find((x) => x.id === scenarioId);
+  clear($('scen-blurb')).append(el('span', {}, s.blurb), el('span', { class: 'watch' }, s.watch),
+    el('span', { class: 'watch' }, 'Opening a walkthrough resets everything, so it runs the same way every time.'));
+
+  const steps = stepsFor(s, topology);
+  const list = clear($('scen-steps'));
+  steps.forEach((st, i) => {
+    const a = ACTIONS[st.a];
+    const label = a.group === 'job' ? a.label + ' \u2014 ' + world.jobs[st.job].label : a.label;
+    const done = i < stepIndex;
+    const now = i === stepIndex;
+    const res = stepResults[i];
+    list.appendChild(el('li', {},
+      el('span', { class: 'n' }, String(i + 1)),
+      el('div', {},
+        el('button', {
+          class: 'step' + (now ? ' now' : ''), ...(now ? {} : { disabled: 'disabled' }),
+          onclick: () => { const ev = dispatch(st.a, st.job); stepResults[i] = ev; stepIndex = i + 1; render(); },
+        }, label),
+        res ? el('div', { class: 'result ' + res.kind },
+          (res.kind === 'refused' && !/^Refused/.test(res.text) ? 'Refused: ' : '') + res.text) : '')));
+  });
+  if (stepIndex >= steps.length) {
+    list.appendChild(el('li', {}, el('span', { class: 'n' }, ''), el('div', { class: 'note' },
+      'Walkthrough finished. Keep poking with the free-play buttons, or switch topology above and run it again \u2014 the same steps, a different answer.')));
+  }
+}
+
+function renderCosts() {
+  const box = clear($('costs'));
+  COSTS.forEach(([k, text]) => {
+    box.appendChild(el('li', {}, el('b', {}, 'Topology ' + k + ': '), text));
+  });
+}
+
+function render() {
+  renderTopologies();
+  renderState();
+  renderFree();
+  renderScenarios();
+  renderCosts();
+}
+
+render();
+</script>
+</body>
+</html>
