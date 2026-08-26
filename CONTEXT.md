@@ -23,3 +23,23 @@ _Avoid_: Universal remote support, all-remotes support
 **Operator**:
 A human, agent, or CI process that controls a job through a supported interaction surface.
 _Avoid_: End user
+
+**Plan**:
+An immutable, digest-bound proposal of everything a job will do, produced from evidence collected about the source. A plan is approved as a whole or not at all; changing what a job will do produces a new revision, never an edit.
+_Avoid_: Inventory, run, batch, dry run
+
+**Preflight**:
+The set of checks that must pass before a job may be planned, covering prerequisites only an administrator can satisfy. Preflight failures are refusals, never retries.
+_Avoid_: Health check, validation
+
+**Exception**:
+A known gap between what a job planned and what is verifiably present, explicitly acknowledged by an operator. An exception is a recorded outcome, not a failure, and it never disappears from a report.
+_Avoid_: Error, warning, caveat
+
+**File mapping**:
+An approved relation from one stable SharePoint document-library root to one stable Google destination folder. Items keep their relative hierarchy inside the mapping, and mappings within a job never overlap.
+_Avoid_: Route, mount, sync pair
+
+**Provenance**:
+Durable evidence tying a destination item to the authoritative source item and file mapping that produced it. A matching path alone is not provenance.
+_Avoid_: Ownership, path match
