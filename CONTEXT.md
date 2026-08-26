@@ -43,3 +43,15 @@ _Avoid_: Route, mount, sync pair
 **Provenance**:
 Durable evidence tying a destination item to the authoritative source item and file mapping that produced it. A matching path alone is not provenance.
 _Avoid_: Ownership, path match
+
+**Archive scope**:
+The explicit, stable-ID list of channels and per-user chat sets a Teams archive job covers. A scope entry names its subject by identifier, never by display title, and a conversation shared by several entries belongs to exactly one of them.
+_Avoid_: Selection, filter, target set
+
+**Conversation**:
+One channel or one chat whose messages form a single archived unit, preserved as human-readable HTML plus canonical structured records.
+_Avoid_: Thread, room, transcript
+
+**Hosted content**:
+Message-inline bytes that Microsoft serves from the message itself rather than from a file location, such as pasted images. It is distinct from an attachment, which references content stored elsewhere.
+_Avoid_: Inline image, embedded file, media
