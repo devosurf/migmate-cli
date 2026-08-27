@@ -1,0 +1,971 @@
+<!doctype html>
+<!--
+  THROWAWAY PROTOTYPE — Migmate local web workflow (issue #8)
+
+  Three radically different variants of the local web workflow, switchable via ?variant=A|B|C
+  (or #variant=A when opened straight off disk), plus the floating bottom bar. Single file,
+  no server required, no persistence: all data is fixture data held in memory.
+
+  A — Lifecycle rail:      one job, the ten-verb spine as the page skeleton.
+  B — Review desk:         table-first review/approve/accept surface; the shell still does the doing.
+  C — Ownership console:   host-level view of this server, its leases, its workers, all jobs.
+
+  The dark strip under the header is the prototype harness, not part of any design: it forces
+  the job type, the lifecycle position, and the two refusal cases so every variant can be judged
+  against the awkward states, not just the happy one.
+
+  Every harness knob is in the URL, so an exact state is a shareable link:
+    ?variant=A|B|C &job=file|teams &stage=setup|doctor|blocked|plan|execute|verify|closed
+    &refusal=none|lock|recovery &tab=plan|progress|findings|evidence   (tab is variant C only)
+  Opened straight off disk, the same keys work as a #hash when the browser refuses replaceState.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — Migmate local web workflow</title>
+<style>
+  :root {
+    --ink: #14181f;
+    --dim: #5b6673;
+    --faint: #8b949e;
+    --line: #e2e6eb;
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --warn: #b45309;
+    --fail: #b91c1c;
+    --shadow: 0 1px 2px rgba(20,24,31,.05), 0 8px 24px rgba(20,24,31,.05);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--ink); background: var(--bg); padding-bottom: 96px; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+  a { color: var(--accent); }
+  h1 { font-size: 26px; margin: 13px 0 6px; letter-spacing: -0.015em; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 12px; font-weight: 700; }
+  h3 { font-size: 14.5px; margin: 0 0 8px; }
+  p { margin: 0 0 10px; }
+  .wrap { max-width: 1460px; margin: 0 auto; padding: 0 28px; }
+  header.page { padding: 30px 0 6px; }
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 4px; background: #fde68a; color: #7c4a03; font-size: 11px; letter-spacing: .09em; font-weight: 700; text-transform: uppercase; }
+  .question { font-size: 15.5px; max-width: 96ch; }
+  .meta { font-size: 13px; color: var(--dim); max-width: 96ch; }
+
+  /* ---------- harness (deliberately not part of any design) ---------- */
+  .harness { background: #171c24; color: #e6eaf0; margin-top: 18px; border-radius: 10px; padding: 12px 16px; display: grid; gap: 10px; }
+  .harness .lbl { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: #98a2b3; font-weight: 700; }
+  .harness .grp { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .harness .grp > .lbl { width: 118px; flex: none; }
+  .harness button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; border: 1px solid #333c49; background: #1f2630; color: #d5dbe4; cursor: pointer; }
+  .harness button:hover { border-color: #5b8def; color: #fff; }
+  .harness button.sel { background: #2f6bff; border-color: #2f6bff; color: #fff; font-weight: 600; }
+  .harness .hint { font-size: 12px; color: #98a2b3; }
+  .statebar { font-size: 12.5px; color: var(--dim); padding: 9px 2px 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .statebar b { color: var(--ink); font-weight: 640; }
+
+  /* ---------- shared bits ---------- */
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .thesis { font-size: 13px; color: var(--dim); border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; margin: 18px 0 14px; max-width: 100ch; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13.5px; }
+  th { color: var(--dim); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; padding-right: 14px; font-variant-numeric: tabular-nums; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11.5px; font-weight: 650; white-space: nowrap; }
+  .chip.ok { background: #dcfce7; color: #14532d; }
+  .chip.info { background: #dbeafe; color: #1e3a8a; }
+  .chip.warn { background: #fef3c7; color: #78350f; }
+  .chip.bad { background: #fee2e2; color: #7f1d1d; }
+  .chip.mute { background: #f1f3f5; color: #5b6673; }
+  button.act { font: inherit; font-size: 13.5px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: #fff; cursor: pointer; }
+  button.act:hover { border-color: var(--accent); color: var(--accent); }
+  button.act.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 620; }
+  button.act.primary:hover { color: #fff; filter: brightness(1.06); }
+  button.act.danger { color: var(--fail); border-color: #f3c9c9; }
+  button.act:disabled { opacity: .45; cursor: not-allowed; }
+  .banner { border-radius: 9px; padding: 13px 15px; margin-bottom: 16px; border: 1px solid; font-size: 13.5px; }
+  .banner.refuse { background: #fef2f2; border-color: #f4c9c9; }
+  .banner.hold { background: #fffbeb; border-color: #f2dfae; }
+  .banner.note { background: #eff5ff; border-color: #cddcfb; }
+  .banner .k { display: block; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700; color: var(--dim); margin-bottom: 5px; }
+  .banner p:last-child { margin-bottom: 0; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 13px; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; }
+  ul.tight { margin: 0 0 10px; padding-left: 18px; font-size: 13.5px; }
+  ul.tight li { margin-bottom: 5px; }
+  ul.plain { list-style: none; margin: 0; padding: 0; }
+  .cli { background: #12161d; color: #dbe3ee; border-radius: 8px; padding: 11px 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; overflow-x: auto; }
+  .cli .c { color: #7f8a9a; }
+  .cli .p { color: #6ee7a5; }
+  .split { display: grid; gap: 18px; }
+  .muted { color: var(--dim); }
+  .small { font-size: 12.5px; }
+  .stat { font-variant-numeric: tabular-nums; font-weight: 650; }
+  .big { font-size: 25px; letter-spacing: -0.02em; }
+
+  /* ---------- variant A ---------- */
+  .a-grid { display: grid; grid-template-columns: 218px minmax(420px, 1fr) 300px; gap: 20px; align-items: start; }
+  .a-rail { position: sticky; top: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .a-rail ol { list-style: none; margin: 0; padding: 0; }
+  .a-rail li { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: baseline; padding: 7px 8px; border-radius: 7px; font-size: 13.5px; }
+  .a-rail li .m { font-size: 12px; color: var(--faint); }
+  .a-rail li.done .m { color: var(--ok); }
+  .a-rail li.now { background: #eef4ff; box-shadow: inset 0 0 0 1px #cddcfb; font-weight: 650; }
+  .a-rail li.blocked { color: var(--fail); }
+  .a-rail li.todo { color: var(--faint); }
+  .a-rail li small { display: block; font-weight: 400; color: var(--dim); font-size: 11.5px; }
+  .a-rail .sep { border-top: 1px solid var(--line); margin: 8px 4px; }
+  .a-stage { background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 20px 22px; }
+  .a-stage .head { display: flex; justify-content: space-between; gap: 14px; align-items: start; border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 16px; }
+  .a-stage .head h3 { font-size: 18px; margin-bottom: 3px; }
+  .a-side { display: grid; gap: 14px; position: sticky; top: 14px; }
+  .a-side .card { padding: 13px 14px; }
+
+  /* ---------- variant B ---------- */
+  .b-top { background: #12161d; color: #dbe3ee; border-radius: 10px; padding: 14px 16px; display: grid; grid-template-columns: 1fr 340px; gap: 18px; margin-bottom: 14px; }
+  .b-top h2 { color: #98a2b3; }
+  .b-tail { background: #0c1016; border-radius: 8px; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.8px; line-height: 1.5; max-height: 132px; overflow: auto; color: #9fb0c4; }
+  .b-tail b { color: #dbe3ee; font-weight: 600; }
+  .b-grid { display: grid; grid-template-columns: 262px 1fr; gap: 18px; align-items: start; }
+  .b-facets { position: sticky; top: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .b-facets .fgroup { margin-bottom: 14px; }
+  .b-facets .fgroup:last-child { margin-bottom: 0; }
+  .b-facets button { width: 100%; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; text-align: left; color: var(--ink); }
+  .b-facets button:hover { background: #f3f6fb; }
+  .b-facets button.sel { background: #eef4ff; border-color: #cddcfb; font-weight: 640; }
+  .b-facets button.blk { color: var(--fail); }
+  .b-facets .n { font-variant-numeric: tabular-nums; color: var(--dim); font-size: 12.5px; }
+  .b-table { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .b-table .thead { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .b-table table { font-size: 13px; }
+  .b-table th, .b-table td { padding: 8px 12px; }
+  .b-table tbody tr:hover { background: #fafbfd; }
+  .b-table .path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.3px; }
+  .b-table .id { color: var(--faint); font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .b-foot { position: sticky; bottom: 84px; margin-top: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; }
+  .b-foot input[type=text] { font: inherit; font-size: 13.5px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; width: 190px; }
+
+  /* ---------- variant C ---------- */
+  .c-host { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; margin-bottom: 16px; }
+  .c-host .cell .lbl { font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); font-weight: 700; margin-bottom: 4px; }
+  .c-host .cell .v { font-size: 13.5px; }
+  .c-board { display: grid; gap: 12px; }
+  .c-job { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 0; overflow: hidden; }
+  .c-job .row { display: grid; grid-template-columns: 250px 150px 1fr 190px; gap: 16px; padding: 14px 16px; align-items: center; cursor: pointer; }
+  .c-job.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .c-job .row:hover { background: #fafbfd; }
+  .c-job .name { font-weight: 640; font-size: 14px; }
+  .c-job .sub { color: var(--dim); font-size: 12.3px; }
+  .c-job .counts { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12.8px; }
+  .c-job .counts .stat { font-size: 14px; }
+  .c-job .own { font-size: 12.3px; color: var(--dim); text-align: right; }
+  .c-detail { border-top: 1px solid var(--line); background: #fafbfd; padding: 16px; }
+  .c-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .c-tabs button { font: inherit; font-size: 13px; padding: 5px 11px; border: 1px solid var(--line); border-radius: 99px; background: #fff; cursor: pointer; }
+  .c-tabs button.sel { background: var(--ink); border-color: var(--ink); color: #fff; font-weight: 620; }
+  .c-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .c-workers { font-size: 12.8px; }
+
+  /* ---------- switcher ---------- */
+  .switcher { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px; z-index: 60; display: flex; align-items: center; gap: 4px; background: #12161d; color: #fff; border-radius: 999px; padding: 6px 8px; box-shadow: 0 10px 30px rgba(0,0,0,.28); }
+  .switcher button { font: inherit; font-size: 16px; line-height: 1; width: 32px; height: 32px; border-radius: 99px; border: none; background: #232b36; color: #fff; cursor: pointer; }
+  .switcher button:hover { background: #2f6bff; }
+  .switcher .label { font-size: 13px; padding: 0 10px; font-weight: 620; white-space: nowrap; }
+  .switcher .label small { display: block; font-weight: 400; color: #98a2b3; font-size: 11.5px; }
+
+  @media (max-width: 1240px) {
+    .a-grid, .b-grid, .c-cols, .b-top { grid-template-columns: 1fr; }
+    .c-host { grid-template-columns: 1fr 1fr; }
+    .a-rail, .a-side, .b-facets { position: static; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="page">
+    <span class="badge">Throwaway prototype</span>
+    <h1>Migmate local web workflow</h1>
+    <p class="question">
+      <b>The question this answers:</b> what minimum local web workflow gives a human operator meaningful leverage over
+      setup, preview, approval, execution, status, verification and reports for both job types &mdash; without duplicating
+      the CLI? Three structurally different answers, same fixture data. Flip with the bar at the bottom (or <code>←</code>/<code>→</code>).
+    </p>
+    <p class="meta">
+      Settled and binding here: the web server process <i>is</i> the writer &mdash; a run it starts survives the tab closing
+      and dies with the server; refusals (lock conflict, stale-lease recovery) are rendered, never hidden; progress is counts,
+      never an invented percentage; the archive package is read outside this UI. Undecided and handed to this ticket: how the
+      local web server itself is bound and authenticated &mdash; each variant takes a different position, visible in its header.
+    </p>
+  </header>
+
+  <div class="harness" id="harness"></div>
+  <div class="statebar" id="statebar"></div>
+  <p class="thesis" id="thesis"></p>
+</div>
+
+<main class="wrap" id="stage"></main>
+
+<div class="switcher" id="switcher"></div>
+
+<script>
+/* ============================== fixtures ============================== */
+
+const VARIANTS = [
+  { key: 'A', name: 'Lifecycle rail',
+    thesis: 'A: the job is the page. The ten-verb spine is the skeleton, one stage open at a time, ownership and evidence always on screen. Web mirrors the CLI verb for verb, and earns its keep by making the gate you are standing on unmissable.' },
+  { key: 'B', name: 'Review desk',
+    thesis: 'B: the shell still does the doing. The web surface exists only where reading matters at volume — plan rows, findings, exception acceptance — so it is table-first, filter-first, with the matching CLI command always in reach and a live follow tail instead of controls.' },
+  { key: 'C', name: 'Ownership console',
+    thesis: 'C: the host is the page. This server process, its leases, its run-scoped workers and every job on the machine, live, with a job detail that opens in place. Leverage comes from seeing who owns what, which is exactly what a terminal cannot show you.' },
+];
+
+const STAGES = [
+  { key: 'setup',    label: 'Setup',              rail: 'init' },
+  { key: 'doctor',   label: 'Preflight refused',  rail: 'doctor' },
+  { key: 'blocked',  label: 'Plan blocked',       rail: 'plan' },
+  { key: 'plan',     label: 'Plan ready',         rail: 'approve' },
+  { key: 'execute',  label: 'Executing',          rail: 'execute' },
+  { key: 'verify',   label: 'Verify + exceptions',rail: 'verify' },
+  { key: 'closed',   label: 'Closed + report',    rail: 'report' },
+];
+
+const REFUSALS = [
+  { key: 'none',     label: 'No refusal' },
+  { key: 'lock',     label: 'Lock conflict' },
+  { key: 'recovery', label: 'Stale lease + live worker' },
+];
+
+const VERBS = ['init','doctor','plan','approve','execute','status','verify','report','close'];
+
+const FILE = {
+  id: 'fm-2481',
+  type: 'file migration job',
+  title: 'Finance libraries → Drive',
+  route: 'SharePoint Online → Google Drive (qualified)',
+  created: '2026-08-24 09:12',
+  planRev: 3,
+  digest: 'sha256:9f2c41ab7d03…e18a',
+  approver: 'operator: m.jonasson (typed yes 2026-08-26 11:04)',
+  mappings: [
+    { src: 'Finance / Shared Documents / Year-End', srcId: 'drive b!8QaK9v2 · item 01ABCXYZ',
+      dst: 'My Drive / Archive / Finance / Year-End', dstId: 'folder 1x9KdP7q' },
+    { src: 'Finance / Shared Documents / Contracts', srcId: 'drive b!8QaK9v2 · item 01LMNOPQ',
+      dst: 'My Drive / Archive / Finance / Contracts', dstId: 'folder 1mB4rTz2' },
+  ],
+  evidence: 'plan-time evidence: 18 412 source items enumerated across 2 mappings, 4 resumable collection checkpoints',
+  outcomes: [
+    { code: 'create',   kind: 'act',   items: 12884, bytes: '41.2 GB', note: 'new at destination' },
+    { code: 'update',   kind: 'act',   items: 903,   bytes: '3.1 GB',  note: 'proven prior copy, source newer' },
+    { code: 'move',     kind: 'act',   items: 61,    bytes: '0.4 GB',  note: 'proven prior copy, source relocated' },
+    { code: 'unchanged',kind: 'skip',  items: 4102,  bytes: '12.8 GB', note: 'compare-and-skip' },
+    { code: 'omitted_by_rule', kind: 'skip', items: 402, bytes: '1.1 GB', note: 'OneNote packages, .url shortcuts, checked-out files' },
+    { code: 'destination_only_retained', kind: 'keep', items: 88, bytes: '0.6 GB', note: 'not ours, left alone' },
+    { code: 'source_deleted_destination_retained', kind: 'keep', items: 14, bytes: '31 MB', note: 'prior copy kept, source gone' },
+    { code: 'destination_duplicate_name', kind: 'block', items: 3, bytes: '—', note: 'same name, no provenance' },
+    { code: 'destination_type_conflict', kind: 'block', items: 1, bytes: '—', note: 'folder where a file must land' },
+    { code: 'unowned_path_collision', kind: 'block', items: 2, bytes: '—', note: 'occupied path, unknown origin' },
+    { code: 'prior_copy_drift', kind: 'block', items: 5, bytes: '—', note: 'our copy changed at destination' },
+  ],
+  rows: [
+    { code:'create', src:'Year-End/2024/Q4/close-pack.xlsx', srcId:'01ABC…H7', dst:'Archive/Finance/Year-End/2024/Q4/close-pack.xlsx', size:'4.2 MB' },
+    { code:'create', src:'Year-End/2024/Q4/audit/', srcId:'01ABC…J1', dst:'Archive/Finance/Year-End/2024/Q4/audit/', size:'folder' },
+    { code:'update', src:'Contracts/vendors/acme-msa.pdf', srcId:'01LMN…K2', dst:'Archive/Finance/Contracts/vendors/acme-msa.pdf', size:'812 KB' },
+    { code:'move',   src:'Contracts/2025/renewals/nordic-hosting.docx', srcId:'01LMN…P9', dst:'was …/Contracts/renewals/nordic-hosting.docx', size:'44 KB' },
+    { code:'unchanged', src:'Year-End/2023/ledger-export.csv', srcId:'01ABC…M4', dst:'Archive/Finance/Year-End/2023/ledger-export.csv', size:'18 MB' },
+    { code:'omitted_by_rule', src:'Year-End/notes.one', srcId:'01ABC…N8', dst:'—', size:'OneNote package' },
+    { code:'omitted_by_rule', src:'Contracts/portal.url', srcId:'01LMN…R3', dst:'—', size:'shortcut' },
+    { code:'destination_only_retained', src:'—', srcId:'no source', dst:'Archive/Finance/Contracts/legal-review-2019.pdf', size:'2.1 MB' },
+    { code:'source_deleted_destination_retained', src:'deleted at source', srcId:'01LMN…T7', dst:'Archive/Finance/Contracts/old/supplier-x.pdf', size:'640 KB' },
+    { code:'destination_duplicate_name', src:'Year-End/2022/summary.xlsx', srcId:'01ABC…V2', dst:'Archive/Finance/Year-End/2022/summary.xlsx', size:'blocked' },
+    { code:'destination_type_conflict', src:'Contracts/index.pdf', srcId:'01LMN…W5', dst:'Archive/Finance/Contracts/index.pdf (is a folder)', size:'blocked' },
+    { code:'unowned_path_collision', src:'Year-End/2024/Q1/', srcId:'01ABC…X9', dst:'Archive/Finance/Year-End/2024/Q1/ (occupied)', size:'blocked' },
+    { code:'prior_copy_drift', src:'Contracts/vendors/globex-sow.docx', srcId:'01LMN…Y4', dst:'Archive/Finance/Contracts/vendors/globex-sow.docx', size:'blocked' },
+  ],
+  progress: {
+    headline: [
+      { label: 'actions done',  value: '9 102',   of: 'of 13 848 planned' },
+      { label: 'bytes copied',  value: '28.4 GB', of: 'of 44.7 GB planned' },
+      { label: 'verified so far', value: '8 455', of: 'hash-checked' },
+      { label: 'retries used',  value: '3',       of: 'of 25 budget' },
+    ],
+    phase: 'copy · mapping 1 of 2',
+    checkpoint: 'checkpoint 42 written 12s ago · resumable',
+    worker: 'rclone worker pid 41377 · socket ~/.migmate/jobs/fm-2481/run-7/rc.sock (dir 0700)',
+    tail: [
+      ['11:41:02', 'checkpoint 42 · 9 102/13 848 actions · 28.4 GB'],
+      ['11:40:58', 'retry 3/25 · Year-End/2024/Q3/board-deck.pptx · 429 from destination'],
+      ['11:40:31', 'checkpoint 41 · 8 980/13 848 actions'],
+      ['11:39:14', 'rc job 7 accepted · _group=job/fm-2481/run-7'],
+    ],
+  },
+  verify: {
+    content: [
+      { check: 'sha256 match, both ends', result: '13 201 items', state: 'ok' },
+      { check: 'size-only comparison (no source checksum on route)', result: '647 items', state: 'warn', code: 'content_verification_degraded' },
+      { check: 'byte length mismatch', result: '0 items', state: 'ok' },
+    ],
+    structure: [
+      { check: 'folder tree present at destination', result: '1 204 folders', state: 'ok' },
+      { check: 'modified time preserved', result: '13 848 items', state: 'ok' },
+      { check: 'created time not supported at destination', result: '13 848 items', state: 'warn', code: 'metadata_not_supported:created_time' },
+      { check: 'permissions / ownership', result: 'not assessed by this job type', state: 'mute' },
+    ],
+    exceptions: [
+      { code: 'content_verification_degraded', scope: '647 items on the qualified route', why: 'source exposes no checksum; size and length match' },
+      { code: 'metadata_not_supported:created_time', scope: '13 848 items', why: 'destination has no writable created-time field' },
+    ],
+  },
+  approvalOwes: [
+    'Current binary version only — no version history is carried.',
+    'Permissions and ownership are not assessed, not migrated, not verified.',
+    'Destination roots must already exist; Migmate creates no root and provisions nothing.',
+    'Destination-only content is retained and reported, never deleted or overwritten.',
+    'Point-in-time verification of what this plan did — this is not a cutover.',
+  ],
+  doctor: [
+    { check: 'rclone binary ≥ v1.69.0', state: 'ok', detail: 'v1.70.2 at /opt/homebrew/bin/rclone' },
+    { check: 'loopback-free RC handshake (rc/noop over unix socket)', state: 'ok', detail: 'answered in 38 ms' },
+    { check: 'route recognised as qualified', state: 'ok', detail: 'SharePoint Online → Google Drive' },
+    { check: 'destination root writable', state: 'fail', detail: 'folder 1mB4rTz2 (Contracts): caller lacks writer role — a Drive admin must grant it' },
+    { check: 'source read access, both mappings', state: 'ok', detail: 'application-only, 2 document libraries' },
+  ],
+};
+
+const TEAMS = {
+  id: 'ta-0917',
+  type: 'Teams archive job',
+  title: 'Nordics Teams archive',
+  route: 'Microsoft Graph v1.0 → local archive package',
+  created: '2026-08-25 15:40',
+  planRev: 2,
+  digest: 'sha256:4d81cc02fe57…7b02',
+  approver: 'operator: m.jonasson (typed yes 2026-08-26 16:20)',
+  mappings: [
+    { src: 'team 19:aeb1f0c4…@thread.tacv2 (all channels)', srcId: 'expanded to 14 channels at plan time',
+      dst: '~/archives/nordics-2026-08/', dstId: 'package root, self-contained' },
+    { src: 'channel 19:9f2c77…@thread.tacv2 in team 19:5c11…', srcId: 'named channel entry',
+      dst: '~/archives/nordics-2026-08/channels/', dstId: '' },
+    { src: 'user 3f7c19aa-… , 88be04c1-… , d0a91f52-…', srcId: '3 user entries', dst: '~/archives/nordics-2026-08/chats/', dstId: 'expanded to 41 chats' },
+  ],
+  evidence: 'plan-time expansion frozen: 16 channels + 41 chats = 57 conversations. Approval is over this child list, not over the team-level request.',
+  options: [
+    { opt: 'retainedHistory', value: 'requested', state: 'fail', note: 'no Purview retention policy on 3 private channels → route returns nothing' },
+    { opt: 'transcripts', value: 'on', state: 'ok', note: 'tenant transcript access enabled at preflight' },
+    { opt: 'attachmentBytes', value: 'on (opt-in)', state: 'warn', note: 'cloud attachment bytes attempted; hosted content is guaranteed regardless' },
+    { opt: 'collection window', value: '2019-01-01 → 2026-08-20', state: 'info', note: 'modification window: a message edited inside the window is in, whenever it was posted' },
+  ],
+  outcomes: [
+    { code: 'channels in scope', kind: 'act', items: 16, bytes: '—', note: '14 expanded from one team entry, 2 named' },
+    { code: 'chats in scope',    kind: 'act', items: 41, bytes: '—', note: 'expanded from 3 user entries' },
+    { code: 'messages estimated',kind: 'act', items: 412000, bytes: '—', note: 'paging estimate; no denominator until paging ends' },
+    { code: 'hosted content items', kind: 'act', items: 6455, bytes: '9.9 GB', note: 'bytes guaranteed in package' },
+    { code: 'cloud attachments', kind: 'act', items: 1841, bytes: '4.2 GB', note: 'opt-in, may be unavailable per item' },
+    { code: 'private_channel_retained_history_unavailable', kind: 'block', items: 3, bytes: '—', note: 'no retention policy; will be a planned omission, not a failure' },
+    { code: 'deleted_message_window_expired', kind: 'skip', items: 1, bytes: '—', note: '21-day window; 1 channel affected' },
+    { code: 'meeting_recording_beta_route', kind: 'skip', items: 12, bytes: '—', note: 'beta route, deferred past first release' },
+  ],
+  rows: [
+    { code:'channels in scope', src:'#finance-nordics (channel)', srcId:'19:9f2c77…@thread.tacv2', dst:'channels/finance-nordics/', size:'12 884 records' },
+    { code:'channels in scope', src:'#ops-se (channel, expanded from team entry)', srcId:'19:b41d02…@thread.tacv2', dst:'channels/ops-se/', size:'8 402 records' },
+    { code:'channels in scope', src:'#hr-private (private channel)', srcId:'19:77ca90…@thread.tacv2', dst:'channels/hr-private/', size:'current history only' },
+    { code:'chats in scope', src:'chat with 3f7c19aa-… and 2 others', srcId:'19:meeting_… oneOnOne', dst:'chats/3f7c19aa/…', size:'2 104 records' },
+    { code:'chats in scope', src:'group chat “Nordics leads”', srcId:'19:0c88ab…@thread.v2', dst:'chats/group-0c88ab/', size:'6 551 records' },
+    { code:'hosted content items', src:'pasted images, cards, emoji assets', srcId:'per message', dst:'assets/hosted/', size:'9.9 GB' },
+    { code:'cloud attachments', src:'files referenced from messages', srcId:'driveItem refs', dst:'assets/attachments/', size:'4.2 GB' },
+    { code:'private_channel_retained_history_unavailable', src:'#hr-private, #legal-private, #board-private', srcId:'3 channels', dst:'omission record', size:'blocked option' },
+    { code:'deleted_message_window_expired', src:'#ops-se', srcId:'21-day window', dst:'omission record', size:'—' },
+    { code:'meeting_recording_beta_route', src:'12 meetings across 4 channels', srcId:'beta route', dst:'omission record', size:'—' },
+  ],
+  progress: {
+    headline: [
+      { label: 'conversations done', value: '23',      of: 'of 57 in scope (frozen)' },
+      { label: 'records written',    value: '184 220',  of: 'no denominator until paging ends' },
+      { label: 'assets stored',      value: '6 412',   of: 'hosted + attachments' },
+      { label: 'package size',       value: '9.8 GB',  of: 'on local disk' },
+    ],
+    phase: 'paging channel messages · #ops-se',
+    checkpoint: 'checkpoint 19 written 8s ago · resumable per conversation',
+    worker: 'no rclone worker — archive collection runs inside this process',
+    tail: [
+      ['16:52:11', 'checkpoint 19 · conversation 23/57 · 184 220 records'],
+      ['16:51:40', 'throttled 429 · backoff 4s · Graph messages delta'],
+      ['16:50:02', 'omission recorded · deleted_message_window_expired · #ops-se'],
+      ['16:48:55', 'conversation 22/57 done · #ops-se hosted content 412 items'],
+    ],
+  },
+  verify: {
+    content: [
+      { check: 'every record maps exactly once (no duplicate, no orphan)', result: '184 220 records', state: 'ok' },
+      { check: 'hosted content bytes present and hash-matched', result: '6 412 assets', state: 'ok' },
+      { check: 'cloud attachment bytes unavailable at source', result: '43 assets', state: 'warn', code: 'cloud_attachment_unavailable' },
+    ],
+    structure: [
+      { check: 'every HTML page parses, JavaScript-free, opens from disk', result: '57 of 57 pages', state: 'ok' },
+      { check: 'canonical JSONL ↔ HTML cross-reference', result: '57 conversations', state: 'ok' },
+      { check: 'retained history requested but unavailable', result: '3 private channels', state: 'warn', code: 'private_channel_retained_history_unavailable' },
+      { check: 'verification is against the package, not a live tenant re-query', result: 'by design', state: 'mute' },
+    ],
+    exceptions: [
+      { code: 'cloud_attachment_unavailable', scope: '43 attachments', why: 'source no longer serves the bytes; message record and reference kept' },
+      { code: 'private_channel_retained_history_unavailable', scope: '3 private channels', why: 'no Purview retention policy; current history archived, retained history absent' },
+    ],
+  },
+  approvalOwes: [
+    'Archive scope is the frozen expansion above — 57 conversations, by identifier, not by title.',
+    'Production Graph v1.0 routes only; beta routes (meeting recordings, targeted messages) are omitted.',
+    'The package is read by opening its HTML from disk. Migmate’s web UI is not the archive viewer.',
+    'Verification proves the package is self-consistent; it does not re-query the tenant later.',
+    'A second pass is a new archive job carrying a lineage pointer, never a re-run of this one.',
+  ],
+  doctor: [
+    { check: 'application-only Graph consent for requested routes', state: 'ok', detail: 'ChannelMessage.Read.All, Chat.Read.All granted' },
+    { check: 'tenant transcript access enabled', state: 'ok', detail: 'AllowTranscription policy on' },
+    { check: 'Purview retention policy present (retainedHistory requested)', state: 'fail', detail: 'absent — a compliance admin must add one, or drop the option and re-plan' },
+    { check: 'licensing covers export routes', state: 'ok', detail: 'E5 on all 3 named users' },
+    { check: 'local package path writable, 40 GB free', state: 'ok', detail: '~/archives · 512 GB free' },
+  ],
+};
+
+/* ============================== state ============================== */
+
+const state = { variant: 'A', job: 'file', stage: 'plan', refusal: 'none', facet: 'all', cTab: 'plan', cSel: 'fm-2481' };
+
+function job()   { return state.job === 'file' ? FILE : TEAMS; }
+function other()  { return state.job === 'file' ? TEAMS : FILE; }
+function isFile() { return state.job === 'file'; }
+function stageIndex() { return STAGES.findIndex(s => s.key === state.stage); }
+function stageLabel() { return STAGES[stageIndex()].label; }
+
+const CHIPFOR = { ok: 'ok', warn: 'warn', fail: 'bad', info: 'info', mute: 'mute' };
+const KINDCHIP = { act: 'info', skip: 'mute', keep: 'ok', block: 'bad' };
+
+function n(v) { return `<span class="stat">${v}</span>`; }
+
+/* trust seam: each variant takes a different position on the handed-down question */
+const SEAM = {
+  A: { line: 'loopback :7343, one-time pairing token in the URL printed by <code>migmate web</code>; token dies with the server process',
+       chip: 'paired session' },
+  B: { line: 'unix socket <code>~/.migmate/web.sock</code>; the desk is opened by the CLI, which bridges one browser tab per invocation',
+       chip: 'socket-bound, CLI-opened' },
+  C: { line: 'loopback on an ephemeral port, Origin-pinned, token rotated on every start; the console is long-lived so the seam is on screen permanently',
+       chip: 'token rotates on start' },
+};
+
+/* ============================== refusal banners ============================== */
+
+function refusalBanner() {
+  if (state.refusal === 'lock') {
+    return `<div class="banner refuse">
+      <span class="k">Refused — another process owns this job</span>
+      <p><b>${job().id}</b> is held by <code>migmate execute</code> (CLI), pid 40122 on this host, lease renewed 4s ago.
+      This server will not take the writer lease and will not queue behind it.</p>
+      <p class="muted">Reads are always safe: status, plan revisions and reports do not take the lease.</p>
+      <div style="display:flex;gap:8px;margin-top:10px"><button class="act primary">Open read-only view</button><button class="act">Show lease record</button></div>
+    </div>`;
+  }
+  if (state.refusal === 'recovery') {
+    return `<div class="banner refuse">
+      <span class="k">Refused — stale lease, but the run’s worker is still answering</span>
+      <p>Lease heartbeat expired 6m 12s ago and the recorded owner (pid 39877) is gone, so the lease looks reclaimable.
+      It is not: <code>rc/noop</code> on <code>${isFile() ? '~/.migmate/jobs/' + job().id + '/run-7/rc.sock' : 'this run’s socket'}</code> answered in 22 ms,
+      so something is still writing under this run.</p>
+      <p><b>Recovery plan, in order:</b> stop <code>_group=job/${job().id}/run-7</code> → terminate that process after a 30s deadline →
+      re-read checkpoint ${isFile() ? '42' : '19'} → resume. Nothing resumes until the old writer is proven gone.</p>
+      <div style="display:flex;gap:8px;margin-top:10px"><button class="act danger">Stop worker and reclaim</button><button class="act">Download recovery report</button></div>
+    </div>`;
+  }
+  return '';
+}
+
+function tabNote(cls) {
+  if (state.stage !== 'execute') return '';
+  if (state.refusal !== 'none') {
+    return `<div class="banner hold ${cls || ''}">
+      <span class="k">Who owns this run</span>
+      <p>Not this server. ${state.refusal === 'lock'
+        ? 'The lease is held by a CLI process (pid 40122), so these numbers are a read-only follow of someone else’s run.'
+        : 'The lease is stale but the run’s worker still answers, so nothing here may be written until that writer is proven gone.'}</p>
+    </div>`;
+  }
+  return `<div class="banner note ${cls || ''}">
+    <span class="k">Who owns this run</span>
+    <p>Owned by <b>this web server process</b> (pid 41022, lease renewed 3s ago).
+    Closing this tab does not stop it — the browser is a viewport. Quitting the server does stop it, at the next checkpoint.</p>
+  </div>`;
+}
+
+/* ============================== shared content blocks ============================== */
+
+function outcomeTable(compact) {
+  const j = job();
+  const rows = j.outcomes.map(o => `<tr>
+      <td><span class="chip ${KINDCHIP[o.kind]}">${o.code}</span></td>
+      <td class="num">${o.items.toLocaleString('en-US').replace(/,/g, ' ')}</td>
+      ${compact ? '' : `<td class="num">${o.bytes}</td>`}
+      <td class="muted small">${o.note}</td>
+    </tr>`).join('');
+  return `<table><thead><tr><th>Outcome</th><th class="num">${isFile() ? 'Items' : 'Count'}</th>${compact ? '' : '<th class="num">Bytes</th>'}<th>Meaning</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function blockerBlock() {
+  const blocks = job().outcomes.filter(o => o.kind === 'block');
+  if (!blocks.length) return '';
+  const total = blocks.reduce((a, b) => a + b.items, 0);
+  return `<div class="banner hold">
+    <span class="k">${total} blockers — this plan cannot be approved</span>
+    <ul class="tight">${blocks.map(b => `<li><code>${b.code}</code> · ${b.items} · ${b.note}</li>`).join('')}</ul>
+    <p><b>The only remediation in this release:</b> ${isFile()
+      ? 'resolve the content outside Migmate, or exclude the stable source item or subtree, then make a new plan revision. No overwrite, no rename, no auto-dedupe, no delete.'
+      : 'drop the option or narrow the scope entry, then make a new plan revision. Missing tenant prerequisites are an admin fix, never a retry.'}</p>
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="act primary">Exclude selected and re-plan</button><button class="act">Export blocker list</button></div>
+  </div>`;
+}
+
+function mappingBlock() {
+  const j = job();
+  return `<table><thead><tr><th>${isFile() ? 'Source root (stable id)' : 'Scope entry (stable id)'}</th><th>${isFile() ? 'Destination root (stable id)' : 'Lands in package at'}</th></tr></thead><tbody>
+    ${j.mappings.map(m => `<tr>
+      <td><div class="mono">${m.src}</div><div class="small muted">${m.srcId}</div></td>
+      <td><div class="mono">${m.dst}</div><div class="small muted">${m.dstId || ''}</div></td>
+    </tr>`).join('')}
+  </tbody></table>
+  <p class="small muted" style="margin-top:10px">${isFile()
+    ? 'Both ends addressed by stable id, shown as friendly paths. Roots may not overlap. The source root’s <i>contents</i> land directly in the destination root — no wrapper folder is invented.'
+    : 'Scope is stable-ID entry. The team entry above was expanded at plan time; approval is over the expansion, not over the team.'}</p>`;
+}
+
+function optionsBlock() {
+  if (isFile()) return '';
+  return `<table><thead><tr><th>Option</th><th>Requested</th><th>Effect</th></tr></thead><tbody>
+    ${TEAMS.options.map(o => `<tr><td><code>${o.opt}</code></td><td><span class="chip ${CHIPFOR[o.state]}">${o.value}</span></td><td class="small muted">${o.note}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+/* what a plan is over: the mappings (file) or the frozen scope expansion plus options (archive) */
+function scopeSection() {
+  return `<h3 style="margin-top:20px">${isFile() ? 'Mappings this plan is over' : 'Scope, frozen at plan time'}</h3>
+    ${mappingBlock()}
+    ${isFile() ? '' : `<h3 style="margin-top:18px">Options and collection window</h3>${optionsBlock()}`}`;
+}
+
+function approvalBlock(withButton) {
+  const j = job();
+  return `<div class="card" style="margin-top:0">
+    <h2>What approval binds</h2>
+    <dl class="kv">
+      <dt>Plan</dt><dd>revision ${j.planRev}, immutable · <code>${j.digest}</code></dd>
+      <dt>Digest re-check</dt><dd>compared again at execute; a mismatch refuses, never proceeds</dd>
+      <dt>Non-interactive path</dt><dd>digest read back from <code>plan</code> output + approver identity. No auto-approve flag exists, in any mode.</dd>
+    </dl>
+    <h3 style="margin-top:16px">This approval says out loud</h3>
+    <ul class="tight">${j.approvalOwes.map(t => `<li>${t}</li>`).join('')}</ul>
+    ${withButton ? `<div style="display:flex;gap:10px;align-items:center;margin-top:14px">
+      <input type="text" placeholder="type yes" style="font:inherit;font-size:13.5px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;width:150px" />
+      <button class="act primary">Approve revision ${j.planRev}</button>
+      <span class="small muted">no affirmative default; the box starts empty every time</span>
+    </div>` : ''}
+  </div>`;
+}
+
+function progressBlock() {
+  const p = job().progress;
+  return `<div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px">
+      ${p.headline.map(h => `<div><div class="small muted">${h.label}</div><div class="big stat">${h.value}</div><div class="small muted">${h.of}</div></div>`).join('')}
+    </div>
+    <p class="small muted" style="margin-top:14px">Counts only. ${isFile()
+      ? 'The denominator exists because the plan is frozen — it is the planned action count, not an estimate.'
+      : 'Records and assets have no denominator until paging finishes, so no bar and no percentage is drawn for them.'}</p>
+    <dl class="kv" style="margin-top:10px">
+      <dt>Phase</dt><dd>${p.phase}</dd>
+      <dt>Checkpoint</dt><dd>${p.checkpoint}</dd>
+      <dt>Worker</dt><dd class="small">${p.worker}</dd>
+    </dl>
+  </div>`;
+}
+
+function verifyBlock() {
+  const v = job().verify;
+  const t = (rows, title) => `<div><h3>${title}</h3><table><tbody>
+    ${rows.map(r => `<tr><td>${r.check}${r.code ? `<div class="small"><code>${r.code}</code></div>` : ''}</td>
+      <td style="width:150px"><span class="chip ${CHIPFOR[r.state]}">${r.result}</span></td></tr>`).join('')}
+  </tbody></table></div>`;
+  return `<div class="split" style="grid-template-columns:1fr 1fr">
+    ${t(v.content, isFile() ? 'Content proof' : 'Record and asset proof')}
+    ${t(v.structure, isFile() ? 'Structure and metadata proof' : 'Package structure proof')}
+  </div>
+  <p class="small muted" style="margin-top:12px">${isFile()
+    ? 'Content proof is shown apart from structural proof on purpose: a job can be structurally perfect and still content-degraded. Size-only is visibly degraded, and closing on it requires accepting <code>content_verification_degraded</code> explicitly.'
+    : 'Verification proves the package is self-consistent. It is not a re-query of the tenant, and it never becomes one.'}</p>`;
+}
+
+function exceptionBlock() {
+  const v = job().verify;
+  return `<div class="banner hold">
+    <span class="k">Closure is blocked until every exception is accepted</span>
+    <ul class="plain">${v.exceptions.map(e => `<li style="margin-bottom:8px"><label style="display:flex;gap:8px;align-items:flex-start">
+      <input type="checkbox" style="margin-top:4px" />
+      <span><code>${e.code}</code> · ${e.scope}<br /><span class="small muted">${e.why}</span></span></label></li>`).join('')}</ul>
+    <p class="small">Accepted exceptions bind to the verification digest and appear in every report forever. The job closes as
+      <b>completed with accepted exceptions</b> — never as clean.</p>
+    <div style="display:flex;gap:8px"><button class="act primary" disabled>Accept and close</button><button class="act">Re-run verify</button></div>
+  </div>`;
+}
+
+function reportBlock() {
+  const j = job();
+  return `<div class="split" style="grid-template-columns:1fr 1fr">
+    <div><h3>Artifacts</h3><ul class="tight">
+      <li><code>report.html</code> — human summary, digest-bound</li>
+      <li><code>report.json</code> — same content, versioned envelope</li>
+      <li><code>plan-rev${j.planRev}.json</code> + <code>${j.digest.slice(0, 20)}…</code></li>
+      <li><code>verify.jsonl</code> — per-item outcome stream</li>
+      <li><code>preflight.json</code> — what was true at plan time</li>
+      ${isFile() ? '' : '<li><code>~/archives/nordics-2026-08/index.html</code> — the package itself, opened from disk</li>'}
+    </ul></div>
+    <div><h3>Closed state</h3><dl class="kv">
+      <dt>Outcome</dt><dd><span class="chip warn">completed with accepted exceptions</span></dd>
+      <dt>Accepted</dt><dd>${j.verify.exceptions.map(e => `<code>${e.code}</code>`).join('<br />')}</dd>
+      <dt>Approver</dt><dd>${j.approver}</dd>
+      <dt>Re-runnable</dt><dd>${isFile() ? '<code>execute</code> again picks up new and changed source items; nothing is deleted at the destination' : 'a second pass is a new job with a lineage pointer'}</dd>
+    </dl></div>
+  </div>`;
+}
+
+function doctorBlock() {
+  const j = job();
+  return `<div>
+    <div class="banner refuse"><span class="k">Preflight refused — planning is not offered</span>
+      <p>One hard failure. Preflight failures are refusals, not retries: nothing downstream can succeed until an administrator fixes it.</p></div>
+    <table><tbody>${j.doctor.map(d => `<tr>
+      <td style="width:26px"><span class="chip ${CHIPFOR[d.state]}">${d.state === 'ok' ? 'pass' : 'fail'}</span></td>
+      <td>${d.check}<div class="small muted">${d.detail}</div></td></tr>`).join('')}</tbody></table>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="act primary">Re-run preflight</button><button class="act">Copy admin request</button></div>
+    <p class="small muted" style="margin-top:8px">Recorded as job evidence either way, so a report can prove what was true at plan time.</p>
+  </div>`;
+}
+
+function setupBlock() {
+  const j = job();
+  return `<div>
+    <h3>${isFile() ? 'File mappings' : 'Archive scope'}</h3>
+    ${mappingBlock()}
+    ${isFile() ? '' : `<h3 style="margin-top:18px">Options</h3>${optionsBlock()}`}
+    <div style="display:flex;gap:8px;margin-top:16px"><button class="act primary">Run preflight</button><button class="act">Add ${isFile() ? 'mapping' : 'scope entry'}</button></div>
+  </div>`;
+}
+
+/* ============================== variant A ============================== */
+
+function renderA() {
+  const j = job(), idx = stageIndex(), cur = STAGES[idx].rail;
+  const done = { init: idx >= 1, doctor: idx >= 2, plan: idx >= 3, approve: idx >= 4, execute: idx >= 5, status: idx >= 5, verify: idx >= 6, report: idx >= 6, close: idx >= 6 };
+  const rail = VERBS.map(v => {
+    let cls = 'todo', mark = '·', sub = '';
+    if (v === cur) { cls = 'now'; mark = '▸'; }
+    else if (done[v]) { cls = 'done'; mark = '✓'; }
+    if (v === 'plan' && state.stage === 'blocked') { cls = 'blocked'; mark = '!'; sub = '4 blocker kinds'; }
+    if (v === 'doctor' && state.stage === 'doctor') { cls = 'blocked'; mark = '!'; sub = '1 hard failure'; }
+    if (v === 'plan' && idx >= 3) sub = `revision ${j.planRev}`;
+    if (v === 'execute' && state.stage === 'execute') sub = j.progress.checkpoint.split(' · ')[0];
+    if (v === 'verify' && idx >= 5) sub = `${j.verify.exceptions.length} exceptions`;
+    return `<li class="${cls}"><span class="m">${mark}</span><span>${v}${sub ? `<small>${sub}</small>` : ''}</span></li>`;
+  }).join('');
+
+  let body = '';
+  const head = (title, sub, action) => `<div class="head"><div><h3>${title}</h3><div class="small muted">${sub}</div></div>${action || ''}</div>`;
+  switch (state.stage) {
+    case 'setup':   body = head(isFile() ? 'Define the mappings' : 'Define the archive scope', 'Nothing is read from the source until preflight passes.') + setupBlock(); break;
+    case 'doctor':  body = head('Preflight', 'Same checks as <code>migmate doctor</code>, recorded as evidence.') + doctorBlock(); break;
+    case 'blocked': body = head(`Plan revision ${j.planRev}`, j.evidence) + blockerBlock() + outcomeTable() + scopeSection(); break;
+    case 'plan':    body = head(`Approve plan revision ${j.planRev}`, j.evidence, '<button class="act primary">Approve…</button>') + outcomeTable() + scopeSection() + '<div style="height:16px"></div>' + approvalBlock(true); break;
+    case 'execute': body = head('Executing', j.progress.phase, '<button class="act danger">Interrupt at next checkpoint</button>') + tabNote() + progressBlock(); break;
+    case 'verify':  body = head('Verification', 'Ran as the tail of execute; re-runnable without re-approval.') + verifyBlock() + '<div style="height:16px"></div>' + exceptionBlock(); break;
+    case 'closed':  body = head('Report', 'Closed 2026-08-26 · digest-bound artifacts.', '<button class="act">Open report.html</button>') + reportBlock(); break;
+  }
+
+  const refuse = refusalBanner();
+  return `<div class="a-grid">
+    <nav class="a-rail"><h2 style="padding:4px 8px 2px">Lifecycle</h2><ol>${rail}</ol>
+      <div class="sep"></div>
+      <ol><li class="todo"><span class="m">·</span><span>cancel<small>terminal; never rolls back</small></span></li></ol>
+    </nav>
+    <section class="a-stage">${refuse}${body}</section>
+    <aside class="a-side">
+      <div class="card"><h2>This job</h2><dl class="kv">
+        <dt>Id</dt><dd><code>${j.id}</code></dd>
+        <dt>Type</dt><dd>${j.type}</dd>
+        <dt>Route</dt><dd class="small">${j.route}</dd>
+        <dt>Stage</dt><dd>${stageLabel()}</dd>
+      </dl></div>
+      <div class="card"><h2>Ownership</h2>
+        <p class="small">${state.refusal === 'none'
+          ? 'Writer lease held by <b>this web server</b> (pid 41022). The tab is a viewport: close it and the run continues; quit the server and the run stops at its next checkpoint.'
+          : 'Writer lease <b>not held</b> by this server. Everything on this page is read-only until the refusal above is resolved.'}</p>
+        <p class="small muted">${j.progress.worker}</p>
+      </div>
+      <div class="card"><h2>Trust seam</h2><p class="small">${SEAM.A.line}</p><span class="chip info">${SEAM.A.chip}</span></div>
+      <div class="card"><h2>Same thing in a shell</h2><div class="cli"><span class="p">$</span> migmate ${cur} ${j.id}</div>
+        <p class="small muted" style="margin-top:8px">One verb per stage, same names, same order.</p></div>
+    </aside>
+  </div>`;
+}
+
+/* ============================== variant B ============================== */
+
+function renderB() {
+  const j = job();
+  const groups = j.outcomes;
+  const facets = groups.map(o => `<button class="${state.facet === o.code ? 'sel' : ''} ${o.kind === 'block' ? 'blk' : ''}" onclick="set('facet','${o.code}')">
+      <span>${o.code}</span><span class="n">${o.items.toLocaleString('en-US').replace(/,/g, ' ')}</span></button>`).join('');
+  const rows = j.rows.filter(r => state.facet === 'all' || r.code === state.facet);
+  const showVerify = state.stage === 'verify' || state.stage === 'closed';
+
+  const tail = `<div class="b-tail">${j.progress.tail.map(t => `<div><b>${t[0]}</b> ${t[1]}</div>`).join('')}</div>`;
+  const cmd = { setup: `migmate doctor ${j.id}`, doctor: `migmate doctor ${j.id}`, blocked: `migmate plan ${j.id} --exclude-file excludes.txt`,
+                plan: `migmate approve ${j.id} --digest ${j.digest.slice(0, 18)}… --approver m.jonasson`, execute: `migmate execute ${j.id}`,
+                verify: `migmate verify ${j.id} --accept ${j.verify.exceptions[0].code}`, closed: `migmate report ${j.id} --output json` }[state.stage];
+
+  const table = showVerify
+    ? `<div class="b-table"><div class="thead"><div><b>Findings</b> <span class="muted small">— content proof and structural proof are separate tables, never one score</span></div>
+        <span class="chip warn">${j.verify.exceptions.length} exceptions pending</span></div>
+        <div style="padding:14px 16px">${verifyBlock()}</div></div>
+       <div style="height:16px"></div>${exceptionBlock()}`
+    : `<div class="b-table">
+        <div class="thead">
+          <div><b>${state.facet === 'all' ? 'All planned outcomes' : state.facet}</b>
+            <span class="muted small">— ${rows.length} of ${j.rows.length} sample rows shown; the real table pages server-side</span></div>
+          <div style="display:flex;gap:8px"><button class="act">Export csv</button><button class="act">Copy stable ids</button></div>
+        </div>
+        <table><thead><tr><th>Outcome</th><th>Source (stable id)</th><th>Destination</th><th>Size</th></tr></thead><tbody>
+        ${rows.map(r => `<tr>
+          <td><span class="chip ${KINDCHIP[(j.outcomes.find(o => o.code === r.code) || { kind: 'act' }).kind]}">${r.code}</span></td>
+          <td><div class="path">${r.src}</div><div class="id">${r.srcId}</div></td>
+          <td class="path">${r.dst}</td><td class="small muted">${r.size}</td></tr>`).join('')}
+        </tbody></table></div>`;
+
+  const foot = state.stage === 'plan'
+    ? `<div class="b-foot"><div><b>Approve plan revision ${j.planRev}</b>
+        <div class="small muted">Digest <code>${j.digest}</code> · re-checked at execute · ${j.approvalOwes.length} disclosures below the table</div></div>
+       <div style="display:flex;gap:10px;align-items:center"><input type="text" placeholder="type yes" /><button class="act primary">Approve</button></div></div>`
+    : state.stage === 'blocked'
+      ? `<div class="b-foot"><div><b>Cannot approve</b><div class="small muted">${j.outcomes.filter(o => o.kind === 'block').reduce((a, b) => a + b.items, 0)} blockers · remediation is exclude-or-fix-outside, then re-plan</div></div>
+         <button class="act primary">Exclude selected and re-plan</button></div>`
+      : '';
+
+  return `<div>
+    ${refusalBanner()}
+    <div class="b-top">
+      <div>
+        <h2>The shell is doing this — the desk is for reading</h2>
+        <div class="cli"><span class="c"># run this in your own terminal; the desk follows along</span><br /><span class="p">$</span> ${cmd}</div>
+        <p class="small" style="color:#98a2b3;margin:10px 0 0">${state.refusal !== 'none'
+          ? (state.refusal === 'lock'
+              ? 'This run belongs to a <b style="color:#dbe3ee">CLI process</b> (pid 40122). The desk is following it read-only; nothing here can write.'
+              : 'The lease is stale but the run’s worker still answers. The desk is read-only until that writer is proven gone.')
+          : state.stage === 'execute'
+            ? 'This run is owned by <b style="color:#dbe3ee">this web server</b> because you started it here. Closing the tab does not stop it.'
+            : 'Nothing on this page mutates a job except approval and exception acceptance — the two decisions that need a human’s eyes on a lot of rows.'}</p>
+        <p class="small" style="color:#98a2b3;margin:6px 0 0">Bound at ${SEAM.B.line}</p>
+      </div>
+      <div><h2>Live follow · ${j.id}</h2>${tail}
+        <p class="small" style="color:#98a2b3;margin:8px 0 0">${j.progress.headline.slice(0, 2).map(h => `${h.label} <b style="color:#dbe3ee">${h.value}</b> ${h.of}`).join(' · ')}</p></div>
+    </div>
+    <div class="b-grid">
+      <aside class="b-facets">
+        <div class="fgroup"><h2>Rows</h2>
+          <button class="${state.facet === 'all' ? 'sel' : ''}" onclick="set('facet','all')"><span>all</span><span class="n">${j.rows.length} sampled</span></button>
+          ${facets}</div>
+        <div class="fgroup"><h2>${isFile() ? 'Mappings' : 'Scope entries'}</h2>
+          <ul class="plain small">${j.mappings.map(m => `<li style="margin-bottom:8px"><div class="mono" style="font-size:11.8px">${m.src}</div><div class="muted" style="font-size:11.5px">→ ${m.dst}</div></li>`).join('')}</ul></div>
+        ${isFile() ? '' : `<div class="fgroup"><h2>Options</h2><ul class="plain small">${TEAMS.options.map(o => `<li style="margin-bottom:6px"><code>${o.opt}</code> <span class="chip ${CHIPFOR[o.state]}">${o.value}</span></li>`).join('')}</ul></div>`}
+        <div class="fgroup"><h2>Stage</h2><p class="small muted">${stageLabel()} · plan rev ${j.planRev}<br />${j.evidence}</p></div>
+      </aside>
+      <div>${state.stage === 'doctor' ? `<div class="card">${doctorBlock()}</div>` : state.stage === 'setup' ? `<div class="card">${setupBlock()}</div>` : state.stage === 'closed' ? `<div class="card">${reportBlock()}</div><div style="height:16px"></div>${table}` : table}
+        ${foot}
+        ${state.stage === 'plan' ? `<div style="height:16px"></div>${approvalBlock(false)}` : ''}
+        ${foot ? '<div style="height:90px"></div>' : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ============================== variant C ============================== */
+
+function renderC() {
+  const jobs = [FILE, TEAMS];
+  const stageOf = j => j.id === job().id ? stageLabel() : (j.id === 'ta-0917' ? 'Executing' : 'Plan ready');
+  const ownerOf = j => {
+    if (j.id !== job().id) return 'this server · lease 2s ago';
+    if (state.refusal === 'lock') return 'CLI pid 40122 · lease 4s ago';
+    if (state.refusal === 'recovery') return 'stale lease · worker alive';
+    return 'this server · lease 3s ago';
+  };
+  /* counts must agree with the stage: a job that has not executed shows planned counts, never progress */
+  const PLANNED = {
+    'fm-2481': [['13 848', 'planned actions'], ['44.7 GB', 'planned bytes'], ['11', 'blockers']],
+    'ta-0917': [['57', 'conversations in scope'], ['16', 'channels'], ['41', 'chats']],
+  };
+  const countsOf = (j, st) => ['Setup', 'Preflight refused', 'Plan blocked', 'Plan ready'].includes(st)
+    ? PLANNED[j.id]
+    : j.progress.headline.slice(0, 3).map(h => [h.value, h.label]);
+  const board = jobs.map(j => {
+    const sel = state.cSel === j.id;
+    const st = stageOf(j);
+    return `<div class="c-job ${sel ? 'sel' : ''}">
+      <div class="row" onclick="set('cSel','${j.id}')">
+        <div><div class="name">${j.title}</div><div class="sub"><code>${j.id}</code> · ${j.type}</div></div>
+        <div><span class="chip ${st === 'Executing' ? 'info' : st === 'Plan blocked' || st === 'Preflight refused' ? 'bad' : 'ok'}">${st}</span></div>
+        <div class="counts">${countsOf(j, st).map(c => `<span><span class="stat">${c[0]}</span> <span class="muted">${c[1]}</span></span>`).join('')}</div>
+        <div class="own">${ownerOf(j)}<div class="small">${j.progress.worker.startsWith('no rclone') ? 'in-process collector' : 'own rclone worker'}</div></div>
+      </div>
+      ${sel ? `<div class="c-detail">${detailC(j)}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  return `<div>
+    ${refusalBanner()}
+    <div class="c-host">
+      <div class="cell"><div class="lbl">This server</div><div class="v">migmate web · pid 41022<div class="small muted">host mbp-mj · started 11:02</div></div></div>
+      <div class="cell"><div class="lbl">Bind &amp; trust seam</div><div class="v">${SEAM.C.line}</div></div>
+      <div class="cell"><div class="lbl">Leases held</div><div class="v"><span class="stat">${state.refusal === 'none' ? 2 : 1}</span> of 2 jobs on this host
+        <div class="small muted">${state.refusal === 'none' ? 'both writable here' : 'one job is owned elsewhere'}</div></div></div>
+      <div class="cell"><div class="lbl">Run-scoped workers</div><div class="v c-workers">1 rclone · <code>fm-2481/run-7/rc.sock</code>
+        <div class="small muted">dir 0700 · generated rc-user/pass in child env · dies with this server</div></div></div>
+    </div>
+    <p class="small muted" style="margin:0 0 14px">A run belongs to the process that started it. This console shows exactly what that means: quitting this server stops the two runs it owns, and closing a tab stops nothing.</p>
+    <div class="c-board">${board}</div>
+  </div>`;
+}
+
+function detailC(j) {
+  const tabs = ['plan', 'progress', 'findings', 'evidence'];
+  const bar = `<div class="c-tabs">${tabs.map(t => `<button class="${state.cTab === t ? 'sel' : ''}" onclick="set('cTab','${t}')">${t}</button>`).join('')}
+    <span style="flex:1"></span><button class="act" style="padding:5px 11px">Open in CLI</button></div>`;
+  let body = '';
+  const wasFile = state.job === 'file';
+  if (j.id !== job().id) {
+    body = `<p class="small muted">Fixture data for the job the harness is not focused on. Switch the job type in the harness strip to drive this one through the stages.</p>
+      <div class="c-cols"><div class="card">${mappingBlockFor(j)}</div><div class="card">${progressBlockFor(j)}</div></div>`;
+    return bar + body;
+  }
+  if (state.cTab === 'plan') {
+    body = `<div class="c-cols"><div class="card"><h2>Plan revision ${j.planRev}</h2>${outcomeTable(true)}</div>
+      <div>${state.stage === 'blocked' ? blockerBlock() : approvalBlock(state.stage === 'plan')}
+      <div class="card" style="margin-top:14px"><h2>${wasFile ? 'Mappings' : 'Scope, frozen at plan time'}</h2>${mappingBlock()}${optionsBlock()}</div></div></div>`;
+  } else if (state.cTab === 'progress') {
+    body = `${tabNote()}<div class="card">${progressBlock()}</div>
+      <div class="card" style="margin-top:14px"><h2>Event tail</h2><div class="cli">${j.progress.tail.map(t => `<span class="c">${t[0]}</span> ${t[1]}`).join('<br />')}</div></div>`;
+  } else if (state.cTab === 'findings') {
+    body = `<div class="card">${verifyBlock()}</div><div style="height:14px"></div>${exceptionBlock()}`;
+  } else {
+    body = `<div class="card">${reportBlock()}</div>`;
+  }
+  return bar + body;
+}
+
+function mappingBlockFor(j) {
+  return `<h2>${j.id === 'fm-2481' ? 'Mappings' : 'Scope'}</h2><table><tbody>${j.mappings.map(m => `<tr><td class="mono small">${m.src}</td><td class="mono small">${m.dst}</td></tr>`).join('')}</tbody></table>`;
+}
+function progressBlockFor(j) {
+  return `<h2>Counts</h2><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">${j.progress.headline.map(h => `<div><div class="small muted">${h.label}</div><div class="stat" style="font-size:19px">${h.value}</div><div class="small muted">${h.of}</div></div>`).join('')}</div>`;
+}
+
+/* ============================== harness + shell ============================== */
+
+function renderHarness() {
+  const btn = (group, key, label, cur) => `<button class="${cur === key ? 'sel' : ''}" onclick="set('${group}','${key}')">${label}</button>`;
+  document.getElementById('harness').innerHTML = `
+    <div class="grp"><span class="lbl">Job type</span>
+      ${btn('job', 'file', 'File migration (fm-2481)', state.job)}
+      ${btn('job', 'teams', 'Teams archive (ta-0917)', state.job)}
+      <span class="hint">same lifecycle shape, different content</span></div>
+    <div class="grp"><span class="lbl">Lifecycle</span>
+      ${STAGES.map(s => btn('stage', s.key, s.label, state.stage)).join('')}</div>
+    <div class="grp"><span class="lbl">Refusal</span>
+      ${REFUSALS.map(r => btn('refusal', r.key, r.label, state.refusal)).join('')}
+      <span class="hint">every variant must render these, not hide them</span></div>`;
+
+  const j = job();
+  document.getElementById('statebar').innerHTML = `
+    <span>variant <b>${state.variant} — ${VARIANTS.find(v => v.key === state.variant).name}</b></span>
+    <span>job <b>${j.id}</b> (${j.type})</span>
+    <span>stage <b>${stageLabel()}</b></span>
+    <span>plan <b>rev ${j.planRev}</b> <code>${j.digest}</code></span>
+    <span>lease <b>${state.refusal === 'none' ? 'held by this web server (pid 41022)' : state.refusal === 'lock' ? 'held by CLI pid 40122' : 'stale, worker still answering'}</b></span>
+    <span>refusal <b>${REFUSALS.find(r => r.key === state.refusal).label}</b></span>`;
+  document.getElementById('thesis').innerHTML = VARIANTS.find(v => v.key === state.variant).thesis;
+}
+
+function renderSwitcher() {
+  const v = VARIANTS.find(x => x.key === state.variant);
+  document.getElementById('switcher').innerHTML = `
+    <button onclick="cycle(-1)" title="previous variant">←</button>
+    <span class="label">${v.key} — ${v.name}<small>?variant=${v.key} · prototype only</small></span>
+    <button onclick="cycle(1)" title="next variant">→</button>`;
+}
+
+function render() {
+  renderHarness();
+  renderSwitcher();
+  const el = document.getElementById('stage');
+  el.innerHTML = state.variant === 'A' ? renderA() : state.variant === 'B' ? renderB() : renderC();
+}
+
+/* every harness knob is URL-addressable, so an exact state can be handed over as a link */
+const URLKEYS = ['variant', 'job', 'stage', 'refusal'];
+
+function syncUrl() {
+  const url = new URL(location.href);
+  URLKEYS.forEach(k => url.searchParams.set(k, state[k]));
+  try { history.replaceState({}, '', url); }
+  catch (e) { location.hash = URLKEYS.map(k => k + '=' + state[k]).join('&'); }   /* file:// fallback */
+}
+
+function set(k, v) {
+  state[k] = v;
+  if (k === 'job') state.cSel = v === 'file' ? 'fm-2481' : 'ta-0917';
+  if (URLKEYS.includes(k)) syncUrl();
+  render();
+}
+
+function setVariant(key) {
+  state.variant = key;
+  state.facet = 'all';
+  syncUrl();
+  render();
+}
+
+function cycle(dir) {
+  const i = VARIANTS.findIndex(v => v.key === state.variant);
+  setVariant(VARIANTS[(i + dir + VARIANTS.length) % VARIANTS.length].key);
+}
+
+(function boot() {
+  const search = new URL(location.href).searchParams;
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const read = k => search.get(k) || hash.get(k);
+  const variant = (read('variant') || 'A').toUpperCase();
+  if (VARIANTS.some(v => v.key === variant)) state.variant = variant;
+  const jobKey = read('job');
+  if (jobKey === 'file' || jobKey === 'teams') { state.job = jobKey; state.cSel = jobKey === 'file' ? 'fm-2481' : 'ta-0917'; }
+  const stageKey = read('stage');
+  if (STAGES.some(s => s.key === stageKey)) state.stage = stageKey;
+  const refusalKey = read('refusal');
+  if (REFUSALS.some(r => r.key === refusalKey)) state.refusal = refusalKey;
+  const tab = read('tab');
+  if (['plan', 'progress', 'findings', 'evidence'].includes(tab)) state.cTab = tab;
+  document.addEventListener('keydown', e => {
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (e.key === 'ArrowLeft') cycle(-1);
+    if (e.key === 'ArrowRight') cycle(1);
+  });
+  render();
+})();
+</script>
+</body>
+</html>
