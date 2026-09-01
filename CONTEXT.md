@@ -55,3 +55,15 @@ _Avoid_: Thread, room, transcript
 **Hosted content**:
 Message-inline bytes that Microsoft serves from the message itself rather than from a file location, such as pasted images. It is distinct from an attachment, which references content stored elsewhere.
 _Avoid_: Inline image, embedded file, media
+
+**Engine home**:
+The per-user local root that holds Migmate's host identity and its job tree. Live job state is local-filesystem only, so a foreign host identity is a refusal rather than a race.
+_Avoid_: install prefix, cache, workspace root
+
+**Job folder**:
+The directory under engine home holding everything durable about one job: operator config, state database, assets, artifacts, and the current run's private directory.
+_Avoid_: workspace, project folder, run directory
+
+**Credential reference**:
+A typed pointer in a job folder's operator config to an operator-owned file holding a secret or secret-bearing config. Migmate resolves it just in time and never copies the bytes into durable state.
+_Avoid_: Secret value, credential blob
