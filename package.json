@@ -1,0 +1,28 @@
+{
+  "name": "@devosurf/migmate",
+  "version": "0.1.0-dev",
+  "description": "Finite, one-way movement or preservation of organizational content",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "migmate": "./src/cli/main.ts"
+  },
+  "files": [
+    "src",
+    "vendor"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.9.2"
+  }
+}
