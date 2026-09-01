@@ -999,7 +999,47 @@ async function handleInvocation(
   }
 }
 
+const HELP = `migmate — finite, one-way movement or preservation of organizational content
+
+Usage: migmate <verb> [flags]
+
+Lifecycle verbs, in rail order:
+  init      create a job of an explicit type
+  doctor    run preflight and record its evidence
+  plan      collect evidence and produce an immutable, digest-bound plan
+  approve   bind an approver identity to an exact plan digest
+  execute   run the approved plan in the foreground; resumable after interrupt
+  status    read job state, rail, ownership, and progress without taking the lease
+  verify    prove the result; re-runnable without re-approval
+  accept    accept named exceptions against the current verification digest
+  report    write the durable report artifacts
+  close     close the job; requires a clean verification or accepted exceptions
+  cancel    stop the job terminally; never rolls back destination writes
+  reclaim   take a job from a dead owner after reading its recovery report
+
+Flags:
+  --output text|json|jsonl   machine-facing output; json and jsonl never prompt
+  --job <id>                 the job to act on
+  --home <path>              engine home; defaults to MIGMATE_HOME
+  --type <job type>          init only: file_migration or teams_archive
+  --approver <string>        approve and accept: the identity being recorded
+  --plan-digest <digest>     approve: the digest read back from plan output
+  --verification-digest <d>  accept: the digest the acceptance binds to
+  --code <code>              accept: an exception code; repeatable
+  --from <cursor>            jsonl: resume exclusively from a durable cursor
+  --confirm / --stop-worker  reclaim: acknowledge the recovery report
+  --reason <string>          cancel: why the job was stopped
+
+Exit codes: 0 success, 1 defect, 2 usage, 3 lease, 4 gate refusal, 5 blocked,
+6 closed, 7 cancelled, 8 state version, 130 interrupt, 141 broken pipe.
+`;
+
 export async function run(argv: string[], io: Io, engine: Engine): Promise<number> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    await io.stdout.write(HELP);
+    return 0;
+  }
+
   const parsed = parseInvocation(argv);
   const commandId = randomUUID();
 
