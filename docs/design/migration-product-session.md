@@ -149,16 +149,16 @@ Public identifiers and time:
 
 Exit codes:
 
-| Code | Meaning |
-| --- | --- |
-| `0` | Command completed its intended state successfully |
-| `1` | Internal or unclassified product defect |
-| `2` | Invalid invocation or configuration |
-| `3` | Job lifecycle, lock, or lease conflict |
-| `4` | Safety, approval, policy, capability, or verification block |
-| `5` | Retryable dependency outage after the elapsed retry budget |
-| `6` | Terminal operation failure |
-| `7` | Job was terminally cancelled |
+| Code  | Meaning                                                           |
+| ----- | ----------------------------------------------------------------- |
+| `0`   | Command completed its intended state successfully                 |
+| `1`   | Internal or unclassified product defect                           |
+| `2`   | Invalid invocation or configuration                               |
+| `3`   | Job lifecycle, lock, or lease conflict                            |
+| `4`   | Safety, approval, policy, capability, or verification block       |
+| `5`   | Retryable dependency outage after the elapsed retry budget        |
+| `6`   | Terminal operation failure                                        |
+| `7`   | Job was terminally cancelled                                      |
 | `130` | Local CLI interrupted by SIGINT; job may remain running or paused |
 
 Precise failure causes use stable public string codes such as `PLAN_DIGEST_MISMATCH` and `RC_UNREACHABLE` inside structured errors.

@@ -59,6 +59,12 @@ export interface Engine {
   /** Never takes the lease. */
   reader(ref: JobRef): JobReader;
   withWriter<T>(ref: JobRef, fn: (w: JobWriter) => Promise<T>): Promise<Outcome<T>>;
+  /**
+   * The form every adapter wants: a lease refusal and a verb refusal collapse into
+   * one envelope. Nesting them makes a refused verb look like a successful call,
+   * which is how a caller ends up reporting exit 0 for a job that refused.
+   */
+  withWriterResult<T>(ref: JobRef, fn: (w: JobWriter) => Promise<Outcome<T>>): Promise<Outcome<T>>;
   reclaim(ref: JobRef, decision: ReclaimDecision): Promise<Outcome<RecoveryReport>>;
   close(): void;
 }
@@ -67,9 +73,11 @@ export interface Engine {
 export interface JobWriter {
   doctor(): Promise<Outcome<PreflightReport>>;
   plan(opts?: PlanOptions): Promise<Outcome<PlanRevision>>;
-  approve(a: { approver: string; planDigest: string; mode: "interactive" | "unattended" }): Promise<
-    Outcome<ApprovalRecord>
-  >;
+  approve(a: {
+    approver: string;
+    planDigest: string;
+    mode: "interactive" | "unattended";
+  }): Promise<Outcome<ApprovalRecord>>;
   execute(opts?: ExecuteOptions): Promise<Outcome<ExecuteResult>>;
   verify(): Promise<Outcome<VerificationRevision>>;
   accept(x: {

@@ -102,6 +102,11 @@ export interface JobSpec {
   type: JobType;
   /** Operator-facing label. Never an identifier. */
   label?: string;
+  /**
+   * Operator-authored job configuration, persisted verbatim beside the job's
+   * state and validated at the engine boundary before any driver sees it.
+   */
+  config?: unknown;
 }
 
 /**
