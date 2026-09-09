@@ -1,3 +1,6 @@
+import type { CheckResult, JobType } from "../types.ts";
+import type { ArchiveProvider } from "./archive.ts";
+
 export type SourceItemKind = "file" | "folder" | "package" | "reference" | "undownloadable";
 export type DestinationItemKind = "file" | "folder" | "shortcut" | "document";
 
@@ -14,6 +17,7 @@ export interface SourceEntry {
   mimeType: string | null;
   identity: string;
   downloadable: boolean;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ProvenanceRecord {
@@ -28,6 +32,7 @@ export interface ProvenanceRecord {
   createdAt: string;
   modifiedAt: string;
   mimeType: string | null;
+  stateRevision?: string;
 }
 
 export interface DestinationEntry {
@@ -49,6 +54,7 @@ export interface TransferWorkerHandle {
   socketPath: string;
   pid: number;
   version: string;
+  group?: string;
 }
 
 export interface TransferWorkerProbe {
@@ -69,6 +75,17 @@ export function hasRetryAfter(error: unknown): error is RetryAfterError {
 }
 
 export interface ProviderPort {
+  archive?: ArchiveProvider;
+  preflight?(input: { jobType: JobType; config: unknown; jobDirectory: string }): AsyncIterable<CheckResult>;
+  applicationIdentity?(): Promise<string>;
+  close?(): Promise<void>;
+  /** Exact immutable evidence to bind into plan inputs and re-check before execute. */
+  qualificationEvidence?(): Promise<{ digest: string; tuple: Record<string, unknown>; bundle: string }>;
+  binaryEvidence?(): Promise<Record<string, unknown>>;
+  assertExecutionEvidence?(input: { applicationIdentity: string; binarySha256: string; binaryVersion: string; qualificationDigest: string }): Promise<void>;
+  reserveDestinationId?(): Promise<string>;
+  readSourceItem?(input: { driveId: string; itemId: string }): Promise<SourceEntry | null>;
+  readDestinationObject?(input: { driveId: string; objectId: string }): Promise<DestinationEntry | null>;
   resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;
@@ -82,6 +99,8 @@ export interface ProviderPort {
   }): Promise<DestinationEntry | null>;
   listDestinationChildren(destFolderId: string): Promise<DestinationEntry[]>;
   createDestinationFolder(input: {
+    destinationId?: string;
+    marker?: ProvenanceRecord;
     parentFolderId: string;
     name: string;
     createdAt: string;
@@ -89,6 +108,9 @@ export interface ProviderPort {
   }): Promise<DestinationEntry>;
   uploadDestinationContent(input: {
     destinationId?: string;
+    create?: boolean;
+    marker?: ProvenanceRecord;
+    expectedEtag?: string;
     parentFolderId: string;
     name: string;
     content: Uint8Array | AsyncIterable<Uint8Array>;
@@ -101,11 +123,14 @@ export interface ProviderPort {
     parentFolderId: string;
     name: string;
     modifiedAt?: string;
+    expectedEtag?: string;
+    marker?: ProvenanceRecord;
   }): Promise<DestinationEntry>;
   readDestinationMarker(objectId: string): Promise<ProvenanceRecord | null>;
   writeDestinationMarker(input: {
     objectId: string;
     marker: ProvenanceRecord | null;
+    expectedEtag?: string;
   }): Promise<void>;
   streamDestinationContent(objectId: string): AsyncIterable<Uint8Array>;
 
