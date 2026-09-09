@@ -28,7 +28,6 @@ const NOW = "2026-09-01T00:00:00.000Z";
 
 function value<T>(outcome: Outcome<T>): T {
   assert.equal(outcome.ok, true, outcome.ok ? undefined : outcome.refusal.code);
-  if (!outcome.ok) throw new Error(outcome.refusal.code);
   return outcome.value;
 }
 
@@ -393,7 +392,7 @@ describe("engine durability seam", () => {
     const h = await harness(t);
     await approve(h);
     const defect = Object.assign(new Error("Unexpected provider defect"), { code: "constructor" });
-    h.port.scriptEffect({ method: "streamSourceContent", objectId: "document", count: 1, error: defect });
+    h.port.scriptEffect({ method: "openSourceContent", objectId: "document", count: 1, error: defect });
     await assert.rejects(() => h.engine.withWriterResult(h.ref, (writer) => writer.execute()), (error) => error === defect);
     assert.equal(value(await h.engine.reader(h.ref).status()).state, "interrupted");
   });

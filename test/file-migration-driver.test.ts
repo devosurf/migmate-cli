@@ -17,7 +17,6 @@ const config: FileMigrationConfig = {
 
 function value<T>(outcome: Outcome<T>): T {
   assert.equal(outcome.ok, true, outcome.ok ? undefined : outcome.refusal.code);
-  if (!outcome.ok) throw new Error(outcome.refusal.code);
   return outcome.value;
 }
 

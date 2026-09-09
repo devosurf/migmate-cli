@@ -136,6 +136,9 @@ describe("engine seam", () => {
     assert.equal(status.ok, true);
     if (!status.ok) throw new Error("unreachable");
     assert.ok(["verified", "needs_attention"].includes(status.value.state));
+    assert.equal(status.value.resumable, false);
+    assert.equal(status.value.terminalState, "completed");
+    assert.deepEqual(status.value.worker, { active: false, group: null });
 
     const closed = await h.engine.withWriter(ref, async (w) => {
       const verification = await w.verify();
@@ -248,6 +251,8 @@ describe("engine seam", () => {
     assert.equal(statusAfterInterrupt.ok, true);
     if (!statusAfterInterrupt.ok) throw new Error("unreachable");
     assert.equal(statusAfterInterrupt.value.state, "interrupted");
+    assert.equal(statusAfterInterrupt.value.resumable, true);
+    assert.equal(statusAfterInterrupt.value.terminalState, "interrupted");
 
     const resumed = await h.engine.withWriter(ref, async (w) => w.execute());
     assert.equal(resumed.ok, true);

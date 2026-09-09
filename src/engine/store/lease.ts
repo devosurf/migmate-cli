@@ -461,9 +461,10 @@ function workerOwned(row: LeaseRow, observed: ProcessObservation): boolean {
   // macOS ps returns the actual kernel executable separately. Its argv display
   // is not shell syntax: compare the complete fixed leading arguments including
   // the trailing flag, so a socket substring or quoted lookalike cannot match.
+  const directories = ` --cache-dir ${directory} --temp-dir ${directory}`;
   return identity.command !== null &&
     identity.command.startsWith(`${row.workerExecutable} rcd --rc-addr ${expected} --rc-serve --config `) &&
-    identity.command.includes(` --cache-dir ${directory} --temp-dir ${directory} `) &&
+    (identity.command.includes(`${directories} `) || identity.command.endsWith(directories)) &&
     identity.command.indexOf(" --rc-addr ", identity.command.indexOf(" --rc-addr ") + 1) === -1;
 }
 

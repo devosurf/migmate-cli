@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { openEngine } from "../src/engine/index.ts";
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import type { ArchiveConversation, ArchiveProvider, ArchiveScopeBinding } from "../src/engine/providers/archive.ts";
+import type { PackageManifest } from "../src/engine/archive/package.ts";
 
-const now = () => new Date("2026-09-01T00:00:00.000Z");
 
 // The fake sits at the same provider-effects seam as production. No driver or
 // store mocks: frozen scope, commit replay and offline verification cross engine.
 test("archive approval freezes empty conversations and offline verification survives reopening", async () => {
   const home = await mkdtemp(join(tmpdir(), "migmate-archive-engine-"));
+  let currentTime = "2026-09-01T00:00:00.000Z";
+  const now = () => new Date(currentTime);
   try {
     const conversation: ArchiveConversation = { id: "chat-1", kind: "chat", title: "Original chat", scopeEntryId: "user:a", participantScopeIds: ["user:a", "user:b"], ownerUserId: "a", raw: { id: "chat-1", chatType: "group" } };
     const empty: ArchiveConversation = { ...conversation, id: "chat-empty", title: "Empty", participantScopeIds: ["user:a"], raw: { id: "chat-empty", chatType: "group" } };
@@ -40,7 +42,8 @@ test("archive approval freezes empty conversations and offline verification surv
     };
     const port = Object.assign(new FakeFileMigrationPort({ sourceDriveId: "unused", sourceRootId: "unused", destinationDriveId: "unused", destinationRootId: "unused", sourceItems: [], destinationItems: [] }), { archive });
     const engine = openEngine({ home, now, provider: port });
-    const initialized = await engine.initJob({ type: "teams_archive", config: { scopes: [{ kind: "user-chats", userId: "a" }, { kind: "user-chats", userId: "b" }], window: { from: "2026-01-01T00:00:00Z" }, timezone: "Europe/Stockholm" } });
+    const config = { scopes: [{ kind: "user-chats", userId: "a" }, { kind: "user-chats", userId: "b" }], window: { from: "2026-01-01T00:00:00Z" }, timezone: "Europe/Stockholm" };
+    const initialized = await engine.initJob({ type: "teams_archive", config });
     assert.ok(initialized.ok);
     if (!initialized.ok) throw new Error("init refused");
     const ref = initialized.value;
@@ -48,7 +51,17 @@ test("archive approval freezes empty conversations and offline verification surv
       const planned = await writer.plan();
       assert.ok(planned.ok);
       if (!planned.ok) throw new Error("plan refused");
-      assert.ok((await writer.approve({ planDigest: planned.value.planDigest, approver: "test", mode: "unattended" })).ok);
+      currentTime = "2026-09-02T00:00:00.000Z";
+      const replanned = await writer.plan();
+      assert.ok(replanned.ok);
+      assert.equal(replanned.value.planDigest, planned.value.planDigest, "Replanning must retain the frozen upper bound");
+      assert.ok((await writer.approve({ planDigest: replanned.value.planDigest, approver: "test", mode: "unattended" })).ok);
+      assert.ok((await writer.onboard({ ...config, window: { ...config.window, to: "2026-08-31T00:00:00Z" } })).ok);
+      const changedWindow = await writer.execute();
+      assert.equal(changedWindow.ok, false);
+      if (changedWindow.ok) throw new Error("Changed archive window reused approval");
+      assert.equal(changedWindow.refusal.code, "plan_revision_required");
+      assert.ok((await writer.onboard(config)).ok);
       newConversationExists = true;
       const execution = await writer.execute();
       assert.ok(execution.ok);
@@ -56,7 +69,15 @@ test("archive approval freezes empty conversations and offline verification surv
       assert.equal(execution.value.outcome, "completed");
     });
     assert.ok(run.ok);
+    const manifest: PackageManifest = JSON.parse(await readFile(join(home, "jobs", ref.id, "archive", "manifest.json"), "utf8"));
+    assert.equal(manifest.plan.window.to, "2026-09-01T00:00:00.000Z");
+    assert.deepEqual(manifest.conversations.map((entry) => ({ id: entry.id, records: entry.recordCount })), [
+      { id: "chat-1", records: 1 }, { id: "chat-empty", records: 0 },
+    ]);
+    assert.deepEqual(manifest.scopes.find((entry) => entry.id === "user:b")?.conversationIds, ["chat-1"]);
+    engine.close();
     networkAllowed = false;
+    currentTime = "2026-10-01T00:00:00.000Z";
     const reopened = openEngine({ home, now, provider: port });
     const verified = await reopened.withWriter(ref, async (writer) => writer.verify());
     assert.ok(verified.ok);
@@ -68,5 +89,6 @@ test("archive approval freezes empty conversations and offline verification surv
     assert.ok(!verificationCodes.includes("record_unrendered"));
     assert.ok(!verificationCodes.includes("manifest_digest_mismatch"));
     assert.ok(verificationCodes.includes("retained_history_not_requested"));
+    reopened.close();
   } finally { await rm(home, { recursive: true, force: true }); }
 });

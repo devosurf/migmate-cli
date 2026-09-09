@@ -252,14 +252,14 @@ async function initJob(deps: EngineDeps, spec: JobSpec): Promise<Outcome<JobRef>
 }
 function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
   async function withStore<T>(fn: (store: Store) => T): Promise<Outcome<T>> {
-    try { const paths = pathsFor(deps, ref), opened = openReadStore(paths.dir, { migmateVersion: MIGMATE_VERSION, now: deps.now }); if (!opened.ok) return opened;
+    try { const paths = pathsFor(deps, ref), opened = openReadStore(paths.dir, { migmateVersion: MIGMATE_VERSION, now: deps.now, hostId: readHostId(deps.home) ?? "" }); if (!opened.ok) return opened;
       try { return ok(fn(opened.value)); } finally { opened.value.close(); }
     } catch (error) { const failure = expectedFailure<T>(error); if (failure) return failure; throw error; }
   }
   return {
     status: () => withStore((s) => s.status()), rows: (q) => withStore((s) => s.rows(q)), artifacts: () => withStore((s) => s.readArtifactSet()),
     async *events(q): AsyncIterable<JobEvent> {
-      const paths = pathsFor(deps, ref), opened = openReadStore(paths.dir, { migmateVersion: MIGMATE_VERSION, now: deps.now });
+      const paths = pathsFor(deps, ref), opened = openReadStore(paths.dir, { migmateVersion: MIGMATE_VERSION, now: deps.now, hostId: readHostId(deps.home) ?? "" });
       if (!opened.ok) throw new EngineRefusalError(opened.refusal);
       try { yield* opened.value.events(q); } finally { opened.value.close(); }
     },
@@ -584,8 +584,8 @@ function makeWriter(deps: EngineDeps, store: Store, paths: JobPaths, active: () 
       const blockers = store.readFindings(plan.revision, "plan").filter((f) => f.kind === "finding");
       if (blockers.length) return refuse("preflight_failed", "The plan contains unresolved blockers.", { detail: { codes: [...new Set(blockers.map((f) => f.code))] } });
       if (job().state !== "planned") return refuse("approval_required", "Only the current unapproved plan may be approved.");
-      const record: ApprovalRecord = { revision: plan.revision, planDigest: plan.planDigest, approver: text(a.approver, "approver"), mode: a.mode, at: deps.now().toISOString() };
-      record.approvalDigest = digestJson(record);
+      const approval = { revision: plan.revision, planDigest: plan.planDigest, approver: text(a.approver, "approver"), mode: a.mode, at: deps.now().toISOString() };
+      const record: ApprovalRecord = { ...approval, approvalDigest: digestJson(approval) };
       store.atomic(() => { store.writeApproval(record); transition("approve", "approve", { planDigest: plan.planDigest, approvalDigest: record.approvalDigest }); });
       return ok(record);
     }),

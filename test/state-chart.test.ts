@@ -118,9 +118,10 @@ describe("engine lifecycle boundaries", () => {
     t.after(() => { engine.close(); rmSync(home, { recursive: true, force: true }); });
     const created = await engine.initJob({ type: "file_migration" });
     assert.ok(created.ok);
-    const cancelled = await engine.withWriter(created.value, async (writer) => writer.cancel());
+    const cancelled = await engine.withWriter(created.value, async (writer) => writer.cancel("Operator withdrew this migration request"));
     assert.ok(cancelled.ok);
     assert.ok(cancelled.value.ok);
+    assert.equal(cancelled.value.value.reason, "Operator withdrew this migration request");
     const reopened = await engine.withWriter(created.value, async (writer) => {
       for (const result of [await writer.plan(), await writer.execute(), await writer.close()]) {
         assert.equal(result.ok, false);
@@ -132,5 +133,7 @@ describe("engine lifecycle boundaries", () => {
     const status = await engine.reader(created.value).status();
     assert.ok(status.ok);
     assert.equal(status.value.state, "cancelled");
+    assert.equal(status.value.resumable, false);
+    assert.equal(status.value.terminalState, "cancelled");
   });
 });

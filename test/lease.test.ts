@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it, type TestContext } from "node:test";
-import { openEngine } from "../src/engine/index.ts";
+import { EngineRefusalError, openEngine } from "../src/engine/index.ts";
 import { reconcileOnWriterOpen } from "../src/engine/state-chart.ts";
 import {
   acquire, evaluateReclaim, getHostId, getProcessStartTime, heartbeat, inspectLease,
@@ -379,14 +379,20 @@ describe("engine recovery seam", () => {
     assert.ok((await engine.withWriter(created.value, async () => "released")).ok);
     getHostId(otherHome);
     cpSync(join(home, "jobs", created.value.id), join(otherHome, "jobs", created.value.id), { recursive: true });
-    const reader = await other.reader(created.value).status();
+    const foreignReader = other.reader(created.value);
+    const reader = await foreignReader.status();
+    const rows = await foreignReader.rows({ phase: "plan" });
+    const artifacts = await foreignReader.artifacts();
     const writer = await other.withWriter(created.value, async () => { throw new Error("foreign callback entered"); });
     const reclaim = await other.reclaim(created.value, { confirm: true, stopWorker: true });
-    for (const result of [reader, writer, reclaim]) {
+    for (const result of [reader, rows, artifacts, writer, reclaim]) {
       assert.equal(result.ok, false);
       if (result.ok) throw new Error("foreign job accepted");
       assert.equal(result.refusal.code, "foreign_host");
       assert.equal(result.refusal.recovery?.reclaimable, false);
     }
+    await assert.rejects(async () => {
+      for await (const _event of foreignReader.events({})) assert.fail("Foreign-host events must not be exposed");
+    }, (error) => error instanceof EngineRefusalError && error.refusal.code === "foreign_host" && error.refusal.recovery?.reclaimable === false);
   });
 });
