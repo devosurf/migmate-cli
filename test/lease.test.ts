@@ -40,21 +40,19 @@ import type { JobState } from "../src/engine/types.ts";
 const schema = readFileSync(new URL("../src/engine/store/schema.sql", import.meta.url), "utf8");
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 
-function workspace(t: TestContext) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-")));
-  const home = join(root, "home");
-  const db = new DatabaseSync(join(root, "state.db"));
-  db.exec(schema);
-  db.prepare(
-    `INSERT INTO job (id,type,state,schema_version,migmate_version,created_at,last_checkpoint)
-    VALUES ('job-1','file_migration','new',2,'test',?,'checkpoint-7')`,
-  ).run(NOW.toISOString());
-  t.after(() => {
-    db.close();
-    rmSync(root, { recursive: true, force: true });
-  });
-  return { root, home, db };
-}
+function engineHome(t: TestContext) { const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-")));
+const home = join(root, "home");
+const db = new DatabaseSync(join(root, "state.db"));
+db.exec(schema);
+db.prepare(
+  `INSERT INTO job (id,type,state,schema_version,migmate_version,created_at,last_checkpoint)
+  VALUES ('job-1','file_migration','new',2,'test',?,'checkpoint-7')`,
+).run(NOW.toISOString());
+t.after(() => {
+  db.close();
+  rmSync(root, { recursive: true, force: true });
+});
+return { root, home, db }; }
 
 function staleRow(overrides: Partial<LeaseRow> = {}): LeaseRow {
   return {
@@ -159,13 +157,13 @@ async function orphan(
 
 describe("persistent host identity", () => {
   it("does not create a home during a reader-only lookup", (t) => {
-    const { home } = workspace(t);
+    const { home } = engineHome(t);
     assert.equal(readHostId(home), null);
     assert.equal(existsSync(home), false);
   });
 
   it("installs one private identity shared by concurrent creators", async (t) => {
-    const { home } = workspace(t);
+    const { home } = engineHome(t);
     const source = new URL("../src/engine/store/lease.ts", import.meta.url).href;
     const outputs = await Promise.all(
       Array.from({ length: 4 }, async () => {
@@ -207,7 +205,7 @@ describe("persistent host identity", () => {
     "refuses a symlink identity instead of trusting or replacing its target",
     { skip: process.platform === "win32" },
     (t) => {
-      const { root, home } = workspace(t);
+      const { root, home } = engineHome(t);
       mkdirSync(home, { mode: 0o700 });
       const target = join(root, "unrelated");
       const contents = "8a6ea0dd-5a15-4acd-a3c3-5cc35df2f2ed\n";
@@ -334,7 +332,7 @@ describe("lease adjudication", () => {
   });
 
   it("distinguishes definite socket absence from invalid probe input", async (t) => {
-    const { root } = workspace(t);
+    const { root } = engineHome(t);
     assert.equal(await probeWorker(join(root, "missing-socket")), false);
     assert.equal(await probeWorker(""), null);
   });
@@ -442,7 +440,7 @@ describe("exact orphan termination", () => {
 
 describe("writer ownership and reconciliation", () => {
   it("does not acquire or reconcile a stale row until explicit reclaim", async (t) => {
-    const { db } = workspace(t),
+    const { db } = engineHome(t),
       row = staleRow();
     db.exec("UPDATE job SET state='executing'");
     seedLease(db, row);
@@ -464,7 +462,7 @@ describe("writer ownership and reconciliation", () => {
   });
 
   it("reconciles only the acquired owner's executing state, preserving checkpoints and all other states", async (t) => {
-    const { db, home } = workspace(t);
+    const { db, home } = engineHome(t);
     const identity = {
       hostId: getHostId(home),
       pid: process.pid,
@@ -509,7 +507,7 @@ describe("writer ownership and reconciliation", () => {
   });
 
   it("persists the host after release and rejects an empty-lease foreign writer", async (t) => {
-    const { db, home } = workspace(t);
+    const { db, home } = engineHome(t);
     const identity = {
       hostId: getHostId(home),
       pid: process.pid,
@@ -526,7 +524,7 @@ describe("writer ownership and reconciliation", () => {
   });
 
   it("releases on callback failure but never clears a surviving worker claim or another owner's lease", async (t) => {
-    const { db, home } = workspace(t);
+    const { db, home } = engineHome(t);
     const identity = {
       hostId: getHostId(home),
       pid: process.pid,

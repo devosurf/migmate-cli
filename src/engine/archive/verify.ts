@@ -10,6 +10,7 @@ import type {
 } from "../providers/archive.ts";
 import { canonicalJson } from "../store/digest.ts";
 import type { ConversationManifest, ManifestAsset, ManifestRecord } from "./package.ts";
+import { parseConversationManifest } from "./package.ts";
 import { parseHtml, recordAnchor, visibleUrl, type HtmlNode } from "./render.ts";
 
 function safePath(path: string): boolean {
@@ -311,26 +312,15 @@ export async function verifyPackageFiles(
       return;
     }
     if (path === "manifest.json") return;
-    if (!Array.isArray(manifest.parts)) {
-      report("record_count_mismatch", path, { reason: "parts_missing_from_manifest" });
+    const index = parseConversationManifest(manifest);
+    if (!index) {
+      report("manifest_digest_mismatch", path, { reason: "invalid_conversation_manifest" });
       return;
     }
-    for (const value of manifest.parts) {
-      const part = object(value);
-      const jsonl = object(part?.jsonl);
-      const html = object(part?.html);
-      if (
-        !part ||
-        !jsonl ||
-        !html ||
-        typeof jsonl.path !== "string" ||
-        typeof html.path !== "string" ||
-        !safePath(jsonl.path) ||
-        !safePath(html.path) ||
-        !expectedParts.has(jsonl.path) ||
-        !expectedFiles.has(html.path) ||
-        !Array.isArray(part.records)
-      ) {
+    for (const part of index.parts) {
+      const { jsonl, html } = part;
+      if (!safePath(jsonl.path) || !safePath(html.path) ||
+        !expectedParts.has(jsonl.path) || !expectedFiles.has(html.path)) {
         report("manifest_digest_mismatch", path, {
           reason: "invalid_or_unconfined_part_descriptor",
         });
@@ -343,17 +333,7 @@ export async function verifyPackageFiles(
           count: part.count ?? null,
           mapped: part.records.length,
         });
-      for (const entry of part.records) {
-        const record = object(entry);
-        if (
-          !record ||
-          typeof record.key !== "string" ||
-          !Number.isSafeInteger(record.line) ||
-          Number(record.line) < 1
-        ) {
-          report("record_count_mismatch", path, { reason: "invalid_record_mapping" });
-          continue;
-        }
+      for (const record of part.records) {
         mappedCounts.set(record.key, (mappedCounts.get(record.key) ?? 0) + 1);
         if (!durableRecords.has(record.key))
           report("record_count_mismatch", record.key, {

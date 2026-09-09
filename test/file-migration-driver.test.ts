@@ -4,40 +4,20 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
-import { openEngine, type Engine, type Outcome, type JobRef } from "../src/engine/index.ts";
+import { openEngine, type Engine, type JobRef } from "../src/engine/index.ts";
 import {
   FakeFileMigrationPort,
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
 import type { FileMigrationConfig } from "../src/engine/drivers/file-migration.ts";
 import type { FileProvider } from "../src/engine/drivers/file-state.ts";
+import { fileConfig, fileFixture, value, approve } from "./engine-fixture.ts";
 
 const now = "2026-09-01T00:00:00.000Z";
-const config: FileMigrationConfig = {
-  mappings: [
-    {
-      id: "mapping",
-      sourceDriveId: "source-drive",
-      sourceItemId: "source-root",
-      destDriveId: "destination-drive",
-      destFolderId: "destination-root",
-    },
-  ],
-};
-
-function value<T>(outcome: Outcome<T>): T {
-  assert.equal(outcome.ok, true, outcome.ok ? undefined : outcome.refusal.code);
-  return outcome.value;
-}
+const config = fileConfig();
 
 function fixture(): FakeFileMigrationFixture {
-  return {
-    sourceDriveId: "source-drive",
-    sourceRootId: "source-root",
-    destinationDriveId: "destination-drive",
-    destinationRootId: "destination-root",
-    sourceItems: [
-      { id: "source-root", parentId: null, name: "Do not wrap this root", kind: "folder" },
+  return fileFixture([
       { id: "folder", parentId: "source-root", name: "nested", kind: "folder" },
       { id: "empty", parentId: "folder", name: "empty", kind: "folder" },
       {
@@ -58,11 +38,7 @@ function fixture(): FakeFileMigrationFixture {
         modifiedAt: "2024-05-06T07:08:09.000Z",
         mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       },
-    ],
-    destinationItems: [
-      { id: "destination-root", parentId: null, name: "existing", kind: "folder" },
-    ],
-  };
+  ]);
 }
 
 async function harness(
@@ -85,21 +61,6 @@ interface Harness {
   port: FakeFileMigrationPort;
 }
 
-async function approve(h: Harness): Promise<string> {
-  return value(
-    await h.engine.withWriter(h.ref, async (writer) => {
-      const plan = value(await writer.plan());
-      value(
-        await writer.approve({
-          approver: "file-contract-test",
-          mode: "unattended",
-          planDigest: plan.planDigest,
-        }),
-      );
-      return plan.planDigest;
-    }),
-  );
-}
 
 async function execute(h: Harness): Promise<void> {
   value(value(await h.engine.withWriter(h.ref, (writer) => writer.execute())));

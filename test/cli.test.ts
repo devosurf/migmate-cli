@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir, userInfo, hostname } from "node:os";
 import { join } from "node:path";
 import { it, type TestContext } from "node:test";
@@ -83,7 +83,7 @@ async function invoke(
   return { code, stdout, stderr, prompts };
 }
 function harness(t: TestContext) {
-  const home = mkdtempSync(join(tmpdir(), "migmate-cli-contract-"));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "migmate-cli-contract-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const provider = new FakeFileMigrationPort(cliFixture());
   const engine = () => openEngine({ home, provider, adapter: "cli" });

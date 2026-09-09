@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve, win32 } from "node:path";
+import { isAbsolute, posix, resolve, win32 } from "node:path";
 import { VERBS, type JobType, type RowQuery, type Verb } from "../engine/types.ts";
 
 export type OutputMode = "text" | "json" | "jsonl";
@@ -36,17 +36,17 @@ export function defaultHome(
   if (environment.MIGMATE_HOME) return resolve(environment.MIGMATE_HOME);
   switch (platform) {
     case "darwin":
-      return join(home, "Library", "Application Support", "Migmate");
+      return posix.join(home, "Library", "Application Support", "Migmate");
     case "win32":
       return win32.join(
         environment.LOCALAPPDATA || win32.join(home, "AppData", "Local"),
         "Migmate",
       );
     default:
-      return join(
-        environment.XDG_STATE_HOME && isAbsolute(environment.XDG_STATE_HOME)
+      return posix.join(
+        environment.XDG_STATE_HOME && posix.isAbsolute(environment.XDG_STATE_HOME)
           ? environment.XDG_STATE_HOME
-          : join(home, ".local", "state"),
+          : posix.join(home, ".local", "state"),
         "migmate",
       );
   }

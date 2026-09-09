@@ -27,6 +27,7 @@ import type { ProbeCapture } from "../../src/qualification/bundle.ts";
 import { canonicalJson, digestJson } from "../../src/engine/store/digest.ts";
 import {
   QualificationBlocked,
+  qualificationAssertion,
   type QualificationInput,
   type QualificationResult,
 } from "./common.ts";
@@ -37,9 +38,7 @@ import { fileWorkerQualification } from "./file-worker.ts";
 class Facts {
   readonly assertions: ProbeCapture["assertions"] = [];
   expect(id: string, expected: unknown, observed: unknown): void {
-    if (canonicalJson(expected) !== canonicalJson(observed))
-      throw new QualificationBlocked(`file_probe_${id}`);
-    this.assertions.push({ id, expected, observed });
+    this.assertions.push(qualificationAssertion("file_probe_", id, expected, observed));
   }
 }
 

@@ -3,6 +3,27 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { ReadableStreamReadResult } from "node:stream/web";
 import { ProviderFault, type CredentialSession } from "./credentials.ts";
 
+export function retryableStatus(status: number | undefined): boolean {
+  return status !== undefined && (status === 0 || status === 408 || status === 429 || status >= 500);
+}
+
+export async function* cursorPages<T>(
+  initial: string | null,
+  read: (cursor: string | null) => Promise<{ value: T; next: string | null | undefined }>,
+  cycle: () => Error,
+): AsyncIterable<T> {
+  let cursor = initial;
+  const seen = new Set<string>();
+  do {
+    if (cursor !== null) {
+      if (seen.has(cursor)) throw cycle();
+      seen.add(cursor);
+    }
+    const page = await read(cursor);
+    yield page.value;
+    cursor = page.next || null;
+  } while (cursor !== null);
+}
 /** Provider responses never become diagnostic text: URLs and bodies may contain credentials. */
 export class HttpProviderFault extends ProviderFault {
   readonly status: number;
@@ -18,7 +39,7 @@ export class HttpProviderFault extends ProviderFault {
       },
     );
     this.status = status;
-    this.transient = status === 0 || status === 408 || status === 429 || status >= 500;
+    this.transient = retryableStatus(status);
     if (retryAfter !== null) {
       const seconds = Number(retryAfter);
       const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now();

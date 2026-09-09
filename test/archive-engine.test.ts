@@ -11,6 +11,7 @@ import type {
   ArchiveScopeBinding,
 } from "../src/engine/providers/archive.ts";
 import type { PackageManifest } from "../src/engine/archive/package.ts";
+import { ArchiveEffectError } from "../src/engine/providers/archive.ts";
 
 // The fake sits at the same provider-effects seam as production. No driver or
 // store mocks: frozen scope, commit replay and offline verification cross engine.
@@ -85,9 +86,11 @@ test("archive approval freezes empty conversations and offline verification surv
       async transcriptConversationId() {
         throw new Error("transcripts not requested");
       },
-      async *assetRequests() {},
+      async *assetRequests(conversation, record, route) {
+        yield { conversation, record, route, kind: "hosted_content", id: "missing-image", name: "image" } as const;
+      },
       async *openAsset() {
-        throw new Error("no asset requested");
+        throw new ArchiveEffectError("message_collection_incomplete", 404);
       },
     };
     const port = Object.assign(
@@ -183,6 +186,11 @@ test("archive approval freezes empty conversations and offline verification surv
     assert.ok(!verificationCodes.includes("record_unrendered"));
     assert.ok(!verificationCodes.includes("manifest_digest_mismatch"));
     assert.ok(verificationCodes.includes("retained_history_not_requested"));
+    assert.equal(verified.value.value.findings.find((facet) => facet.code === "retained_history_not_requested")?.count, 2);
+    assert.equal(verified.value.value.findings.find((facet) => facet.code === "message_collection_incomplete")?.count, 1);
+    const again = await reopened.withWriterResult(ref, (writer) => writer.verify());
+    assert.ok(again.ok);
+    assert.deepEqual(again.value.findings, verified.value.value.findings);
     reopened.close();
   } finally {
     await rm(home, { recursive: true, force: true });

@@ -1,7 +1,6 @@
 import { lstat, open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { CODE_BY_NAME } from "../../src/engine/codes.ts";
 import {
   fileMigrationDriver,
   type FileMigrationConfig,
@@ -12,7 +11,7 @@ import type {
   FileState,
 } from "../../src/engine/drivers/file-state.ts";
 import type { CommitUnit } from "../../src/engine/drivers/types.ts";
-import { QualificationBlocked } from "./common.ts";
+import { QualificationBlocked, privatePathOwned, registeredCodes } from "./common.ts";
 
 export type FilePhase = "plan" | "execute" | "verify";
 
@@ -75,10 +74,7 @@ export class FileJournal {
     const info = await lstat(path);
     if (
       dirname(path) !== jobDirectory ||
-      !info.isFile() ||
-      info.isSymbolicLink() ||
-      (process.platform !== "win32" &&
-        ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))
+      !privatePathOwned(info, "file")
     ) {
       throw new QualificationBlocked("file_journal_ownership_invalid");
     }
@@ -203,23 +199,10 @@ export class FileJournal {
 }
 
 export function observedCodes(units: readonly CommitUnit[], sourceId?: string): string[] {
-  const codes = [
-    ...new Set(
-      units.flatMap((unit) => [
-        ...unit.rows
-          .filter(
-            (row) =>
-              sourceId === undefined ||
-              (row.jobType === "file_migration" && row.sourceItemId === sourceId),
-          )
-          .map((row) => row.code),
-        ...unit.findings
-          .filter((finding) => sourceId === undefined || finding.subjectId === sourceId)
-          .map((finding) => finding.code),
-      ]),
-    ),
-  ].sort();
-  if (codes.some((code) => !Object.hasOwn(CODE_BY_NAME, code)))
-    throw new QualificationBlocked("file_probe_unregistered_driver_code");
-  return codes;
+  return registeredCodes(units.flatMap((unit) => [
+    ...unit.rows.filter((row) => sourceId === undefined ||
+      (row.jobType === "file_migration" && row.sourceItemId === sourceId)).map((row) => row.code),
+    ...unit.findings.filter((finding) => sourceId === undefined ||
+      finding.subjectId === sourceId).map((finding) => finding.code),
+  ]), "file_probe_unregistered_driver_code");
 }

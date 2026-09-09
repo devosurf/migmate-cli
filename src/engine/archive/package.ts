@@ -98,6 +98,39 @@ export interface ConversationManifest {
   index: { path: string; sha256: string; size: number };
   csv: { path: string; sha256: string; size: number };
 }
+/** Only the manifest index is interpreted; durable package digests cover the remaining fields. */
+export interface ConversationManifestIndex {
+  parts: Array<Pick<ConversationManifest["parts"][number], "count" | "jsonl" | "html"> & {
+    records: Array<Pick<PartManifest["records"][number], "key" | "line" | "rawSha256" | "anchor">>;
+  }>;
+}
+export function parseConversationManifest(value: unknown): ConversationManifestIndex | null {
+  if (!value || typeof value !== "object" || !("parts" in value) || !Array.isArray(value.parts))
+    return null;
+  const parts: ConversationManifestIndex["parts"] = [];
+  const file = (value: unknown): PartManifest["jsonl"] | null => {
+    if (!value || typeof value !== "object" || !("path" in value) || typeof value.path !== "string" ||
+      !("sha256" in value) || typeof value.sha256 !== "string" ||
+      !("size" in value) || typeof value.size !== "number" || !Number.isSafeInteger(value.size) || value.size < 0)
+      return null;
+    return { path: value.path, sha256: value.sha256, size: value.size };
+  };
+  for (const part of value.parts) {
+    if (!part || typeof part !== "object" || !Array.isArray(part.records) ||
+      !Number.isSafeInteger(part.count) || part.count < 0) return null;
+    const jsonl = file(part.jsonl), html = file(part.html);
+    if (!jsonl || !html) return null;
+    const records: ConversationManifestIndex["parts"][number]["records"] = [];
+    for (const record of part.records) {
+      if (!record || typeof record !== "object" || typeof record.key !== "string" ||
+        !Number.isSafeInteger(record.line) || record.line < 1 ||
+        typeof record.rawSha256 !== "string" || typeof record.anchor !== "string") return null;
+      records.push({ key: record.key, line: record.line, rawSha256: record.rawSha256, anchor: record.anchor });
+    }
+    parts.push({ count: part.count, jsonl, html, records });
+  }
+  return { parts };
+}
 
 export interface PackageManifest {
   version: 1;

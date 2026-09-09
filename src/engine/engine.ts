@@ -37,11 +37,6 @@ export interface EngineOptions {
   adapter?: "cli" | "web";
 }
 
-export interface PlanOptions {
-  /** Re-plan even when the inputs digest is unchanged. */
-  force?: boolean;
-}
-
 export interface ExecuteOptions {
   /** Interrupt, never cancellation: aborting stops at the next commit boundary. */
   signal?: AbortSignal;
@@ -74,7 +69,7 @@ export interface JobWriter {
   /** Validate and persist typed references, then immediately run the proof probes. */
   onboard(config: unknown): Promise<Outcome<PreflightReport>>;
   doctor(): Promise<Outcome<PreflightReport>>;
-  plan(opts?: PlanOptions): Promise<Outcome<PlanRevision>>;
+  plan(): Promise<Outcome<PlanRevision>>;
   approve(a: {
     approver: string;
     planDigest: string;

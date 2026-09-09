@@ -4,20 +4,15 @@
  * contracts are the code registry, the exit-code table, and the CLI envelope.
  */
 
-export type JobType = "file_migration" | "teams_archive";
+export const JOB_TYPES = ["file_migration", "teams_archive"] as const;
+export type JobType = (typeof JOB_TYPES)[number];
 
 /** The ten durable job states. `closed` and `cancelled` are absorbing. */
-export type JobState =
-  | "new"
-  | "planned"
-  | "approved"
-  | "executing"
-  | "interrupted"
-  | "blocked"
-  | "needs_attention"
-  | "verified"
-  | "closed"
-  | "cancelled";
+export const JOB_STATES = [
+  "new", "planned", "approved", "executing", "interrupted", "blocked",
+  "needs_attention", "verified", "closed", "cancelled",
+] as const;
+export type JobState = (typeof JOB_STATES)[number];
 
 export const TERMINAL_STATES = ["closed", "cancelled"] as const;
 
@@ -113,7 +108,7 @@ export interface JobSpec {
 /** Safe ownership facts. Worker process identifiers and addresses remain internal. */
 export interface RecoveryReport {
   workerAlive: boolean;
-  workerStatus?: "alive" | "absent" | "unknown";
+  workerStatus?: WorkerStatus;
   recordedHostId: string;
   thisHostId: string;
   holder: {
@@ -128,8 +123,11 @@ export interface RecoveryReport {
   lastCheckpoint: string | null;
   reclaimable: boolean;
 }
+export const WORKER_STATUSES = ["alive", "absent", "unknown"] as const;
+export type WorkerStatus = (typeof WORKER_STATUSES)[number];
 
-export type ProgressUnit = "bytes" | "items" | "records" | "assets" | "conversations";
+export const PROGRESS_UNITS = ["bytes", "items", "records", "assets", "conversations"] as const;
+export type ProgressUnit = (typeof PROGRESS_UNITS)[number];
 
 export interface Progress {
   unit: ProgressUnit;
@@ -138,14 +136,11 @@ export interface Progress {
   total: number | null;
 }
 
-export type EventKind =
-  | "phase_started"
-  | "phase_completed"
-  | "check_result"
-  | "unit_committed"
-  | "progress"
-  | "refusal"
-  | "terminal";
+export const EVENT_KINDS = [
+  "phase_started", "phase_completed", "check_result", "unit_committed",
+  "progress", "refusal", "terminal",
+] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
 
 export interface JobEvent {
   /** Durable row id: monotonic, gap-free, resumable. */
@@ -157,7 +152,8 @@ export interface JobEvent {
   payload: Record<string, unknown>;
 }
 
-export type TerminalState = "completed" | "interrupted" | "blocked" | "cancelled";
+export const EXECUTION_TERMINAL_STATES = ["completed", "interrupted", "blocked", "cancelled"] as const;
+export type TerminalState = (typeof EXECUTION_TERMINAL_STATES)[number];
 
 export interface ExecuteResult {
   outcome: "completed" | "interrupted" | "blocked";
@@ -172,7 +168,7 @@ export interface CheckResult {
   id: string;
   title: string;
   status: "pass" | "fail" | "skip";
-  /** Present on failure; a code from the registry. */
+  /** Registry code for a failure or a recorded unavailable probe. */
   code?: string;
   /** Redacted by construction: identities and outcomes only, never secrets. */
   evidence: Record<string, unknown>;
@@ -231,11 +227,13 @@ export interface ArtifactSet {
   artifacts: Artifact[];
 }
 
+export const CLOSURE_OUTCOMES = ["completed", "completed_with_accepted_exceptions", "cancelled"] as const;
+export type ClosureOutcome = (typeof CLOSURE_OUTCOMES)[number];
 export interface Closure {
   state: "closed" | "cancelled";
   at: string;
   acceptedExceptions: string[];
-  outcome?: "completed" | "completed_with_accepted_exceptions" | "cancelled";
+  outcome?: ClosureOutcome;
   reason?: string;
 }
 
@@ -295,7 +293,8 @@ export interface RowPage {
   totalRows: number;
 }
 
-export type VerbState = "pending" | "done" | "current" | "blocked" | "checkpoint";
+export const VERB_STATES = ["pending", "done", "current", "blocked", "checkpoint"] as const;
+export type VerbState = (typeof VERB_STATES)[number];
 
 export interface JobStatus {
   jobId: string;

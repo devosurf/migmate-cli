@@ -12,6 +12,7 @@ import {
   type Transition,
 } from "../src/engine/state-chart.ts";
 import type { JobState } from "../src/engine/types.ts";
+import { fileConfig, fileFixture } from "./engine-fixture.ts";
 
 const STATES: readonly JobState[] = [
   "new",
@@ -124,24 +125,7 @@ describe("durable lifecycle model", () => {
 describe("engine lifecycle boundaries", () => {
   it("keeps an approval across reopen, but a new plan revision requires approval again", async (t) => {
     const home = mkdtempSync(join(tmpdir(), "state-model-"));
-    const provider = new FakeFileMigrationPort({
-      sourceDriveId: "source",
-      sourceRootId: "source-root",
-      destinationDriveId: "dest",
-      destinationRootId: "dest-root",
-      sourceItems: [
-        {
-          id: "source-root",
-          parentId: null,
-          name: "root",
-          kind: "folder",
-          identity: "source-root",
-        },
-      ],
-      destinationItems: [
-        { id: "dest-root", parentId: null, name: "root", kind: "folder", identity: "dest-root" },
-      ],
-    });
+    const provider = new FakeFileMigrationPort(fileFixture());
     const engine = openEngine({ home, provider });
     t.after(() => {
       engine.close();
@@ -149,17 +133,7 @@ describe("engine lifecycle boundaries", () => {
     });
     const created = await engine.initJob({
       type: "file_migration",
-      config: {
-        mappings: [
-          {
-            id: "mapping",
-            sourceDriveId: "source",
-            sourceItemId: "source-root",
-            destDriveId: "dest",
-            destFolderId: "dest-root",
-          },
-        ],
-      },
+      config: fileConfig(),
     });
     assert.ok(created.ok);
     const approved = await engine.withWriter(created.value, async (writer) => {
@@ -220,5 +194,10 @@ describe("engine lifecycle boundaries", () => {
     assert.equal(status.value.state, "cancelled");
     assert.equal(status.value.resumable, false);
     assert.equal(status.value.terminalState, "cancelled");
+    const states = Object.fromEntries(status.value.rail.map(({ verb, state }) => [verb, state]));
+    assert.equal(states.cancel, "done");
+    assert.equal(states.close, "pending");
+    assert.equal(states.execute, "pending");
+    assert.equal(status.value.rail.some(({ state }) => state === "current"), false);
   });
 });
