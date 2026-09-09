@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { ProviderFault } from "./credentials.ts";
 import { createTransferSupervisor } from "./transfer-worker.ts";
+import { withSocketPath } from "./socket-path.ts";
 
 // Opt-in, real executable only. These exercise the supervisor seam, not route qualification.
 const binaryPath = process.env.MIGMATE_TEST_RCLONE_BINARY;
@@ -23,8 +24,9 @@ function suppliedBinary() {
 }
 
 function unauthenticatedNoop(socketPath: string): Promise<number> {
+  return withSocketPath(socketPath, (connectPath) => {
   const { promise, resolve, reject } = Promise.withResolvers<number>();
-  const req = request({ socketPath, path: "/rc/noop", method: "POST", agent: false }, (res) => {
+  const req = request({ socketPath: connectPath, path: "/rc/noop", method: "POST", agent: false }, (res) => {
     res.resume();
     res.on("end", () => resolve(res.statusCode ?? 0));
     res.on("error", reject);
@@ -34,6 +36,7 @@ function unauthenticatedNoop(socketPath: string): Promise<number> {
   req.on("error", reject);
   req.end();
   return promise;
+  });
 }
 
 function fault(code: string, reason?: string) {
@@ -97,6 +100,41 @@ describe("real rclone transfer supervisor", { skip: !enabled }, () => {
       });
       await assert.rejects(lstat(dirname(worker.socketPath)), { code: "ENOENT" });
       assert.deepEqual(await readFile(join(source, name)), bytes);
+    } finally {
+      await observer.close();
+      await supervisor.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a default-home-length private socket for auth, streaming, recovery observation and cleanup", async () => {
+    const root = await mkdtemp("/tmp/mm-long-");
+    const job = join(root, "Library", "Application Support", "Migmate", "jobs",
+      "12345678-1234-1234-1234-123456789012", "long-operator-home-segment");
+    await mkdir(job, { recursive: true, mode: 0o700 });
+    const source = join(root, "source");
+    await mkdir(source);
+    const expected = Buffer.from("long-path-transfer-without-truncation");
+    await writeFile(join(source, "content.bin"), expected);
+    const configPath = join(root, "rclone.conf");
+    await writeFile(configPath, `[source]\ntype = alias\nremote = ${source}\n`, { mode: 0o600 });
+    const supervisor = createTransferSupervisor({ configPath, jobDirectory: job, binary: suppliedBinary() });
+    const observer = createTransferSupervisor({ configPath: null, jobDirectory: job, binary: suppliedBinary() });
+    const originalCwd = process.cwd();
+    try {
+      const worker = await supervisor.startTransferWorker({ runDirectory: join(job, "run", "12345678-1234-1234-1234-123456789012") });
+      assert.ok(Buffer.byteLength(worker.socketPath) > 107);
+      assert.equal((await lstat(dirname(worker.socketPath))).mode & 0o777, 0o700);
+      assert.equal(await unauthenticatedNoop(worker.socketPath), 401);
+      assert.deepEqual(await supervisor.call(worker.socketPath, "rc/noop", { content: "long-path" }), { content: "long-path" });
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of supervisor.openRead(worker.socketPath, "source:content.bin")) chunks.push(chunk);
+      assert.deepEqual(Buffer.concat(chunks), expected);
+      assert.deepEqual(await observer.probeTransferWorker(worker), { alive: true, version: null });
+      await supervisor.stopTransferWorker(worker);
+      assert.deepEqual(await observer.probeTransferWorker(worker), { alive: false, version: null });
+      await assert.rejects(lstat(dirname(worker.socketPath)), { code: "ENOENT" });
+      assert.equal(process.cwd(), originalCwd);
     } finally {
       await observer.close();
       await supervisor.close();

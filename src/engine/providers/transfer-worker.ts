@@ -3,11 +3,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { request, type IncomingMessage } from "node:http";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ProviderFault } from "./credentials.ts";
 import type { ProviderPort, TransferWorkerHandle, TransferWorkerProbe } from "./port.ts";
+import { withSocketPath } from "./socket-path.ts";
 
 const TESTED_VERSIONS: Readonly<Record<string, true>> = { "v1.75.0": true };
 const VERSION_FLOOR = [1, 69, 0] as const;
@@ -143,8 +144,8 @@ async function terminate(child: OwnedChild): Promise<void> {
 }
 
 async function capture(binary: string, args: string[], env: NodeJS.ProcessEnv,
-  timeout = REQUEST_TIMEOUT): Promise<{ value: unknown; success: boolean }> {
-  const child = spawnOwned(binary, args, env, undefined, true);
+  timeout = REQUEST_TIMEOUT, cwd?: string): Promise<{ value: unknown; success: boolean }> {
+  const child = spawnOwned(binary, args, env, cwd, true);
   const chunks: Buffer[] = [];
   let size = 0;
   let overflow = false;
@@ -239,9 +240,10 @@ async function privateDirectory(path: string): Promise<void> {
 
 function response(socketPath: string, path: string, method: string, body: string | undefined,
   authorization: string | undefined, timeout: number): Promise<IncomingMessage> {
+  return withSocketPath(socketPath, (connectPath) => {
   const deferred = Promise.withResolvers<IncomingMessage>();
   try {
-    const req = request({ socketPath, path, method, agent: false,
+    const req = request({ socketPath: connectPath, path, method, agent: false,
       headers: {
         ...(body === undefined ? {} : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }),
         ...(authorization === undefined ? {} : { Authorization: authorization }),
@@ -260,6 +262,7 @@ function response(socketPath: string, path: string, method: string, body: string
     deferred.reject(fail("provider_failed", "worker_request_invalid"));
   }
   return deferred.promise;
+  });
 }
 
 async function readJson(res: IncomingMessage, timeout: number): Promise<unknown> {
@@ -410,10 +413,10 @@ export function createTransferSupervisor(options: {
       // Go's native client supplies AF_UNIX on Windows. Request JSON and Basic
       // credentials are environment-only, not CLI arguments or files.
       const result = await capture(executable.path,
-        ["rc", "--unix-socket", socketPath, method, "--config", "NUL"], {
+        ["rc", "--unix-socket", basename(socketPath), method, "--config", "NUL"], {
           ...systemEnvironment(), RCLONE_JSON: body,
           ...(worker === undefined ? {} : { RCLONE_USER: worker.user, RCLONE_PASS: worker.password }),
-        }, timeout);
+        }, timeout, dirname(socketPath));
       const status = result.success ? 200 : record(result.value) && typeof result.value.status === "number"
         ? result.value.status : 503;
       // The native client synthesizes 503 only when dialing fails; a real HTTP
@@ -481,7 +484,7 @@ export function createTransferSupervisor(options: {
     catch (error) { worker.stopping = null; throw error; }
   }
 
-  async function start(input: { runDirectory: string }): Promise<TransferWorkerHandle> {
+  async function start(input: Parameters<ProviderPort["startTransferWorker"]>[0]): Promise<TransferWorkerHandle> {
     if (closed) throw fail("provider_failed", "supervisor_closed");
     const executable = await proveBinary();
     let directory: string | null = null;
@@ -509,13 +512,14 @@ export function createTransferSupervisor(options: {
       directoryIdentity = await lstat(directory);
       await privateDirectory(directory);
       const socketPath = join(directory, "s");
-      if (Buffer.byteLength(socketPath) > (process.platform === "darwin" ? 103 : 107)) throw fail("preflight_failed", "worker_socket_path_too_long");
       const user = randomBytes(18).toString("hex");
       const password = randomBytes(32).toString("base64url");
       const configPath = options.configPath === null ? (process.platform === "win32" ? "NUL" : "/dev/null") : options.configPath;
       if (!isAbsolute(configPath) && configPath !== "NUL") throw fail("preflight_failed", "worker_config_path_invalid");
       await rehash(executable);
-      const child = spawnOwned(executable.path, ["rcd", "--rc-addr", `unix://${socketPath}`,
+      const group = `migmate-${randomBytes(16).toString("hex")}`;
+      input.onPrepare?.({ socketPath, group, executablePath: executable.path });
+      const child = spawnOwned(executable.path, ["rcd", "--rc-addr", "unix://s",
         "--rc-serve", "--config", configPath, "--cache-dir", directory, "--temp-dir", directory,
         "--drive-skip-gdocs=true", "--drive-skip-shortcuts=true", "--drive-import-formats=",
         "--drive-metadata-owner=off", "--drive-metadata-permissions=off", "--drive-metadata-labels=off",
@@ -525,9 +529,11 @@ export function createTransferSupervisor(options: {
       { ...systemEnvironment(), TMPDIR: directory, TEMP: directory, TMP: directory,
         RCLONE_RC_USER: user, RCLONE_RC_PASS: password }, directory);
       worker = { child, directory, directoryIdentity, socketPath,
-        socketIdentity: null, user, password, group: `migmate-${randomBytes(16).toString("hex")}`,
+        socketIdentity: null, user, password, group,
         proof: executable, stopping: null };
       workers.set(socketPath, worker);
+      if (child.process.pid === undefined) throw fail("preflight_failed", "worker_spawn_failed");
+      input.onSpawn?.({ socketPath, pid: child.process.pid, version: executable.version, group, executablePath: executable.path });
       const deadline = Date.now() + READY_TIMEOUT;
       let ready = false;
       while (Date.now() < deadline && child.alive) {

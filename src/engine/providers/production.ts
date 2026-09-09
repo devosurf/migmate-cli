@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import type { CheckResult, JobType } from "../types.ts";
 import type { ProviderPort, TransferWorkerHandle } from "./port.ts";
 import { createCredentialSession, ProviderFault, type CredentialSession } from "./credentials.ts";
@@ -130,20 +129,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
           const proof = await binaryProof();
           yield { id: "provider.transfer_binary", title: "Exact managed transfer binary", status: "pass", evidence: { ...proof, proofCommand: "rc --loopback core/version" } };
         } catch (error) { yield failedCheck("provider.transfer_binary", "Exact managed transfer binary", error, {}); }
-        if (loaded) {
-          let handle: TransferWorkerHandle | undefined;
-          try {
-            handle = await loaded.worker.startTransferWorker({ runDirectory: join(input.jobDirectory, "run") });
-            yield { id: "provider.transfer_worker", title: "Private authenticated Unix transfer worker", status: "pass", evidence: { runDirectoryPermissions: "0700", socketOnly: true, missingAuthenticationRefused: true, authenticatedLiveness: true, version: handle.version } };
-          } catch (error) { yield failedCheck("provider.transfer_worker", "Private authenticated Unix transfer worker", error, {}); }
-          finally {
-            if (handle) {
-              try { await loaded.worker.stopTransferWorker(handle); await loaded.worker.terminateTransferWorker(handle); }
-              catch (error) { yield failedCheck("provider.transfer_worker_shutdown", "Bounded managed worker shutdown", error, {}); }
-            }
-          }
-          yield* loaded.files!.preflight();
-        }
+        if (loaded) yield* loaded.files!.preflight();
       }
       try {
         const route = await qualificationEvidence();

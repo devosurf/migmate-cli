@@ -134,7 +134,11 @@ export interface ProviderPort {
   }): Promise<void>;
   streamDestinationContent(objectId: string): AsyncIterable<Uint8Array>;
 
-  startTransferWorker(input: { runDirectory: string }): Promise<TransferWorkerHandle>;
+  startTransferWorker(input: {
+    runDirectory: string;
+    onPrepare?: (intent: { socketPath: string; group: string; executablePath: string }) => void;
+    onSpawn?: (handle: TransferWorkerHandle & { executablePath: string }) => void;
+  }): Promise<TransferWorkerHandle>;
   probeTransferWorker(input: { socketPath: string }): Promise<TransferWorkerProbe>;
   stopTransferWorker(input: { socketPath: string }): Promise<void>;
   terminateTransferWorker(input: { socketPath: string }): Promise<void>;
