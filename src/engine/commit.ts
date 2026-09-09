@@ -10,6 +10,10 @@
  */
 
 import type { CodeKind, ProgressUnit, RowPhase } from "./types.ts";
+import type { FileState, FileSourceEvidence, FileScope } from "./drivers/file-state.ts";
+import type {
+  ArchivePlan, ArchiveRecord, ArchiveCollectionEvidence, ArchivePackageFile,
+} from "./providers/archive.ts";
 
 export interface CommitRowBase {
   id: string;
@@ -34,6 +38,9 @@ export interface FileCommitRow extends CommitRowBase {
   destinationFileId?: string | null;
   destinationFingerprint?: string | null;
   provenanceState?: "none" | "marked" | "verified" | "drifted";
+  fileState?: FileState;
+  sourceEvidence?: FileSourceEvidence;
+  fileScope?: FileScope;
 }
 
 export interface ConversationCommitRow extends CommitRowBase {
@@ -68,6 +75,7 @@ export interface DurableAsset {
   sha256: string;
   size: number;
   retrievedAt: string;
+  archivePath?: string;
 }
 
 export interface CommitUnit {
@@ -85,6 +93,13 @@ export interface CommitUnit {
   assets?: DurableAsset[];
   watermark?: { unitKey: string; value: string };
   progress?: { unit: ProgressUnit; done: number; total: number | null };
+  /** Verification idempotence is scoped to a fresh durable run, not just a plan. */
+  verificationRun?: number;
+  archivePlan?: ArchivePlan;
+  archiveRecords?: ArchiveRecord[];
+  archiveEvidence?: ArchiveCollectionEvidence;
+  archiveFiles?: ArchivePackageFile[];
+  archiveManifestDigest?: string;
 }
 
 export interface CommitReceipt {

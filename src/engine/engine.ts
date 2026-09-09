@@ -71,6 +71,8 @@ export interface Engine {
 
 /** Exists only inside `withWriter`, where the lease is provably held. */
 export interface JobWriter {
+  /** Validate and persist typed references, then immediately run the proof probes. */
+  onboard(config: unknown): Promise<Outcome<PreflightReport>>;
   doctor(): Promise<Outcome<PreflightReport>>;
   plan(opts?: PlanOptions): Promise<Outcome<PlanRevision>>;
   approve(a: {

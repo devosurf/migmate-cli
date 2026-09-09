@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-function canonicalize(value: unknown, seen: WeakSet<object>): string {
+function canonicalize(value: unknown, seen: WeakSet<object>): string | undefined {
   if (value === null) {
     return "null";
   }
@@ -21,7 +21,7 @@ function canonicalize(value: unknown, seen: WeakSet<object>): string {
     case "undefined":
     case "function":
     case "symbol":
-      return undefined as never;
+      return undefined;
     case "object": {
       if (seen.has(value)) {
         throw new TypeError("Cannot digest circular data");
@@ -50,12 +50,16 @@ function canonicalize(value: unknown, seen: WeakSet<object>): string {
       return `{${entries.join(",")}}`;
     }
     default:
-      return undefined as never;
+      return undefined;
   }
 }
 
 export function canonicalJson(value: unknown): string {
-  return canonicalize(value, new WeakSet<object>());
+  const serialized = canonicalize(value, new WeakSet<object>());
+  if (serialized === undefined) {
+    throw new TypeError("Cannot digest a value without a JSON representation");
+  }
+  return serialized;
 }
 
 export function digestJson(value: unknown): string {

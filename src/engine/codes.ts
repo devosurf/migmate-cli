@@ -103,9 +103,8 @@ export const CODES: readonly CodeEntry[] = [
   entry("manifest_digest_mismatch", "finding", "verify", TEAMS),
 ];
 
-export const CODE_BY_NAME: Record<string, CodeEntry> = Object.fromEntries(
-  CODES.map((c) => [c.code, c]),
-);
+export const CODE_BY_NAME: Record<string, CodeEntry> = Object.create(null);
+for (const code of CODES) CODE_BY_NAME[code.code] = code;
 
 /**
  * A code an operator may accept as an exception, and therefore a code that blocks
