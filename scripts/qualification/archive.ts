@@ -13,7 +13,7 @@ import type {
 import type { CheckResult } from "../../src/engine/types.ts";
 import { canonicalJson } from "../../src/engine/store/digest.ts";
 import type { ProbeCapture } from "../../src/qualification/bundle.ts";
-import { ArchiveJournal, archiveFileProof, type ArchiveJournalUnit } from "./archive-journal.ts";
+import { ArchiveJournal, archiveFileProof, type ArchiveFileProof, type ArchiveJournalUnit } from "./archive-journal.ts";
 import { QualificationBlocked, type QualificationInput, type QualificationResult } from "./common.ts";
 
 type ScopeKind = "channel" | "chat";
@@ -267,7 +267,7 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
     regeneratedProofs.push({ path: file.path, sha256: file.sha256, size: bytes.length });
   }
   const assets = new Map(packageInput.records.flatMap((record) => record.assets.map((asset) => [asset.path, asset] as const)));
-  const assetProofs = [];
+  const assetProofs: ArchiveFileProof[] = [];
   for (const asset of assets.values()) {
     input.signal.throwIfAborted();
     const proof = await archiveFileProof(join(journal.archiveRoot, asset.path));

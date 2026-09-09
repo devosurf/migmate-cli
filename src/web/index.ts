@@ -48,7 +48,6 @@ export async function launchWeb(options: { engine: Engine; job: JobRef }): Promi
     await app.whenReady(); // Runs the nonblocking native pump, never runSync().
   } catch {
     app?.exit();
-    app?.stop();
     return unavailable(process.platform === "linux" ? "WebKitGTK 4.1 and libxdo, plus the matching @webviewjs/webview 0.4.5 binding" : process.platform === "win32" ? "WebView2 and the matching @webviewjs/webview 0.4.5 binding" : "WKWebView and the matching @webviewjs/webview 0.4.5 binding");
   }
 
@@ -111,7 +110,6 @@ export async function launchWeb(options: { engine: Engine; job: JobRef }): Promi
     try { await session.close(); }
     finally {
       app.exit();
-      app.stop();
       clearInterval(keepAlive);
     }
   }

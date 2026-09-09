@@ -206,7 +206,7 @@ function chatId(id: string): string { return `chat:${id}`; }
 function messageConversation(record: Json, scope: ArchiveScopeBinding): string | undefined {
   if (scope.kind === "user-chats") return text(record.chatId) ? chatId(String(record.chatId)) : undefined;
   const identity = object(record.channelIdentity);
-  if (identity?.teamId !== scope.teamId || !text(identity.channelId)) return undefined;
+  if (!identity || identity.teamId !== scope.teamId || !text(identity.channelId)) return undefined;
   return channelId(String(identity.teamId), String(identity.channelId));
 }
 function messagePath(conversation: ArchiveConversation, record: Json): string {

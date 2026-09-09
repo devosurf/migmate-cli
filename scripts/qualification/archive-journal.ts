@@ -10,6 +10,11 @@ import type {
 } from "../../src/engine/providers/archive.ts";
 import { QualificationBlocked } from "./common.ts";
 
+export interface ArchiveFileProof {
+  sha256: string;
+  size: number;
+}
+
 export type ArchiveJournalUnit = Omit<ArchiveCommit, "assets" | "archiveFiles"> & {
   archiveFileProofs?: { path: string; sha256: string; size: number }[];
 };
@@ -55,7 +60,7 @@ async function archiveTarget(root: string, path: string): Promise<string> {
   return join(root, path);
 }
 
-export async function archiveFileProof(path: string): Promise<{ sha256: string; size: number }> {
+export async function archiveFileProof(path: string): Promise<ArchiveFileProof> {
   const before = await lstat(path);
   requireFact(before.isFile() && !before.isSymbolicLink(), "archive_regular_file_required");
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));

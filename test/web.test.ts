@@ -34,6 +34,7 @@ function status(): JobStatus {
     rail: VERBS.map((verb) => ({ verb, state: verb === "approve" ? "current" : verb === "init" || verb === "plan" ? "done" : "pending" })),
     ownership: { held: true, heldByThisProcess: false, hostId: "this-host", pid: 900, heartbeatAt: "2026-09-01T00:00:00Z", kind: "cli" },
     planRevision: 1, planDigest: "reviewed-plan-digest", verificationDigest: null,
+    currentPlan: null,
     progress: { unit: "records", done: 27, total: null }, lastCheckpoint: "durable-page-3", outstandingFindings: [],
     worker: { active: true, group: "recorded-group" }, resumable: true, terminalState: "interrupted",
   };
