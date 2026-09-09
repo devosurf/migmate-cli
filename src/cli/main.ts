@@ -1,1108 +1,337 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { createInterface } from "node:readline/promises";
+import { constants, realpathSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { extname } from "node:path";
+import { hostname, userInfo } from "node:os";
 import { pathToFileURL } from "node:url";
-import { openEngine } from "../engine/index.ts";
-import type { Engine, JobReader, JobWriter } from "../engine/engine.ts";
-import type {
-  AcceptedException,
-  ApprovalRecord,
-  ExecuteResult,
-  JobEvent,
-  JobRef,
-  JobStatus,
-  Outcome,
-  Refusal,
-  RowPage,
-} from "../engine/types.ts";
-import {
-  type CommandName,
-  SCHEMA_VERSION,
-  buildReviewEnvelope,
-  terminalEnvelopeForExecute,
-} from "./envelope.ts";
-import { exitCodeForRefusalCode, exitCodeForSignal } from "./exit-codes.ts";
+import { parse as parseToml } from "smol-toml";
+import { openEngine, type Engine, type ExecuteResult, type JobReader, type JobWriter, type JobEvent, type JobStatus, type Outcome, type Refusal, type RowQuery } from "../engine/index.ts";
+import { launchWeb } from "../web/index.ts";
+import { parseInvocation, outputMode, commandLabel, UsageFailure, type Invocation, type OutputMode } from "./arguments.ts";
+import { SCHEMA_VERSION, buildReviewEnvelope, knownContract, outcomeExit, terminalEnvelopeForExecute, type AdapterOutcome, type JobEnvelope } from "./envelope.ts";
+import { errorCode, processIo, type Io } from "./io.ts";
 import { redact } from "./redact.ts";
 
-export interface IoStream {
-  isTTY: boolean;
-  write(chunk: string): void | Promise<void>;
-}
+export type { Io, IoInput, IoStream } from "./io.ts";
 
-export interface IoInput {
-  isTTY: boolean;
-  readLine(): Promise<string | null>;
-}
+const HELP = `Migmate — one ten-verb lifecycle, two job types
 
-export interface Io {
-  stdout: IoStream;
-  stderr: IoStream;
-  stdin: IoInput;
-}
+migmate init --type file_migration|teams_archive [--config job.toml|job.json]
+migmate creds init --job ID --config job.toml|job.json
+migmate doctor|plan|execute|status|verify|report|close --job ID
+migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
+migmate approve --job ID                    # human terminal: review, then literal yes
+migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code CODE [--note NOTE]
+migmate cancel --job ID [--reason TEXT]
+migmate reclaim --job ID --confirm [--stop-worker]
+migmate web --job ID
 
-type OutputMode = "text" | "json" | "jsonl";
+All commands: --home PATH, --output text|json|jsonl, --schema-version 1, --help
+Home defaults: macOS ~/Library/Application Support/Migmate; Windows
+%LOCALAPPDATA%/Migmate; Linux \${XDG_STATE_HOME:-~/.local/state}/migmate.
+MIGMATE_HOME overrides the default. --home overrides MIGMATE_HOME.
+Config input is TOML or JSON containing typed file credential references, never secrets.
+Only the engine writes job.toml and probes credentials. Init without config creates
+an unconfigured job: onboard with creds init before doctor/plan.
 
-type JobType = "file_migration" | "teams_archive";
+Review: plan|verify --review reads existing evidence without taking a writer lease.
+--phase plan|execute|verify, --code CODE (repeatable), --search TEXT,
+--cursor CURSOR, --limit 1..1000, --sort natural|path|size, --revision N.
+status accepts the same row-query flags. Facets cover the whole matching set.
+JSONL streams durable events live during a verb. --from CURSOR resumes exclusively;
+without --from a writer streams only its new attempt. status --output jsonl replays
+the log and exits; it is not a watcher. Terminals are durable, never synthesized.
+Only text-mode approval with stdin/stdout/stderr all TTY may prompt, with no default.
+Machine approval always requires both explicit identity and read-back plan digest.
 
-interface Invocation {
-  command: CommandName;
-  output: OutputMode;
-  jobId: string | null;
-  initType: JobType | null;
-  label: string | null;
-  approver: string | null;
-  planDigest: string | null;
-  verificationDigest: string | null;
-  codes: string[];
-  confirm: boolean;
-  stopWorker: boolean;
-  from: number | null;
-  reason: string | null;
-}
+Exit codes: 0 success; 1 internal defect or unknown code/enum; 2 usage/configuration
+(including unavailable web runtime); 3 lease/recovery refusal; 4 preflight/approval/
+route/verification gate; 5 retry budget exhausted, blocked at a checkpoint;
+6 already closed; 7 already cancelled; 8 unsupported state version;
+130 SIGINT; 141 broken pipe. Successful cancel exits 0.
+`;
 
-interface ParseFailure {
-  message: string;
-}
-
-const DEFAULT_JOB_TYPE: JobType = "file_migration";
-const COMMANDS: readonly CommandName[] = [
-  "init",
-  "doctor",
-  "plan",
-  "approve",
-  "execute",
-  "status",
-  "verify",
-  "accept",
-  "report",
-  "close",
-  "cancel",
-  "reclaim",
-  "web",
-];
-
-async function writeChunk(stream: IoStream, chunk: string): Promise<void> {
-  await stream.write(chunk);
-}
-
-async function emitJson(stream: IoStream, value: unknown): Promise<void> {
-  await writeChunk(stream, `${JSON.stringify(redact(value))}\n`);
-}
-
-async function emitText(stream: IoStream, value: unknown): Promise<void> {
-  await writeChunk(stream, `${JSON.stringify(redact(value), null, 2)}\n`);
-}
-
-function usage(message: string): ParseFailure {
-  return { message };
-}
-
-function parseInvocation(argv: string[]): Invocation | ParseFailure {
-  let command: CommandName | null = null;
-  let output: OutputMode = "text";
-  let jobId: string | null = null;
-  let initType: JobType | null = null;
-  let label: string | null = null;
-  let approver: string | null = null;
-  let planDigest: string | null = null;
-  let verificationDigest: string | null = null;
-  let confirm = false;
-  let stopWorker = false;
-  let from: number | null = null;
-  let reason: string | null = null;
-  const codes: string[] = [];
-
-  const takeValue = (flag: string, index: number): string | ParseFailure => {
-    const nextIndex = index + 1;
-    const value = nextIndex < argv.length ? argv[nextIndex] : undefined;
-    if (value === undefined || value.startsWith("--")) {
-      return usage(`${flag} requires a value`);
-    }
-
-    return value;
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
-    if (token === undefined) {
-      return usage("missing command");
-    }
-
-    if (!token.startsWith("--")) {
-      if (command !== null) {
-        return usage(`unexpected argument: ${token}`);
-      }
-
-      if (!COMMANDS.includes(token as CommandName)) {
-        return usage(`unknown command: ${token}`);
-      }
-
-      command = token as CommandName;
-      continue;
-    }
-
-    switch (token) {
-      case "--output": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        if (value !== "text" && value !== "json" && value !== "jsonl") {
-          return usage(`unsupported output mode: ${value}`);
-        }
-        output = value;
-        index += 1;
-        break;
-      }
-      case "--job": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        jobId = value;
-        index += 1;
-        break;
-      }
-      case "--home": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        index += 1;
-        break;
-      }
-      case "--type": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        if (value !== "file_migration" && value !== "teams_archive") {
-          return usage(`unsupported job type: ${value}`);
-        }
-        initType = value;
-        index += 1;
-        break;
-      }
-      case "--label": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        label = value;
-        index += 1;
-        break;
-      }
-      case "--approver": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        approver = value;
-        index += 1;
-        break;
-      }
-      case "--plan-digest": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        planDigest = value;
-        index += 1;
-        break;
-      }
-      case "--verification-digest": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        verificationDigest = value;
-        index += 1;
-        break;
-      }
-      case "--code": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        codes.push(value);
-        index += 1;
-        break;
-      }
-      case "--confirm":
-        confirm = true;
-        break;
-      case "--stop-worker":
-        stopWorker = true;
-        break;
-      case "--from": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        const parsed = Number(value);
-        if (!Number.isInteger(parsed) || parsed < 0) {
-          return usage(`invalid cursor: ${value}`);
-        }
-        from = parsed;
-        index += 1;
-        break;
-      }
-      case "--reason": {
-        const value = takeValue(token, index);
-        if (typeof value !== "string") return value;
-        reason = value;
-        index += 1;
-        break;
-      }
-      default:
-        return usage(`unknown option: ${token}`);
-    }
+class Output {
+  readonly commandId = randomUUID();
+  job: JobEnvelope | null = null;
+  attempted = false;
+  failed: unknown;
+  unknown = false;
+  lastRefusal: string | undefined;
+  readonly io: Io;
+  readonly mode: OutputMode;
+  command: string;
+  readonly abort: AbortController;
+  constructor(io: Io, mode: OutputMode, command: string, abort: AbortController) {
+    this.io = io;
+    this.mode = mode;
+    this.command = command;
+    this.abort = abort;
   }
 
-  if (command === null) {
-    return usage("missing command");
+  async write(value: unknown) {
+    if (this.failed) throw this.failed;
+    const line = `${JSON.stringify(redact(value), null, this.mode === "text" ? 2 : undefined)}\n`;
+    this.attempted = true;
+    try { await this.io.stdout.write(line); }
+    catch (error) { this.failed = error; this.abort.abort(error); throw error; }
   }
 
-  return {
-    command,
-    output,
-    jobId,
-    initType,
-    label,
-    approver,
-    planDigest,
-    verificationDigest,
-    codes,
-    confirm,
-    stopWorker,
-    from,
-    reason,
-  };
-}
-
-function jobEnvelope(id: string, type: JobType): { id: string; type: JobType } {
-  return { id, type };
-}
-
-function refusalEnvelope(
-  command: CommandName,
-  commandId: string,
-  job: { id: string; type: JobType },
-  refusal: Refusal,
-) {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    command,
-    commandId,
-    job,
-    ok: false as const,
-    refusal,
-  };
-}
-
-function resultEnvelope<T>(
-  command: CommandName,
-  commandId: string,
-  job: { id: string; type: JobType },
-  value: T,
-) {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    command,
-    commandId,
-    job,
-    ok: true as const,
-    value,
-  };
-}
-
-function normalizeTerminalPayload(payload: Record<string, unknown>): Record<string, unknown> {
-  const state =
-    typeof payload.state === "string"
-      ? payload.state
-      : typeof payload.outcome === "string"
-        ? payload.outcome
-        : null;
-
-  const resumable =
-    typeof payload.resumable === "boolean"
-      ? payload.resumable
-      : state === "blocked" || state === "interrupted";
-
-  return {
-    ...payload,
-    ...(state === null ? {} : { state }),
-    resumable,
-  };
-}
-
-function eventEnvelope(
-  command: CommandName,
-  commandId: string,
-  job: { id: string; type: JobType },
-  event: JobEvent,
-) {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    command,
-    commandId,
-    job,
-    cursor: event.cursor,
-    at: event.at,
-    verb: event.verb,
-    phase: event.phase,
-    kind: event.kind,
-    payload: event.kind === "terminal" ? normalizeTerminalPayload(event.payload) : event.payload,
-  };
-}
-
-function terminalEventFromExecute(result: ExecuteResult) {
-  return {
-    ...result,
-    terminal: terminalEnvelopeForExecute(result),
-  };
-}
-
-async function emitOutcome<T>(
-  io: Io,
-  command: CommandName,
-  commandId: string,
-  job: { id: string; type: JobType },
-  outcome: Outcome<T>,
-  output: OutputMode,
-): Promise<number> {
-  if (output === "jsonl") {
-    return outcome.ok ? 0 : exitCodeForRefusalCode(outcome.refusal.code);
+  async outcome(outcome: AdapterOutcome) {
+    const projected = outcome.ok ? outcome : {
+      ok: false,
+      refusal: { kind: "refusal", phase: this.command === "creds init" ? "doctor" : this.command, detail: {}, ...outcome.refusal },
+    };
+    const envelope = { schemaVersion: SCHEMA_VERSION, command: this.command, commandId: this.commandId, job: this.job, ...projected };
+    if (this.mode === "text" && !outcome.ok) {
+      await this.io.stderr.write(`${JSON.stringify(redact(envelope), null, 2)}\n`);
+    } else await this.write(envelope);
   }
 
-  const envelope = outcome.ok
-    ? resultEnvelope(command, commandId, job, outcome.value)
-    : refusalEnvelope(command, commandId, job, outcome.refusal);
-
-  if (output === "json") {
-    await emitJson(io.stdout, envelope);
-  } else {
-    await emitText(io.stdout, envelope);
+  async event(event: JobEvent) {
+    await this.write({ schemaVersion: SCHEMA_VERSION, command: this.command, commandId: this.commandId, job: this.job, ...event });
+    if (event.kind === "refusal" && typeof event.payload.code === "string") this.lastRefusal = event.payload.code;
+    if (!knownContract(event)) { this.unknown = true; this.abort.abort(); }
   }
-
-  return outcome.ok ? 0 : exitCodeForRefusalCode(outcome.refusal.code);
 }
 
-async function streamEvents(
-  io: Io,
-  command: CommandName,
-  commandId: string,
-  job: { id: string; type: JobType },
+function refusal(code: string, message: string): AdapterOutcome<never> {
+  return { ok: false, refusal: { code, message } };
+}
+
+function caught(error: unknown): AdapterOutcome<never> {
+  // Reader event iteration is the one expected refusal represented by a throw.
+  if (error && typeof error === "object" && "refusal" in error) {
+    const value = error.refusal;
+    if (value && typeof value === "object" && "code" in value && typeof value.code === "string" && "message" in value && typeof value.message === "string") {
+      return { ok: false, refusal: value as Omit<Refusal, "code"> & { code: string } };
+    }
+  }
+  if (error instanceof UsageFailure) return refusal("usage", error.message);
+  if (["ENOENT", "EACCES", "EPERM", "ENOTDIR", "EISDIR"].includes(errorCode(error) ?? "")) return refusal("configuration_invalid", "The engine home or job input is not accessible.");
+  // Never echo parser input, provider exception messages, stacks or paths that
+  // could contain credential bytes or transient URLs.
+  return refusal("internal_defect", "The command could not complete because of an internal defect.");
+}
+
+async function readConfig(path: string): Promise<AdapterOutcome<unknown>> {
+  let file;
+  try {
+    if (![".json", ".toml"].includes(extname(path).toLowerCase())) return refusal("configuration_invalid", "Config input must be a .json or .toml file.");
+    file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size > 4 * 1024 * 1024) return refusal("configuration_invalid", "Config input must be a regular file no larger than 4 MiB.");
+    const buffer = Buffer.alloc(stat.size + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
+    if (bytesRead > stat.size) return refusal("configuration_invalid", "Config input changed while being read.");
+    const source = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
+    const value: unknown = extname(path).toLowerCase() === ".json" ? JSON.parse(source) : parseToml(source);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return refusal("configuration_invalid", "Config input must be an object of typed references and job options.");
+    return { ok: true, value };
+  } catch { return refusal("configuration_invalid", "Config input could not be read or parsed as UTF-8 TOML or JSON."); }
+  finally { await file?.close(); }
+}
+
+async function withEvents(
+  invocation: Invocation,
+  output: Output,
   reader: JobReader,
-  from: number | null,
-): Promise<void> {
-  const query = from === null ? { follow: false } : { from, follow: false };
-  for await (const event of reader.events(query)) {
-    await emitJson(io.stdout, eventEnvelope(command, commandId, job, event));
+  operation: () => Promise<AdapterOutcome>,
+): Promise<AdapterOutcome> {
+  if (invocation.output !== "jsonl") return operation();
+  let cursor = invocation.from ?? 0;
+  if (invocation.from === undefined) {
+    // Capture the existing high-water mark before the writer begins. Replaying
+    // previous attempts by default would produce duplicate terminal records.
+    for await (const event of reader.events({ follow: false })) cursor = event.cursor;
   }
+  const tailAbort = new AbortController();
+  let tailFailure: unknown;
+  const emit = async (follow: boolean) => {
+    for await (const event of reader.events({ from: cursor, follow, ...(follow ? { signal: tailAbort.signal } : {}) })) {
+      await output.event(event);
+      cursor = event.cursor;
+      if (output.unknown) break;
+    }
+  };
+  // Attach the rejection handler immediately; a broken output aborts execution,
+  // but the writer must settle and release its lease before the adapter returns.
+  const tail = emit(true).catch(error => {
+    if (tailAbort.signal.aborted && error instanceof Error && error.name === "AbortError") return;
+    tailFailure = error;
+    output.abort.abort(error);
+  });
+  let result: AdapterOutcome;
+  try { result = await operation(); }
+  catch (error) { result = caught(error); }
+  finally { tailAbort.abort(); await tail; }
+  if (tailFailure) throw tailFailure;
+  if (!output.unknown) await emit(false); // drain commits made between the final poll and writer release
+  return result;
 }
 
-async function promptForYes(io: Io): Promise<boolean> {
-  if (!io.stdin.isTTY || !io.stdout.isTTY || !io.stderr.isTTY) {
-    return false;
+async function review(reader: JobReader, invocation: Invocation, status: JobStatus, value?: unknown): Promise<AdapterOutcome> {
+  const query: RowQuery = { ...invocation.query };
+  if (query.revision === undefined && query.phase === "plan" && status.planRevision !== null) query.revision = status.planRevision;
+  const page = await reader.rows(query);
+  if (!page.ok) return page;
+  return { ok: true, value: {
+    ...(value && typeof value === "object" ? value : {}),
+    planDigest: status.planDigest,
+    verificationDigest: status.verificationDigest,
+    review: buildReviewEnvelope(query, page.value),
+  } };
+}
+
+async function approve(invocation: Invocation, output: Output, engine: Engine, reader: JobReader, status: JobStatus): Promise<AdapterOutcome> {
+  const interactive = invocation.output === "text" && output.io.stdin.isTTY && output.io.stdout.isTTY && output.io.stderr.isTTY;
+  let approver = invocation.approver;
+  let planDigest = invocation.planDigest;
+  if (interactive) {
+    planDigest ??= status.planDigest ?? undefined;
+    if (!planDigest) return refusal("approval_required", "Review a plan before approving it.");
+    const plan = status.currentPlan;
+    if (!plan || plan.planDigest !== planDigest) return refusal("approval_required", "Read back the current plan before approving it.");
+    const preview = await review(reader, invocation, status, plan);
+    if (!preview.ok) return preview;
+    await output.io.stderr.write(`${JSON.stringify(redact(preview.value), null, 2)}\nApprove plan ${planDigest}. Type yes to approve: `);
+    if (await output.io.stdin.readLine(output.abort.signal) !== "yes" || output.abort.signal.aborted) return refusal("approval_required", "Approval requires literal yes.");
+    approver = `${userInfo().username}@${hostname()}`;
   }
-
-  await writeChunk(io.stdout, "Type yes to approve: ");
-  const answer = await io.stdin.readLine();
-  return answer === "yes";
+  if (!approver?.trim() || !planDigest?.trim()) return refusal("approval_required", "Unattended approval requires an explicit approver and the plan digest read from plan.");
+  const approval = { approver, planDigest, mode: interactive ? "interactive" as const : "unattended" as const };
+  const result = await engine.withWriterResult({ id: invocation.jobId! }, writer => writer.approve(approval));
+  if (!result.ok) return result;
+  return review(reader, invocation, status, { ...result.value, plan: status.currentPlan });
 }
 
-function writeUsage(io: Io, message: string): Promise<void> {
-  return writeChunk(io.stderr, `${message}\n`);
-}
-function errorCode(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return undefined;
+async function executeCommand(invocation: Invocation, output: Output, engine: Engine): Promise<AdapterOutcome> {
+  let config: unknown;
+  if (invocation.config !== undefined) {
+    const input = await readConfig(invocation.config);
+    if (!input.ok) return input;
+    config = input.value;
   }
-
-  const code = Reflect.get(error, "code");
-  return typeof code === "string" ? code : undefined;
-}
-
-function jobTypeFromStatus(status: Outcome<JobStatus> | null): JobType {
-  if (status?.ok) {
-    return status.value.jobType;
+  if (invocation.command === "init") {
+    const result = await engine.initJob({ type: invocation.type!, ...(invocation.label === undefined ? {} : { label: invocation.label }), ...(config === undefined ? {} : { config }) });
+    if (result.ok) {
+      output.job = { id: result.value.id, type: invocation.type! };
+      if (invocation.output === "jsonl") for await (const event of engine.reader(result.value).events({ from: invocation.from ?? 0, follow: false })) await output.event(event);
+    }
+    return result;
   }
-
-  return DEFAULT_JOB_TYPE;
-}
-
-async function statusRefutation(
-  io: Io,
-  command: CommandName,
-  commandId: string,
-  job: { id: string; type: JobType },
-  status: Outcome<JobStatus>,
-  output: OutputMode,
-): Promise<number> {
-  return emitOutcome(io, command, commandId, job, status, output);
-}
-
-async function renderJobCommand<T>(
-  io: Io,
-  command: CommandName,
-  commandId: string,
-  job: { id: string; type: JobType },
-  outcome: Outcome<T>,
-  output: OutputMode,
-  reader: JobReader,
-  from: number | null,
-): Promise<number> {
-  const code = await emitOutcome(io, command, commandId, job, outcome, output);
-  if (output === "jsonl") {
-    await streamEvents(io, command, commandId, job, reader, from);
+  const job = { id: invocation.jobId! };
+  output.job = { ...job, type: null };
+  const reader = engine.reader(job);
+  const status = await reader.status();
+  if (!status.ok) return status;
+  output.job.type = status.value.jobType;
+  if (!knownContract(status.value)) return { ok: true, value: status.value };
+  if (invocation.command === "web") {
+    return launchWeb({ engine, job });
   }
+  if (invocation.command === "status") {
+    if (invocation.output === "jsonl") {
+      for await (const event of reader.events({ from: invocation.from ?? 0, follow: false, signal: output.abort.signal })) await output.event(event);
+      return status;
+    }
+    return review(reader, invocation, status.value, status.value);
+  }
+  if ((invocation.command === "plan" || invocation.command === "verify") && invocation.review) return review(reader, invocation, status.value, invocation.command === "plan" ? status.value.currentPlan : undefined);
+  if (invocation.command === "accept") {
+    if (!invocation.verificationDigest) return refusal("verification_unaccepted", "Acceptance requires the exact verification digest.");
+    if (!invocation.approver?.trim() || !invocation.codes.length) return refusal("usage", "Acceptance requires an approver and named codes.");
+  }
+  const result = await withEvents(invocation, output, reader, async () => {
+    if (invocation.command === "approve") return approve(invocation, output, engine, reader, status.value);
+    if (invocation.command === "reclaim") return engine.reclaim(job, { confirm: true, stopWorker: invocation.stopWorker });
+    return engine.withWriterResult(job, async (writer: JobWriter): Promise<Outcome<unknown>> => {
+      switch (invocation.command) {
+        case "creds init": return writer.onboard(config);
+        case "doctor": return writer.doctor();
+        case "plan": return writer.plan();
+        case "execute": return writer.execute({ signal: output.abort.signal });
+        case "verify": return writer.verify();
+        case "accept": return writer.accept({ verificationDigest: invocation.verificationDigest!, approver: invocation.approver!, codes: invocation.codes.map((code, index) => ({ code, ...(invocation.notes[index] === undefined ? {} : { note: invocation.notes[index] }) })) });
+        case "report": return writer.report();
+        case "close": return writer.close();
+        case "cancel": return writer.cancel(invocation.reason ?? "Operator cancelled the job.");
+        default: throw new Error("Unexpected writer command");
+      }
+    });
+  });
+  if (!result.ok) return result;
+  if (invocation.command === "execute") return { ok: true, value: terminalEnvelopeForExecute(result.value as ExecuteResult) };
+  if (invocation.command === "plan" || invocation.command === "verify") {
+    const current = await reader.status();
+    if (!current.ok) return current;
+    return review(reader, invocation, current.value, result.value);
+  }
+  return result;
+}
 
+/** Command-layer seam: argv in, stdout/stderr and exit code out. Engine owns all state. */
+export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Promise<number> {
+  const abort = new AbortController();
+  const onAbort = () => abort.abort(io.signal?.reason);
+  io.signal?.addEventListener("abort", onAbort, { once: true });
+  if (io.signal?.aborted) onAbort();
+  const output = new Output(io, outputMode(argv), commandLabel(argv), abort);
+  let engine = suppliedEngine;
+  let result: AdapterOutcome;
+  let invocation: Invocation | undefined;
+  try {
+    invocation = parseInvocation(argv);
+    if (!invocation.help || output.command !== "help") output.command = invocation.command;
+    if (invocation.jobId) output.job = { id: invocation.jobId, type: null };
+    if (invocation.help) result = { ok: true, value: { help: HELP } };
+    else {
+      engine ??= openEngine({ home: invocation.home, adapter: "cli" });
+      result = await executeCommand(invocation, output, engine);
+    }
+  } catch (error) {
+    result = caught(error);
+  } finally {
+    try { engine?.close(); } catch (error) { result = caught(error); }
+    io.signal?.removeEventListener("abort", onAbort);
+  }
+  const signal = errorCode(io.signal?.reason);
+  if (signal === "EPIPE" || errorCode(output.failed) === "EPIPE") return 141;
+  if (output.failed) return signal === "SIGINT" ? 130 : 1;
+  let code = output.unknown ? 1 : outcomeExit(invocation?.command ?? output.command, result);
+  try {
+    // JSONL has no synthetic cursor or synthetic terminal. A pre-lease refusal
+    // still needs a result envelope when no matching durable refusal was logged.
+    if (invocation?.help && output.mode === "text" && result.ok) await io.stdout.write(HELP);
+    else if (output.mode !== "jsonl" || (!result.ok && output.lastRefusal !== result.refusal.code) || (!output.attempted && result.ok)) await output.outcome(result);
+  } catch (error) {
+    if (errorCode(error) === "EPIPE") return 141;
+    if (!output.failed && !output.attempted) {
+      try { await output.outcome(refusal("internal_defect", "The command result could not be serialized.")); }
+      catch (failure) { if (errorCode(failure) === "EPIPE") return 141; }
+    }
+    return signal === "SIGINT" ? 130 : 1;
+  }
+  if (signal === "SIGINT") code = 130;
+  if (signal === "SIGTERM") code = 143;
   return code;
 }
 
-async function runInit(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.initType === null) {
-    await writeUsage(io, "init requires --type file_migration|teams_archive");
-    return 2;
-  }
-
-  const outcome = await engine.initJob(
-    invocation.label === null
-      ? { type: invocation.initType }
-      : { type: invocation.initType, label: invocation.label },
-  );
-  const job = outcome.ok
-    ? jobEnvelope(outcome.value.id, invocation.initType)
-    : jobEnvelope("", invocation.initType);
-
-  if (invocation.output === "jsonl") {
-    if (outcome.ok) {
-      const reader = engine.reader({ id: outcome.value.id });
-      await streamEvents(io, "init", commandId, job, reader, invocation.from);
-    }
-
-    return outcome.ok ? 0 : exitCodeForRefusalCode(outcome.refusal.code);
-  }
-
-  return emitOutcome(io, "init", commandId, job, outcome, invocation.output);
+// npm's POSIX bin is a symlink; emitted .js and source .ts share the same guard.
+let direct = false;
+if (process.argv[1]) {
+  try { direct = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; }
+  catch { direct = false; }
 }
-
-async function runDoctor(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "doctor requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "doctor", commandId, job, status, invocation.output);
-  }
-
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.doctor(),
-  );
-  return renderJobCommand(
-    io,
-    "doctor",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runPlan(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "plan requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "plan", commandId, job, status, invocation.output);
-  }
-
-  const revisionOutcome = await engine.withWriterResult(
-    { id: invocation.jobId },
-    (writer: JobWriter) => writer.plan(),
-  );
-  if (!revisionOutcome.ok) {
-    return emitOutcome(io, "plan", commandId, job, revisionOutcome, invocation.output);
-  }
-
-  const query = { phase: "plan" as const, revision: revisionOutcome.value.revision };
-  const rows = await reader.rows(query);
-  if (!rows.ok) {
-    return renderJobCommand(
-      io,
-      "plan",
-      commandId,
-      job,
-      rows,
-      invocation.output,
-      reader,
-      invocation.from,
-    );
-  }
-
-  const value = {
-    ...revisionOutcome.value,
-    review: buildReviewEnvelope(query, rows.value),
-  };
-
-  return renderJobCommand(
-    io,
-    "plan",
-    commandId,
-    job,
-    { ok: true, value },
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runApprove(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "approve requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "approve", commandId, job, status, invocation.output);
-  }
-
-  if (invocation.approver === null || invocation.planDigest === null) {
-    const refusal: Refusal = {
-      code: "approval_required",
-      message: "approve requires --approver and --plan-digest",
-    };
-    return emitOutcome(io, "approve", commandId, job, { ok: false, refusal }, invocation.output);
-  }
-
-  const humanMode =
-    invocation.output === "text" && io.stdin.isTTY && io.stdout.isTTY && io.stderr.isTTY;
-  if (humanMode) {
-    const accepted = await promptForYes(io);
-    if (!accepted) {
-      const refusal: Refusal = {
-        code: "approval_required",
-        message: "approve requires literal yes",
-      };
-      return emitOutcome(io, "approve", commandId, job, { ok: false, refusal }, invocation.output);
-    }
-  }
-
-  const approver = invocation.approver;
-  const planDigest = invocation.planDigest;
-  const mode = humanMode ? "interactive" : "unattended";
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.approve({
-      approver,
-      planDigest,
-      mode,
-    }),
-  );
-
-  return renderJobCommand(
-    io,
-    "approve",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runExecute(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "execute requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "execute", commandId, job, status, invocation.output);
-  }
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.execute(),
-  );
-  if (!outcome.ok) {
-    return emitOutcome(io, "execute", commandId, job, outcome, invocation.output);
-  }
-
-  const result = outcome.value;
-  if (invocation.output === "jsonl") {
-    await streamEvents(io, "execute", commandId, job, reader, invocation.from);
-    return result.outcome === "blocked" ? 5 : 0;
-  }
-
-  await emitOutcome(
-    io,
-    "execute",
-    commandId,
-    job,
-    { ok: true, value: terminalEnvelopeForExecute(result) },
-    invocation.output,
-  );
-  return result.outcome === "blocked" ? 5 : 0;
-}
-
-async function runStatus(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "status requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "status", commandId, job, status, invocation.output);
-  }
-
-  return renderJobCommand(
-    io,
-    "status",
-    commandId,
-    job,
-    status,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runVerify(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "verify requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "verify", commandId, job, status, invocation.output);
-  }
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.verify(),
-  );
-  return renderJobCommand(
-    io,
-    "verify",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runAccept(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "accept requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "accept", commandId, job, status, invocation.output);
-  }
-
-  if (invocation.verificationDigest === null) {
-    const refusal: Refusal = {
-      code: "verification_unaccepted",
-      message: "accept requires --verification-digest",
-    };
-    return emitOutcome(io, "accept", commandId, job, { ok: false, refusal }, invocation.output);
-  }
-
-  if (invocation.approver === null || invocation.codes.length === 0) {
-    await writeUsage(io, "accept requires --approver and at least one --code");
-    return 2;
-  }
-
-  const verificationDigest = invocation.verificationDigest;
-  const approver = invocation.approver;
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.accept({
-      verificationDigest,
-      codes: invocation.codes.map((code) => ({ code }) as AcceptedException),
-      approver,
-    }),
-  );
-
-  return renderJobCommand(
-    io,
-    "accept",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runReport(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "report requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "report", commandId, job, status, invocation.output);
-  }
-
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.report(),
-  );
-  return renderJobCommand(
-    io,
-    "report",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runClose(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "close requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "close", commandId, job, status, invocation.output);
-  }
-
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.close(),
-  );
-  return renderJobCommand(
-    io,
-    "close",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runCancel(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "cancel requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "cancel", commandId, job, status, invocation.output);
-  }
-
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.cancel(invocation.reason ?? "cli cancel"),
-  );
-  return renderJobCommand(
-    io,
-    "cancel",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runDoctorLike(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "doctor requires --job <id>");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "doctor", commandId, job, status, invocation.output);
-  }
-
-  const outcome = await engine.withWriterResult({ id: invocation.jobId }, (writer: JobWriter) =>
-    writer.doctor(),
-  );
-  return renderJobCommand(
-    io,
-    "doctor",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runReclaim(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  if (invocation.jobId === null) {
-    await writeUsage(io, "reclaim requires --job <id>");
-    return 2;
-  }
-
-  if (!invocation.confirm) {
-    await writeUsage(io, "reclaim requires --confirm");
-    return 2;
-  }
-
-  const reader = engine.reader({ id: invocation.jobId });
-  const status = await reader.status();
-  const job = jobEnvelope(invocation.jobId, jobTypeFromStatus(status));
-  if (!status.ok) {
-    return statusRefutation(io, "reclaim", commandId, job, status, invocation.output);
-  }
-
-  const outcome = await engine.reclaim(
-    { id: invocation.jobId },
-    { confirm: true, stopWorker: invocation.stopWorker },
-  );
-  return renderJobCommand(
-    io,
-    "reclaim",
-    commandId,
-    job,
-    outcome,
-    invocation.output,
-    reader,
-    invocation.from,
-  );
-}
-
-async function runWeb(io: Io): Promise<number> {
-  await writeUsage(io, "web is not available yet; stage 4 will introduce the webview adapter");
-  return 2;
-}
-
-async function handleInvocation(
-  invocation: Invocation,
-  io: Io,
-  engine: Engine,
-  commandId: string,
-): Promise<number> {
-  switch (invocation.command) {
-    case "init":
-      return runInit(invocation, io, engine, commandId);
-    case "doctor":
-      return runDoctorLike(invocation, io, engine, commandId);
-    case "plan":
-      return runPlan(invocation, io, engine, commandId);
-    case "approve":
-      return runApprove(invocation, io, engine, commandId);
-    case "execute":
-      return runExecute(invocation, io, engine, commandId);
-    case "status":
-      return runStatus(invocation, io, engine, commandId);
-    case "verify":
-      return runVerify(invocation, io, engine, commandId);
-    case "accept":
-      return runAccept(invocation, io, engine, commandId);
-    case "report":
-      return runReport(invocation, io, engine, commandId);
-    case "close":
-      return runClose(invocation, io, engine, commandId);
-    case "cancel":
-      return runCancel(invocation, io, engine, commandId);
-    case "reclaim":
-      return runReclaim(invocation, io, engine, commandId);
-    case "web":
-      return runWeb(io);
-    default: {
-      const neverCommand: never = invocation.command;
-      return neverCommand;
-    }
-  }
-}
-
-const HELP = `migmate — finite, one-way movement or preservation of organizational content
-
-Usage: migmate <verb> [flags]
-
-Lifecycle verbs, in rail order:
-  init      create a job of an explicit type
-  doctor    run preflight and record its evidence
-  plan      collect evidence and produce an immutable, digest-bound plan
-  approve   bind an approver identity to an exact plan digest
-  execute   run the approved plan in the foreground; resumable after interrupt
-  status    read job state, rail, ownership, and progress without taking the lease
-  verify    prove the result; re-runnable without re-approval
-  accept    accept named exceptions against the current verification digest
-  report    write the durable report artifacts
-  close     close the job; requires a clean verification or accepted exceptions
-  cancel    stop the job terminally; never rolls back destination writes
-  reclaim   take a job from a dead owner after reading its recovery report
-
-Flags:
-  --output text|json|jsonl   machine-facing output; json and jsonl never prompt
-  --job <id>                 the job to act on
-  --home <path>              engine home; defaults to MIGMATE_HOME
-  --type <job type>          init only: file_migration or teams_archive
-  --approver <string>        approve and accept: the identity being recorded
-  --plan-digest <digest>     approve: the digest read back from plan output
-  --verification-digest <d>  accept: the digest the acceptance binds to
-  --code <code>              accept: an exception code; repeatable
-  --from <cursor>            jsonl: resume exclusively from a durable cursor
-  --confirm / --stop-worker  reclaim: acknowledge the recovery report
-  --reason <string>          cancel: why the job was stopped
-
-Exit codes: 0 success, 1 defect, 2 usage, 3 lease, 4 gate refusal, 5 blocked,
-6 closed, 7 cancelled, 8 state version, 130 interrupt, 141 broken pipe.
-`;
-
-export async function run(argv: string[], io: Io, engine: Engine): Promise<number> {
-  if (argv.includes("--help") || argv.includes("-h")) {
-    await io.stdout.write(HELP);
-    return 0;
-  }
-
-  const parsed = parseInvocation(argv);
-  const commandId = randomUUID();
-
-  try {
-    if ("message" in parsed) {
-      await writeUsage(io, parsed.message);
-      return 2;
-    }
-
-    return await handleInvocation(parsed, io, engine, commandId);
-  } catch (error) {
-    const code = errorCode(error);
-    if (code === "EPIPE") return exitCodeForSignal("EPIPE");
-    if (code === "SIGINT") return exitCodeForSignal("SIGINT");
-    throw error;
-  } finally {
-    await engine.close();
-  }
-}
-
-function bootstrapHome(argv: string[]): string {
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
-    if (token === "--home") {
-      const next = argv[index + 1];
-      if (next !== undefined && !next.startsWith("--")) {
-        return next;
-      }
-    }
-  }
-
-  return process.env.MIGMATE_HOME ?? `${process.env.HOME ?? ""}/.migmate`;
-}
-
-function processIo(): Io {
-  return {
-    stdout: {
-      isTTY: Boolean(process.stdout.isTTY),
-      write(chunk: string) {
-        process.stdout.write(chunk);
-      },
-    },
-    stderr: {
-      isTTY: Boolean(process.stderr.isTTY),
-      write(chunk: string) {
-        process.stderr.write(chunk);
-      },
-    },
-    stdin: {
-      isTTY: Boolean(process.stdin.isTTY),
-      async readLine() {
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
-        try {
-          return await rl.question("");
-        } finally {
-          rl.close();
-        }
-      },
-    },
-  };
-}
-
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const engine = openEngine({ home: bootstrapHome(process.argv.slice(2)), adapter: "cli" });
-  process.exit(await run(process.argv.slice(2), processIo(), engine));
+if (direct) {
+  const transport = processIo();
+  try { process.exitCode = await run(process.argv.slice(2), transport.io); }
+  finally { transport.dispose(); }
 }
