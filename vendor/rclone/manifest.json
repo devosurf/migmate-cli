@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "version": "v1.75.0",
+  "binaries": {
+    "darwin-arm64": {
+      "path": "vendor/rclone/osx-arm64/rclone",
+      "sha256": "f52ccc22e6fe61ea5791f0e186db323155ad1cc1b6dfe547f4bc665bea57a2dd",
+      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-osx-arm64.zip"
+    },
+    "darwin-x64": {
+      "path": "vendor/rclone/osx-amd64/rclone",
+      "sha256": "da8f28fd63f96815505bbb6f2c8afc101f0dc5f6c12347d49bfad75d52547f41",
+      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-osx-amd64.zip"
+    },
+    "linux-arm64": {
+      "path": "vendor/rclone/linux-arm64/rclone",
+      "sha256": "a7094d6e48c6c26cb069175ae93ee221db7dabfa18f57cb6bf3d3d5e1fb1cf3a",
+      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-arm64.zip"
+    },
+    "linux-x64": {
+      "path": "vendor/rclone/linux-amd64/rclone",
+      "sha256": "f3f9aff817f9766029e50adf9a7963c169e475b8f10c7927823568a0d9443db7",
+      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-amd64.zip"
+    },
+    "win32-arm64": {
+      "path": "vendor/rclone/windows-arm64/rclone.exe",
+      "sha256": "60dc6d41f820a7fc4643868bda001ca8a930ef0276abc8f43bc80f162c88548f",
+      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-windows-arm64.zip"
+    },
+    "win32-x64": {
+      "path": "vendor/rclone/windows-amd64/rclone.exe",
+      "sha256": "8be30f02266a6eaad9d481941ef287b9744bb7140034b097ad862a2ccff3e24c",
+      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-windows-amd64.zip"
+    }
+  }
+}
