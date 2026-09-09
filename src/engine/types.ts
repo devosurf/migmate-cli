@@ -53,6 +53,10 @@ export type RowPhase = "plan" | "execute" | "verify";
 export type CodeKind = "policy_outcome" | "planned_omission" | "finding";
 
 export type RefusalCode =
+  | "configuration_invalid"
+  | "job_not_found"
+  | "local_filesystem_required"
+  | "retry_budget_exhausted"
   | "lease_held"
   | "lease_stale_worker_alive"
   | "foreign_host"
@@ -102,20 +106,14 @@ export interface JobSpec {
   type: JobType;
   /** Operator-facing label. Never an identifier. */
   label?: string;
-  /**
-   * Operator-authored job configuration, persisted verbatim beside the job's
-   * state and validated at the engine boundary before any driver sees it.
-   */
+  /** Operator configuration validated as safe typed references before persistence. */
   config?: unknown;
 }
 
-/**
- * Everything the three lease refusals must be able to render. The socket path and
- * worker pid are engine-internal: the CLI redacts both before they reach any
- * output surface.
- */
+/** Safe ownership facts. Worker process identifiers and addresses remain internal. */
 export interface RecoveryReport {
   workerAlive: boolean;
+  workerStatus?: "alive" | "absent" | "unknown";
   recordedHostId: string;
   thisHostId: string;
   holder: {
@@ -127,10 +125,6 @@ export interface RecoveryReport {
     kind: "cli" | "web";
   } | null;
   workerGroup: string | null;
-  /** Redacted before output. */
-  socketProbed: string | null;
-  /** Redacted before output. */
-  workerPid: number | null;
   lastCheckpoint: string | null;
   reclaimable: boolean;
 }
@@ -167,6 +161,7 @@ export type TerminalState = "completed" | "interrupted" | "blocked" | "cancelled
 
 export interface ExecuteResult {
   outcome: "completed" | "interrupted" | "blocked";
+  resumable: boolean;
   checkpoint: string | null;
   committedUnits: number;
   /** Populated when the run stopped in `blocked`. */
@@ -195,10 +190,14 @@ export interface PlanRevision {
   createdAt: string;
   sourceInventoryAt: string;
   rowCount: number;
+  disclosures?: string[];
+  sections?: { id: string; title: string; body: string }[];
+  review?: RowPage;
 }
 
 export interface ApprovalRecord {
   revision: number;
+  approvalDigest?: string;
   planDigest: string;
   approver: string;
   mode: "interactive" | "unattended";
@@ -213,6 +212,7 @@ export interface AcceptedException {
 export interface VerificationRevision {
   revision: number;
   verificationDigest: string;
+  evidenceDigest?: string;
   clean: boolean;
   findings: FacetCount[];
   acceptedCodes: string[];
@@ -221,7 +221,7 @@ export interface VerificationRevision {
 
 export interface Artifact {
   name: string;
-  format: "jsonl" | "html" | "json";
+  format: "jsonl" | "html" | "json" | "csv";
   path: string;
   digest: string;
 }
@@ -235,6 +235,7 @@ export interface Closure {
   state: "closed" | "cancelled";
   at: string;
   acceptedExceptions: string[];
+  outcome?: "completed" | "completed_with_accepted_exceptions" | "cancelled";
   reason?: string;
 }
 
@@ -312,8 +313,20 @@ export interface JobStatus {
   };
   planRevision: number | null;
   planDigest: string | null;
+  currentPlan?: PlanRevision | null;
   verificationDigest: string | null;
   progress: Progress | null;
   lastCheckpoint: string | null;
   outstandingFindings: FacetCount[];
+  worker?: { active: boolean; group: string | null };
+  resumable?: boolean;
+  terminalState?: TerminalState | null;
+  archiveProgress?: {
+    conversations: number;
+    totalConversations: number;
+    records: number;
+    totalRecords: number | null;
+    assets: number;
+    bytes: number;
+  };
 }
