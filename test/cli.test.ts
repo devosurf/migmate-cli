@@ -1,915 +1,317 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir, userInfo, hostname } from "node:os";
+import { join } from "node:path";
+import { it, type TestContext } from "node:test";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { run, type Io } from "../src/cli/main.ts";
-import { type Engine, type JobReader, type JobWriter } from "../src/engine/engine.ts";
-import {
-  ok,
-  type AcceptedException,
-  type ApprovalRecord,
-  type ArtifactSet,
-  type Closure,
-  type ExecuteResult,
-  type JobEvent,
-  type JobRef,
-  type JobStatus,
-  type Outcome,
-  type PlanRevision,
-  type PreflightReport,
-  type RecoveryReport,
-  type Refusal,
-  type RowPage,
-  type VerificationRevision,
-} from "../src/engine/types.ts";
+import { defaultHome } from "../src/cli/arguments.ts";
+import { openEngine, type Engine, type JobStatus, type Outcome, type PlanRevision, type RowPage, type ApprovalRecord, type ExecuteResult, type ArtifactSet } from "../src/engine/index.ts";
+import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
+import { cliFixture, CLI_JOB_CONFIG } from "./cli-fixture.ts";
 
-type JobType = "file_migration" | "teams_archive";
-
-type JsonDoc = {
-  schemaVersion: number;
-  command: string;
-  commandId: string;
-  job: { id: string; type: JobType };
-  ok: boolean;
-  value?: unknown;
-  refusal?: { code: string; message: string; recovery?: unknown };
-};
-
-type JsonlBase = {
-  schemaVersion: number;
-  cursor: number;
-  at: string;
-  verb: JobEvent["verb"];
-  phase: JobEvent["phase"];
-};
-
-type JsonlTerminalDoc = JsonlBase & {
-  kind: "terminal";
-  payload: { state: string; resumable: boolean };
-};
-
-type JsonlDoc =
-  | JsonlTerminalDoc
-  | (JsonlBase & { kind: Exclude<JobEvent["kind"], "terminal">; payload: JobEvent["payload"] });
-
-interface EngineConfig {
-  init: Outcome<JobRef>;
-  status: Outcome<JobStatus>;
-  rows: Outcome<RowPage>;
-  plan: Outcome<PlanRevision>;
-  doctor: Outcome<PreflightReport>;
-  approve: Outcome<ApprovalRecord>;
-  execute: Outcome<ExecuteResult>;
-  verify: Outcome<VerificationRevision>;
-  accept: Outcome<VerificationRevision>;
-  artifacts: Outcome<ArtifactSet>;
-  close: Outcome<Closure>;
-  cancel: Outcome<Closure>;
-  reclaim: Outcome<RecoveryReport>;
-  leaseRefusal?: Refusal;
-  events: JobEvent[];
+interface Capture { code: number; stdout: string; stderr: string; prompts: number }
+interface Document<T> { schemaVersion: number; command: string; commandId: string; job: { id: string; type: string | null } | null; ok: boolean; value: T; refusal: { code: string; detail?: Record<string, unknown>; recovery?: Record<string, unknown> } }
+function document<T>(capture: Capture): Document<T> {
+  assert.equal(capture.stderr, "");
+  const parsed: Document<T> = JSON.parse(capture.stdout);
+  assert.equal(parsed.schemaVersion, 1);
+  assert.match(parsed.commandId, /^[\da-f-]{36}$/u);
+  assert.notEqual("value" in parsed, "refusal" in parsed);
+  return parsed;
 }
-
-interface EngineState {
-  approveArgs: { approver: string; planDigest: string; mode: "interactive" | "unattended" } | null;
-  acceptArgs: { verificationDigest: string; codes: AcceptedException[]; approver: string } | null;
-  cancelArgs: string | null;
-  reclaimArgs: { confirm: true; stopWorker?: boolean } | null;
-  calls: string[];
-}
-
-function defaultStatus(jobType: JobType = "file_migration"): JobStatus {
-  return {
-    jobId: "job-1",
-    jobType,
-    state: "executing",
-    schemaVersion: 1,
-    rail: [
-      { verb: "init", state: "done" },
-      { verb: "doctor", state: "done" },
-      { verb: "plan", state: "done" },
-      { verb: "approve", state: "done" },
-      { verb: "execute", state: "current" },
-      { verb: "status", state: "checkpoint" },
-      { verb: "verify", state: "pending" },
-      { verb: "report", state: "pending" },
-      { verb: "close", state: "pending" },
-      { verb: "cancel", state: "pending" },
-    ],
-    ownership: {
-      held: false,
-      heldByThisProcess: false,
-      hostId: null,
-      pid: null,
-      heartbeatAt: null,
-      kind: null,
-    },
-    planRevision: 7,
-    planDigest: "plan-digest",
-    verificationDigest: "verification-digest",
-    progress: { unit: "items", done: 2, total: null },
-    lastCheckpoint: "checkpoint-1",
-    outstandingFindings: [],
+async function invoke(argv: string[], engine?: Engine, options: { tty?: boolean[]; answer?: string; write?: Io["stdout"]["write"]; signal?: AbortSignal } = {}): Promise<Capture> {
+  let stdout = "", stderr = "", prompts = 0;
+  const io: Io = {
+    stdout: { isTTY: options.tty?.[1] ?? false, async write(chunk) { if (options.write) await options.write(chunk); stdout += chunk; } },
+    stderr: { isTTY: options.tty?.[2] ?? false, write(chunk) { stderr += chunk; } },
+    stdin: { isTTY: options.tty?.[0] ?? false, async readLine() { prompts++; return options.answer ?? null; } },
+    ...(options.signal ? { signal: options.signal } : {}),
   };
+  const code = await run(argv, io, engine);
+  return { code, stdout, stderr, prompts };
+}
+function harness(t: TestContext) {
+  const home = mkdtempSync(join(tmpdir(), "migmate-cli-contract-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const provider = new FakeFileMigrationPort(cliFixture());
+  const engine = () => openEngine({ home, provider, adapter: "cli" });
+  return { home, provider, engine };
+}
+async function planned(t: TestContext) {
+  const h = harness(t);
+  const config = join(h.home, "input.toml");
+  writeFileSync(config, stringifyToml(CLI_JOB_CONFIG));
+  const init = document<{ id: string }>(await invoke(["init", "--type", "file_migration", "--config", config, "--output", "json"], h.engine()));
+  assert.equal(init.ok, true);
+  const id = init.value.id;
+  const plan = document<PlanRevision & { review: RowPage }>(await invoke(["plan", "--job", id, "--limit", "2", "--output", "json"], h.engine()));
+  assert.equal(plan.ok, true);
+  return { ...h, id, plan: plan.value };
 }
 
-function defaultPlan(): PlanRevision {
-  return {
-    revision: 7,
-    planDigest: "plan-digest",
-    inputsDigest: "inputs-digest",
-    createdAt: "2026-09-01T00:00:00.000Z",
-    sourceInventoryAt: "2026-09-01T00:00:00.000Z",
-    rowCount: 1,
-  };
-}
-
-function defaultRows(): RowPage {
-  return {
-    facets: [{ code: "updated", kind: "policy_outcome", count: 1 }],
-    rows: [
-      {
-        id: "item-1",
-        jobType: "file_migration",
-        code: "updated",
-        kind: "policy_outcome",
-        phase: "plan",
-        revision: 7,
-        accepted: false,
-        mappingId: "map-1",
-        sourceItemId: "source-1",
-        relativePath: "docs/readme.md",
-        size: 12,
-        destinationFileId: "dest-1",
-        provenanceState: "marked",
-      },
-    ],
-    nextCursor: null,
-    totalRows: 1,
-  };
-}
-
-function defaultPreflight(): PreflightReport {
-  return {
-    passed: true,
-    checks: [{ id: "check-1", title: "ok", status: "pass", evidence: {} }],
-  };
-}
-
-function defaultApproval(): ApprovalRecord {
-  return {
-    revision: 8,
-    planDigest: "plan-digest",
-    approver: "alice",
-    mode: "unattended",
-    at: "2026-09-01T00:00:00.000Z",
-  };
-}
-
-function defaultExecute(outcome: ExecuteResult["outcome"] = "completed"): ExecuteResult {
-  const result: ExecuteResult = {
-    outcome,
-    checkpoint: "checkpoint-2",
-    committedUnits: 4,
-  };
-
-  if (outcome === "blocked") {
-    result.budget = { failedAttempts: 3, failedUnitRatio: 0.75 };
+it("emits one versioned stdout document for handled usage/configuration failures and help", async t => {
+  const h = harness(t);
+  const cases = [
+    ["execute"], ["not-a-command"], ["init"], ["status", "--job", "../escape"],
+    ["status", "--job", "missing", "--limit", "0"], ["status", "--job", "missing", "--from", "9007199254740992"],
+    ["status", "--job", "missing", "--schema-version", "2"], ["execute", "--job", "missing", "--yes"],
+    ["creds", "init", "--job", "missing"], ["reclaim", "--job", "missing"],
+  ];
+  for (const argv of cases) for (const mode of ["json", "jsonl"]) {
+    const result = await invoke([...argv, "--output", mode], h.engine());
+    assert.equal(result.code, 2);
+    assert.equal(document(result).ok, false);
+    assert.equal(result.prompts, 0);
   }
+  const help = await invoke(["--help", "--output", "json"], h.engine());
+  assert.equal(help.code, 0);
+  assert.equal(document(help).ok, true);
+  assert.equal(existsSync(join(h.home, "jobs", "escape")), false);
+});
 
-  return result;
-}
+it("parses TOML and JSON inputs but persists only typed TOML references through onboarding", async t => {
+  const h = harness(t);
+  const secret = join(h.home, "operator-secret");
+  const sentinel = "CLI-SECRET-CANARY-do-not-copy";
+  writeFileSync(secret, sentinel, { mode: 0o600 });
+  const config = { ...CLI_JOB_CONFIG, rclone: { config: { resolver: "file", path: secret, mode: "0600" } } };
+  const input = join(h.home, "operator.json");
+  writeFileSync(input, JSON.stringify(config));
+  const init = document<{ id: string }>(await invoke(["init", "--type", "file_migration", "--config", input, "--output", "json"], h.engine()));
+  assert.equal(init.ok, true);
+  const path = join(h.home, "jobs", init.value.id, "job.toml");
+  const persisted = readFileSync(path, "utf8");
+  assert.deepEqual(parseToml(persisted).rclone, config.rclone);
+  assert.equal(persisted.includes(sentinel), false);
+  const tomlInput = join(h.home, "operator.toml");
+  writeFileSync(tomlInput, stringifyToml(config));
+  const onboard = await invoke(["creds", "init", "--job", init.value.id, "--config", tomlInput, "--output", "json"], h.engine());
+  const report = document<{ checks: unknown[]; passed: boolean }>(onboard);
+  assert.equal(report.command, "creds init");
+  assert.equal(report.ok, true);
+  assert.equal(report.value.passed, true);
+  assert.equal(onboard.stdout.includes(sentinel), false);
+  assert.equal(readFileSync(secret, "utf8"), sentinel);
+  assert.equal(existsSync(join(h.home, "jobs", init.value.id, "job.config.json")), false);
+  writeFileSync(input, '{"secret":"CLI-SECRET-CANARY-do-not-copy"');
+  const malformed = await invoke(["creds", "init", "--job", init.value.id, "--config", input, "--output", "json"], h.engine());
+  assert.equal(malformed.code, 2);
+  assert.equal(document(malformed).refusal.code, "configuration_invalid");
+  assert.equal(malformed.stdout.includes(sentinel), false);
+  assert.equal(readFileSync(path, "utf8").includes(sentinel), false);
+});
 
-function defaultVerification(): VerificationRevision {
-  return {
-    revision: 9,
-    verificationDigest: "verification-digest",
-    clean: true,
-    findings: [],
-    acceptedCodes: [],
-    at: "2026-09-01T00:00:00.000Z",
-  };
-}
+it("refuses missing jobs and malformed config rather than creating state", async t => {
+  const h = harness(t);
+  const status = await invoke(["status", "--job", "missing", "--output", "json"], h.engine());
+  assert.equal(status.code, 2);
+  assert.equal(document(status).refusal.code, "job_not_found");
+  assert.equal(existsSync(join(h.home, "jobs", "missing")), false);
+  const config = await invoke(["init", "--type", "teams_archive", "--config", join(h.home, "absent.toml"), "--output", "json"], h.engine());
+  assert.equal(config.code, 2);
+  assert.equal(document(config).refusal.code, "configuration_invalid");
+});
 
-function defaultArtifacts(): ArtifactSet {
-  return {
-    reportDigest: "report-digest",
-    artifacts: [{ name: "report", format: "json", path: "/tmp/report.json", digest: "digest-1" }],
-  };
-}
+it("pages and filters durable plan evidence without revising the approved digest", async t => {
+  const h = await planned(t);
+  const ids = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const result = await invoke(["plan", "--review", "--job", h.id, "--limit", "2", "--code", "created", ...(cursor ? ["--cursor", cursor] : []), "--output", "json"], h.engine());
+    const doc = document<{ planDigest: string; review: RowPage }>(result);
+    assert.equal(result.code, 0);
+    assert.equal(doc.value.planDigest, h.plan.planDigest);
+    assert.equal(doc.value.review.totalRows, 8);
+    assert.equal(doc.value.review.facets.find(facet => facet.code === "created")?.count, 8);
+    for (const row of doc.value.review.rows) { assert.equal(ids.has(row.id), false); ids.add(row.id); }
+    cursor = doc.value.review.nextCursor;
+  } while (cursor);
+  assert.equal(ids.size, 8);
+  const search = document<{ review: RowPage }>(await invoke(["plan", "--review", "--job", h.id, "--search", "3.txt", "--code", "created", "--output", "json"], h.engine()));
+  assert.equal(search.value.review.totalRows, 1);
+  assert.equal(search.value.review.rows[0]?.code, "created");
+});
 
-function defaultClosure(state: "closed" | "cancelled"): Closure {
-  return {
-    state,
-    at: "2026-09-01T00:00:00.000Z",
-    acceptedExceptions: [],
-  };
-}
-
-function defaultRecovery(): RecoveryReport {
-  return {
-    workerAlive: false,
-    recordedHostId: "host-a",
-    thisHostId: "host-a",
-    holder: {
-      ownerUuid: "owner-1",
-      pid: 9001,
-      processStartTime: 111,
-      heartbeatAt: "2026-09-01T00:00:00.000Z",
-      heartbeatAgeMs: 2000,
-      kind: "cli",
-    },
-    workerGroup: "worker-group",
-    socketProbed: null,
-    workerPid: null,
-    lastCheckpoint: "checkpoint-1",
-    reclaimable: true,
-  };
-}
-
-function makeEngine(config: Partial<EngineConfig> = {}): Engine & { state: EngineState } {
-  const state: EngineState = {
-    approveArgs: null,
-    acceptArgs: null,
-    cancelArgs: null,
-    reclaimArgs: null,
-    calls: [],
-  };
-
-  const writer: JobWriter = {
-    doctor: async () => {
-      state.calls.push("writer.doctor");
-      return config.doctor ?? ok(defaultPreflight());
-    },
-    plan: async () => {
-      state.calls.push("writer.plan");
-      return config.plan ?? ok(defaultPlan());
-    },
-    approve: async (args) => {
-      state.calls.push("writer.approve");
-      state.approveArgs = args;
-      return config.approve ?? ok(defaultApproval());
-    },
-    execute: async () => {
-      state.calls.push("writer.execute");
-      return config.execute ?? ok(defaultExecute());
-    },
-    verify: async () => {
-      state.calls.push("writer.verify");
-      return config.verify ?? ok(defaultVerification());
-    },
-    accept: async (args) => {
-      state.calls.push("writer.accept");
-      state.acceptArgs = args;
-      return config.accept ?? ok(defaultVerification());
-    },
-    report: async () => {
-      state.calls.push("writer.report");
-      return config.artifacts ?? ok(defaultArtifacts());
-    },
-    close: async () => {
-      state.calls.push("writer.close");
-      return config.close ?? ok(defaultClosure("closed"));
-    },
-    cancel: async (reason) => {
-      state.calls.push("writer.cancel");
-      state.cancelArgs = reason;
-      return config.cancel ?? ok(defaultClosure("cancelled"));
-    },
-  };
-
-  const reader: JobReader = {
-    status: async () => {
-      state.calls.push("reader.status");
-      return config.status ?? ok(defaultStatus());
-    },
-    rows: async (query) => {
-      state.calls.push(`reader.rows:${query.phase}:${query.revision ?? "none"}`);
-      return config.rows ?? ok(defaultRows());
-    },
-    events: async function* (query) {
-      state.calls.push(`reader.events:${query.from ?? "none"}:${query.follow ?? false}`);
-      for (const event of config.events ?? []) {
-        yield event;
-      }
-    },
-    artifacts: async () => {
-      state.calls.push("reader.artifacts");
-      return config.artifacts ?? ok(defaultArtifacts());
-    },
-  };
-
-  return {
-    state,
-    initJob: async (spec) => {
-      state.calls.push(`initJob:${spec.type}`);
-      return config.init ?? ok({ id: "job-new" });
-    },
-    reader: () => {
-      state.calls.push("reader");
-      return reader;
-    },
-    withWriter: async <T>(_ref: JobRef, fn: (w: JobWriter) => Promise<T>): Promise<Outcome<T>> => {
-      state.calls.push("withWriter");
-      return fn(writer) as unknown as Outcome<T>;
-    },
-    withWriterResult: async <T>(
-      _ref: JobRef,
-      fn: (w: JobWriter) => Promise<Outcome<T>>,
-    ): Promise<Outcome<T>> => {
-      state.calls.push("withWriterResult");
-      if (config.leaseRefusal !== undefined) {
-        return { ok: false, refusal: config.leaseRefusal };
-      }
-
-      return fn(writer);
-    },
-    reclaim: async (_ref, decision) => {
-      state.calls.push("engine.reclaim");
-      state.reclaimArgs = decision;
-      return config.reclaim ?? ok(defaultRecovery());
-    },
-    close: () => {
-      state.calls.push("engine.close");
-    },
-  };
-}
-
-function makeIo(
-  opts: {
-    stdoutTTY?: boolean;
-    stderrTTY?: boolean;
-    stdinTTY?: boolean;
-    answers?: string[];
-  } = {},
-): { io: Io; stdout: string[]; stderr: string[]; prompts: () => number } {
-  const stdout: string[] = [];
-  const stderr: string[] = [];
-  let promptCount = 0;
-  const answers = [...(opts.answers ?? [])];
-
-  return {
-    stdout,
-    stderr,
-    prompts: () => promptCount,
-    io: {
-      stdout: {
-        isTTY: opts.stdoutTTY ?? false,
-        write(chunk: string) {
-          stdout.push(chunk);
-        },
-      },
-      stderr: {
-        isTTY: opts.stderrTTY ?? false,
-        write(chunk: string) {
-          stderr.push(chunk);
-        },
-      },
-      stdin: {
-        isTTY: opts.stdinTTY ?? false,
-        async readLine() {
-          promptCount += 1;
-          return answers.shift() ?? null;
-        },
-      },
-    },
-  };
-}
-
-function parseJson(text: string): JsonDoc {
-  return JSON.parse(text.trim()) as JsonDoc;
-}
-
-function parseJsonLines(text: string): JsonlDoc[] {
-  return text
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as JsonlDoc);
-}
-
-function assertTerminalJsonlDoc(doc: JsonlDoc): asserts doc is JsonlTerminalDoc {
-  assert.equal(doc.kind, "terminal");
-}
-
-function assertBaseEnvelope(doc: JsonDoc, command: string, jobId: string, jobType: JobType) {
-  assert.equal(doc.schemaVersion, 1);
-  assert.equal(doc.command, command);
-  assert.equal(typeof doc.commandId, "string");
-  assert.equal(doc.commandId.length > 0, true);
-  assert.deepEqual(doc.job, { id: jobId, type: jobType });
-}
-
-async function invoke(
-  argv: string[],
-  engineConfig: Partial<EngineConfig> = {},
-  ioOpts: Parameters<typeof makeIo>[0] = {},
-) {
-  const built = makeIo(ioOpts);
-  const engine = makeEngine(engineConfig);
-  const code = await run(argv, built.io, engine);
-  return {
-    code,
-    stdout: built.stdout,
-    stderr: built.stderr,
-    prompts: built.prompts,
-    state: engine.state,
-  };
-}
-
-describe("CLI JSON envelope", () => {
-  it("emits one JSON document for each supported verb", async () => {
-    const cases = [
-      {
-        command: "init",
-        argv: ["init", "--type", "file_migration", "--output", "json"],
-        config: { init: ok({ id: "job-new" }) },
-        jobId: "job-new",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { id: string };
-          assert.equal(value.id, "job-new");
-        },
-      },
-      {
-        command: "doctor",
-        argv: ["doctor", "--job", "job-1", "--output", "json"],
-        config: { doctor: ok(defaultPreflight()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { passed: boolean };
-          assert.equal(value.passed, true);
-        },
-      },
-      {
-        command: "plan",
-        argv: ["plan", "--job", "job-1", "--output", "json"],
-        config: { plan: ok(defaultPlan()), rows: ok(defaultRows()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as {
-            planDigest: string;
-            review: { totalRows: number; rows: unknown[] };
-          };
-          assert.equal(value.planDigest, "plan-digest");
-          assert.equal(value.review.totalRows, 1);
-          assert.equal(value.review.rows.length, 1);
-        },
-      },
-      {
-        command: "approve",
-        argv: [
-          "approve",
-          "--job",
-          "job-1",
-          "--approver",
-          "alice",
-          "--plan-digest",
-          "plan-digest",
-          "--output",
-          "json",
-        ],
-        config: { approve: ok(defaultApproval()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { approver: string };
-          assert.equal(value.approver, "alice");
-        },
-      },
-      {
-        command: "execute",
-        argv: ["execute", "--job", "job-1", "--output", "json"],
-        config: { execute: ok(defaultExecute("completed")) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as {
-            state: string;
-            resumable: boolean;
-            checkpoint: string | null;
-            committedUnits?: number;
-            budget?: { failedAttempts: number; failedUnitRatio: number };
-          };
-          assert.equal(value.state, "completed");
-          assert.equal(value.resumable, false);
-          assert.equal(value.checkpoint, "checkpoint-2");
-          assert.equal(value.committedUnits, undefined);
-        },
-      },
-      {
-        command: "status",
-        argv: ["status", "--job", "job-1", "--output", "json"],
-        config: { status: ok(defaultStatus()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { state: string };
-          assert.equal(value.state, "executing");
-        },
-      },
-      {
-        command: "verify",
-        argv: ["verify", "--job", "job-1", "--output", "json"],
-        config: { verify: ok(defaultVerification()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { verificationDigest: string };
-          assert.equal(value.verificationDigest, "verification-digest");
-        },
-      },
-      {
-        command: "accept",
-        argv: [
-          "accept",
-          "--job",
-          "job-1",
-          "--verification-digest",
-          "verification-digest",
-          "--code",
-          "record_count_mismatch",
-          "--approver",
-          "alice",
-          "--output",
-          "json",
-        ],
-        config: { accept: ok(defaultVerification()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { acceptedCodes: string[] };
-          assert.equal(value.acceptedCodes.length, 0);
-        },
-      },
-      {
-        command: "report",
-        argv: ["report", "--job", "job-1", "--output", "json"],
-        config: { artifacts: ok(defaultArtifacts()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { reportDigest: string };
-          assert.equal(value.reportDigest, "report-digest");
-        },
-      },
-      {
-        command: "close",
-        argv: ["close", "--job", "job-1", "--output", "json"],
-        config: { close: ok(defaultClosure("closed")) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { state: string };
-          assert.equal(value.state, "closed");
-        },
-      },
-      {
-        command: "cancel",
-        argv: ["cancel", "--job", "job-1", "--reason", "stop", "--output", "json"],
-        config: { cancel: ok(defaultClosure("cancelled")) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { state: string };
-          assert.equal(value.state, "cancelled");
-        },
-      },
-      {
-        command: "reclaim",
-        argv: ["reclaim", "--job", "job-1", "--confirm", "--output", "json"],
-        config: { reclaim: ok(defaultRecovery()) },
-        jobId: "job-1",
-        jobType: "file_migration" as const,
-        verify(doc: JsonDoc) {
-          const value = doc.value as { workerGroup: string };
-          assert.equal(value.workerGroup, "worker-group");
-        },
-      },
-    ] as const;
-
-    for (const testCase of cases) {
-      const argv = [...testCase.argv];
-      const { code, stdout, stderr } = await invoke(argv, testCase.config);
-      assert.equal(code, 0, testCase.command);
-      assert.equal(stderr.join(""), "", testCase.command);
-      assert.equal(stdout.length, 1, testCase.command);
-      const doc = parseJson(stdout.join(""));
-      assertBaseEnvelope(doc, testCase.command, testCase.jobId, testCase.jobType);
-      assert.equal(doc.ok, true);
-      assert.ok("value" in doc);
-      assert.equal("refusal" in doc, false);
-      testCase.verify(doc);
+it("machine approval requires both identity and read-back digest, regardless of TTYs", async t => {
+  const h = await planned(t);
+  for (let mask = 0; mask < 8; mask++) {
+    const tty = [Boolean(mask & 1), Boolean(mask & 2), Boolean(mask & 4)];
+    for (const mode of ["json", "jsonl"]) {
+      const result = await invoke(["approve", "--job", h.id, "--approver", "ci:review", "--output", mode], h.engine(), { tty });
+      assert.equal(result.code, 4);
+      assert.equal(result.prompts, 0);
+      assert.equal(document(result).refusal.code, "approval_required");
     }
-  });
-});
-
-describe("CLI refusal codes", () => {
-  const refusalCases = [
-    ["lease_held", 3],
-    ["foreign_host", 3],
-    ["lease_stale_worker_alive", 3],
-    ["preflight_failed", 4],
-    ["approval_required", 4],
-    ["approval_digest_stale", 4],
-    ["plan_revision_required", 4],
-    ["unqualified_route", 4],
-    ["verification_unaccepted", 4],
-    ["job_closed", 6],
-    ["job_cancelled", 7],
-    ["state_version_unsupported", 8],
-    ["not_a_real_code", 1],
-  ] as const;
-
-  for (const [code, exitCode] of refusalCases) {
-    it(`maps ${code} to exit ${exitCode}`, async () => {
-      const statusOutcome = {
-        ok: false,
-        refusal: { code, message: `${code} happened` },
-      } as Outcome<JobStatus>;
-      const { code: actual, stdout } = await invoke(
-        ["status", "--job", "job-1", "--output", "json"],
-        {
-          status: statusOutcome,
-        },
-      );
-
-      assert.equal(actual, exitCode);
-      assert.equal(stdout.length, 1);
-      const doc = parseJson(stdout.join(""));
-      assert.equal(doc.ok, false);
-      assert.equal(doc.refusal?.code, code);
-    });
   }
+  const accepted = await invoke(["approve", "--job", h.id, "--approver", "ci:review", "--plan-digest", h.plan.planDigest, "--output", "json"], h.engine());
+  const approval = document<ApprovalRecord>(accepted);
+  assert.equal(accepted.code, 0);
+  assert.equal(approval.value.planDigest, h.plan.planDigest);
+  assert.match(approval.value.approvalDigest, /^[a-f0-9]{64}$/u);
 });
 
-it("surfaces a lease refusal as ok false and the mapped exit code", async () => {
-  const { code, stdout, state } = await invoke(["doctor", "--job", "job-1", "--output", "json"], {
-    leaseRefusal: { code: "lease_held", message: "lease held" },
-  });
-
-  assert.equal(code, 3);
-  assert.ok(state.calls.includes("withWriterResult"));
-  assert.equal(state.calls.includes("writer.doctor"), false);
-  const doc = parseJson(stdout.join(""));
-  assert.equal(doc.ok, false);
-  assert.equal(doc.refusal?.code, "lease_held");
+it("human approval prompts only with all three TTYs and requires exact literal yes", async t => {
+  const h = await planned(t);
+  for (let mask = 0; mask < 7; mask++) {
+    const result = await invoke(["approve", "--job", h.id], h.engine(), { tty: [Boolean(mask & 1), Boolean(mask & 2), Boolean(mask & 4)], answer: "yes" });
+    assert.equal(result.code, 4);
+    assert.equal(result.prompts, 0);
+  }
+  for (const answer of ["", "y", "YES", " yes", "yes "]) {
+    const result = await invoke(["approve", "--job", h.id], h.engine(), { tty: [true, true, true], answer });
+    assert.equal(result.code, 4);
+    assert.equal(result.prompts, 1);
+  }
+  const accepted = await invoke(["approve", "--job", h.id, "--approver", "not-the-os-user"], h.engine(), { tty: [true, true, true], answer: "yes" });
+  assert.equal(accepted.code, 0);
+  const approval: Document<ApprovalRecord> = JSON.parse(accepted.stdout);
+  assert.equal(approval.value.mode, "interactive");
+  assert.equal(approval.value.approver, `${userInfo().username}@${hostname()}`);
+  for (const disclosure of h.plan.disclosures) assert.ok(accepted.stderr.includes(disclosure));
 });
 
-describe("CLI lease refusal redaction", () => {
-  it("redacts worker socket data from lease_stale_worker_alive refusals", async () => {
-    const socketPath = "/private/var/run/migmate-worker.sock";
-    const { code, stdout } = await invoke(
-      ["reclaim", "--job", "job-1", "--confirm", "--output", "json"],
-      {
-        reclaim: {
-          ok: false,
-          refusal: {
-            code: "lease_stale_worker_alive",
-            message: `worker still answering at ${socketPath}`,
-            recovery: {
-              workerAlive: true,
-              recordedHostId: "host-a",
-              thisHostId: "host-a",
-              holder: {
-                ownerUuid: "owner-1",
-                pid: 9001,
-                processStartTime: 111,
-                heartbeatAt: "2026-09-01T00:00:00.000Z",
-                heartbeatAgeMs: 6000,
-                kind: "cli",
-              },
-              workerGroup: "group-a",
-              socketProbed: socketPath,
-              workerPid: 4242,
-              lastCheckpoint: "checkpoint-1",
-              reclaimable: false,
-            },
-          },
-        },
-      },
-    );
-
-    assert.equal(code, 3);
-    assert.equal(stdout.length, 1);
-    const raw = stdout.join("");
-    assert.equal(raw.includes(socketPath), false);
-    assert.equal(raw.includes("4242"), false);
-    const doc = parseJson(raw);
-    assert.equal(doc.ok, false);
-    assert.equal(doc.refusal?.code, "lease_stale_worker_alive");
-    const recovery = doc.refusal?.recovery as {
-      socketProbed: null;
-      workerPid: null;
-      recordedHostId: string;
-      holder: { pid: number };
-      workerGroup: string;
-      lastCheckpoint: string;
-    };
-    assert.equal(recovery.socketProbed, null);
-    assert.equal(recovery.workerPid, null);
-    assert.equal(recovery.recordedHostId, "host-a");
-    assert.equal(recovery.holder.pid, 9001);
-    assert.equal(recovery.workerGroup, "group-a");
-    assert.equal(recovery.lastCheckpoint, "checkpoint-1");
-  });
+it("maps stable refusal codes exactly and preserves unknown values fail-closed", async t => {
+  const h = harness(t);
+  const cases: Array<[string, number]> = [["configuration_invalid", 2], ["job_not_found", 2], ["lease_held", 3], ["foreign_host", 3], ["lease_stale_worker_alive", 3], ["preflight_failed", 4], ["approval_required", 4], ["approval_digest_stale", 4], ["plan_revision_required", 4], ["unqualified_route", 4], ["verification_unaccepted", 4], ["local_filesystem_required", 4], ["retry_budget_exhausted", 5], ["job_closed", 6], ["job_cancelled", 7], ["state_version_unsupported", 8], ["future_code", 1], ["toString", 1]];
+  for (const [code, expected] of cases) {
+    const engine = h.engine();
+    const reader = engine.reader({ id: "absent" });
+    engine.reader = () => ({ ...reader, status: async () => ({ ok: false, refusal: { code, message: "opaque" } }) as Outcome<JobStatus> });
+    const result = await invoke(["status", "--job", "absent", "--output", "json"], engine);
+    assert.equal(result.code, expected);
+    assert.equal(document(result).refusal.code, code);
+  }
+  const engine = h.engine();
+  const reader = engine.reader({ id: "absent" });
+  engine.reader = () => ({ ...reader, status: async () => ({ ok: true, value: { jobType: "file_migration", state: "future_state" } }) as unknown as Outcome<JobStatus> });
+  const future = await invoke(["status", "--job", "absent", "--output", "json"], engine);
+  assert.equal(future.code, 1);
+  assert.equal(document<{ state: string }>(future).value.state, "future_state");
 });
 
-describe("CLI approve prompt policy", () => {
-  it("refuses without prompting when approve lacks --plan-digest in non-TTY mode", async () => {
-    const { code, stdout, prompts, state } = await invoke(
-      ["approve", "--job", "job-1", "--approver", "alice", "--output", "json"],
-      {},
-      { stdinTTY: false, stdoutTTY: false, stderrTTY: false },
-    );
-
-    assert.equal(code, 4);
-    assert.equal(prompts(), 0);
-    assert.equal(state.approveArgs, null);
-    const doc = parseJson(stdout.join(""));
-    assert.equal(doc.ok, false);
-    assert.equal(doc.refusal?.code, "approval_required");
-  });
-
-  it("accepts literal yes in TTY mode", async () => {
-    const { code, stdout, prompts, state } = await invoke(
-      [
-        "approve",
-        "--job",
-        "job-1",
-        "--approver",
-        "alice",
-        "--plan-digest",
-        "plan-digest",
-        "--output",
-        "text",
-      ],
-      { approve: ok(defaultApproval()) },
-      { stdinTTY: true, stdoutTTY: true, stderrTTY: true, answers: ["yes"] },
-    );
-
-    assert.equal(code, 0);
-    assert.equal(prompts(), 1);
-    assert.deepEqual(state.approveArgs, {
-      approver: "alice",
-      planDigest: "plan-digest",
-      mode: "interactive",
-    });
-    const rendered = stdout.join("");
-    const doc = parseJson(rendered.slice(rendered.indexOf("{")));
-    assert.equal(doc.ok, true);
-    const value = doc.value as { approver: string };
-    assert.equal(value.approver, "alice");
-  });
-
-  it("rejects anything other than literal yes in TTY mode", async () => {
-    const { code, stdout, prompts, state } = await invoke(
-      [
-        "approve",
-        "--job",
-        "job-1",
-        "--approver",
-        "alice",
-        "--plan-digest",
-        "plan-digest",
-        "--output",
-        "text",
-      ],
-      {},
-      { stdinTTY: true, stdoutTTY: true, stderrTTY: true, answers: ["no"] },
-    );
-
-    assert.equal(code, 4);
-    assert.equal(prompts(), 1);
-    assert.equal(state.approveArgs, null);
-    const rendered = stdout.join("");
-    const doc = parseJson(rendered.slice(rendered.indexOf("{")));
-    assert.equal(doc.ok, false);
-    assert.equal(doc.refusal?.code, "approval_required");
-  });
+it("redacts sensitive recovery data but keeps actionable owner and checkpoint facts", async t => {
+  const h = harness(t);
+  const engine = h.engine();
+  const reader = engine.reader({ id: "absent" });
+  engine.reader = () => ({ ...reader, status: async () => ({ ok: false, refusal: {
+    code: "lease_stale_worker_alive", message: "Bearer SECRET-CANARY https://example.invalid/download?sig=SECRET-CANARY",
+    detail: { RCLONE_RC_USER: "SECRET-CANARY", RCLONE_RC_PASS: "SECRET-CANARY", workerPid: 424242, authorization: "SECRET-CANARY" },
+    recovery: { workerAlive: true, recordedHostId: "host-one", thisHostId: "host-one", holder: { pid: 31337, heartbeatAt: "2026-09-01T00:00:00Z", token: "SECRET-CANARY" }, workerGroup: "run-group", workerPid: 424242, socketPath: "/private/run/worker.sock", rawFutureField: "SECRET-CANARY", lastCheckpoint: "unit-7" },
+  } }) as unknown as Outcome<JobStatus> });
+  const result = await invoke(["status", "--job", "absent", "--output", "json"], engine);
+  const doc = document(result);
+  assert.equal(result.code, 3);
+  assert.equal(result.stdout.includes("SECRET-CANARY"), false);
+  assert.equal(result.stdout.includes("424242"), false);
+  assert.equal(result.stdout.includes("/private/run/worker.sock"), false);
+  assert.equal(doc.refusal.recovery?.recordedHostId, "host-one");
+  assert.equal(doc.refusal.recovery?.lastCheckpoint, "unit-7");
+  const holder = doc.refusal.recovery?.holder;
+  assert.ok(holder && typeof holder === "object" && "pid" in holder);
+  assert.equal(holder.pid, 31337);
 });
 
-describe("CLI jsonl events", () => {
-  it("resumes exclusively from --from and flushes one line per event", async () => {
-    const events: JobEvent[] = [
-      {
-        cursor: 42,
-        at: "2026-09-01T00:00:00.000Z",
-        verb: "status",
-        phase: "status",
-        kind: "phase_started",
-        payload: { phase: "status" },
-      },
-      {
-        cursor: 43,
-        at: "2026-09-01T00:00:01.000Z",
-        verb: "status",
-        phase: "status",
-        kind: "progress",
-        payload: { unit: "items", done: 2, total: null },
-      },
-    ];
-
-    const { code, stdout, state } = await invoke(
-      ["status", "--job", "job-1", "--from", "41", "--output", "jsonl"],
-      {
-        events,
-      },
-    );
-
-    assert.equal(code, 0);
-    assert.ok(state.calls.includes("reader.events:41:false"));
-    assert.equal(stdout.length, 2);
-    assert.equal(
-      stdout.every((chunk) => chunk.endsWith("\n")),
-      true,
-    );
-    const docs = parseJsonLines(stdout.join(""));
-    assert.equal(docs.length, 2);
-    const first = docs[0];
-    const second = docs[1];
-    assert.ok(first);
-    assert.ok(second);
-    assert.equal(first.schemaVersion, 1);
-    assert.equal(first.cursor, 42);
-    assert.equal(second.cursor, 43);
-  });
-
-  it("marks execute blocked as resumable and emits one terminal event", async () => {
-    const events: JobEvent[] = [
-      {
-        cursor: 88,
-        at: "2026-09-01T00:00:00.000Z",
-        verb: "execute",
-        phase: "execute",
-        kind: "terminal",
-        payload: { state: "blocked", resumable: true },
-      },
-    ];
-
-    const { code, stdout } = await invoke(["execute", "--job", "job-1", "--output", "jsonl"], {
-      execute: ok(defaultExecute("blocked")),
-      events,
-    });
-
-    assert.equal(code, 5);
-    assert.equal(stdout.length, 1);
-    const docs = parseJsonLines(stdout.join(""));
-    const doc = docs[0];
-    assert.ok(doc);
-    assertTerminalJsonlDoc(doc);
-    const value = doc.payload;
-    assert.equal(value.state, "blocked");
-    assert.equal(value.resumable, true);
-  });
-
-  it("reports interrupted as resumable and not cancelled", async () => {
-    const events: JobEvent[] = [
-      {
-        cursor: 89,
-        at: "2026-09-01T00:00:00.000Z",
-        verb: "execute",
-        phase: "execute",
-        kind: "terminal",
-        payload: { state: "interrupted", resumable: true },
-      },
-    ];
-
-    const { code, stdout } = await invoke(["execute", "--job", "job-1", "--output", "jsonl"], {
-      execute: ok(defaultExecute("interrupted")),
-      events,
-    });
-
-    assert.equal(code, 0);
-    const docs = parseJsonLines(stdout.join(""));
-    const doc = docs[0];
-    assert.ok(doc);
-    assertTerminalJsonlDoc(doc);
-    const value = doc.payload;
-    assert.equal(value.state, "interrupted");
-    assert.equal(value.resumable, true);
-    assert.notEqual(value.state, "cancelled");
-  });
+it("executes a real engine lifecycle with digest-bound reports and successful terminal cancel", async t => {
+  const h = await planned(t);
+  const approve = await invoke(["approve", "--job", h.id, "--approver", "ci", "--plan-digest", h.plan.planDigest, "--output", "json"], h.engine());
+  assert.equal(approve.code, 0);
+  const execute = await invoke(["execute", "--job", h.id, "--output", "json"], h.engine());
+  assert.equal(execute.code, 0);
+  const done = document<ExecuteResult & { state: string }>(execute);
+  assert.equal(done.value.state, "completed");
+  assert.equal(done.value.resumable, false);
+  const verify = await invoke(["verify", "--job", h.id, "--output", "json"], h.engine());
+  assert.equal(verify.code, 0);
+  const report = document<ArtifactSet>(await invoke(["report", "--job", h.id, "--output", "json"], h.engine()));
+  assert.match(report.value.reportDigest!, /^[a-f0-9]{64}$/u);
+  for (const format of ["jsonl", "html"]) assert.ok(report.value.artifacts.some(artifact => artifact.format === format && existsSync(artifact.path)));
+  const cancel = await invoke(["cancel", "--job", h.id, "--reason", "No rollback requested", "--output", "json"], h.engine());
+  assert.equal(cancel.code, 0);
+  assert.equal(document<{ state: string }>(cancel).value.state, "cancelled");
+  assert.equal(h.provider.snapshotDestination().filter(row => row.kind === "file").length, 8);
 });
 
-describe("CLI stderr discipline", () => {
-  it("keeps stderr empty for a successful JSON invocation", async () => {
-    const { code, stdout, stderr } = await invoke(
-      ["status", "--job", "job-1", "--output", "json"],
-      {},
-    );
-
-    assert.equal(code, 0);
-    assert.equal(stdout.length, 1);
-    assert.equal(stderr.join(""), "");
-  });
+it("waits for asynchronous stdout completion and never emits a second error after EPIPE", async t => {
+  const h = harness(t);
+  const { promise, resolve } = Promise.withResolvers<void>();
+  let pending = true;
+  const result = invoke(["--help", "--output", "json"], h.engine(), { write: () => promise }).finally(() => { pending = false; });
+  await new Promise<void>(done => setImmediate(done));
+  assert.equal(pending, true);
+  resolve();
+  assert.equal((await result).code, 0);
+  const broken = await invoke(["--help", "--output", "json"], h.engine(), { async write() { await Promise.resolve(); throw Object.assign(new Error("EPIPE"), { code: "EPIPE" }); } });
+  assert.equal(broken.code, 141);
+  assert.equal(broken.stdout, "");
+  assert.equal(broken.stderr, "");
 });
 
-describe("CLI stage 4 web usage", () => {
-  it("refuses web with a usage error", async () => {
-    const { code, stderr } = await invoke(["web"], {});
+it("uses OS-specific persistent engine homes", () => {
+  assert.equal(defaultHome("darwin", {}, "/Users/operator"), "/Users/operator/Library/Application Support/Migmate");
+  assert.equal(defaultHome("linux", {}, "/home/operator"), "/home/operator/.local/state/migmate");
+  assert.equal(defaultHome("linux", { XDG_STATE_HOME: "/local/state" }, "/home/operator"), "/local/state/migmate");
+  assert.equal(defaultHome("win32", { LOCALAPPDATA: "C:\\Users\\operator\\AppData\\Local" }, "C:\\Users\\operator"), "C:\\Users\\operator\\AppData\\Local\\Migmate");
+});
 
-    assert.equal(code, 2);
-    assert.notEqual(stderr.join(""), "");
+it("keeps acceptance bound to the verification digest and closes only after named gaps are accepted", async t => {
+  const h = await planned(t);
+  assert.equal((await invoke(["doctor", "--job", h.id, "--output", "json"], h.engine())).code, 0);
+  assert.equal((await invoke(["approve", "--job", h.id, "--approver", "ci", "--plan-digest", h.plan.planDigest, "--output", "json"], h.engine())).code, 0);
+  assert.equal((await invoke(["execute", "--job", h.id, "--output", "json"], h.engine())).code, 0);
+  const verification = document<{ verificationDigest: string; findings: Array<{ code: string }> }>(await invoke(["verify", "--job", h.id, "--output", "json"], h.engine()));
+  const stale = await invoke(["accept", "--job", h.id, "--approver", "ci", "--verification-digest", "stale", "--code", "version_history_omitted", "--output", "json"], h.engine());
+  assert.equal(stale.code, 4);
+  assert.equal(document(stale).refusal.code, "verification_unaccepted");
+  const codes = verification.value.findings.map(finding => finding.code);
+  if (codes.length) {
+    const accepted = await invoke(["accept", "--job", h.id, "--approver", "ci:review", "--verification-digest", verification.value.verificationDigest, ...codes.flatMap(code => ["--code", code, "--note", "Reviewed retained evidence"]), "--output", "json"], h.engine());
+    const value = document<{ verificationDigest: string; acceptedCodes: string[] }>(accepted).value;
+    assert.equal(accepted.code, 0);
+    assert.equal(value.verificationDigest, verification.value.verificationDigest);
+    assert.deepEqual([...value.acceptedCodes].sort(), [...codes].sort());
+  }
+  const closed = await invoke(["close", "--job", h.id, "--output", "json"], h.engine());
+  assert.equal(closed.code, 0);
+  assert.equal(document<{ state: string }>(closed).value.state, "closed");
+  const again = await invoke(["execute", "--job", h.id, "--output", "json"], h.engine());
+  assert.equal(again.code, 6);
+  assert.equal(document(again).refusal.code, "job_closed");
+});
+
+it("does not translate reader event refusals into a successful empty stream", async t => {
+  const h = await planned(t);
+  const engine = h.engine();
+  const reader = engine.reader({ id: h.id });
+  engine.reader = () => ({
+    ...reader,
+    async *events() { throw Object.assign(new Error("opaque"), { refusal: { code: "state_version_unsupported", message: "opaque", detail: { found: 99 } } }); },
   });
+  const result = await invoke(["status", "--job", h.id, "--output", "jsonl"], engine);
+  assert.equal(result.code, 8);
+  assert.equal(document(result).refusal.code, "state_version_unsupported");
+});
+
+it("explicit reclaim refuses a live writer rather than treating confirmation as force", async t => {
+  const h = await planned(t);
+  const owner = h.engine();
+  const acquired = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const holding = owner.withWriter({ id: h.id }, async () => { acquired.resolve(); await release.promise; });
+  void holding.then(outcome => { if (!outcome.ok) acquired.reject(new Error("Could not acquire test writer")); }, acquired.reject);
+  try {
+    await acquired.promise;
+    const result = await invoke(["reclaim", "--job", h.id, "--confirm", "--stop-worker", "--output", "json"], h.engine());
+    assert.equal(result.code, 3);
+    const doc = document(result);
+    assert.equal(doc.refusal.code, "lease_held");
+    assert.equal(doc.refusal.recovery?.recordedHostId, doc.refusal.recovery?.thisHostId);
+    const reader = h.engine();
+    try {
+      const status = await reader.reader({ id: h.id }).status();
+      assert.ok(status.ok);
+      assert.equal(status.value.ownership.held, true);
+      assert.equal(status.value.ownership.pid, process.pid);
+    } finally { reader.close(); }
+  } finally { release.resolve(); await holding; owner.close(); }
 });

@@ -1,184 +1,65 @@
-import type {
-  ArtifactSet,
-  CheckResult,
-  ExecuteResult,
-  EventKind,
-  JobEvent,
-  JobState,
-  JobType,
-  Progress,
-  Refusal,
-  Row,
-  RowPage,
-  RowQuery,
-  TerminalState,
-  Verb,
-} from "../engine/types.ts";
+import type { ExecuteResult, JobType, Outcome, Refusal, RowPage, RowQuery } from "../engine/types.ts";
+import { CODE_BY_NAME } from "../engine/codes.ts";
+import { VERBS } from "../engine/types.ts";
+import { EXIT_CODE_BY_REFUSAL_CODE, exitCodeForRefusalCode } from "./exit-codes.ts";
 
 export const SCHEMA_VERSION = 1 as const;
-
-export type OutputMode = "text" | "json" | "jsonl";
-export type CommandName = Verb | "accept" | "reclaim" | "web";
-
-export interface JobEnvelope {
-  id: string;
-  type: JobType;
-}
-
-export interface JsonEnvelope<T> {
-  schemaVersion: typeof SCHEMA_VERSION;
-  command: CommandName;
-  commandId: string;
-  job: JobEnvelope;
-  ok: true;
-  value: T;
-}
-
-export interface RefusalEnvelope {
-  schemaVersion: typeof SCHEMA_VERSION;
-  command: CommandName;
-  commandId: string;
-  job: JobEnvelope;
+export interface JobEnvelope { id: string; type: JobType | null }
+export type AdapterOutcome<T = unknown> = Outcome<T> | {
   ok: false;
-  refusal: Refusal;
+  refusal: Omit<Refusal, "code"> & { code: string };
+};
+
+export function buildReviewEnvelope(query: RowQuery, page: RowPage) {
+  return { query: { ...query, cursor: query.cursor ?? null }, ...page };
 }
 
-export type CommandEnvelope<T> = JsonEnvelope<T> | RefusalEnvelope;
-
-export interface ReviewEnvelope {
-  query: RowQuery;
-  facets: RowPage["facets"];
-  rows: Row[];
-  nextCursor: string | null;
-  totalRows: number;
+export function terminalEnvelopeForExecute(result: ExecuteResult) {
+  return { ...result, state: result.outcome };
 }
 
-export interface EventEnvelope {
-  schemaVersion: typeof SCHEMA_VERSION;
-  command: CommandName;
-  commandId: string;
-  job: JobEnvelope;
-  cursor: number;
-  at: string;
-  verb: Verb;
-  phase: Verb;
-  kind: EventKind;
-  payload: Record<string, unknown>;
-}
-
-export interface TerminalEnvelope {
-  state: TerminalState;
-  resumable: boolean;
-  checkpoint: string | null;
-  committedUnits?: number;
-  budget?: { failedAttempts: number; failedUnitRatio: number };
-}
-
-export interface ExecuteEnvelope {
-  outcome: ExecuteResult["outcome"];
-  checkpoint: string | null;
-  committedUnits: number;
-  budget?: ExecuteResult["budget"];
-  terminal: TerminalEnvelope;
-}
-
-export interface JsonlEventEnvelope {
-  schemaVersion: typeof SCHEMA_VERSION;
-  command: CommandName;
-  commandId: string;
-  job: JobEnvelope;
-  cursor: number;
-  at: string;
-  verb: Verb;
-  phase: Verb;
-  kind: EventKind;
-  payload: Record<string, unknown>;
-}
-
-export function terminalEnvelopeForExecute(result: ExecuteResult): TerminalEnvelope {
-  if (result.outcome === "completed") {
-    return { state: "completed", resumable: false, checkpoint: result.checkpoint };
+  const enums: Record<string, readonly unknown[]> = {
+    ok: [true, false],
+    resumable: [true, false],
+    workerStatus: ["alive", "absent", "unknown"],
+    jobType: ["file_migration", "teams_archive"],
+    phase: VERBS,
+    verb: VERBS,
+    kind: ["policy_outcome", "planned_omission", "finding", "refusal", "phase_started", "phase_completed", "check_result", "unit_committed", "progress", "terminal", "cli", "web", null],
+    state: ["new", "planned", "approved", "executing", "interrupted", "blocked", "needs_attention", "verified", "closed", "cancelled", "completed", "pending", "done", "current", "checkpoint"],
+    terminalState: ["completed", "interrupted", "blocked", "cancelled", null],
+    outcome: ["completed", "interrupted", "blocked", "cancelled", "completed_with_accepted_exceptions"],
+    mode: ["interactive", "unattended"],
+    format: ["json", "jsonl", "html", "csv"],
+    unit: ["bytes", "items", "records", "assets", "conversations"],
+    status: ["pass", "fail", "skip"],
+  };
+// Inspect only contract-bearing members. Arbitrary provider evidence, prose, and
+// code-specific detail are not new enum namespaces for the adapter to interpret.
+export function knownContract(value: unknown): boolean {
+  if (Array.isArray(value)) return value.every(knownContract);
+  if (!value || typeof value !== "object") return true;
+  const object = value as Record<string, unknown>;
+  for (const [key, entry] of Object.entries(object)) {
+    if (key === "code" && (typeof entry !== "string" || (!Object.hasOwn(CODE_BY_NAME, entry) && !Object.hasOwn(EXIT_CODE_BY_REFUSAL_CODE, entry)))) return false;
+    if (Object.hasOwn(enums, key) && !enums[key]!.includes(entry)) return false;
+    if (["value", "payload", "review", "rows", "facets", "checks", "findings", "outstandingFindings", "rail", "ownership", "progress", "artifacts", "refusal", "currentPlan", "plan"].includes(key) && !knownContract(entry)) return false;
+    if (["acceptedCodes", "acceptedExceptions"].includes(key) && Array.isArray(entry) && entry.some(code => typeof code !== "string" || !Object.hasOwn(CODE_BY_NAME, code))) return false;
   }
+  return true;
+}
 
-  if (result.outcome === "blocked") {
-    const envelope: TerminalEnvelope = {
-      state: "blocked",
-      resumable: true,
-      checkpoint: result.checkpoint,
-      committedUnits: result.committedUnits,
-    };
-    if (result.budget !== undefined) {
-      envelope.budget = result.budget;
+export function outcomeExit(command: string, outcome: AdapterOutcome): number {
+  if (!knownContract(outcome)) return 1;
+  if (!outcome.ok) return exitCodeForRefusalCode(outcome.refusal.code);
+  if (command === "execute") {
+    const result = outcome.value as ExecuteResult;
+    switch (result.outcome) {
+      case "completed": return 0;
+      case "interrupted": return 130;
+      case "blocked": return 5;
+      default: return 1;
     }
-    return envelope;
   }
-
-  return {
-    state: "interrupted",
-    resumable: true,
-    checkpoint: result.checkpoint,
-    committedUnits: result.committedUnits,
-  };
-}
-
-export function buildReviewEnvelope(query: RowQuery, page: RowPage): ReviewEnvelope {
-  return {
-    query,
-    facets: page.facets,
-    rows: page.rows,
-    nextCursor: page.nextCursor,
-    totalRows: page.totalRows,
-  };
-}
-
-export function terminalStateFromJobState(state: JobState): TerminalState | null {
-  if (state === "closed") return "completed";
-  if (state === "cancelled") return "cancelled";
-  return null;
-}
-
-export function attachEventEnvelope(
-  base: Omit<EventEnvelope, "payload">,
-  payload: Record<string, unknown>,
-): EventEnvelope {
-  return { ...base, payload };
-}
-
-export function jsonlEnvelopeFromEvent(
-  event: JobEvent,
-  base: Omit<JsonlEventEnvelope, "payload">,
-): JsonlEventEnvelope {
-  return { ...base, payload: event.payload };
-}
-
-export function isProgressPayload(payload: unknown): payload is Progress {
-  return (
-    typeof payload === "object" &&
-    payload !== null &&
-    "unit" in payload &&
-    "done" in payload &&
-    "total" in payload &&
-    typeof payload.unit === "string" &&
-    typeof payload.done === "number" &&
-    (typeof payload.total === "number" || payload.total === null)
-  );
-}
-
-export function isCheckResultPayload(payload: unknown): payload is CheckResult {
-  return (
-    typeof payload === "object" &&
-    payload !== null &&
-    "id" in payload &&
-    "title" in payload &&
-    "status" in payload &&
-    typeof payload.id === "string" &&
-    typeof payload.title === "string" &&
-    typeof payload.status === "string"
-  );
-}
-
-export function isArtifactSet(value: unknown): value is ArtifactSet {
-  return (
-    typeof value === "object" && value !== null && "artifacts" in value && "reportDigest" in value
-  );
+  return 0;
 }
