@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "qualifiedRoutes": [],
+  "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
+  "transferVersion": "v1.75.0",
+  "macosMinimumVersion": "13.5",
+  "desktopCells": [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+    "win32-arm64",
+    "win32-x64"
+  ],
+  "gates": [
+    {
+      "id": "installed_artifact_matrix",
+      "status": "not_run",
+      "command": "npm run check:package",
+      "scope": "Run on every exact native desktop architecture; hosted CLI success does not prove native GUI behavior."
+    },
+    {
+      "id": "native_desktop_lifecycle_matrix",
+      "status": "not_run",
+      "command": "npm run check:package -- --desktop",
+      "scope": "Inspect the actual installed native window on all six cells. Native custom-protocol readiness alone does not prove ten-verb lifecycle parity or the absence of listeners; retain the separate per-cell launch/interaction evidence."
+    },
+    {
+      "id": "real_tenant_route_matrix",
+      "status": "blocked",
+      "reason": "No live tenant or Shared Drive credentials and no real immutable qualified-route bundles are available. Missing consent, licensing, enabled options, representative in-scope assets, or disposable fixture permissions must refuse without publishing qualification.",
+      "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
+      "scope": "Exact source/destination/backend/options/guarantee-set tuple, pinned transfer version, and each desktop cell. No credential or captured-output import can assert successful qualification."
+    },
+    {
+      "id": "file_live_source_path_guard",
+      "status": "blocked",
+      "reason": "SharePoint rejects the source names that would exercise the driver's path-representability guard. The file suite requires an actual live source entry reaching that guard before publishing full qualification. A Graph invalid-name rejection or a separately labelled private-provenance-capacity refusal does not substitute for this proof.",
+      "code": "unqualified_route",
+      "gate": "file_live_path_unrepresentable_fixture_unavailable"
+    }
+  ],
+  "nativePrerequisites": {
+    "darwin": "macOS 13.5 or newer with system WebKit and Node 24, on x64 or arm64. The user explicitly raised the floor to match the retained Node baseline.",
+    "win32": "An interactive Windows 10/11 session and WebView2; WebView2 may need separate administration on Windows 10.",
+    "linux": "A real X11 or Wayland desktop, WebKitGTK 4.1 and libxdo. Missing these blocks web only; there is no listener or external-browser fallback. Official Node GNU/Linux binaries require kernel 4.18+ and glibc 2.28+."
+  }
+}
