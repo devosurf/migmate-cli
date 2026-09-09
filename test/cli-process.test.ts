@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { it, type TestContext } from "node:test";
 import { stringify as stringifyToml } from "smol-toml";
-import { CLI_JOB_CONFIG, CLI_ARCHIVE_CONFIG } from "./cli-fixture.ts";
-import type { JobEvent, JobStatus, JobType, PlanRevision, RowPage } from "../src/engine/index.ts";
+import { CLI_JOB_CONFIG, CLI_ARCHIVE_CONFIG, FIXTURE_TIME } from "./cli-fixture.ts";
+import type { JobEvent, JobStatus, JobType, PlanRevision, RecoveryReport, RowPage } from "../src/engine/index.ts";
 
 interface WireEvent extends JobEvent { schemaVersion: number; commandId: string }
 interface Document<T> { ok: boolean; value: T; refusal?: { code: string } }
 interface ChildResult { code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }
+interface DestinationRecord { id: string; name: string; kind: string; content: string }
 interface Running {
   child: ChildProcessWithoutNullStreams;
   events: WireEvent[];
@@ -25,6 +26,8 @@ function setup(t: TestContext, type: JobType = "file_migration") {
   const destination = join(root, "destination.json");
   const config = join(root, "input.toml");
   writeFileSync(config, stringifyToml(type === "teams_archive" ? CLI_ARCHIVE_CONFIG : CLI_JOB_CONFIG));
+  let now = Date.parse(FIXTURE_TIME);
+  const destinationRecords = (): DestinationRecord[] => existsSync(destination) ? JSON.parse(readFileSync(destination, "utf8")) : [];
   const children = new Set<ChildProcessWithoutNullStreams>();
   t.after(async () => {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -33,7 +36,7 @@ function setup(t: TestContext, type: JobType = "file_migration") {
   });
   const start = (argv: string[], slow = false): Running => {
     const child = spawn(process.execPath, [fileURLToPath(new URL("./cli-process-fixture.ts", import.meta.url)), ...argv], {
-      env: { ...process.env, CLI_TEST_HOME: home, CLI_TEST_DESTINATION: destination, CLI_TEST_DELAY: slow ? "300" : "0" }, stdio: "pipe",
+      env: { ...process.env, CLI_TEST_HOME: home, CLI_TEST_DESTINATION: destination, CLI_TEST_DELAY: slow ? "300" : "0", CLI_TEST_NOW: new Date(now).toISOString() }, stdio: "pipe",
     });
     children.add(child);
     const emitter = new EventEmitter();
@@ -86,7 +89,44 @@ function setup(t: TestContext, type: JobType = "file_migration") {
     assert.equal(approval.value.planDigest, plan.value.planDigest);
     return id;
   };
-  return { root, home, destination, start, command, approve };
+  const reclaimKilledWriter = async (id: string, observed: WireEvent[]) => {
+    const before = await command<JobStatus>(["status", "--job", id]);
+    assert.equal(before.value.state, "executing");
+    assert.equal(before.value.ownership.held, true);
+    assert.notEqual(before.value.lastCheckpoint, null);
+    const replay = start(["status", "--job", id, "--output", "jsonl"]);
+    assert.equal((await replay.done).code, 0);
+    assert.equal(replay.events.filter(event => event.verb === "execute" && event.kind === "terminal").length, 0);
+    for (const event of observed) {
+      const durable = replay.events.find(candidate => candidate.cursor === event.cursor);
+      assert.ok(durable);
+      assert.deepEqual(durable.payload, event.payload);
+      assert.equal(durable.kind, event.kind);
+    }
+    const fresh = await start(["reclaim", "--job", id, "--confirm", "--output", "json"]).done;
+    assert.equal(fresh.code, 3, fresh.stdout);
+    assert.equal(JSON.parse(fresh.stdout).refusal.code, "lease_held");
+    // Advance only the injected engine clock. The owner is a real dead process;
+    // production's thirty-second expiry and explicit-reclaim rules stay intact.
+    now += 30_001;
+    const refused = await start(["execute", "--job", id, "--output", "json"]).done;
+    assert.equal(refused.code, 3, refused.stdout);
+    assert.equal(JSON.parse(refused.stdout).refusal.code, "lease_held");
+    const unchanged = await command<JobStatus>(["status", "--job", id]);
+    assert.equal(unchanged.value.state, before.value.state);
+    assert.deepEqual(unchanged.value.ownership, before.value.ownership);
+    assert.equal(unchanged.value.lastCheckpoint, before.value.lastCheckpoint);
+    const reclaimed = await command<RecoveryReport>(["reclaim", "--job", id, "--confirm"]);
+    assert.equal(reclaimed.value.reclaimable, true);
+    assert.equal(reclaimed.value.workerAlive, false);
+    assert.equal(reclaimed.value.holder?.heartbeatAgeMs, 30_001);
+    const ready = await command<JobStatus>(["status", "--job", id]);
+    assert.equal(ready.value.state, "interrupted");
+    assert.equal(ready.value.resumable, true);
+    assert.equal(ready.value.ownership.held, false);
+    assert.equal(ready.value.lastCheckpoint, before.value.lastCheckpoint);
+  };
+  return { root, home, destination, destinationRecords, start, command, approve, reclaimKilledWriter };
 }
 
 // Windows child.kill("SIGINT") terminates instead of generating console Ctrl-C.
@@ -160,19 +200,29 @@ it("SIGKILL leaves durable commits replayable and a clean resume has no duplicat
   const h = setup(t);
   const id = await h.approve();
   const running = h.start(["execute", "--job", id, "--output", "jsonl"], true);
-  await running.event(event => event.verb === "execute" && event.kind === "unit_committed");
+  // A prepared intent is already a unit commit. Wait for persisted destination
+  // bytes, not merely the first unit, before asserting remote output survives.
+  await running.event(event => event.verb === "execute" && event.kind === "unit_committed"
+    && h.destinationRecords().some(row => row.kind === "file" && row.name === "0.txt" && row.content === "content-0"));
   running.child.kill("SIGKILL");
   assert.equal((await running.done).signal, "SIGKILL");
-  const prior: Array<{ id: string; name: string; kind: string }> = JSON.parse(readFileSync(h.destination, "utf8"));
+  const prior = h.destinationRecords();
+  assert.ok(prior.some(row => row.kind === "file" && row.name === "0.txt" && row.content === "content-0"));
+  await h.reclaimKilledWriter(id, running.events);
   const resumed = h.start(["execute", "--job", id, "--output", "jsonl"]);
   const done = await resumed.done;
   assert.equal(done.code, 0, done.stdout);
   assert.equal(done.stderr, "");
   assert.deepEqual(resumed.events.filter(event => event.kind === "terminal").map(event => event.payload.state), ["completed"]);
-  const after: Array<{ id: string; name: string; kind: string }> = JSON.parse(readFileSync(h.destination, "utf8"));
-  for (const row of prior) assert.equal(after.find(candidate => candidate.name === row.name)?.id, row.id);
+  const after = h.destinationRecords();
+  for (const row of prior) {
+    const resumedRow = after.find(candidate => candidate.name === row.name);
+    assert.equal(resumedRow?.id, row.id);
+    assert.equal(resumedRow?.content, row.content);
+  }
   assert.equal(after.filter(row => row.kind === "file").length, 8);
   assert.equal(new Set(after.map(row => row.name)).size, after.length);
+  assert.equal(new Set(after.map(row => row.id)).size, after.length);
 });
 
 it("the actual source bin symlink initializes structured output for usage failures", { timeout: 30000, skip: process.platform === "win32" }, async t => {
@@ -206,7 +256,10 @@ for (const stop of ["SIGINT", "SIGKILL", "EPIPE"] as const) {
     else running.child.kill(stop);
     const stopped = await running.done;
     assert.equal(stopped.stderr, "");
-    if (stop === "SIGKILL") assert.equal(stopped.signal, "SIGKILL");
+    if (stop === "SIGKILL") {
+      assert.equal(stopped.signal, "SIGKILL");
+      await h.reclaimKilledWriter(id, running.events);
+    }
     else {
       assert.equal(stopped.code, stop === "SIGINT" ? 130 : 141);
       const checkpoint = await h.command<JobStatus>(["status", "--job", id]);

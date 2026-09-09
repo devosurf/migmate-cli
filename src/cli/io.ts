@@ -92,7 +92,7 @@ export function processIo(): { io: Io; dispose(): void } {
         isTTY: Boolean(process.stdin.isTTY),
         async readLine(signal) {
           const input = createInterface({ input: process.stdin });
-          try { return await input.question("", signal ? { signal } : undefined); }
+          try { return await input.question("", signal ? { signal } : {}); }
           catch { return null; }
           finally { input.close(); process.stdin.pause(); }
         },
