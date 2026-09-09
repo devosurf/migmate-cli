@@ -737,10 +737,6 @@ async function verifyItem(
 
 async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
   const provider: FileProvider = ctx.provider;
-  if (provider.preflight) {
-    if (!ctx.jobDirectory) throw new Error("Provider preflight requires DriverContext.jobDirectory");
-    yield* provider.preflight({ jobType: "file_migration", config: ctx.config, jobDirectory: ctx.jobDirectory });
-  }
   for (const mapping of ctx.config.mappings) {
     const source = await provider.resolveSourceRoot(mapping);
     const destination = await provider.resolveDestinationFolder(mapping);

@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import type { CheckResult } from "../types.ts";
 import type { CommitRow, FileCommitRow } from "../commit.ts";
 import type { DriverContext } from "./types.ts";
 import type {
@@ -96,11 +95,6 @@ export type FileContext = DriverContext<FileMigrationConfig> & {
 };
 
 export type FileProvider = ProviderPort & {
-  preflight?(input: {
-    jobType: "file_migration";
-    config: unknown;
-    jobDirectory: string;
-  }): AsyncIterable<CheckResult>;
   readSourceItem?(input: { driveId: string; itemId: string }): Promise<SourceEntry | null>;
   readDestinationObject?(input: {
     driveId: string;
