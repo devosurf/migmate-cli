@@ -323,6 +323,31 @@ describe("file migration through the engine", () => {
     assert.equal(value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean, true);
   });
 
+  it("records terminal source and destination failures without abandoning healthy sibling items", async (t) => {
+    class DeniedItemsPort extends FakeFileMigrationPort {
+      override openSourceContent(sourceItemId: string): AsyncIterable<Uint8Array> {
+        if (sourceItemId === "binary") throw Object.assign(new Error("Source denied"), { status: 403, transient: false });
+        return super.openSourceContent(sourceItemId);
+      }
+      override async uploadDestinationContent(input: Parameters<FileProvider["uploadDestinationContent"]>[0]) {
+        if (input.name === "zero.bin") throw Object.assign(new Error("Destination denied"), { status: 403, transient: false });
+        return super.uploadDestinationContent(input);
+      }
+    }
+    const input = fixture();
+    input.sourceItems.push({ id: "healthy", parentId: "source-root", name: "healthy.bin", kind: "file", content: "preserved" });
+    const port = new DeniedItemsPort(input);
+    const h = await harness(t, input, config, port);
+    await approve(h);
+    await execute(h);
+    const outcomes = await codes(h, "execute");
+    assert.equal(outcomes.get("binary"), "source_read_failed");
+    assert.equal(outcomes.get("zero"), "destination_write_failed");
+    assert.equal(port.snapshotDestination().find((entry) => entry.path === "healthy.bin")?.checksum, hash("preserved"));
+    assert.equal(port.snapshotDestination().some((entry) => entry.path === "report.docx"), false);
+    assert.equal(port.snapshotDestination().some((entry) => entry.path === "nested/zero.bin"), false);
+  });
+
   it("requeues a source that changes during streaming instead of accepting its old bytes", async (t) => {
     const input = fixture();
     input.sourceMutations = [{ sourceItemId: "binary", nextContent: "new source version", nextEtag: "changed-during-read" }];

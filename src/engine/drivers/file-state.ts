@@ -185,9 +185,20 @@ export async function assertSourceStable(
   provider: FileProvider,
   source: SourceEntry | FileSourceEvidence,
 ): Promise<void> {
-  const current = provider.readSourceItem
-    ? await provider.readSourceItem({ driveId: source.driveId, itemId: source.id })
-    : await provider.resolveSourceRoot({ sourceDriveId: source.driveId, sourceItemId: source.id });
+  let current: SourceEntry | null;
+  try {
+    current = provider.readSourceItem
+      ? await provider.readSourceItem({ driveId: source.driveId, itemId: source.id })
+      : await provider.resolveSourceRoot({ sourceDriveId: source.driveId, sourceItemId: source.id });
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    const fault = error as Error & { status?: number; statusCode?: number; transient?: boolean };
+    const status = fault.status ?? fault.statusCode;
+    if (fault.transient === true || status === undefined || status < 400 || status >= 500 || status === 429) throw error;
+    throw Object.assign(new Error("Source metadata could not be read"), {
+      code: "source_read_failed", status, transient: false,
+    });
+  }
   if (!current || sourceToken(current) !== sourceToken(source)) {
     throw new FileSourceChangedError(source.id);
   }

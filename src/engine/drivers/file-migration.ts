@@ -435,6 +435,8 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
     for (const source of tree.sources.slice(1)) {
       ctx.signal?.throwIfAborted();
       const prior = states.get(source.id);
+      let effect: "source" | "destination" = "destination";
+      try {
       const omission = excluded.has(source.id) ? "omitted_by_rule" : sourceOmission(source);
       const inheritedBlock = source.parentId === null ? undefined : blocked.get(source.parentId);
       if (omission || inheritedBlock) {
@@ -455,7 +457,9 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
       }
       const observed = problem.observation;
       if (phase === "verify") {
-        yield await verifyItem(ctx, tree, source, prior, observed, parentId, ++done);
+        const verified = await verifyItem(ctx, tree, source, prior, observed, parentId, done + 1);
+        done += 1;
+        yield verified;
         if (source.kind === "folder" && observed) parents.set(source.id, observed.entry.id);
         continue;
       }
@@ -519,9 +523,11 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
         continue;
       }
 
+      effect = "source";
       const staged = source.kind === "file" ? await stageSource(ctx, source) : null;
       try {
         if (!staged) await assertSourceStable(provider, source);
+        effect = "destination";
         const fingerprint = staged?.sha256 ?? null;
         const expected = expectedOutput(mapping, source, parentId, fingerprint, prior);
         const lastOutput = prior?.status === "prepared" ? prior.previous?.output : prior?.output;
@@ -624,9 +630,28 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
         yield commit(ctx, phase, row(ctx, phase, mapping, source, differences[0] ?? prepared.action, completed),
           [...differences.map((code) => finding(ctx, phase, code, source.id)), ...metadataOmissions(ctx, phase, source)],
           `result:${prepared.attempt}`, ++done);
+        effect = "source";
         await assertSourceStable(provider, source);
       } finally {
         await staged?.dispose();
+      }
+      } catch (error) {
+        if (!(error instanceof Error) || error.name === "AbortError") throw error;
+        const detail = error as Error & { code?: string; status?: number; statusCode?: number; transient?: boolean; retryable?: boolean };
+        if (detail.transient === true || detail.retryable === true) throw error;
+        const status = detail.status ?? detail.statusCode;
+        const registered = detail.code === undefined ? undefined : CODE_BY_NAME[detail.code];
+        const fileCode = registered?.jobType === "file_migration" && registered.kind !== "policy_outcome"
+          ? registered.code : undefined;
+        if (detail.transient !== false && !fileCode &&
+          !(status !== undefined && status >= 400 && status < 500 && status !== 429)) throw error;
+        const code = fileCode ?? (effect === "source" ? "source_read_failed" : "destination_write_failed");
+        blocked.set(source.id, code);
+        const latest = states.get(source.id);
+        yield commit(ctx, phase, row(ctx, phase, mapping, source, code, latest), [
+          finding(ctx, phase, code, source.id, { path: source.path, effect,
+            ...(status === undefined ? {} : { status }) }),
+        ], `terminal:${latest?.attempt ?? "read"}`, ++done);
       }
     }
 
