@@ -11,7 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   ok, refuse, VERBS,
   type ApprovalRecord, type ArtifactSet, type CheckResult, type EventKind,
-  type FacetCount, type JobEvent, type JobState, type JobStatus, type JobType,
+  type FacetCount, type FileItemRow, type JobEvent, type JobState, type JobStatus, type JobType,
   type Outcome, type PlanRevision, type Progress, type Row, type RowPage,
   type RowPhase, type RowQuery, type VerificationRevision, type Verb,
 } from "../types.ts";
@@ -212,7 +212,7 @@ function rowToCommit(table: "item" | "conversation", row: SqlRow): CommitRow {
     size: nullableNumber(row.size), sourceEtag: nullableString(row.source_etag),
     sourceFingerprint: nullableString(row.source_fingerprint), destinationDriveId: nullableString(row.dest_drive_id),
     destinationFileId: nullableString(row.dest_file_id), destinationFingerprint: nullableString(row.dest_fingerprint),
-    provenanceState: row.provenance_state as FileCommitRow["provenanceState"],
+    provenanceState: row.provenance_state as FileItemRow["provenanceState"],
   };
   return {
     ...base, jobType: "teams_archive", scopeEntryId: String(row.scope_entry_id),
@@ -511,7 +511,7 @@ class StoreImpl implements Store {
       const payload = typeof row.payload === "string" ? JSON.parse(row.payload) as PlanRevisionRecord : undefined;
       const inputs = Object.fromEntries(this.db.prepare("SELECT key,value FROM plan_input WHERE rev=? ORDER BY key").all(revision).map(entry => [String(entry.key),String(entry.value)]));
       const count = this.db.prepare("SELECT (SELECT COUNT(*) FROM item WHERE rev=? AND phase='plan') + (SELECT COUNT(*) FROM conversation WHERE rev=? AND phase='plan') AS count").get(revision,revision)!;
-      return { ...payload, revision, planDigest:String(row.plan_digest),inputsDigest:String(row.inputs_digest),createdAt:String(row.created_at),sourceInventoryAt:String(row.source_inventory_at),rowCount:Number(count.count),inputs,evidence:parseEvidence(row.evidence) };
+      return { ...payload, revision, planDigest:String(row.plan_digest),inputsDigest:String(row.inputs_digest),createdAt:String(row.created_at),sourceInventoryAt:String(row.source_inventory_at),rowCount:Number(count.count),inputs,evidence:parseEvidence(row.evidence),disclosures:payload?.disclosures ?? [],sections:payload?.sections ?? [] };
     });
   }
   writePlanRevision(record: PlanRevisionRecord): void {
@@ -528,7 +528,8 @@ class StoreImpl implements Store {
     const row = this.db.prepare("SELECT * FROM approval WHERE rev=? ORDER BY id DESC LIMIT 1").get(revision);
     if (row === undefined) return null;
     if (typeof row.payload === "string") return JSON.parse(row.payload) as ApprovalRecord;
-    return { revision:Number(row.rev),planDigest:String(row.plan_digest),approver:String(row.approver),mode:row.mode as ApprovalRecord["mode"],at:String(row.at) };
+    const approval = { revision:Number(row.rev),planDigest:String(row.plan_digest),approver:String(row.approver),mode:row.mode as ApprovalRecord["mode"],at:String(row.at) };
+    return { ...approval, approvalDigest:digestJson(approval) };
   }
   writeApproval(record: ApprovalRecord): void {
     this.db.prepare("INSERT INTO approval (rev,plan_digest,approver,mode,at,payload) VALUES (?,?,?,?,?,?)")
@@ -930,13 +931,17 @@ class StoreImpl implements Store {
       const archiveProgress = archive === undefined ? undefined : {conversations:Number(archive.conversations),totalConversations:Number(archive.total_conversations),records:Number(archive.records),totalRecords:nullableNumber(archive.total_records),assets:Number(archive.assets),bytes:Number(archive.bytes)};
       if (archiveProgress !== undefined) progress = {unit:"records",done:archiveProgress.records,total:archiveProgress.totalRecords};
       // Strip internal inputs/evidence from the adapter-facing approval preview.
-      const currentPlan = plan === null ? null : {revision:plan.revision,planDigest:plan.planDigest,inputsDigest:plan.inputsDigest,createdAt:plan.createdAt,sourceInventoryAt:plan.sourceInventoryAt,rowCount:plan.rowCount,...(plan.disclosures === undefined ? {} : {disclosures:plan.disclosures}),...(plan.sections === undefined ? {} : {sections:plan.sections})};
+      const currentPlan = plan === null ? null : {revision:plan.revision,planDigest:plan.planDigest,inputsDigest:plan.inputsDigest,createdAt:plan.createdAt,sourceInventoryAt:plan.sourceInventoryAt,rowCount:plan.rowCount,disclosures:plan.disclosures,sections:plan.sections};
+      const resumable = job.state === "interrupted" || job.state === "blocked";
+      const terminalState = job.state === "interrupted" || job.state === "blocked" || job.state === "cancelled" ? job.state : job.state === "verified" || job.state === "needs_attention" || job.state === "closed" ? "completed" : null;
       return {
         jobId:job.id,jobType:job.type,state:job.state,schemaVersion:job.schemaVersion,rail,
         ownership:{held:lease !== null,heldByThisProcess:false,hostId:lease?.hostId ?? job.hostId,pid:lease?.pid ?? null,heartbeatAt:lease?.heartbeatAt ?? null,kind:lease?.kind ?? null},
         planRevision:job.planRevision,planDigest:plan?.planDigest ?? null,currentPlan,
         verificationDigest:verification?.verificationDigest ?? null,progress,lastCheckpoint:job.lastCheckpoint ?? lease?.lastCheckpoint ?? null,
         outstandingFindings:findings.filter(finding=>finding.kind !== "policy_outcome" && !accepted.has(finding.code)),
+        worker:{active:lease !== null && (lease.socketPath !== null || lease.workerPid !== null || lease.workerGroup !== null),group:lease?.workerGroup ?? null},
+        resumable,terminalState,
         ...(archiveProgress === undefined ? {} : {archiveProgress}),
       };
     });
@@ -958,7 +963,36 @@ function openInspector(path: string): DatabaseSync {
   }
   return db;
 }
-export function openReadStore(jobDir: string, opts: {migmateVersion:string;now:()=>Date}): Outcome<Store> {
+function inspectHost(db: DatabaseSync, opts: {hostId?:string;now:()=>Date}): Outcome<never> | null {
+  if (opts.hostId === undefined) return null;
+  const hostColumn = db.prepare("SELECT 1 FROM pragma_table_info('job') WHERE name='host_id'").get();
+  const persisted = hostColumn === undefined
+    ? tableExists(db,"job") ? db.prepare("SELECT last_checkpoint FROM job LIMIT 1").get() : undefined
+    : db.prepare("SELECT host_id,last_checkpoint FROM job LIMIT 1").get();
+  const lease = tableExists(db,"lease") ? db.prepare("SELECT host_id,owner_uuid,pid,process_start_time,heartbeat_at,kind,worker_group,last_checkpoint FROM lease WHERE id=1").get() : undefined;
+  const hostId = nullableString(persisted?.host_id) ?? nullableString(lease?.host_id);
+  if (hostId === null || opts.hostId === hostId) return null;
+  const heartbeatAt = nullableString(lease?.heartbeat_at);
+  const recovery = {
+    workerAlive:false,
+    workerStatus:"unknown" as const,
+    recordedHostId:hostId,
+    thisHostId:opts.hostId,
+    holder:lease === undefined ? null : {
+      ownerUuid:String(lease.owner_uuid),
+      pid:Number(lease.pid),
+      processStartTime:Number(lease.process_start_time),
+      heartbeatAt:String(lease.heartbeat_at),
+      heartbeatAgeMs:Math.max(0,opts.now().getTime()-Date.parse(String(lease.heartbeat_at))),
+      kind:lease.kind as "cli"|"web",
+    },
+    workerGroup:nullableString(lease?.worker_group),
+    lastCheckpoint:nullableString(persisted?.last_checkpoint) ?? nullableString(lease?.last_checkpoint),
+    reclaimable:false,
+  };
+  return refuse("foreign_host","This job belongs to another host",{detail:{hostId,pid:nullableNumber(lease?.pid),heartbeatAt},recovery});
+}
+export function openReadStore(jobDir: string, opts: {migmateVersion:string;now:()=>Date;hostId:string}): Outcome<Store> {
   const path = join(resolve(jobDir),"state.db");
   if (!existsSync(path)) return refuse("job_not_found","Job state does not exist");
   safePath(resolve(jobDir),"state.db");
@@ -966,11 +1000,15 @@ export function openReadStore(jobDir: string, opts: {migmateVersion:string;now:(
   try {
     const version = schemaVersion(inspector);
     if (version !== SCHEMA_VERSION) return versionRefusal(version);
+    const mismatch = inspectHost(inspector,opts);
+    if (mismatch) return mismatch;
   } finally { inspector.close(); }
   const db = new DatabaseSync(path,{open:true,readOnly:true,enableForeignKeyConstraints:false});
   try {
     const version = schemaVersion(db);
     if (version !== SCHEMA_VERSION) { db.close(); return versionRefusal(version); }
+    const mismatch = inspectHost(db,opts);
+    if (mismatch) { db.close(); return mismatch; }
     // No tree creation, migrations, or writable PRAGMAs on a reader connection.
     return ok(new StoreImpl(db,resolve(jobDir),opts,false));
   } catch (error) { db.close(); throw error; }
@@ -985,33 +1023,8 @@ export function openStore(jobDir: string, opts: {migmateVersion:string;now:()=>D
       const version = schemaVersion(inspector);
       if (version !== null && (version > SCHEMA_VERSION || version < 1)) return versionRefusal(version);
       if (version === null && opts.existingOnly) return refuse("job_not_found","Job state does not contain a job");
-      const hostColumn = inspector.prepare("SELECT 1 FROM pragma_table_info('job') WHERE name='host_id'").get();
-      const persisted = hostColumn === undefined
-        ? tableExists(inspector,"job") ? inspector.prepare("SELECT last_checkpoint FROM job LIMIT 1").get() : undefined
-        : inspector.prepare("SELECT host_id,last_checkpoint FROM job LIMIT 1").get();
-      const lease = tableExists(inspector,"lease") ? inspector.prepare("SELECT host_id,owner_uuid,pid,process_start_time,heartbeat_at,kind,worker_group,last_checkpoint FROM lease WHERE id=1").get() : undefined;
-      const hostId = nullableString(persisted?.host_id) ?? nullableString(lease?.host_id);
-      if (opts.hostId !== undefined && hostId !== null && opts.hostId !== hostId) {
-        const heartbeatAt = nullableString(lease?.heartbeat_at);
-        const recovery = {
-          workerAlive:false,
-          workerStatus:"unknown" as const,
-          recordedHostId:hostId,
-          thisHostId:opts.hostId,
-          holder:lease === undefined ? null : {
-            ownerUuid:String(lease.owner_uuid),
-            pid:Number(lease.pid),
-            processStartTime:Number(lease.process_start_time),
-            heartbeatAt:String(lease.heartbeat_at),
-            heartbeatAgeMs:Math.max(0,opts.now().getTime()-Date.parse(String(lease.heartbeat_at))),
-            kind:lease.kind as "cli"|"web",
-          },
-          workerGroup:nullableString(lease?.worker_group),
-          lastCheckpoint:nullableString(persisted?.last_checkpoint) ?? nullableString(lease?.last_checkpoint),
-          reclaimable:false,
-        };
-        return refuse("foreign_host","This job belongs to another host",{detail:{hostId,pid:nullableNumber(lease?.pid),heartbeatAt},recovery});
-      }
+      const mismatch = inspectHost(inspector,opts);
+      if (mismatch) return mismatch;
     } finally { inspector.close(); }
   } else if (opts.existingOnly) {
     return refuse("job_not_found","Job state does not exist");

@@ -190,14 +190,14 @@ export interface PlanRevision {
   createdAt: string;
   sourceInventoryAt: string;
   rowCount: number;
-  disclosures?: string[];
-  sections?: { id: string; title: string; body: string }[];
+  disclosures: string[];
+  sections: { id: string; title: string; body: string }[];
   review?: RowPage;
 }
 
 export interface ApprovalRecord {
   revision: number;
-  approvalDigest?: string;
+  approvalDigest: string;
   planDigest: string;
   approver: string;
   mode: "interactive" | "unattended";
@@ -313,14 +313,14 @@ export interface JobStatus {
   };
   planRevision: number | null;
   planDigest: string | null;
-  currentPlan?: PlanRevision | null;
+  currentPlan: PlanRevision | null;
   verificationDigest: string | null;
   progress: Progress | null;
   lastCheckpoint: string | null;
   outstandingFindings: FacetCount[];
-  worker?: { active: boolean; group: string | null };
-  resumable?: boolean;
-  terminalState?: TerminalState | null;
+  worker: { active: boolean; group: string | null };
+  resumable: boolean;
+  terminalState: TerminalState | null;
   archiveProgress?: {
     conversations: number;
     totalConversations: number;

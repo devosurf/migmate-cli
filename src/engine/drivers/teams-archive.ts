@@ -56,11 +56,14 @@ async function expandPlan(ctx: ArchiveDriverContext): Promise<ArchivePlan> {
   const window = { from: config.window.from, to: config.window.to ?? ctx.now().toISOString() };
   if (window.from >= window.to) throw new TypeError("Archive window must have from < to");
   const expanded = await provider(ctx).expand(config, ctx.signal);
-  return { version: 1, window, timezone: config.timezone, config, ...expanded };
+  return { version: 1, window, timezone: config.timezone, config: { ...config, window }, ...expanded };
 }
 function approvedPlan(ctx: ArchiveDriverContext): ArchivePlan {
   const plan = ctx.resume.archivePlan;
-  if (!plan || canonicalJson(plan.config) !== canonicalJson(parseArchiveConfig(ctx.config))) throw new ArchiveEffectError("plan_revision_required");
+  if (!plan) throw new ArchiveEffectError("plan_revision_required");
+  const config = parseArchiveConfig(ctx.config);
+  const window = { ...config.window, to: config.window.to ?? plan.window.to };
+  if (canonicalJson({ ...plan.config, window: plan.window }) !== canonicalJson({ ...config, window })) throw new ArchiveEffectError("plan_revision_required");
   return plan;
 }
 function omissions(plan: ArchivePlan, conversation: ArchiveConversation): string[] {
