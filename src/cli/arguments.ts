@@ -100,7 +100,7 @@ export function parseInvocation(argv: string[]): Invocation {
   const phase = get("--phase") ?? (command === "verify" ? "verify" : "plan");
   if (!["plan", "execute", "verify"].includes(phase)) throw new UsageFailure("Unsupported review phase.");
   const sort = get("--sort");
-  if (sort !== undefined && !["natural", "path", "size"].includes(sort)) throw new UsageFailure("Unsupported row ordering.");
+  if (sort !== undefined && sort !== "natural" && sort !== "path" && sort !== "size") throw new UsageFailure("Unsupported row ordering.");
   const query: RowQuery = { phase: phase as RowQuery["phase"], limit: integer("--limit", 1, 1000) ?? 200 };
   const codes = values.get("--code") ?? [];
   if (codes.length) query.codes = codes;
@@ -110,7 +110,7 @@ export function parseInvocation(argv: string[]): Invocation {
   if (cursor !== undefined) query.cursor = cursor;
   if (search !== undefined) query.search = search;
   if (revision !== undefined) query.revision = revision;
-  if (sort !== undefined) query.sort = sort as RowQuery["sort"];
+  if (sort !== undefined) query.sort = sort;
   const invocation: Invocation = {
     command: (command || "status") as CommandName, output: output as OutputMode,
     home: resolve(get("--home") ?? defaultHome()), codes, notes: values.get("--note") ?? [],

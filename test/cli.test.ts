@@ -75,7 +75,7 @@ it("parses TOML and JSON inputs but persists only typed TOML references through 
   const secret = join(h.home, "operator-secret");
   const sentinel = "CLI-SECRET-CANARY-do-not-copy";
   writeFileSync(secret, sentinel, { mode: 0o600 });
-  const config = { ...CLI_JOB_CONFIG, rclone: { config: { resolver: "file", path: secret, mode: "0600" } } };
+  const config = { ...CLI_JOB_CONFIG, rclone: { config: { resolver: "file", path: secret, mode: "0600" }, sourceRemote: "sharepoint", destinationRemote: "google" } };
   const input = join(h.home, "operator.json");
   writeFileSync(input, JSON.stringify(config));
   const init = document<{ id: string }>(await invoke(["init", "--type", "file_migration", "--config", input, "--output", "json"], h.engine()));
