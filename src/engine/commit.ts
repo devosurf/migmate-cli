@@ -12,7 +12,10 @@
 import type { CodeKind, ProgressUnit, RowPhase } from "./types.ts";
 import type { FileState, FileSourceEvidence, FileScope } from "./drivers/file-state.ts";
 import type {
-  ArchivePlan, ArchiveRecord, ArchiveCollectionEvidence, ArchivePackageFile,
+  ArchivePlan,
+  ArchiveRecord,
+  ArchiveCollectionEvidence,
+  ArchivePackageFile,
 } from "./providers/archive.ts";
 
 export interface CommitRowBase {

@@ -36,12 +36,15 @@ export interface TransferSupervisor {
   transferWorkerVersion: ProviderPort["transferWorkerVersion"];
   call<T>(socketPath: string, method: string, input?: Record<string, unknown>): Promise<T>;
   openRead(socketPath: string, remotePath: string): AsyncIterable<Uint8Array>;
-  openSource(socketPath: string, input: {
-    remote: string;
-    parentId: string;
-    name: string;
-    driveId: string;
-  }): AsyncIterable<Uint8Array>;
+  openSource(
+    socketPath: string,
+    input: {
+      remote: string;
+      parentId: string;
+      name: string;
+      driveId: string;
+    },
+  ): AsyncIterable<Uint8Array>;
   close(): Promise<void>;
 }
 
@@ -71,9 +74,15 @@ interface Worker {
 }
 
 function fail(code: string, reason: string, evidence: Record<string, unknown> = {}): ProviderFault {
-  return new ProviderFault(code, "The managed transfer worker could not satisfy its safety contract.", {
-    check: "transfer_worker", reason, ...evidence,
-  });
+  return new ProviderFault(
+    code,
+    "The managed transfer worker could not satisfy its safety contract.",
+    {
+      check: "transfer_worker",
+      reason,
+      ...evidence,
+    },
+  );
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -93,19 +102,36 @@ function systemEnvironment(): NodeJS.ProcessEnv {
   // An allowlist also excludes RCLONE_*, all proxy variants, activation FDs,
   // loader injection, cloud credentials and inherited debug/log destinations.
   const result: NodeJS.ProcessEnv = {};
-  for (const key of ["SystemRoot", "SYSTEMROOT", "WINDIR", "HOME", "USERPROFILE", "LANG", "LC_ALL", "TZ"]) {
+  for (const key of [
+    "SystemRoot",
+    "SYSTEMROOT",
+    "WINDIR",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+  ]) {
     if (process.env[key] !== undefined) result[key] = process.env[key];
   }
   return result;
 }
 
-function spawnOwned(binary: string, args: string[], env: NodeJS.ProcessEnv, cwd?: string,
-  capture = false): OwnedChild {
+function spawnOwned(
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd?: string,
+  capture = false,
+): OwnedChild {
   const deferred = Promise.withResolvers<void>();
   let child: ChildProcess;
   try {
     child = spawn(binary, args, {
-      env, ...(cwd === undefined ? {} : { cwd }), shell: false, windowsHide: true,
+      env,
+      ...(cwd === undefined ? {} : { cwd }),
+      shell: false,
+      windowsHide: true,
       stdio: ["ignore", capture ? "pipe" : "ignore", "ignore"],
     });
   } catch {
@@ -114,9 +140,15 @@ function spawnOwned(binary: string, args: string[], env: NodeJS.ProcessEnv, cwd?
   const owned = { process: child, exited: deferred.promise, alive: true };
   child.on("error", () => {
     // A failed kill can also emit error. Only a failed spawn proves absence.
-    if (child.pid === undefined) { owned.alive = false; deferred.resolve(); }
+    if (child.pid === undefined) {
+      owned.alive = false;
+      deferred.resolve();
+    }
   });
-  child.once("exit", () => { owned.alive = false; deferred.resolve(); });
+  child.once("exit", () => {
+    owned.alive = false;
+    deferred.resolve();
+  });
   return owned;
 }
 
@@ -137,14 +169,28 @@ async function terminate(child: OwnedChild): Promise<void> {
   // ChildProcess owns the unreaped child identity. Never signal a persisted PID,
   // a PID obtained from the socket, or a process group inferred from either.
   if (!child.alive) return;
-  try { child.process.kill("SIGTERM"); } catch { /* Escalate only this owned child. */ }
+  try {
+    child.process.kill("SIGTERM");
+  } catch {
+    /* Escalate only this owned child. */
+  }
   if (await awaitExit(child, STOP_TIMEOUT)) return;
-  try { child.process.kill("SIGKILL"); } catch { /* The exit predicate remains authoritative. */ }
-  if (!(await awaitExit(child, STOP_TIMEOUT))) throw fail("recovery_required", "worker_shutdown_timeout");
+  try {
+    child.process.kill("SIGKILL");
+  } catch {
+    /* The exit predicate remains authoritative. */
+  }
+  if (!(await awaitExit(child, STOP_TIMEOUT)))
+    throw fail("recovery_required", "worker_shutdown_timeout");
 }
 
-async function capture(binary: string, args: string[], env: NodeJS.ProcessEnv,
-  timeout = REQUEST_TIMEOUT, cwd?: string): Promise<{ value: unknown; success: boolean }> {
+async function capture(
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  timeout = REQUEST_TIMEOUT,
+  cwd?: string,
+): Promise<{ value: unknown; success: boolean }> {
   const child = spawnOwned(binary, args, env, cwd, true);
   const chunks: Buffer[] = [];
   let size = 0;
@@ -156,25 +202,39 @@ async function capture(binary: string, args: string[], env: NodeJS.ProcessEnv,
       child.process.stdout?.destroy();
     } else chunks.push(chunk);
   });
-  child.process.stdout?.on("error", () => { overflow = true; });
+  child.process.stdout?.on("error", () => {
+    overflow = true;
+  });
   const finished = await awaitExit(child, timeout);
   if (!finished || overflow) {
     await terminate(child);
-    throw fail("provider_failed", finished ? "worker_response_too_large" : "worker_request_timeout");
+    throw fail(
+      "provider_failed",
+      finished ? "worker_response_too_large" : "worker_request_timeout",
+    );
   }
   // Pipes can finish after exit; a inherited pipe must not defeat the deadline.
-  if (child.process.stdout !== null && !child.process.stdout.readableEnded && !child.process.stdout.destroyed) {
+  if (
+    child.process.stdout !== null &&
+    !child.process.stdout.readableEnded &&
+    !child.process.stdout.destroyed
+  ) {
     const drained = Promise.withResolvers<void>();
     const timer = setTimeout(() => child.process.stdout?.destroy(), STOP_TIMEOUT);
     child.process.stdout.once("end", drained.resolve);
     child.process.stdout.once("close", drained.resolve);
-    try { await drained.promise; }
-    finally { clearTimeout(timer); }
+    try {
+      await drained.promise;
+    } finally {
+      clearTimeout(timer);
+    }
   }
   if (overflow) throw fail("provider_failed", "worker_response_too_large");
   try {
-    return { value: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown,
-      success: child.process.exitCode === 0 };
+    return {
+      value: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown,
+      success: child.process.exitCode === 0,
+    };
   } catch {
     throw fail("provider_failed", "worker_response_invalid");
   }
@@ -191,7 +251,8 @@ async function digest(path: string): Promise<string> {
 }
 
 function version(value: unknown): string {
-  if (!record(value) || typeof value.version !== "string") throw fail("preflight_failed", "version_proof_invalid");
+  if (!record(value) || typeof value.version !== "string")
+    throw fail("preflight_failed", "version_proof_invalid");
   const parsed = /^v(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.version);
   if (parsed !== null) {
     const parts = [Number(parsed[1]), Number(parsed[2]), Number(parsed[3])];
@@ -210,8 +271,12 @@ async function privateDirectory(path: string): Promise<void> {
   if (process.platform !== "win32") {
     await chmod(path, 0o700);
     const info = await lstat(path);
-    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 ||
-      (process.getuid !== undefined && info.uid !== process.getuid())) {
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      (info.mode & 0o777) !== 0o700 ||
+      (process.getuid !== undefined && info.uid !== process.getuid())
+    ) {
       throw fail("preflight_failed", "run_directory_permissions");
     }
     return;
@@ -219,8 +284,10 @@ async function privateDirectory(path: string): Promise<void> {
   // chmod is not an ACL seam on Windows. Set and verify an owner-only DACL
   // before rclone is spawned; PowerShell is resolved explicitly, never via PATH.
   const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
-  if (systemRoot === undefined || !isAbsolute(systemRoot)) throw fail("preflight_failed", "run_directory_permissions");
-  const script = "$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; " +
+  if (systemRoot === undefined || !isAbsolute(systemRoot))
+    throw fail("preflight_failed", "run_directory_permissions");
+  const script =
+    "$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; " +
     "$acl=New-Object System.Security.AccessControl.DirectorySecurity; $acl.SetOwner($sid); " +
     "$acl.SetAccessRuleProtection($true,$false); " +
     "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); " +
@@ -233,35 +300,61 @@ async function privateDirectory(path: string): Promise<void> {
     "($rules[0].FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne " +
     "[System.Security.AccessControl.FileSystemRights]::FullControl){exit 1}; " +
     "Write-Output 'true'";
-  const result = await capture(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    ["-NoProfile", "-NonInteractive", "-Command", script], { ...systemEnvironment(), MIGMATE_RUN_DIRECTORY: path });
-  if (!result.success || result.value !== true) throw fail("preflight_failed", "run_directory_permissions");
+  const result = await capture(
+    join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { ...systemEnvironment(), MIGMATE_RUN_DIRECTORY: path },
+  );
+  if (!result.success || result.value !== true)
+    throw fail("preflight_failed", "run_directory_permissions");
 }
 
-function response(socketPath: string, path: string, method: string, body: string | undefined,
-  authorization: string | undefined, timeout: number): Promise<IncomingMessage> {
+function response(
+  socketPath: string,
+  path: string,
+  method: string,
+  body: string | undefined,
+  authorization: string | undefined,
+  timeout: number,
+): Promise<IncomingMessage> {
   return withSocketPath(socketPath, (connectPath) => {
-  const deferred = Promise.withResolvers<IncomingMessage>();
-  try {
-    const req = request({ socketPath: connectPath, path, method, agent: false,
-      headers: {
-        ...(body === undefined ? {} : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }),
-        ...(authorization === undefined ? {} : { Authorization: authorization }),
-      },
-    }, (res) => { clearTimeout(timer); deferred.resolve(res); });
-    // A hard header deadline covers connect hangs as well as idle sockets.
-    const timer = setTimeout(() => req.destroy(), timeout);
-    req.once("error", (error) => {
-      clearTimeout(timer);
-      const denied = record(error) && (error.code === "EACCES" || error.code === "EPERM");
-      deferred.reject(fail(denied ? "recovery_required" : "provider_failed",
-        denied ? "worker_probe_failed" : "worker_unreachable"));
-    });
-    req.end(body);
-  } catch {
-    deferred.reject(fail("provider_failed", "worker_request_invalid"));
-  }
-  return deferred.promise;
+    const deferred = Promise.withResolvers<IncomingMessage>();
+    try {
+      const req = request(
+        {
+          socketPath: connectPath,
+          path,
+          method,
+          agent: false,
+          headers: {
+            ...(body === undefined
+              ? {}
+              : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }),
+            ...(authorization === undefined ? {} : { Authorization: authorization }),
+          },
+        },
+        (res) => {
+          clearTimeout(timer);
+          deferred.resolve(res);
+        },
+      );
+      // A hard header deadline covers connect hangs as well as idle sockets.
+      const timer = setTimeout(() => req.destroy(), timeout);
+      req.once("error", (error) => {
+        clearTimeout(timer);
+        const denied = record(error) && (error.code === "EACCES" || error.code === "EPERM");
+        deferred.reject(
+          fail(
+            denied ? "recovery_required" : "provider_failed",
+            denied ? "worker_probe_failed" : "worker_unreachable",
+          ),
+        );
+      });
+      req.end(body);
+    } catch {
+      deferred.reject(fail("provider_failed", "worker_request_invalid"));
+    }
+    return deferred.promise;
   });
 }
 
@@ -291,10 +384,17 @@ function basic(worker: Worker): string {
 }
 
 function objectPath(path: string): string {
-  if (path.length === 0 || path.split("/").some((part) => part === "" || part === "." || part === "..") ||
-    /[\u0000-\u001f\u007f\\]/u.test(path)) throw fail("preflight_failed", "remote_object_path_invalid");
-  try { return path.split("/").map(encodeURIComponent).join("/"); }
-  catch { throw fail("preflight_failed", "remote_object_path_invalid"); }
+  if (
+    path.length === 0 ||
+    path.split("/").some((part) => part === "" || part === "." || part === "..") ||
+    /[\u0000-\u001f\u007f\\]/u.test(path)
+  )
+    throw fail("preflight_failed", "remote_object_path_invalid");
+  try {
+    return path.split("/").map(encodeURIComponent).join("/");
+  } catch {
+    throw fail("preflight_failed", "remote_object_path_invalid");
+  }
 }
 
 function remoteName(name: string): void {
@@ -304,7 +404,8 @@ function remoteName(name: string): void {
 function quoteOption(value: string): string {
   // The serve route's bracket parser runs after URL decoding, so bracket values
   // cannot be made safe merely by percent encoding. Graph IDs do not require them.
-  if (!value || /[\[\]\u0000-\u001f\u007f/\\]/u.test(value)) throw fail("preflight_failed", "source_identity_invalid");
+  if (!value || /[\[\]\u0000-\u001f\u007f/\\]/u.test(value))
+    throw fail("preflight_failed", "source_identity_invalid");
   return `'${value.replaceAll("'", "''")}'`;
 }
 
@@ -325,19 +426,35 @@ export function createTransferSupervisor(options: {
       let root: string | null = null;
       if (candidate === undefined) {
         root = await realpath(PACKAGE_ROOT);
-        const manifest: unknown = JSON.parse(await readFile(join(root, "vendor", "rclone", "manifest.json"), "utf8"));
-        if (!record(manifest) || manifest.schemaVersion !== 1 || manifest.version !== "v1.75.0" || !record(manifest.binaries)) {
+        const manifest: unknown = JSON.parse(
+          await readFile(join(root, "vendor", "rclone", "manifest.json"), "utf8"),
+        );
+        if (
+          !record(manifest) ||
+          manifest.schemaVersion !== 1 ||
+          manifest.version !== "v1.75.0" ||
+          !record(manifest.binaries)
+        ) {
           throw fail("preflight_failed", "binary_manifest_invalid");
         }
         candidate = manifest.binaries[`${process.platform}-${process.arch}`];
       }
-      if (!record(candidate) || typeof candidate.path !== "string" || typeof candidate.sha256 !== "string" ||
-        !/^[a-f0-9]{64}$/.test(candidate.sha256) || typeof candidate.provenance !== "string" ||
-        !/^[\x20-\x7e]{1,512}$/.test(candidate.provenance)) throw fail("preflight_failed", "binary_provenance_required");
-      if (root !== null && isAbsolute(candidate.path)) throw fail("preflight_failed", "binary_manifest_invalid");
-      if (root === null && !isAbsolute(candidate.path)) throw fail("preflight_failed", "binary_path_must_be_absolute");
+      if (
+        !record(candidate) ||
+        typeof candidate.path !== "string" ||
+        typeof candidate.sha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(candidate.sha256) ||
+        typeof candidate.provenance !== "string" ||
+        !/^[\x20-\x7e]{1,512}$/.test(candidate.provenance)
+      )
+        throw fail("preflight_failed", "binary_provenance_required");
+      if (root !== null && isAbsolute(candidate.path))
+        throw fail("preflight_failed", "binary_manifest_invalid");
+      if (root === null && !isAbsolute(candidate.path))
+        throw fail("preflight_failed", "binary_path_must_be_absolute");
       const path = await realpath(root === null ? candidate.path : resolve(root, candidate.path));
-      if (root !== null && !inside(root, path)) throw fail("preflight_failed", "binary_manifest_escape");
+      if (root !== null && !inside(root, path))
+        throw fail("preflight_failed", "binary_manifest_escape");
       if (!(await lstat(path)).isFile()) throw fail("preflight_failed", "binary_unreadable");
       return { path, sha256: candidate.sha256, provenance: candidate.provenance };
     } catch (error) {
@@ -348,19 +465,34 @@ export function createTransferSupervisor(options: {
 
   async function rehash(expected: BinaryProof): Promise<void> {
     try {
-      if (await digest(expected.path) !== expected.sha256) throw fail("plan_revision_required", "binary_changed");
+      if ((await digest(expected.path)) !== expected.sha256)
+        throw fail("plan_revision_required", "binary_changed");
     } catch {
       throw fail("plan_revision_required", "binary_changed");
     }
   }
 
   async function establishProof(): Promise<BinaryProof> {
-    if (proof !== null) { await rehash(proof); return structuredClone(proof); }
+    if (proof !== null) {
+      await rehash(proof);
+      return structuredClone(proof);
+    }
     const binary = await resolveBinary();
-    if (await digest(binary.path) !== binary.sha256) throw fail("preflight_failed", "binary_checksum_mismatch");
+    if ((await digest(binary.path)) !== binary.sha256)
+      throw fail("preflight_failed", "binary_checksum_mismatch");
     // v1.75.0 has no `version --json`. This runs that exact executable's
     // core/version locally, with no listener; live RC proof is separate below.
-    const own = await capture(binary.path, ["rc", "--loopback", "core/version", "--config", process.platform === "win32" ? "NUL" : "/dev/null"], systemEnvironment());
+    const own = await capture(
+      binary.path,
+      [
+        "rc",
+        "--loopback",
+        "core/version",
+        "--config",
+        process.platform === "win32" ? "NUL" : "/dev/null",
+      ],
+      systemEnvironment(),
+    );
     if (!own.success || !record(own.value)) throw fail("preflight_failed", "version_proof_invalid");
     const checked = version(own.value);
     const established = { ...binary, version: checked, versionJson: own.value };
@@ -372,8 +504,11 @@ export function createTransferSupervisor(options: {
   async function proveBinary(): Promise<BinaryProof> {
     if (proving !== null) return structuredClone(await proving);
     proving = establishProof();
-    try { return await proving; }
-    finally { proving = null; }
+    try {
+      return await proving;
+    } finally {
+      proving = null;
+    }
   }
 
   async function socketWithinJob(socketPath: string): Promise<void> {
@@ -392,40 +527,75 @@ export function createTransferSupervisor(options: {
   async function verifySocket(worker: Worker): Promise<void> {
     try {
       const directory = await lstat(worker.directory);
-      if (!sameFile(directory, worker.directoryIdentity) || directory.isSymbolicLink()) throw new Error();
+      if (!sameFile(directory, worker.directoryIdentity) || directory.isSymbolicLink())
+        throw new Error();
       const socket = await lstat(worker.socketPath);
-      if (socket.isSymbolicLink() || (process.platform !== "win32" && !socket.isSocket()) ||
-        (worker.socketIdentity !== null && !sameFile(socket, worker.socketIdentity))) throw new Error();
+      if (
+        socket.isSymbolicLink() ||
+        (process.platform !== "win32" && !socket.isSocket()) ||
+        (worker.socketIdentity !== null && !sameFile(socket, worker.socketIdentity))
+      )
+        throw new Error();
       worker.socketIdentity ??= socket;
     } catch {
       throw fail("recovery_required", "worker_ownership_unproven");
     }
   }
 
-  async function rc(socketPath: string, method: string, input: Record<string, unknown>,
-    worker: Worker | undefined, timeout = REQUEST_TIMEOUT): Promise<{ status: number; answered: boolean; value: unknown }> {
+  async function rc(
+    socketPath: string,
+    method: string,
+    input: Record<string, unknown>,
+    worker: Worker | undefined,
+    timeout = REQUEST_TIMEOUT,
+  ): Promise<{ status: number; answered: boolean; value: unknown }> {
     let body: string;
-    try { body = JSON.stringify(input); }
-    catch { throw fail("provider_failed", "worker_request_invalid"); }
+    try {
+      body = JSON.stringify(input);
+    } catch {
+      throw fail("provider_failed", "worker_request_invalid");
+    }
     if (process.platform === "win32") {
-      const executable = worker?.proof ?? await proveBinary();
+      const executable = worker?.proof ?? (await proveBinary());
       await rehash(executable);
       // Go's native client supplies AF_UNIX on Windows. Request JSON and Basic
       // credentials are environment-only, not CLI arguments or files.
-      const result = await capture(executable.path,
-        ["rc", "--unix-socket", basename(socketPath), method, "--config", "NUL"], {
-          ...systemEnvironment(), RCLONE_JSON: body,
-          ...(worker === undefined ? {} : { RCLONE_USER: worker.user, RCLONE_PASS: worker.password }),
-        }, timeout, dirname(socketPath));
-      const status = result.success ? 200 : record(result.value) && typeof result.value.status === "number"
-        ? result.value.status : 503;
+      const result = await capture(
+        executable.path,
+        ["rc", "--unix-socket", basename(socketPath), method, "--config", "NUL"],
+        {
+          ...systemEnvironment(),
+          RCLONE_JSON: body,
+          ...(worker === undefined
+            ? {}
+            : { RCLONE_USER: worker.user, RCLONE_PASS: worker.password }),
+        },
+        timeout,
+        dirname(socketPath),
+      );
+      const status = result.success
+        ? 200
+        : record(result.value) && typeof result.value.status === "number"
+          ? result.value.status
+          : 503;
       // The native client synthesizes 503 only when dialing fails; a real HTTP
       // 503 still proves liveness. Never publish its diagnostic error string.
-      const noConnection = !result.success && status === 503 && record(result.value) &&
-        typeof result.value.error === "string" && result.value.error.startsWith("connection failed:");
+      const noConnection =
+        !result.success &&
+        status === 503 &&
+        record(result.value) &&
+        typeof result.value.error === "string" &&
+        result.value.error.startsWith("connection failed:");
       return { status, answered: !noConnection, value: status === 200 ? result.value : null };
     }
-    const res = await response(socketPath, `/${method}`, "POST", body, worker === undefined ? undefined : basic(worker), timeout);
+    const res = await response(
+      socketPath,
+      `/${method}`,
+      "POST",
+      body,
+      worker === undefined ? undefined : basic(worker),
+      timeout,
+    );
     const status = res.statusCode ?? 0;
     if (status !== 200 || worker === undefined) {
       res.destroy();
@@ -434,18 +604,29 @@ export function createTransferSupervisor(options: {
     return { status, answered: true, value: await readJson(res, timeout) };
   }
 
-  async function authenticated(worker: Worker, method: string, input: Record<string, unknown> = {}, timeout = REQUEST_TIMEOUT): Promise<unknown> {
+  async function authenticated(
+    worker: Worker,
+    method: string,
+    input: Record<string, unknown> = {},
+    timeout = REQUEST_TIMEOUT,
+  ): Promise<unknown> {
     if (!worker.child.alive) throw fail("provider_failed", "worker_exited");
     await verifySocket(worker);
     const result = await rc(worker.socketPath, method, input, worker, timeout);
-    if (result.status !== 200) throw fail("provider_failed", "worker_request_failed", { status: result.status });
+    if (result.status !== 200)
+      throw fail("provider_failed", "worker_request_failed", { status: result.status });
     return result.value;
   }
 
   async function liveVersion(worker: Worker): Promise<string> {
     await rehash(worker.proof);
     const current = await authenticated(worker, "core/version");
-    if (!record(current) || current.version !== worker.proof.version || current.isGit !== false || current.isBeta !== false) {
+    if (
+      !record(current) ||
+      current.version !== worker.proof.version ||
+      current.isGit !== false ||
+      current.isBeta !== false
+    ) {
       throw fail("plan_revision_required", "worker_version_changed");
     }
     await rehash(worker.proof);
@@ -456,7 +637,8 @@ export function createTransferSupervisor(options: {
     if (worker.child.alive) throw fail("recovery_required", "worker_shutdown_timeout");
     try {
       const info = await lstat(worker.directory);
-      if (!sameFile(info, worker.directoryIdentity) || info.isSymbolicLink()) throw fail("recovery_required", "worker_ownership_unproven");
+      if (!sameFile(info, worker.directoryIdentity) || info.isSymbolicLink())
+        throw fail("recovery_required", "worker_ownership_unproven");
       await rm(worker.directory, { recursive: true, force: true });
     } catch (error) {
       if (error instanceof ProviderFault) throw error;
@@ -471,20 +653,32 @@ export function createTransferSupervisor(options: {
     if (worker.stopping !== null) return worker.stopping;
     worker.stopping = (async () => {
       if (cooperative && worker.child.alive) {
-        try { await authenticated(worker, "job/stopgroup", { group: worker.group }, STOP_TIMEOUT); }
-        catch { /* The directly owned child remains eligible for bounded termination. */ }
-        try { await authenticated(worker, "core/quit", {}, STOP_TIMEOUT); }
-        catch { /* core/quit may close its connection before replying. */ }
+        try {
+          await authenticated(worker, "job/stopgroup", { group: worker.group }, STOP_TIMEOUT);
+        } catch {
+          /* The directly owned child remains eligible for bounded termination. */
+        }
+        try {
+          await authenticated(worker, "core/quit", {}, STOP_TIMEOUT);
+        } catch {
+          /* core/quit may close its connection before replying. */
+        }
         await awaitExit(worker.child, STOP_TIMEOUT);
       }
       await terminate(worker.child);
       await cleanup(worker);
     })();
-    try { await worker.stopping; }
-    catch (error) { worker.stopping = null; throw error; }
+    try {
+      await worker.stopping;
+    } catch (error) {
+      worker.stopping = null;
+      throw error;
+    }
   }
 
-  async function start(input: Parameters<ProviderPort["startTransferWorker"]>[0]): Promise<TransferWorkerHandle> {
+  async function start(
+    input: Parameters<ProviderPort["startTransferWorker"]>[0],
+  ): Promise<TransferWorkerHandle> {
     if (closed) throw fail("provider_failed", "supervisor_closed");
     const executable = await proveBinary();
     let directory: string | null = null;
@@ -495,17 +689,22 @@ export function createTransferSupervisor(options: {
       const configuredRoot = resolve(options.jobDirectory);
       const requested = resolve(configuredRoot, input.runDirectory);
       const relativeRoot = inside(configuredRoot, requested) ? configuredRoot : root;
-      if (!inside(relativeRoot, requested)) throw fail("preflight_failed", "run_directory_outside_job");
+      if (!inside(relativeRoot, requested))
+        throw fail("preflight_failed", "run_directory_outside_job");
       // Resolve the job's external spelling (e.g. macOS /tmp) once, then reject
       // every symlink below it before creating the private worker directory.
       const relativeParts = relative(relativeRoot, requested).split(sep).filter(Boolean);
       let parent = root;
       for (const part of relativeParts) {
         const next = join(parent, part);
-        try { await mkdir(next, { mode: 0o700 }); }
-        catch (error) { if (!record(error) || error.code !== "EEXIST") throw error; }
+        try {
+          await mkdir(next, { mode: 0o700 });
+        } catch (error) {
+          if (!record(error) || error.code !== "EEXIST") throw error;
+        }
         const info = await lstat(next);
-        if (!info.isDirectory() || info.isSymbolicLink()) throw fail("preflight_failed", "run_directory_invalid");
+        if (!info.isDirectory() || info.isSymbolicLink())
+          throw fail("preflight_failed", "run_directory_invalid");
         parent = next;
       }
       directory = await mkdtemp(join(parent, "rc-"));
@@ -514,36 +713,99 @@ export function createTransferSupervisor(options: {
       const socketPath = join(directory, "s");
       const user = randomBytes(18).toString("hex");
       const password = randomBytes(32).toString("base64url");
-      const configPath = options.configPath === null ? (process.platform === "win32" ? "NUL" : "/dev/null") : options.configPath;
-      if (!isAbsolute(configPath) && configPath !== "NUL") throw fail("preflight_failed", "worker_config_path_invalid");
+      const configPath =
+        options.configPath === null
+          ? process.platform === "win32"
+            ? "NUL"
+            : "/dev/null"
+          : options.configPath;
+      if (!isAbsolute(configPath) && configPath !== "NUL")
+        throw fail("preflight_failed", "worker_config_path_invalid");
       await rehash(executable);
       const group = `migmate-${randomBytes(16).toString("hex")}`;
       input.onPrepare?.({ socketPath, group, executablePath: executable.path });
-      const child = spawnOwned(executable.path, ["rcd", "--rc-addr", "unix://s",
-        "--rc-serve", "--config", configPath, "--cache-dir", directory, "--temp-dir", directory,
-        "--drive-skip-gdocs=true", "--drive-skip-shortcuts=true", "--drive-import-formats=",
-        "--drive-metadata-owner=off", "--drive-metadata-permissions=off", "--drive-metadata-labels=off",
-        "--metadata=false", "--onedrive-disable-site-permission=true", "--onedrive-expose-onenote-files=true",
-        "--retries=1", "--low-level-retries=1",
-        "--rc-server-read-timeout", "1h", "--rc-server-write-timeout", "1h"],
-      { ...systemEnvironment(), TMPDIR: directory, TEMP: directory, TMP: directory,
-        RCLONE_RC_USER: user, RCLONE_RC_PASS: password }, directory);
-      worker = { child, directory, directoryIdentity, socketPath,
-        socketIdentity: null, user, password, group,
-        proof: executable, stopping: null };
+      const child = spawnOwned(
+        executable.path,
+        [
+          "rcd",
+          "--rc-addr",
+          "unix://s",
+          "--rc-serve",
+          "--config",
+          configPath,
+          "--cache-dir",
+          directory,
+          "--temp-dir",
+          directory,
+          "--drive-skip-gdocs=true",
+          "--drive-skip-shortcuts=true",
+          "--drive-import-formats=",
+          "--drive-metadata-owner=off",
+          "--drive-metadata-permissions=off",
+          "--drive-metadata-labels=off",
+          "--metadata=false",
+          "--onedrive-disable-site-permission=true",
+          "--onedrive-expose-onenote-files=true",
+          "--retries=1",
+          "--low-level-retries=1",
+          "--rc-server-read-timeout",
+          "1h",
+          "--rc-server-write-timeout",
+          "1h",
+        ],
+        {
+          ...systemEnvironment(),
+          TMPDIR: directory,
+          TEMP: directory,
+          TMP: directory,
+          RCLONE_RC_USER: user,
+          RCLONE_RC_PASS: password,
+        },
+        directory,
+      );
+      worker = {
+        child,
+        directory,
+        directoryIdentity,
+        socketPath,
+        socketIdentity: null,
+        user,
+        password,
+        group,
+        proof: executable,
+        stopping: null,
+      };
       workers.set(socketPath, worker);
       if (child.process.pid === undefined) throw fail("preflight_failed", "worker_spawn_failed");
-      input.onSpawn?.({ socketPath, pid: child.process.pid, version: executable.version, group, executablePath: executable.path });
+      input.onSpawn?.({
+        socketPath,
+        pid: child.process.pid,
+        version: executable.version,
+        group,
+        executablePath: executable.path,
+      });
       const deadline = Date.now() + READY_TIMEOUT;
       let ready = false;
       while (Date.now() < deadline && child.alive) {
         try {
-          const probe = await rc(socketPath, "rc/noop", {}, undefined, Math.min(1_000, deadline - Date.now()));
+          const probe = await rc(
+            socketPath,
+            "rc/noop",
+            {},
+            undefined,
+            Math.min(1_000, deadline - Date.now()),
+          );
           if (!probe.answered) throw fail("provider_failed", "worker_unreachable");
           if (probe.status !== 401) throw fail("preflight_failed", "worker_auth_not_enforced");
-          await authenticated(worker, "rc/noop", {}, Math.min(1_000, Math.max(1, deadline - Date.now())));
+          await authenticated(
+            worker,
+            "rc/noop",
+            {},
+            Math.min(1_000, Math.max(1, deadline - Date.now())),
+          );
           const identity = await authenticated(worker, "core/pid", {}, 1_000);
-          if (!record(identity) || identity.pid !== child.process.pid) throw fail("recovery_required", "worker_ownership_unproven");
+          if (!record(identity) || identity.pid !== child.process.pid)
+            throw fail("recovery_required", "worker_ownership_unproven");
           ready = true;
           break;
         } catch (error) {
@@ -555,7 +817,12 @@ export function createTransferSupervisor(options: {
       await liveVersion(worker);
       if (closed) throw fail("provider_failed", "supervisor_closed");
       if (child.process.pid === undefined) throw fail("preflight_failed", "worker_spawn_failed");
-      return { socketPath, pid: child.process.pid, version: executable.version, group: worker.group };
+      return {
+        socketPath,
+        pid: child.process.pid,
+        version: executable.version,
+        group: worker.group,
+      };
     } catch (error) {
       if (worker !== null) await shutdown(worker, false);
       else if (directory !== null && directoryIdentity !== null) {
@@ -586,9 +853,11 @@ export function createTransferSupervisor(options: {
     // turn it into a dead-worker observation and accidentally permit reclaim.
     const worker = workers.get(input.socketPath);
     if (worker === undefined || !worker.child.alive) return { alive: true, version: null };
-    try { return { alive: true, version: await liveVersion(worker) }; }
-    catch (error) {
-      if (error instanceof ProviderFault && error.code === "provider_failed") return { alive: true, version: null };
+    try {
+      return { alive: true, version: await liveVersion(worker) };
+    } catch (error) {
+      if (error instanceof ProviderFault && error.code === "provider_failed")
+        return { alive: true, version: null };
       throw error;
     }
   }
@@ -604,9 +873,18 @@ export function createTransferSupervisor(options: {
       const name = `read-${randomBytes(16).toString("hex")}`;
       const target = join(worker.directory, name);
       try {
-        await authenticated(worker, "operations/copyfile", {
-          srcFs: fs, srcRemote: path, dstFs: worker.directory, dstRemote: name, _group: worker.group,
-        }, 60 * 60 * 1_000);
+        await authenticated(
+          worker,
+          "operations/copyfile",
+          {
+            srcFs: fs,
+            srcRemote: path,
+            dstFs: worker.directory,
+            dstRemote: name,
+            _group: worker.group,
+          },
+          60 * 60 * 1_000,
+        );
         for await (const chunk of createReadStream(target)) yield chunk;
       } catch (error) {
         if (error instanceof ProviderFault) throw error;
@@ -616,9 +894,19 @@ export function createTransferSupervisor(options: {
       }
       return;
     }
-    const res = await response(worker.socketPath, `/${encodeURIComponent(`[${fs}]`)}/${encodedPath}`,
-      "GET", undefined, basic(worker), REQUEST_TIMEOUT);
-    if (res.statusCode !== 200) { const status = res.statusCode ?? 0; res.destroy(); throw fail("provider_failed", "worker_read_failed", { status }); }
+    const res = await response(
+      worker.socketPath,
+      `/${encodeURIComponent(`[${fs}]`)}/${encodedPath}`,
+      "GET",
+      undefined,
+      basic(worker),
+      REQUEST_TIMEOUT,
+    );
+    if (res.statusCode !== 200) {
+      const status = res.statusCode ?? 0;
+      res.destroy();
+      throw fail("provider_failed", "worker_read_failed", { status });
+    }
     const timer = setTimeout(() => res.destroy(), 60 * 60 * 1_000);
     res.setTimeout(REQUEST_TIMEOUT, () => res.destroy());
     try {
@@ -636,23 +924,35 @@ export function createTransferSupervisor(options: {
     async startTransferWorker(input) {
       const pending = start(input);
       starting.add(pending);
-      try { return await pending; }
-      finally { starting.delete(pending); }
+      try {
+        return await pending;
+      } finally {
+        starting.delete(pending);
+      }
     },
     probeTransferWorker,
-    async stopTransferWorker({ socketPath }) { await shutdown(owned(socketPath), true); },
-    async terminateTransferWorker({ socketPath }) { await shutdown(owned(socketPath), false); },
+    async stopTransferWorker({ socketPath }) {
+      await shutdown(owned(socketPath), true);
+    },
+    async terminateTransferWorker({ socketPath }) {
+      await shutdown(owned(socketPath), false);
+    },
     async transferWorkerVersion({ socketPath }) {
       const worker = workers.get(socketPath);
       if (worker === undefined) return (await probeTransferWorker({ socketPath })).version;
       if (!worker.child.alive) return null;
       return liveVersion(worker);
     },
-    async call<T>(socketPath: string, method: string, input: Record<string, unknown> = {}): Promise<T> {
-      if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*$/.test(method)) throw fail("provider_failed", "worker_method_invalid");
+    async call<T>(
+      socketPath: string,
+      method: string,
+      input: Record<string, unknown> = {},
+    ): Promise<T> {
+      if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*$/.test(method))
+        throw fail("provider_failed", "worker_method_invalid");
       const worker = owned(socketPath);
       if (worker.stopping !== null) throw fail("provider_failed", "worker_stopping");
-      return await authenticated(worker, method, { ...input, _group: worker.group }) as T;
+      return (await authenticated(worker, method, { ...input, _group: worker.group })) as T;
     },
     async *openRead(socketPath, remotePath) {
       const colon = remotePath.indexOf(":");
@@ -670,8 +970,11 @@ export function createTransferSupervisor(options: {
     async close() {
       closed = true;
       await Promise.allSettled(starting);
-      const results = await Promise.allSettled([...workers.values()].map((worker) => shutdown(worker, true)));
-      if (results.some((result) => result.status === "rejected")) throw fail("recovery_required", "worker_cleanup_failed");
+      const results = await Promise.allSettled(
+        [...workers.values()].map((worker) => shutdown(worker, true)),
+      );
+      if (results.some((result) => result.status === "rejected"))
+        throw fail("recovery_required", "worker_cleanup_failed");
     },
   };
 }

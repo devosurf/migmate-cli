@@ -220,12 +220,14 @@ function takeEffect(
   timing: "before" | "after" = "before",
   streaming = false,
 ): FakeEffectRule | undefined {
-  const rule = rules.find((candidate) =>
-    candidate.method === method &&
-    (candidate.objectId === undefined || candidate.objectId === objectId) &&
-    (candidate.timing ?? "before") === timing &&
-    (candidate.afterChunks !== undefined) === streaming &&
-    candidate.count > 0);
+  const rule = rules.find(
+    (candidate) =>
+      candidate.method === method &&
+      (candidate.objectId === undefined || candidate.objectId === objectId) &&
+      (candidate.timing ?? "before") === timing &&
+      (candidate.afterChunks !== undefined) === streaming &&
+      candidate.count > 0,
+  );
   if (rule) rule.count -= 1;
   return rule;
 }
@@ -235,7 +237,8 @@ async function* scriptedStream(
   rule?: FakeEffectRule,
   chunkSize = Math.max(1, Math.ceil(bytes.byteLength / 2)),
 ): AsyncIterable<Uint8Array> {
-  if (!Number.isSafeInteger(chunkSize) || chunkSize < 1) throw new Error("Invalid fixture chunk size");
+  if (!Number.isSafeInteger(chunkSize) || chunkSize < 1)
+    throw new Error("Invalid fixture chunk size");
   let chunks = 0;
   if (rule?.afterChunks === 0) throw rule.error;
   for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
@@ -345,7 +348,13 @@ export class FakeFileMigrationPort implements ProviderPort {
   }
 
   interruptAfterMarkerOnce(objectId: string): void {
-    this.scriptEffect({ method: "writeDestinationMarker", objectId, timing: "after", count: 1, error: lostResponse() });
+    this.scriptEffect({
+      method: "writeDestinationMarker",
+      objectId,
+      timing: "after",
+      count: 1,
+      error: lostResponse(),
+    });
   }
 
   interruptAfterUploadOnce(objectId: string): void {
@@ -361,7 +370,13 @@ export class FakeFileMigrationPort implements ProviderPort {
     objectId?: string,
     error: Error = lostResponse(),
   ): void {
-    this.effects.push({ method, ...(objectId === undefined ? {} : { objectId }), timing: "after", count: 1, error });
+    this.effects.push({
+      method,
+      ...(objectId === undefined ? {} : { objectId }),
+      timing: "after",
+      count: 1,
+      error,
+    });
   }
 
   setApplicationIdentity(identity: string): void {
@@ -398,7 +413,10 @@ export class FakeFileMigrationPort implements ProviderPort {
     return entry?.driveId === input.driveId ? cloneSource(entry) : null;
   }
 
-  async readDestinationObject(input: { driveId: string; objectId: string }): Promise<DestinationEntry | null> {
+  async readDestinationObject(input: {
+    driveId: string;
+    objectId: string;
+  }): Promise<DestinationEntry | null> {
     this.callLog.push(`readDestinationObject:${input.objectId}`);
     this.throwRetryAfter("readDestinationObject", input.objectId);
     const entry = this.destinationById[input.objectId];
@@ -431,10 +449,15 @@ export class FakeFileMigrationPort implements ProviderPort {
     if (patch.metadata !== undefined) entry.metadata = structuredClone(patch.metadata);
     if (patch.parentId !== undefined && patch.parentId !== entry.parentId) {
       const oldKey = entry.parentId ?? "";
-      this.sourceChildrenByParent[oldKey] = (this.sourceChildrenByParent[oldKey] ?? []).filter((id) => id !== entry.id);
+      this.sourceChildrenByParent[oldKey] = (this.sourceChildrenByParent[oldKey] ?? []).filter(
+        (id) => id !== entry.id,
+      );
       entry.parentId = patch.parentId;
       const nextKey = entry.parentId ?? "";
-      this.sourceChildrenByParent[nextKey] = [...(this.sourceChildrenByParent[nextKey] ?? []), entry.id];
+      this.sourceChildrenByParent[nextKey] = [
+        ...(this.sourceChildrenByParent[nextKey] ?? []),
+        entry.id,
+      ];
     }
 
     if (patch.identity !== undefined) {
@@ -725,7 +748,11 @@ export class FakeFileMigrationPort implements ProviderPort {
       modifiedAt: input.modifiedAt,
       mimeType: input.mimeType,
       reportedChecksum: this.withheldChecksums.has(targetId) ? null : hashBytes(bytes),
-      provenance: input.marker ? { ...input.marker } : existing?.provenance ? { ...existing.provenance } : null,
+      provenance: input.marker
+        ? { ...input.marker }
+        : existing?.provenance
+          ? { ...existing.provenance }
+          : null,
       content: bytes,
     };
     if (existing) {
@@ -787,10 +814,15 @@ export class FakeFileMigrationPort implements ProviderPort {
     const blocked = this.unavailableDestinationStreams.get(objectId);
     if (blocked) throw blocked;
     if (entry.content === null) throw destinationFault("destination_stream_unavailable", 403);
-    return scriptedStream(entry.content, takeEffect(this.effects, "streamDestinationContent", objectId, "before", true));
+    return scriptedStream(
+      entry.content,
+      takeEffect(this.effects, "streamDestinationContent", objectId, "before", true),
+    );
   }
 
-  async startTransferWorker(input: Parameters<ProviderPort["startTransferWorker"]>[0]): Promise<TransferWorkerHandle> {
+  async startTransferWorker(
+    input: Parameters<ProviderPort["startTransferWorker"]>[0],
+  ): Promise<TransferWorkerHandle> {
     this.callLog.push(`startTransferWorker:${input.runDirectory}`);
     this.throwRetryAfter("startTransferWorker", input.runDirectory);
     this.workerState = {
@@ -859,7 +891,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       parentId: fixture.parentId,
       name: fixture.name,
       kind: fixture.kind,
-      size: fixture.size !== undefined ? fixture.size : bytes?.byteLength ?? null,
+      size: fixture.size !== undefined ? fixture.size : (bytes?.byteLength ?? null),
       etag: fixture.etag !== undefined ? fixture.etag : bytes ? hashBytes(bytes) : null,
       createdAt: fixture.createdAt ?? new Date(0).toISOString(),
       modifiedAt: fixture.modifiedAt ?? new Date(0).toISOString(),
@@ -890,7 +922,8 @@ export class FakeFileMigrationPort implements ProviderPort {
       createdAt: fixture.createdAt ?? new Date(0).toISOString(),
       modifiedAt: fixture.modifiedAt ?? new Date(0).toISOString(),
       mimeType: fixture.mimeType ?? null,
-      reportedChecksum: fixture.reportedChecksum !== undefined ? fixture.reportedChecksum : checksum,
+      reportedChecksum:
+        fixture.reportedChecksum !== undefined ? fixture.reportedChecksum : checksum,
       provenance: fixture.provenance ? { ...fixture.provenance } : null,
       content: bytes,
     };
@@ -943,8 +976,13 @@ export class FakeFileMigrationPort implements ProviderPort {
 
   private nextDestinationId(prefix: string): string {
     let id: string;
-    do { id = `${prefix}-${++this.idSeed}`; }
-    while (this.destinationById[id] || this.reservedIds.has(id) || this.reservedDestinationIds.includes(id));
+    do {
+      id = `${prefix}-${++this.idSeed}`;
+    } while (
+      this.destinationById[id] ||
+      this.reservedIds.has(id) ||
+      this.reservedDestinationIds.includes(id)
+    );
     return id;
   }
 
@@ -958,13 +996,20 @@ export class FakeFileMigrationPort implements ProviderPort {
     return entry;
   }
 
-  private checkEtag(entry: MutableDestinationEntry | undefined, expected: string | undefined): void {
+  private checkEtag(
+    entry: MutableDestinationEntry | undefined,
+    expected: string | undefined,
+  ): void {
     if (expected !== undefined && (!expected || entry?.etag !== expected)) {
       throw destinationFault("prior_copy_drift", 412);
     }
   }
 
-  private throwEffect(method: string, objectId?: string, timing: "before" | "after" = "before"): void {
+  private throwEffect(
+    method: string,
+    objectId?: string,
+    timing: "before" | "after" = "before",
+  ): void {
     const rule = takeEffect(this.effects, method, objectId, timing);
     if (rule) throw rule.error;
   }
@@ -975,10 +1020,16 @@ export class FakeFileMigrationPort implements ProviderPort {
     if (marker) this.throwEffect("writeDestinationMarker", id, "after");
   }
 
-  private applySourceMutation(sourceItemId: string, when: "source-stream" | "destination-upload"): void {
-    const rule = this.sourceMutationRules.find((candidate) =>
-      candidate.sourceItemId === sourceItemId && !candidate.triggered &&
-      (candidate.when ?? "source-stream") === when);
+  private applySourceMutation(
+    sourceItemId: string,
+    when: "source-stream" | "destination-upload",
+  ): void {
+    const rule = this.sourceMutationRules.find(
+      (candidate) =>
+        candidate.sourceItemId === sourceItemId &&
+        !candidate.triggered &&
+        (candidate.when ?? "source-stream") === when,
+    );
     if (!rule) return;
     this.mutateSourceItem(sourceItemId, {
       content: rule.nextContent,
@@ -1005,7 +1056,9 @@ export class FakeFileMigrationPort implements ProviderPort {
 
     rule.count -= 1;
     const error: RetryAfterError = Object.assign(new Error(`retry after ${rule.retryAfterMs}ms`), {
-      retryAfterMs: rule.retryAfterMs, status: 429, transient: true,
+      retryAfterMs: rule.retryAfterMs,
+      status: 429,
+      transient: true,
     });
     throw error;
   }
@@ -1022,7 +1075,10 @@ export class FakeArchivePort implements ArchiveProvider {
   private available = true;
 
   constructor(fixture: FakeArchiveFixture) {
-    this.expansion = structuredClone({ scopes: fixture.scopes, conversations: fixture.conversations });
+    this.expansion = structuredClone({
+      scopes: fixture.scopes,
+      conversations: fixture.conversations,
+    });
     this.pages = structuredClone(fixture.pages);
     this.checks = structuredClone(fixture.checks ?? []);
     this.assets = structuredClone(fixture.assets ?? []);
@@ -1059,7 +1115,9 @@ export class FakeArchivePort implements ArchiveProvider {
     return structuredClone(this.expansion);
   }
 
-  async *preflight(...[, , signal]: Parameters<ArchiveProvider["preflight"]>): AsyncIterable<CheckResult> {
+  async *preflight(
+    ...[, , signal]: Parameters<ArchiveProvider["preflight"]>
+  ): AsyncIterable<CheckResult> {
     this.before("preflight", undefined, signal);
     for (const check of this.checks) {
       signal?.throwIfAborted();
@@ -1070,9 +1128,12 @@ export class FakeArchivePort implements ArchiveProvider {
   async page(input: Parameters<ArchiveProvider["page"]>[0]): Promise<ArchivePage> {
     const key = JSON.stringify([input.scope.id, input.route, input.cursor]);
     this.before("page", key, input.signal);
-    const fixture = this.pages.find((candidate) =>
-      candidate.scopeId === input.scope.id && candidate.route === input.route &&
-      candidate.cursor === input.cursor);
+    const fixture = this.pages.find(
+      (candidate) =>
+        candidate.scopeId === input.scope.id &&
+        candidate.route === input.route &&
+        candidate.cursor === input.cursor,
+    );
     if (!fixture) throw new Error(`Unscripted archive page: ${key}`);
     return structuredClone(fixture.page);
   }
@@ -1089,7 +1150,12 @@ export class FakeArchivePort implements ArchiveProvider {
   ): AsyncIterable<ArchiveAssetRequest> {
     this.before("assetRequests", String(record.id), signal);
     for (const asset of this.assets) {
-      if (asset.conversationId !== conversation.id || asset.recordId !== record.id || asset.route !== route) continue;
+      if (
+        asset.conversationId !== conversation.id ||
+        asset.recordId !== record.id ||
+        asset.route !== route
+      )
+        continue;
       if (asset.kind === "attachment" && !config.attachmentBytes) continue;
       if (asset.kind === "transcript" && !config.transcripts) continue;
       signal?.throwIfAborted();
@@ -1109,9 +1175,14 @@ export class FakeArchivePort implements ArchiveProvider {
     ...[request, signal]: Parameters<ArchiveProvider["openAsset"]>
   ): AsyncIterable<Uint8Array> {
     this.before("openAsset", request.id, signal);
-    const asset = this.assets.find((candidate) =>
-      candidate.conversationId === request.conversation.id && candidate.recordId === request.record.id &&
-      candidate.route === request.route && candidate.kind === request.kind && candidate.id === request.id);
+    const asset = this.assets.find(
+      (candidate) =>
+        candidate.conversationId === request.conversation.id &&
+        candidate.recordId === request.record.id &&
+        candidate.route === request.route &&
+        candidate.kind === request.kind &&
+        candidate.id === request.id,
+    );
     if (!asset) throw new Error(`Unscripted archive asset: ${request.id}`);
     const rule = takeEffect(this.effects, "openAsset", request.id, "before", true);
     for await (const chunk of scriptedStream(encodeText(asset.content), rule, asset.chunkSize)) {
@@ -1120,7 +1191,11 @@ export class FakeArchivePort implements ArchiveProvider {
     }
   }
 
-  private before(method: string, objectId: string | undefined, signal: AbortSignal | undefined): void {
+  private before(
+    method: string,
+    objectId: string | undefined,
+    signal: AbortSignal | undefined,
+  ): void {
     signal?.throwIfAborted();
     if (!this.available) throw new Error(`Archive effects disabled: ${method}`);
     const rule = takeEffect(this.effects, method, objectId);

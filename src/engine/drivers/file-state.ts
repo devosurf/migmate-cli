@@ -101,22 +101,30 @@ export type FileProvider = ProviderPort & {
     objectId: string;
   }): Promise<DestinationEntry | null>;
   reserveDestinationId?(): Promise<string>;
-  createDestinationFolder(input: Parameters<ProviderPort["createDestinationFolder"]>[0] & {
-    destinationId?: string;
-    marker?: FileMarker;
-  }): Promise<DestinationEntry>;
-  uploadDestinationContent(input: Parameters<ProviderPort["uploadDestinationContent"]>[0] & {
-    create?: boolean;
-    marker?: FileMarker;
-    expectedEtag?: string;
-  }): Promise<DestinationEntry>;
-  moveDestinationObject(input: Parameters<ProviderPort["moveDestinationObject"]>[0] & {
-    expectedEtag?: string;
-    marker?: FileMarker;
-  }): Promise<DestinationEntry>;
-  writeDestinationMarker(input: Parameters<ProviderPort["writeDestinationMarker"]>[0] & {
-    expectedEtag?: string;
-  }): Promise<void>;
+  createDestinationFolder(
+    input: Parameters<ProviderPort["createDestinationFolder"]>[0] & {
+      destinationId?: string;
+      marker?: FileMarker;
+    },
+  ): Promise<DestinationEntry>;
+  uploadDestinationContent(
+    input: Parameters<ProviderPort["uploadDestinationContent"]>[0] & {
+      create?: boolean;
+      marker?: FileMarker;
+      expectedEtag?: string;
+    },
+  ): Promise<DestinationEntry>;
+  moveDestinationObject(
+    input: Parameters<ProviderPort["moveDestinationObject"]>[0] & {
+      expectedEtag?: string;
+      marker?: FileMarker;
+    },
+  ): Promise<DestinationEntry>;
+  writeDestinationMarker(
+    input: Parameters<ProviderPort["writeDestinationMarker"]>[0] & {
+      expectedEtag?: string;
+    },
+  ): Promise<void>;
 };
 
 export class FileSourceChangedError extends Error {
@@ -141,9 +149,10 @@ export class FilePlanRevisionRequiredError extends Error {
 }
 
 export function sourceEvidence(source: SourceEntry): FileSourceEvidence {
-  const projected = source as SourceEntry & Partial<FileSourceEvidence> & {
-    metadata?: Partial<FileSourceEvidence>;
-  };
+  const projected = source as SourceEntry &
+    Partial<FileSourceEvidence> & {
+      metadata?: Partial<FileSourceEvidence>;
+    };
   const richer = projected.metadata ?? projected;
   return {
     id: source.id,
@@ -169,8 +178,17 @@ export function sourceEvidence(source: SourceEntry): FileSourceEvidence {
 
 export function sourceToken(source: SourceEntry | FileSourceEvidence): string {
   return JSON.stringify([
-    source.driveId, source.id, source.identity, source.parentId, source.name, source.kind,
-    source.size, source.etag, source.createdAt, source.modifiedAt, source.mimeType,
+    source.driveId,
+    source.id,
+    source.identity,
+    source.parentId,
+    source.name,
+    source.kind,
+    source.size,
+    source.etag,
+    source.createdAt,
+    source.modifiedAt,
+    source.mimeType,
     source.downloadable,
   ]);
 }
@@ -183,14 +201,26 @@ export async function assertSourceStable(
   try {
     current = provider.readSourceItem
       ? await provider.readSourceItem({ driveId: source.driveId, itemId: source.id })
-      : await provider.resolveSourceRoot({ sourceDriveId: source.driveId, sourceItemId: source.id });
+      : await provider.resolveSourceRoot({
+          sourceDriveId: source.driveId,
+          sourceItemId: source.id,
+        });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     const fault = error as Error & { status?: number; statusCode?: number; transient?: boolean };
     const status = fault.status ?? fault.statusCode;
-    if (fault.transient === true || status === undefined || status < 400 || status >= 500 || status === 429) throw error;
+    if (
+      fault.transient === true ||
+      status === undefined ||
+      status < 400 ||
+      status >= 500 ||
+      status === 429
+    )
+      throw error;
     throw Object.assign(new Error("Source metadata could not be read"), {
-      code: "source_read_failed", status, transient: false,
+      code: "source_read_failed",
+      status,
+      transient: false,
     });
   }
   if (!current || sourceToken(current) !== sourceToken(source)) {
@@ -218,7 +248,10 @@ export async function hashStream(
 }
 
 /** One file on disk, bounded stream buffers, removed even on generator cancellation. */
-export async function stageSource(ctx: FileContext, source: SourceEntry): Promise<{
+export async function stageSource(
+  ctx: FileContext,
+  source: SourceEntry,
+): Promise<{
   sha256: string;
   size: number;
   content: () => AsyncIterable<Uint8Array>;

@@ -76,16 +76,32 @@ export function hasRetryAfter(error: unknown): error is RetryAfterError {
 
 export interface ProviderPort {
   archive?: ArchiveProvider;
-  preflight?(input: { jobType: JobType; config: unknown; jobDirectory: string }): AsyncIterable<CheckResult>;
+  preflight?(input: {
+    jobType: JobType;
+    config: unknown;
+    jobDirectory: string;
+  }): AsyncIterable<CheckResult>;
   applicationIdentity?(): Promise<string>;
   close?(): Promise<void>;
   /** Exact immutable evidence to bind into plan inputs and re-check before execute. */
-  qualificationEvidence?(): Promise<{ digest: string; tuple: Record<string, unknown>; bundle: string }>;
+  qualificationEvidence?(): Promise<{
+    digest: string;
+    tuple: Record<string, unknown>;
+    bundle: string;
+  }>;
   binaryEvidence?(): Promise<Record<string, unknown>>;
-  assertExecutionEvidence?(input: { applicationIdentity: string; binarySha256: string; binaryVersion: string; qualificationDigest: string }): Promise<void>;
+  assertExecutionEvidence?(input: {
+    applicationIdentity: string;
+    binarySha256: string;
+    binaryVersion: string;
+    qualificationDigest: string;
+  }): Promise<void>;
   reserveDestinationId?(): Promise<string>;
   readSourceItem?(input: { driveId: string; itemId: string }): Promise<SourceEntry | null>;
-  readDestinationObject?(input: { driveId: string; objectId: string }): Promise<DestinationEntry | null>;
+  readDestinationObject?(input: {
+    driveId: string;
+    objectId: string;
+  }): Promise<DestinationEntry | null>;
   resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;

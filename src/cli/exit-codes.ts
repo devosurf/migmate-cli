@@ -23,4 +23,3 @@ export const EXIT_CODE_BY_REFUSAL_CODE: Record<string, number> = {
 export function exitCodeForRefusalCode(code: string): number {
   return Object.hasOwn(EXIT_CODE_BY_REFUSAL_CODE, code) ? EXIT_CODE_BY_REFUSAL_CODE[code]! : 1;
 }
-

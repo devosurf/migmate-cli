@@ -5,8 +5,12 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonicalJson } from "../../src/engine/store/digest.ts";
 import { teamsArchiveDriver } from "../../src/engine/drivers/teams-archive.ts";
 import type {
-  ArchiveCommit, ArchiveConfig, ArchiveDriverContext, ArchiveDurableAsset,
-  ArchivePackageFile, ArchiveResumeState,
+  ArchiveCommit,
+  ArchiveConfig,
+  ArchiveDriverContext,
+  ArchiveDurableAsset,
+  ArchivePackageFile,
+  ArchiveResumeState,
 } from "../../src/engine/providers/archive.ts";
 import { QualificationBlocked } from "./common.ts";
 
@@ -30,28 +34,43 @@ async function syncDirectory(path: string): Promise<void> {
   // are still flushed before rename and before a journal commit on that cell.
   if (process.platform === "win32") return;
   const handle = await open(path, "r");
-  try { await handle.sync(); } finally { await handle.close(); }
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 async function directory(path: string): Promise<void> {
   const info = await lstat(path);
   requireFact(info.isDirectory() && !info.isSymbolicLink(), "archive_private_directory_required");
   if (process.platform !== "win32") {
-    requireFact((info.mode & 0o077) === 0 && info.uid === process.getuid?.(), "archive_private_directory_required");
+    requireFact(
+      (info.mode & 0o077) === 0 && info.uid === process.getuid?.(),
+      "archive_private_directory_required",
+    );
   }
 }
 
 async function ensureDirectory(path: string): Promise<void> {
-  try { await mkdir(path, { mode: 0o700 }); await syncDirectory(dirname(path)); }
-  catch (error) {
-    if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
+  try {
+    await mkdir(path, { mode: 0o700 });
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST"))
+      throw error;
   }
   await directory(path);
 }
 
 async function archiveTarget(root: string, path: string): Promise<string> {
-  requireFact(path.length > 0 && !isAbsolute(path) && !/[\\\u0000-\u001f\u007f:%?#]/u.test(path) &&
-    path.split("/").every((part) => part.length > 0 && part !== "." && part !== ".."), "archive_path_unconfined");
+  requireFact(
+    path.length > 0 &&
+      !isAbsolute(path) &&
+      !/[\\\u0000-\u001f\u007f:%?#]/u.test(path) &&
+      path.split("/").every((part) => part.length > 0 && part !== "." && part !== ".."),
+    "archive_path_unconfined",
+  );
   let parent = root;
   for (const part of path.split("/").slice(0, -1)) {
     parent = join(parent, part);
@@ -66,16 +85,28 @@ export async function archiveFileProof(path: string): Promise<ArchiveFileProof> 
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const opened = await handle.stat();
-    requireFact(opened.isFile() && opened.ino === before.ino && opened.dev === before.dev, "archive_file_changed");
+    requireFact(
+      opened.isFile() && opened.ino === before.ino && opened.dev === before.dev,
+      "archive_file_changed",
+    );
     const hash = createHash("sha256");
     let size = 0;
     for await (const chunk of handle.createReadStream({ autoClose: false })) {
-      hash.update(chunk); size += chunk.byteLength;
+      hash.update(chunk);
+      size += chunk.byteLength;
     }
     const after = await handle.stat();
-    requireFact(after.size === size && opened.size === size && opened.mtimeMs === after.mtimeMs && opened.ctimeMs === after.ctimeMs, "archive_file_changed");
+    requireFact(
+      after.size === size &&
+        opened.size === size &&
+        opened.mtimeMs === after.mtimeMs &&
+        opened.ctimeMs === after.ctimeMs,
+      "archive_file_changed",
+    );
     return { sha256: hash.digest("hex"), size };
-  } finally { await handle.close(); }
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Private disposable driver durability boundary. Provider effects are never replaced. */
@@ -97,7 +128,11 @@ export class ArchiveJournal {
     await directory(journal.#jobDirectory);
     await ensureDirectory(journal.archiveRoot);
     const handle = await open(journal.path, "wx", 0o600);
-    try { await handle.sync(); } finally { await handle.close(); }
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await syncDirectory(journal.#jobDirectory);
     return journal;
   }
@@ -116,21 +151,35 @@ export class ArchiveJournal {
     requireFact(info.isFile() && !info.isSymbolicLink(), "archive_journal_unavailable");
     const text = await readFile(this.path, "utf8");
     requireFact(!text || text.endsWith("\n"), "archive_journal_torn_commit");
-    const units: ArchiveJournalUnit[] = text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as ArchiveJournalUnit);
-    requireFact(new Set(units.map((unit) => unit.unitKey)).size === units.length, "archive_journal_duplicate_commit");
+    const units: ArchiveJournalUnit[] = text
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as ArchiveJournalUnit);
+    requireFact(
+      new Set(units.map((unit) => unit.unitKey)).size === units.length,
+      "archive_journal_duplicate_commit",
+    );
     return units;
   }
 
   async resume(): Promise<Resume> {
     const units = await this.units();
-    const state: Resume = { checkpoint: units.at(-1)?.checkpoint ?? null, watermarks: {},
-      archiveRecords: [], archiveEvidence: [], committedUnits: [] };
+    const state: Resume = {
+      checkpoint: units.at(-1)?.checkpoint ?? null,
+      watermarks: {},
+      archiveRecords: [],
+      archiveEvidence: [],
+      committedUnits: [],
+    };
     const records = new Map<string, NonNullable<ArchiveResumeState["archiveRecords"]>[number]>();
     for (const unit of units) {
       if (unit.archivePlan) state.archivePlan = unit.archivePlan;
       for (const record of unit.archiveRecords ?? []) {
         const prior = records.get(record.key);
-        requireFact(!prior || canonicalJson(prior) === canonicalJson(record), "archive_journal_record_conflict");
+        requireFact(
+          !prior || canonicalJson(prior) === canonicalJson(record),
+          "archive_journal_record_conflict",
+        );
         if (!prior) records.set(record.key, record);
       }
       if (unit.archiveEvidence) state.archiveEvidence!.push(unit.archiveEvidence);
@@ -147,19 +196,37 @@ export class ArchiveJournal {
     await directory(join(this.#jobDirectory, "assets"));
     await directory(staging);
     const location = relative(staging, resolve(asset.stagedPath));
-    requireFact(location.length > 0 && !location.startsWith(`..${sep}`) && location !== ".." && !isAbsolute(location) && !location.includes(sep), "archive_staging_unconfined");
+    requireFact(
+      location.length > 0 &&
+        !location.startsWith(`..${sep}`) &&
+        location !== ".." &&
+        !isAbsolute(location) &&
+        !location.includes(sep),
+      "archive_staging_unconfined",
+    );
     const proof = await archiveFileProof(asset.stagedPath);
-    requireFact(proof.sha256 === asset.sha256 && proof.size === asset.size, "archive_staged_asset_mismatch");
+    requireFact(
+      proof.sha256 === asset.sha256 && proof.size === asset.size,
+      "archive_staged_asset_mismatch",
+    );
     const staged = await open(asset.stagedPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    try { await staged.sync(); } finally { await staged.close(); }
+    try {
+      await staged.sync();
+    } finally {
+      await staged.close();
+    }
     const target = await archiveTarget(this.archiveRoot, asset.archivePath);
     let existing = false;
     try {
       const current = await archiveFileProof(target);
-      requireFact(current.sha256 === asset.sha256 && current.size === asset.size, "archive_asset_replay_mismatch");
+      requireFact(
+        current.sha256 === asset.sha256 && current.size === asset.size,
+        "archive_asset_replay_mismatch",
+      );
       existing = true;
     } catch (error) {
-      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT"))
+        throw error;
     }
     if (existing) await rm(asset.stagedPath);
     else await rename(asset.stagedPath, target);
@@ -167,18 +234,26 @@ export class ArchiveJournal {
     await syncDirectory(staging);
   }
 
-  async #installFile(file: ArchivePackageFile): Promise<{ path: string; sha256: string; size: number }> {
+  async #installFile(
+    file: ArchivePackageFile,
+  ): Promise<{ path: string; sha256: string; size: number }> {
     const sha256 = createHash("sha256").update(file.content).digest("hex");
     requireFact(sha256 === file.sha256, "archive_package_file_digest_mismatch");
     const target = await archiveTarget(this.archiveRoot, file.path);
     const temporary = join(dirname(target), `.qualification-${randomUUID()}`);
     const handle = await open(temporary, "wx", 0o600);
-    try { await handle.writeFile(file.content, "utf8"); await handle.sync(); }
-    finally { await handle.close(); }
+    try {
+      await handle.writeFile(file.content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     try {
       await rename(temporary, target);
       await syncDirectory(dirname(target));
-    } finally { await rm(temporary, { force: true }); }
+    } finally {
+      await rm(temporary, { force: true });
+    }
     return { path: file.path, sha256, size: Buffer.byteLength(file.content) };
   }
 
@@ -191,29 +266,58 @@ export class ArchiveJournal {
       for (const asset of record.assets) {
         const target = await archiveTarget(this.archiveRoot, asset.path);
         const proof = await archiveFileProof(target);
-        requireFact(proof.sha256 === asset.sha256 && proof.size === asset.size, "archive_asset_reference_not_durable");
+        requireFact(
+          proof.sha256 === asset.sha256 && proof.size === asset.size,
+          "archive_asset_reference_not_durable",
+        );
       }
     }
     const archiveFileProofs = [];
-    for (const file of unit.archiveFiles ?? []) archiveFileProofs.push(await this.#installFile(file));
+    for (const file of unit.archiveFiles ?? [])
+      archiveFileProofs.push(await this.#installFile(file));
     if (unit.archiveManifestDigest) {
-      requireFact(archiveFileProofs.some((file) => file.path === "manifest.json" && file.sha256 === unit.archiveManifestDigest), "archive_manifest_not_durable");
+      requireFact(
+        archiveFileProofs.some(
+          (file) => file.path === "manifest.json" && file.sha256 === unit.archiveManifestDigest,
+        ),
+        "archive_manifest_not_durable",
+      );
     }
     const { assets: _assets, archiveFiles: _files, ...durable } = unit;
-    const saved: ArchiveJournalUnit = { ...durable, ...(archiveFileProofs.length ? { archiveFileProofs } : {}) };
+    const saved: ArchiveJournalUnit = {
+      ...durable,
+      ...(archiveFileProofs.length ? { archiveFileProofs } : {}),
+    };
     const handle = await open(this.path, "a");
-    try { await handle.writeFile(`${JSON.stringify(saved)}\n`, "utf8"); await handle.sync(); }
-    finally { await handle.close(); }
+    try {
+      await handle.writeFile(`${JSON.stringify(saved)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
   }
 
-  async run(phase: "plan" | "execute", config: ArchiveConfig, provider: ArchiveDriverContext["provider"], stopAfterPage = false): Promise<boolean> {
+  async run(
+    phase: "plan" | "execute",
+    config: ArchiveConfig,
+    provider: ArchiveDriverContext["provider"],
+    stopAfterPage = false,
+  ): Promise<boolean> {
     // Every invocation, especially restart, reconstructs the approved plan,
     // records, page evidence and watermarks from the actual fsynced journal.
     const resume = await this.resume();
     const committed = new Set(resume.committedUnits);
-    const context: ArchiveDriverContext = { config, provider, resume, revision: 1,
-      jobDirectory: this.#jobDirectory, signal: this.#signal, now: () => new Date() };
-    const iterator = phase === "plan" ? teamsArchiveDriver.collect(context) : teamsArchiveDriver.execute(context);
+    const context: ArchiveDriverContext = {
+      config,
+      provider,
+      resume,
+      revision: 1,
+      jobDirectory: this.#jobDirectory,
+      signal: this.#signal,
+      now: () => new Date(),
+    };
+    const iterator =
+      phase === "plan" ? teamsArchiveDriver.collect(context) : teamsArchiveDriver.execute(context);
     try {
       for (;;) {
         this.#signal.throwIfAborted();
@@ -226,6 +330,8 @@ export class ArchiveJournal {
         // complete yielded unit have all crossed the durability boundary.
         if (stopAfterPage && next.value.archiveEvidence) return true;
       }
-    } finally { await iterator.return(undefined); }
+    } finally {
+      await iterator.return(undefined);
+    }
   }
 }

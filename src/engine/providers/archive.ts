@@ -84,11 +84,35 @@ export interface ArchiveAssetRequest {
   sourceUrl?: string;
 }
 export interface ArchiveProvider {
-  expand(config: ArchiveConfig, signal?: AbortSignal): Promise<{ scopes: ArchiveScopeBinding[]; conversations: ArchiveConversation[] }>;
-  preflight(config: ArchiveConfig, plan: ArchivePlan, signal?: AbortSignal): AsyncIterable<CheckResult>;
-  page(input: { scope: ArchiveScopeBinding; route: ArchiveRoute; window: ArchivePlan["window"]; cursor: string | null; signal?: AbortSignal }): Promise<ArchivePage>;
-  transcriptConversationId(record: Record<string, unknown>, scope: ArchiveScopeBinding, conversations: ArchiveConversation[], signal?: AbortSignal): Promise<string | null>;
-  assetRequests(conversation: ArchiveConversation, record: Record<string, unknown>, route: ArchiveRoute, config: ArchiveConfig, signal?: AbortSignal): AsyncIterable<ArchiveAssetRequest>;
+  expand(
+    config: ArchiveConfig,
+    signal?: AbortSignal,
+  ): Promise<{ scopes: ArchiveScopeBinding[]; conversations: ArchiveConversation[] }>;
+  preflight(
+    config: ArchiveConfig,
+    plan: ArchivePlan,
+    signal?: AbortSignal,
+  ): AsyncIterable<CheckResult>;
+  page(input: {
+    scope: ArchiveScopeBinding;
+    route: ArchiveRoute;
+    window: ArchivePlan["window"];
+    cursor: string | null;
+    signal?: AbortSignal;
+  }): Promise<ArchivePage>;
+  transcriptConversationId(
+    record: Record<string, unknown>,
+    scope: ArchiveScopeBinding,
+    conversations: ArchiveConversation[],
+    signal?: AbortSignal,
+  ): Promise<string | null>;
+  assetRequests(
+    conversation: ArchiveConversation,
+    record: Record<string, unknown>,
+    route: ArchiveRoute,
+    config: ArchiveConfig,
+    signal?: AbortSignal,
+  ): AsyncIterable<ArchiveAssetRequest>;
   openAsset(request: ArchiveAssetRequest, signal?: AbortSignal): AsyncIterable<Uint8Array>;
 }
 export interface ArchiveCollectionEvidence {

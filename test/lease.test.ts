@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -9,8 +20,19 @@ import { describe, it, type TestContext } from "node:test";
 import { EngineRefusalError, openEngine } from "../src/engine/index.ts";
 import { reconcileOnWriterOpen } from "../src/engine/state-chart.ts";
 import {
-  acquire, evaluateReclaim, getHostId, getProcessStartTime, heartbeat, inspectLease,
-  probeWorker, processAlive, readHostId, reconcileWriterOpen, release, stopOrphanWorker, withLease,
+  acquire,
+  evaluateReclaim,
+  getHostId,
+  getProcessStartTime,
+  heartbeat,
+  inspectLease,
+  probeWorker,
+  processAlive,
+  readHostId,
+  reconcileWriterOpen,
+  release,
+  stopOrphanWorker,
+  withLease,
   type LeaseRow,
 } from "../src/engine/store/lease.ts";
 import type { JobState } from "../src/engine/types.ts";
@@ -23,44 +45,95 @@ function workspace(t: TestContext) {
   const home = join(root, "home");
   const db = new DatabaseSync(join(root, "state.db"));
   db.exec(schema);
-  db.prepare(`INSERT INTO job (id,type,state,schema_version,migmate_version,created_at,last_checkpoint)
-    VALUES ('job-1','file_migration','new',2,'test',?,'checkpoint-7')`).run(NOW.toISOString());
-  t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+  db.prepare(
+    `INSERT INTO job (id,type,state,schema_version,migmate_version,created_at,last_checkpoint)
+    VALUES ('job-1','file_migration','new',2,'test',?,'checkpoint-7')`,
+  ).run(NOW.toISOString());
+  t.after(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
   return { root, home, db };
 }
 
 function staleRow(overrides: Partial<LeaseRow> = {}): LeaseRow {
   return {
-    ownerUuid: "dead-owner", hostId: "local-host", pid: process.pid,
+    ownerUuid: "dead-owner",
+    hostId: "local-host",
+    pid: process.pid,
     processStartTime: getProcessStartTime() + 1,
-    heartbeatAt: new Date(NOW.getTime() - 31_000).toISOString(), kind: "cli",
-    socketPath: null, workerGroup: null, workerPid: null, workerProcessStartTime: null,
-    workerExecutable: null, lastCheckpoint: "checkpoint-7", migmateVersion: "test", ...overrides,
+    heartbeatAt: new Date(NOW.getTime() - 31_000).toISOString(),
+    kind: "cli",
+    socketPath: null,
+    workerGroup: null,
+    workerPid: null,
+    workerProcessStartTime: null,
+    workerExecutable: null,
+    lastCheckpoint: "checkpoint-7",
+    migmateVersion: "test",
+    ...overrides,
   };
 }
 
 function seedLease(db: DatabaseSync, row: LeaseRow): void {
-  db.prepare(`INSERT INTO lease (id,owner_uuid,host_id,pid,process_start_time,heartbeat_at,kind,
+  db.prepare(
+    `INSERT INTO lease (id,owner_uuid,host_id,pid,process_start_time,heartbeat_at,kind,
     socket_path,worker_group,worker_pid,worker_process_start_time,worker_executable,last_checkpoint,migmate_version)
-    VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(row.ownerUuid, row.hostId, row.pid, row.processStartTime,
-      row.heartbeatAt, row.kind, row.socketPath, row.workerGroup, row.workerPid,
-      row.workerProcessStartTime, row.workerExecutable, row.lastCheckpoint, row.migmateVersion);
+    VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    row.ownerUuid,
+    row.hostId,
+    row.pid,
+    row.processStartTime,
+    row.heartbeatAt,
+    row.kind,
+    row.socketPath,
+    row.workerGroup,
+    row.workerPid,
+    row.workerProcessStartTime,
+    row.workerExecutable,
+    row.lastCheckpoint,
+    row.migmateVersion,
+  );
 }
 
-async function orphan(t: TestContext, stubborn = false): Promise<{ row: LeaseRow; child: ChildProcess; exited: Promise<unknown[]> }> {
+async function orphan(
+  t: TestContext,
+  stubborn = false,
+): Promise<{ row: LeaseRow; child: ChildProcess; exited: Promise<unknown[]> }> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-orphan-")));
   const directory = join(root, "run", "run-id", "rc-owned");
   // getHostId creates and secures this private engine-owned directory on all OSes.
   getHostId(directory);
-  writeFileSync(join(directory, "rcd"), `
+  writeFileSync(
+    join(directory, "rcd"),
+    `
     ${stubborn ? "process.on('SIGTERM', () => {});" : ""}
     process.stdin.resume();
-    process.stdout.write('ready\\n');`, { mode: 0o600 });
-  const executable = realpathSync(process.execPath), socketPath = join(directory, "s");
-  const child = spawn(executable, ["rcd", "--rc-addr", "unix://s", "--rc-serve", "--config",
-    process.platform === "win32" ? "NUL" : "/dev/null", "--cache-dir", directory, "--temp-dir", directory], {
-    cwd: directory, stdio: ["pipe", "pipe", "pipe"],
-  });
+    process.stdout.write('ready\\n');`,
+    { mode: 0o600 },
+  );
+  const executable = realpathSync(process.execPath),
+    socketPath = join(directory, "s");
+  const child = spawn(
+    executable,
+    [
+      "rcd",
+      "--rc-addr",
+      "unix://s",
+      "--rc-serve",
+      "--config",
+      process.platform === "win32" ? "NUL" : "/dev/null",
+      "--cache-dir",
+      directory,
+      "--temp-dir",
+      directory,
+    ],
+    {
+      cwd: directory,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
   const exited = once(child, "exit");
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -70,10 +143,18 @@ async function orphan(t: TestContext, stubborn = false): Promise<{ row: LeaseRow
   assert.ok(child.stdout);
   await once(child.stdout, "data");
   assert.ok(child.pid);
-  return { child, exited, row: staleRow({ workerPid: child.pid,
-    workerProcessStartTime: getProcessStartTime(child.pid), workerExecutable: executable,
-    workerGroup: "migmate-recorded-run", socketPath,
-    heartbeatAt: new Date(Date.now() - 60_000).toISOString() }) };
+  return {
+    child,
+    exited,
+    row: staleRow({
+      workerPid: child.pid,
+      workerProcessStartTime: getProcessStartTime(child.pid),
+      workerExecutable: executable,
+      workerGroup: "migmate-recorded-run",
+      socketPath,
+      heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    }),
+  };
 }
 
 describe("persistent host identity", () => {
@@ -86,18 +167,33 @@ describe("persistent host identity", () => {
   it("installs one private identity shared by concurrent creators", async (t) => {
     const { home } = workspace(t);
     const source = new URL("../src/engine/store/lease.ts", import.meta.url).href;
-    const outputs = await Promise.all(Array.from({ length: 4 }, async () => {
-      const child = spawn(process.execPath, ["--input-type=module", "-e",
-        `import {getHostId} from ${JSON.stringify(source)}; console.log(getHostId(process.argv[1]));`, home], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let text = "", stderr = "";
-      child.stdout?.on("data", (chunk) => { text += String(chunk); });
-      child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
-      const [code] = await once(child, "exit");
-      assert.equal(code, 0, stderr);
-      return text.trim();
-    }));
+    const outputs = await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `import {getHostId} from ${JSON.stringify(source)}; console.log(getHostId(process.argv[1]));`,
+            home,
+          ],
+          {
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        let text = "",
+          stderr = "";
+        child.stdout?.on("data", (chunk) => {
+          text += String(chunk);
+        });
+        child.stderr?.on("data", (chunk) => {
+          stderr += String(chunk);
+        });
+        const [code] = await once(child, "exit");
+        assert.equal(code, 0, stderr);
+        return text.trim();
+      }),
+    );
     assert.equal(new Set(outputs).size, 1);
     assert.equal(getHostId(home), outputs[0]);
     assert.equal(readHostId(home), outputs[0]);
@@ -107,30 +203,56 @@ describe("persistent host identity", () => {
     }
   });
 
-  it("refuses a symlink identity instead of trusting or replacing its target", { skip: process.platform === "win32" }, (t) => {
-    const { root, home } = workspace(t);
-    mkdirSync(home, { mode: 0o700 });
-    const target = join(root, "unrelated");
-    const contents = "8a6ea0dd-5a15-4acd-a3c3-5cc35df2f2ed\n";
-    writeFileSync(target, contents, { mode: 0o600 });
-    symlinkSync(target, join(home, "hostId"));
-    assert.throws(() => readHostId(home));
-    assert.throws(() => getHostId(home));
-    assert.equal(readFileSync(target, "utf8"), contents);
-  });
+  it(
+    "refuses a symlink identity instead of trusting or replacing its target",
+    { skip: process.platform === "win32" },
+    (t) => {
+      const { root, home } = workspace(t);
+      mkdirSync(home, { mode: 0o700 });
+      const target = join(root, "unrelated");
+      const contents = "8a6ea0dd-5a15-4acd-a3c3-5cc35df2f2ed\n";
+      writeFileSync(target, contents, { mode: 0o600 });
+      symlinkSync(target, join(home, "hostId"));
+      assert.throws(() => readHostId(home));
+      assert.throws(() => getHostId(home));
+      assert.equal(readFileSync(target, "utf8"), contents);
+    },
+  );
 });
 
 describe("lease adjudication", () => {
   it("permits exactly one of the sixteen documented reclaim combinations", () => {
-    const codes = ["foreign_host", "foreign_host", "foreign_host", "foreign_host",
-      "lease_held", "lease_held", "lease_held", "lease_held",
-      "foreign_host", "foreign_host", "foreign_host", "foreign_host",
-      "lease_held", "lease_held", "lease_stale_worker_alive", null];
+    const codes = [
+      "foreign_host",
+      "foreign_host",
+      "foreign_host",
+      "foreign_host",
+      "lease_held",
+      "lease_held",
+      "lease_held",
+      "lease_held",
+      "foreign_host",
+      "foreign_host",
+      "foreign_host",
+      "foreign_host",
+      "lease_held",
+      "lease_held",
+      "lease_stale_worker_alive",
+      null,
+    ];
     for (let mask = 0; mask < 16; mask++) {
-      assert.deepEqual(evaluateReclaim({ heartbeatExpired: Boolean(mask & 8), hostMatches: Boolean(mask & 4),
-        ownerProcessGone: Boolean(mask & 2), workerSocketSilent: Boolean(mask & 1) }), {
-        reclaimable: mask === 15, code: codes[mask],
-      });
+      assert.deepEqual(
+        evaluateReclaim({
+          heartbeatExpired: Boolean(mask & 8),
+          hostMatches: Boolean(mask & 4),
+          ownerProcessGone: Boolean(mask & 2),
+          workerSocketSilent: Boolean(mask & 1),
+        }),
+        {
+          reclaimable: mask === 15,
+          code: codes[mask],
+        },
+      );
     }
   });
 
@@ -160,8 +282,12 @@ describe("lease adjudication", () => {
     const row = staleRow({ socketPath: "/private/worker/s", workerGroup: "run" });
     const result = await inspectLease(row, "another-host", {
       now: () => NOW,
-      processAlive: () => { throw new Error("must not inspect this host's PID"); },
-      probeWorker: async () => { throw new Error("must not dial this host's socket"); },
+      processAlive: () => {
+        throw new Error("must not inspect this host's PID");
+      },
+      probeWorker: async () => {
+        throw new Error("must not dial this host's socket");
+      },
     });
     assert.equal(result.decision.code, "foreign_host");
     assert.equal(result.workerStatus, "unknown");
@@ -180,12 +306,15 @@ describe("lease adjudication", () => {
     assert.equal(owner.decision.reclaimable, false);
     assert.equal(owner.decision.code, "lease_held");
     const socket = await inspectLease({ ...row, socketPath: "/not-readable/s" }, row.hostId, {
-      now: () => NOW, probeWorker: async () => null,
+      now: () => NOW,
+      probeWorker: async () => null,
     });
     assert.equal(socket.socketStatus, "unknown");
     assert.equal(socket.decision.reclaimable, false);
     assert.equal(socket.stopEligible, false);
-    const invalid = await inspectLease({ ...row, heartbeatAt: "corrupt" }, row.hostId, { now: () => NOW });
+    const invalid = await inspectLease({ ...row, heartbeatAt: "corrupt" }, row.hostId, {
+      now: () => NOW,
+    });
     assert.equal(invalid.decision.code, "lease_held");
   });
 
@@ -194,7 +323,11 @@ describe("lease adjudication", () => {
     const live = await inspectLease(row, row.hostId, { now: () => NOW });
     assert.equal(live.workerStatus, "alive");
     assert.equal(live.decision.reclaimable, false);
-    const reused = await inspectLease({ ...row, workerProcessStartTime: row.workerProcessStartTime! + 1 }, row.hostId, { now: () => NOW });
+    const reused = await inspectLease(
+      { ...row, workerProcessStartTime: row.workerProcessStartTime! + 1 },
+      row.hostId,
+      { now: () => NOW },
+    );
     assert.equal(reused.workerStatus, "unknown");
     assert.equal(reused.decision.reclaimable, false);
     assert.equal(reused.stopEligible, false);
@@ -206,33 +339,55 @@ describe("lease adjudication", () => {
     assert.equal(await probeWorker(""), null);
   });
 
-  it("does not mistake a live long-path AF_UNIX worker for an absent socket", { skip: process.platform === "win32" }, async (t) => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-long-socket-")));
-    const directory = join(root, "long-engine-home-".repeat(8), "run", "rc-owned");
-    getHostId(directory);
-    const socketPath = join(directory, "s");
-    const child = spawn(process.execPath, ["-e",
-      "require('node:net').createServer(s=>s.end()).listen('s',()=>process.stdout.write('ready\\n'));"], {
-      cwd: directory, stdio: ["ignore", "pipe", "pipe"],
-    });
-    const exited = once(child, "exit");
-    t.after(async () => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      await exited;
-      rmSync(root, { recursive: true, force: true });
-    });
-    assert.ok(child.stdout);
-    await once(child.stdout, "data");
-    assert.equal(await probeWorker(socketPath), true);
-    const row = staleRow({ socketPath, workerPid: child.pid!, workerProcessStartTime: getProcessStartTime(child.pid) });
-    const result = await inspectLease(row, row.hostId, { now: () => NOW });
-    assert.equal(result.workerStatus, "alive");
-    assert.equal(result.decision.reclaimable, false);
-  });
+  it(
+    "does not mistake a live long-path AF_UNIX worker for an absent socket",
+    { skip: process.platform === "win32" },
+    async (t) => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-long-socket-")));
+      const directory = join(root, "long-engine-home-".repeat(8), "run", "rc-owned");
+      getHostId(directory);
+      const socketPath = join(directory, "s");
+      const child = spawn(
+        process.execPath,
+        [
+          "-e",
+          "require('node:net').createServer(s=>s.end()).listen('s',()=>process.stdout.write('ready\\n'));",
+        ],
+        {
+          cwd: directory,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const exited = once(child, "exit");
+      t.after(async () => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await exited;
+        rmSync(root, { recursive: true, force: true });
+      });
+      assert.ok(child.stdout);
+      await once(child.stdout, "data");
+      assert.equal(await probeWorker(socketPath), true);
+      const row = staleRow({
+        socketPath,
+        workerPid: child.pid!,
+        workerProcessStartTime: getProcessStartTime(child.pid),
+      });
+      const result = await inspectLease(row, row.hostId, { now: () => NOW });
+      assert.equal(result.workerStatus, "alive");
+      assert.equal(result.decision.reclaimable, false);
+    },
+  );
 
   it("does not bless a launch intent with a missing PID merely because its socket is absent", async () => {
-    const row = staleRow({ socketPath: "/not-started/s", workerGroup: "pending-run", workerExecutable: process.execPath });
-    const result = await inspectLease(row, row.hostId, { now: () => NOW, probeWorker: async () => false });
+    const row = staleRow({
+      socketPath: "/not-started/s",
+      workerGroup: "pending-run",
+      workerExecutable: process.execPath,
+    });
+    const result = await inspectLease(row, row.hostId, {
+      now: () => NOW,
+      probeWorker: async () => false,
+    });
     assert.equal(result.workerStatus, "unknown");
     assert.equal(result.decision.reclaimable, false);
     assert.equal(result.stopEligible, false);
@@ -251,14 +406,18 @@ describe("exact orphan termination", () => {
     assert.equal((await inspectLease(row, row.hostId)).decision.reclaimable, true);
   });
 
-  it("rechecks ownership before escalating an unresponsive exact worker", { skip: process.platform === "win32" }, async (t) => {
-    // This exercises the production bounded OS kill escalation, not a sleep
-    // standing in for readiness. A child-process clock cannot use test timers.
-    const { row, child, exited } = await orphan(t, true);
-    assert.equal(await stopOrphanWorker(row), true);
-    await exited;
-    assert.equal(child.signalCode, "SIGKILL");
-  });
+  it(
+    "rechecks ownership before escalating an unresponsive exact worker",
+    { skip: process.platform === "win32" },
+    async (t) => {
+      // This exercises the production bounded OS kill escalation, not a sleep
+      // standing in for readiness. A child-process clock cannot use test timers.
+      const { row, child, exited } = await orphan(t, true);
+      assert.equal(await stopOrphanWorker(row), true);
+      await exited;
+      assert.equal(child.signalCode, "SIGKILL");
+    },
+  );
 
   it("refuses mismatched executable, PID start, socket argv, group and live-owner claims without killing the child", async (t) => {
     const { row } = await orphan(t);
@@ -283,14 +442,22 @@ describe("exact orphan termination", () => {
 
 describe("writer ownership and reconciliation", () => {
   it("does not acquire or reconcile a stale row until explicit reclaim", async (t) => {
-    const { db } = workspace(t), row = staleRow();
+    const { db } = workspace(t),
+      row = staleRow();
     db.exec("UPDATE job SET state='executing'");
     seedLease(db, row);
-    const refused = await acquire(db, { hostId: row.hostId, pid: process.pid, processStartTime: getProcessStartTime() }, { kind: "cli", now: () => NOW });
+    const refused = await acquire(
+      db,
+      { hostId: row.hostId, pid: process.pid, processStartTime: getProcessStartTime() },
+      { kind: "cli", now: () => NOW },
+    );
     assert.equal(refused.ok, false);
     if (refused.ok) throw new Error("stale lease silently stolen");
     assert.equal(refused.refusal.recovery?.reclaimable, true);
-    const reconciled = await reconcileWriterOpen(db, reconcileOnWriterOpen, { hostId: row.hostId, now: () => NOW });
+    const reconciled = await reconcileWriterOpen(db, reconcileOnWriterOpen, {
+      hostId: row.hostId,
+      now: () => NOW,
+    });
     assert.equal(reconciled.changed, false);
     assert.equal(reconciled.state, "executing");
     assert.equal(db.prepare("SELECT owner_uuid FROM lease").get()?.owner_uuid, row.ownerUuid);
@@ -298,26 +465,56 @@ describe("writer ownership and reconciliation", () => {
 
   it("reconciles only the acquired owner's executing state, preserving checkpoints and all other states", async (t) => {
     const { db, home } = workspace(t);
-    const identity = { hostId: getHostId(home), pid: process.pid, processStartTime: getProcessStartTime() };
-    const states: JobState[] = ["new", "planned", "approved", "executing", "interrupted", "blocked", "needs_attention", "verified", "closed", "cancelled"];
+    const identity = {
+      hostId: getHostId(home),
+      pid: process.pid,
+      processStartTime: getProcessStartTime(),
+    };
+    const states: JobState[] = [
+      "new",
+      "planned",
+      "approved",
+      "executing",
+      "interrupted",
+      "blocked",
+      "needs_attention",
+      "verified",
+      "closed",
+      "cancelled",
+    ];
     for (const state of states) {
       db.prepare("UPDATE job SET state=?").run(state);
       const acquired = await acquire(db, identity, { kind: "cli" });
       assert.ok(acquired.ok);
       try {
-        const wrong = await reconcileWriterOpen(db, reconcileOnWriterOpen, { hostId: identity.hostId, ownerUuid: "not-owner" });
+        const wrong = await reconcileWriterOpen(db, reconcileOnWriterOpen, {
+          hostId: identity.hostId,
+          ownerUuid: "not-owner",
+        });
         assert.equal(wrong.changed, false);
-        const result = await reconcileWriterOpen(db, reconcileOnWriterOpen, { hostId: identity.hostId, ownerUuid: acquired.value.row.ownerUuid });
+        const result = await reconcileWriterOpen(db, reconcileOnWriterOpen, {
+          hostId: identity.hostId,
+          ownerUuid: acquired.value.row.ownerUuid,
+        });
         assert.equal(result.state, state === "executing" ? "interrupted" : state);
         assert.equal(result.changed, state === "executing");
-        assert.equal(db.prepare("SELECT last_checkpoint FROM job").get()?.last_checkpoint, "checkpoint-7");
-      } finally { release(db, acquired.value); }
+        assert.equal(
+          db.prepare("SELECT last_checkpoint FROM job").get()?.last_checkpoint,
+          "checkpoint-7",
+        );
+      } finally {
+        release(db, acquired.value);
+      }
     }
   });
 
   it("persists the host after release and rejects an empty-lease foreign writer", async (t) => {
     const { db, home } = workspace(t);
-    const identity = { hostId: getHostId(home), pid: process.pid, processStartTime: getProcessStartTime() };
+    const identity = {
+      hostId: getHostId(home),
+      pid: process.pid,
+      processStartTime: getProcessStartTime(),
+    };
     const first = await acquire(db, identity, { kind: "cli" });
     assert.ok(first.ok);
     assert.equal(release(db, first.value), true);
@@ -330,8 +527,17 @@ describe("writer ownership and reconciliation", () => {
 
   it("releases on callback failure but never clears a surviving worker claim or another owner's lease", async (t) => {
     const { db, home } = workspace(t);
-    const identity = { hostId: getHostId(home), pid: process.pid, processStartTime: getProcessStartTime() };
-    await assert.rejects(withLease(db, identity, { kind: "cli" }, async () => { throw new Error("callback failed"); }), /callback failed/u);
+    const identity = {
+      hostId: getHostId(home),
+      pid: process.pid,
+      processStartTime: getProcessStartTime(),
+    };
+    await assert.rejects(
+      withLease(db, identity, { kind: "cli" }, async () => {
+        throw new Error("callback failed");
+      }),
+      /callback failed/u,
+    );
     assert.equal(db.prepare("SELECT count(*) AS n FROM lease").get()?.n, 0);
     const acquired = await acquire(db, identity, { kind: "cli" });
     assert.ok(acquired.ok);
@@ -346,24 +552,34 @@ describe("writer ownership and reconciliation", () => {
 
 describe("engine recovery seam", () => {
   it("requires explicit reclaim before opening an interrupted writer at the durable checkpoint", async (t) => {
-    const root = mkdtempSync(join(tmpdir(), "lease-engine-")), home = join(root, "home");
+    const root = mkdtempSync(join(tmpdir(), "lease-engine-")),
+      home = join(root, "home");
     const engine = openEngine({ home, now: () => NOW });
-    t.after(() => { engine.close(); rmSync(root, { recursive: true, force: true }); });
+    t.after(() => {
+      engine.close();
+      rmSync(root, { recursive: true, force: true });
+    });
     const created = await engine.initJob({ type: "file_migration" });
     assert.ok(created.ok);
     const db = new DatabaseSync(join(home, "jobs", created.value.id, "state.db"));
     try {
       db.exec("UPDATE job SET state='executing',last_checkpoint='committed-page-3'");
       seedLease(db, staleRow({ hostId: getHostId(home), lastCheckpoint: "committed-page-3" }));
-    } finally { db.close(); }
+    } finally {
+      db.close();
+    }
     let entered = false;
-    const blocked = await engine.withWriter(created.value, async () => { entered = true; });
+    const blocked = await engine.withWriter(created.value, async () => {
+      entered = true;
+    });
     assert.equal(blocked.ok, false);
     assert.equal(entered, false);
     const recovered = await engine.reclaim(created.value, { confirm: true });
     assert.ok(recovered.ok);
     assert.equal(recovered.value.lastCheckpoint, "committed-page-3");
-    const opened = await engine.withWriter(created.value, async () => engine.reader(created.value).status());
+    const opened = await engine.withWriter(created.value, async () =>
+      engine.reader(created.value).status(),
+    );
     assert.ok(opened.ok);
     assert.ok(opened.value.ok);
     assert.equal(opened.value.value.state, "interrupted");
@@ -371,19 +587,30 @@ describe("engine recovery seam", () => {
   });
 
   it("refuses a copied foreign-host job even after its original lease was released", async (t) => {
-    const root = mkdtempSync(join(tmpdir(), "lease-copy-")), home = join(root, "origin"), otherHome = join(root, "foreign");
-    const engine = openEngine({ home }), other = openEngine({ home: otherHome });
-    t.after(() => { engine.close(); other.close(); rmSync(root, { recursive: true, force: true }); });
+    const root = mkdtempSync(join(tmpdir(), "lease-copy-")),
+      home = join(root, "origin"),
+      otherHome = join(root, "foreign");
+    const engine = openEngine({ home }),
+      other = openEngine({ home: otherHome });
+    t.after(() => {
+      engine.close();
+      other.close();
+      rmSync(root, { recursive: true, force: true });
+    });
     const created = await engine.initJob({ type: "file_migration" });
     assert.ok(created.ok);
     assert.ok((await engine.withWriter(created.value, async () => "released")).ok);
     getHostId(otherHome);
-    cpSync(join(home, "jobs", created.value.id), join(otherHome, "jobs", created.value.id), { recursive: true });
+    cpSync(join(home, "jobs", created.value.id), join(otherHome, "jobs", created.value.id), {
+      recursive: true,
+    });
     const foreignReader = other.reader(created.value);
     const reader = await foreignReader.status();
     const rows = await foreignReader.rows({ phase: "plan" });
     const artifacts = await foreignReader.artifacts();
-    const writer = await other.withWriter(created.value, async () => { throw new Error("foreign callback entered"); });
+    const writer = await other.withWriter(created.value, async () => {
+      throw new Error("foreign callback entered");
+    });
     const reclaim = await other.reclaim(created.value, { confirm: true, stopWorker: true });
     for (const result of [reader, rows, artifacts, writer, reclaim]) {
       assert.equal(result.ok, false);
@@ -391,8 +618,15 @@ describe("engine recovery seam", () => {
       assert.equal(result.refusal.code, "foreign_host");
       assert.equal(result.refusal.recovery?.reclaimable, false);
     }
-    await assert.rejects(async () => {
-      for await (const _event of foreignReader.events({})) assert.fail("Foreign-host events must not be exposed");
-    }, (error) => error instanceof EngineRefusalError && error.refusal.code === "foreign_host" && error.refusal.recovery?.reclaimable === false);
+    await assert.rejects(
+      async () => {
+        for await (const _event of foreignReader.events({}))
+          assert.fail("Foreign-host events must not be exposed");
+      },
+      (error) =>
+        error instanceof EngineRefusalError &&
+        error.refusal.code === "foreign_host" &&
+        error.refusal.recovery?.reclaimable === false,
+    );
   });
 });

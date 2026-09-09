@@ -18,10 +18,19 @@ try {
   const supervisor = createTransferSupervisor({ configPath: null, jobDirectory: directory });
   const binary = await supervisor.proveBinary();
   await supervisor.close();
-  const proof = await fileWorkerQualification({ jobDirectory: directory, configPath: null, binary, signal: controller.signal });
-  process.stdout.write(`${JSON.stringify({ schemaVersion: 1, cell: platform.cell, ok: true, assertions: proof.assertions, observations: proof.observations, qualification: "not_claimed", scope: "managed_worker_transport_only" })}\n`);
+  const proof = await fileWorkerQualification({
+    jobDirectory: directory,
+    configPath: null,
+    binary,
+    signal: controller.signal,
+  });
+  process.stdout.write(
+    `${JSON.stringify({ schemaVersion: 1, cell: platform.cell, ok: true, assertions: proof.assertions, observations: proof.observations, qualification: "not_claimed", scope: "managed_worker_transport_only" })}\n`,
+  );
 } catch {
-  process.stderr.write("Managed worker transport smoke did not satisfy the required native authentication, lifecycle, or binary gate. No route was qualified.\n");
+  process.stderr.write(
+    "Managed worker transport smoke did not satisfy the required native authentication, lifecycle, or binary gate. No route was qualified.\n",
+  );
   process.exitCode = controller.signal.aborted ? 130 : 1;
 } finally {
   process.removeListener("SIGINT", interrupt);

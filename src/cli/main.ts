@@ -7,10 +7,36 @@ import { extname } from "node:path";
 import { hostname, userInfo } from "node:os";
 import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
-import { openEngine, type Engine, type ExecuteResult, type JobReader, type JobWriter, type JobEvent, type JobStatus, type Outcome, type Refusal, type RowQuery } from "../engine/index.ts";
+import {
+  openEngine,
+  type Engine,
+  type ExecuteResult,
+  type JobReader,
+  type JobWriter,
+  type JobEvent,
+  type JobStatus,
+  type Outcome,
+  type Refusal,
+  type RowQuery,
+} from "../engine/index.ts";
 import { launchWeb } from "../web/index.ts";
-import { parseInvocation, outputMode, commandLabel, UsageFailure, type Invocation, type OutputMode } from "./arguments.ts";
-import { SCHEMA_VERSION, buildReviewEnvelope, knownContract, outcomeExit, terminalEnvelopeForExecute, type AdapterOutcome, type JobEnvelope } from "./envelope.ts";
+import {
+  parseInvocation,
+  outputMode,
+  commandLabel,
+  UsageFailure,
+  type Invocation,
+  type OutputMode,
+} from "./arguments.ts";
+import {
+  SCHEMA_VERSION,
+  buildReviewEnvelope,
+  knownContract,
+  outcomeExit,
+  terminalEnvelopeForExecute,
+  type AdapterOutcome,
+  type JobEnvelope,
+} from "./envelope.ts";
 import { errorCode, processIo, type Io } from "./io.ts";
 import { redact } from "./redact.ts";
 
@@ -75,25 +101,53 @@ class Output {
     if (this.failed) throw this.failed;
     const line = `${JSON.stringify(redact(value), null, this.mode === "text" ? 2 : undefined)}\n`;
     this.attempted = true;
-    try { await this.io.stdout.write(line); }
-    catch (error) { this.failed = error; this.abort.abort(error); throw error; }
+    try {
+      await this.io.stdout.write(line);
+    } catch (error) {
+      this.failed = error;
+      this.abort.abort(error);
+      throw error;
+    }
   }
 
   async outcome(outcome: AdapterOutcome) {
-    const projected = outcome.ok ? outcome : {
-      ok: false,
-      refusal: { kind: "refusal", phase: this.command === "creds init" ? "doctor" : this.command, detail: {}, ...outcome.refusal },
+    const projected = outcome.ok
+      ? outcome
+      : {
+          ok: false,
+          refusal: {
+            kind: "refusal",
+            phase: this.command === "creds init" ? "doctor" : this.command,
+            detail: {},
+            ...outcome.refusal,
+          },
+        };
+    const envelope = {
+      schemaVersion: SCHEMA_VERSION,
+      command: this.command,
+      commandId: this.commandId,
+      job: this.job,
+      ...projected,
     };
-    const envelope = { schemaVersion: SCHEMA_VERSION, command: this.command, commandId: this.commandId, job: this.job, ...projected };
     if (this.mode === "text" && !outcome.ok) {
       await this.io.stderr.write(`${JSON.stringify(redact(envelope), null, 2)}\n`);
     } else await this.write(envelope);
   }
 
   async event(event: JobEvent) {
-    await this.write({ schemaVersion: SCHEMA_VERSION, command: this.command, commandId: this.commandId, job: this.job, ...event });
-    if (event.kind === "refusal" && typeof event.payload.code === "string") this.lastRefusal = event.payload.code;
-    if (!knownContract(event)) { this.unknown = true; this.abort.abort(); }
+    await this.write({
+      schemaVersion: SCHEMA_VERSION,
+      command: this.command,
+      commandId: this.commandId,
+      job: this.job,
+      ...event,
+    });
+    if (event.kind === "refusal" && typeof event.payload.code === "string")
+      this.lastRefusal = event.payload.code;
+    if (!knownContract(event)) {
+      this.unknown = true;
+      this.abort.abort();
+    }
   }
 }
 
@@ -105,24 +159,40 @@ function caught(error: unknown): AdapterOutcome<never> {
   // Reader event iteration is the one expected refusal represented by a throw.
   if (error && typeof error === "object" && "refusal" in error) {
     const value = error.refusal;
-    if (value && typeof value === "object" && "code" in value && typeof value.code === "string" && "message" in value && typeof value.message === "string") {
+    if (
+      value &&
+      typeof value === "object" &&
+      "code" in value &&
+      typeof value.code === "string" &&
+      "message" in value &&
+      typeof value.message === "string"
+    ) {
       return { ok: false, refusal: value as Omit<Refusal, "code"> & { code: string } };
     }
   }
   if (error instanceof UsageFailure) return refusal("usage", error.message);
-  if (["ENOENT", "EACCES", "EPERM", "ENOTDIR", "EISDIR"].includes(errorCode(error) ?? "")) return refusal("configuration_invalid", "The engine home or job input is not accessible.");
+  if (["ENOENT", "EACCES", "EPERM", "ENOTDIR", "EISDIR"].includes(errorCode(error) ?? ""))
+    return refusal("configuration_invalid", "The engine home or job input is not accessible.");
   // Never echo parser input, provider exception messages, stacks or paths that
   // could contain credential bytes or transient URLs.
-  return refusal("internal_defect", "The command could not complete because of an internal defect.");
+  return refusal(
+    "internal_defect",
+    "The command could not complete because of an internal defect.",
+  );
 }
 
 async function readConfig(path: string): Promise<AdapterOutcome<unknown>> {
   let file;
   try {
-    if (![".json", ".toml"].includes(extname(path).toLowerCase())) return refusal("configuration_invalid", "Config input must be a .json or .toml file.");
+    if (![".json", ".toml"].includes(extname(path).toLowerCase()))
+      return refusal("configuration_invalid", "Config input must be a .json or .toml file.");
     file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > 4 * 1024 * 1024) return refusal("configuration_invalid", "Config input must be a regular file no larger than 4 MiB.");
+    if (!stat.isFile() || stat.size > 4 * 1024 * 1024)
+      return refusal(
+        "configuration_invalid",
+        "Config input must be a regular file no larger than 4 MiB.",
+      );
     const buffer = Buffer.alloc(stat.size + 1);
     let bytesRead = 0;
     while (bytesRead < buffer.length) {
@@ -130,13 +200,25 @@ async function readConfig(path: string): Promise<AdapterOutcome<unknown>> {
       if (chunk.bytesRead === 0) break;
       bytesRead += chunk.bytesRead;
     }
-    if (bytesRead > stat.size) return refusal("configuration_invalid", "Config input changed while being read.");
+    if (bytesRead > stat.size)
+      return refusal("configuration_invalid", "Config input changed while being read.");
     const source = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
-    const value: unknown = extname(path).toLowerCase() === ".json" ? JSON.parse(source) : parseToml(source);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return refusal("configuration_invalid", "Config input must be an object of typed references and job options.");
+    const value: unknown =
+      extname(path).toLowerCase() === ".json" ? JSON.parse(source) : parseToml(source);
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return refusal(
+        "configuration_invalid",
+        "Config input must be an object of typed references and job options.",
+      );
     return { ok: true, value };
-  } catch { return refusal("configuration_invalid", "Config input could not be read or parsed as UTF-8 TOML or JSON."); }
-  finally { await file?.close(); }
+  } catch {
+    return refusal(
+      "configuration_invalid",
+      "Config input could not be read or parsed as UTF-8 TOML or JSON.",
+    );
+  } finally {
+    await file?.close();
+  }
 }
 
 async function withEvents(
@@ -155,7 +237,11 @@ async function withEvents(
   const tailAbort = new AbortController();
   let tailFailure: unknown;
   const emit = async (follow: boolean) => {
-    for await (const event of reader.events({ from: cursor, follow, ...(follow ? { signal: tailAbort.signal } : {}) })) {
+    for await (const event of reader.events({
+      from: cursor,
+      follow,
+      ...(follow ? { signal: tailAbort.signal } : {}),
+    })) {
       await output.event(event);
       cursor = event.cursor;
       if (output.unknown) break;
@@ -163,56 +249,101 @@ async function withEvents(
   };
   // Attach the rejection handler immediately; a broken output aborts execution,
   // but the writer must settle and release its lease before the adapter returns.
-  const tail = emit(true).catch(error => {
+  const tail = emit(true).catch((error) => {
     if (tailAbort.signal.aborted && error instanceof Error && error.name === "AbortError") return;
     tailFailure = error;
     output.abort.abort(error);
   });
   let result: AdapterOutcome;
-  try { result = await operation(); }
-  catch (error) { result = caught(error); }
-  finally { tailAbort.abort(); await tail; }
+  try {
+    result = await operation();
+  } catch (error) {
+    result = caught(error);
+  } finally {
+    tailAbort.abort();
+    await tail;
+  }
   if (tailFailure) throw tailFailure;
   if (!output.unknown) await emit(false); // drain commits made between the final poll and writer release
   return result;
 }
 
-async function review(reader: JobReader, invocation: Invocation, status: JobStatus, value?: unknown): Promise<AdapterOutcome> {
+async function review(
+  reader: JobReader,
+  invocation: Invocation,
+  status: JobStatus,
+  value?: unknown,
+): Promise<AdapterOutcome> {
   const query: RowQuery = { ...invocation.query };
-  if (query.revision === undefined && query.phase === "plan" && status.planRevision !== null) query.revision = status.planRevision;
+  if (query.revision === undefined && query.phase === "plan" && status.planRevision !== null)
+    query.revision = status.planRevision;
   const page = await reader.rows(query);
   if (!page.ok) return page;
-  return { ok: true, value: {
-    ...(value && typeof value === "object" ? value : {}),
-    planDigest: status.planDigest,
-    verificationDigest: status.verificationDigest,
-    review: buildReviewEnvelope(query, page.value),
-  } };
+  return {
+    ok: true,
+    value: {
+      ...(value && typeof value === "object" ? value : {}),
+      planDigest: status.planDigest,
+      verificationDigest: status.verificationDigest,
+      review: buildReviewEnvelope(query, page.value),
+    },
+  };
 }
 
-async function approve(invocation: Invocation, output: Output, engine: Engine, reader: JobReader, status: JobStatus): Promise<AdapterOutcome> {
-  const interactive = invocation.output === "text" && output.io.stdin.isTTY && output.io.stdout.isTTY && output.io.stderr.isTTY;
+async function approve(
+  invocation: Invocation,
+  output: Output,
+  engine: Engine,
+  reader: JobReader,
+  status: JobStatus,
+): Promise<AdapterOutcome> {
+  const interactive =
+    invocation.output === "text" &&
+    output.io.stdin.isTTY &&
+    output.io.stdout.isTTY &&
+    output.io.stderr.isTTY;
   let approver = invocation.approver;
   let planDigest = invocation.planDigest;
   if (interactive) {
     planDigest ??= status.planDigest ?? undefined;
     if (!planDigest) return refusal("approval_required", "Review a plan before approving it.");
     const plan = status.currentPlan;
-    if (!plan || plan.planDigest !== planDigest) return refusal("approval_required", "Read back the current plan before approving it.");
+    if (!plan || plan.planDigest !== planDigest)
+      return refusal("approval_required", "Read back the current plan before approving it.");
     const preview = await review(reader, invocation, status, plan);
     if (!preview.ok) return preview;
-    await output.io.stderr.write(`${JSON.stringify(redact(preview.value), null, 2)}\nApprove plan ${planDigest}. Type yes to approve: `);
-    if (await output.io.stdin.readLine(output.abort.signal) !== "yes" || output.abort.signal.aborted) return refusal("approval_required", "Approval requires literal yes.");
+    await output.io.stderr.write(
+      `${JSON.stringify(redact(preview.value), null, 2)}\nApprove plan ${planDigest}. Type yes to approve: `,
+    );
+    if (
+      (await output.io.stdin.readLine(output.abort.signal)) !== "yes" ||
+      output.abort.signal.aborted
+    )
+      return refusal("approval_required", "Approval requires literal yes.");
     approver = `${userInfo().username}@${hostname()}`;
   }
-  if (!approver?.trim() || !planDigest?.trim()) return refusal("approval_required", "Unattended approval requires an explicit approver and the plan digest read from plan.");
-  const approval = { approver, planDigest, mode: interactive ? "interactive" as const : "unattended" as const };
-  const result = await engine.withWriterResult({ id: invocation.jobId! }, writer => writer.approve(approval));
+  if (!approver?.trim() || !planDigest?.trim())
+    return refusal(
+      "approval_required",
+      "Unattended approval requires an explicit approver and the plan digest read from plan.",
+    );
+  const approval = {
+    approver,
+    planDigest,
+    mode: interactive ? ("interactive" as const) : ("unattended" as const),
+  };
+  const result = await engine.withWriterResult({ id: invocation.jobId! }, (writer) =>
+    writer.approve(approval),
+  );
   if (!result.ok) return result;
   return review(reader, invocation, status, { ...result.value, plan: status.currentPlan });
 }
 
-async function executeCommand(invocation: Invocation, output: Output, engine: Engine): Promise<AdapterOutcome> {
+async function executeCommand(
+  invocation: Invocation,
+  output: Output,
+  engine: Engine,
+): Promise<AdapterOutcome> {
   let config: unknown;
   if (invocation.config !== undefined) {
     const input = await readConfig(invocation.config);
@@ -220,10 +351,18 @@ async function executeCommand(invocation: Invocation, output: Output, engine: En
     config = input.value;
   }
   if (invocation.command === "init") {
-    const result = await engine.initJob({ type: invocation.type!, ...(invocation.label === undefined ? {} : { label: invocation.label }), ...(config === undefined ? {} : { config }) });
+    const result = await engine.initJob({
+      type: invocation.type!,
+      ...(invocation.label === undefined ? {} : { label: invocation.label }),
+      ...(config === undefined ? {} : { config }),
+    });
     if (result.ok) {
       output.job = { id: result.value.id, type: invocation.type! };
-      if (invocation.output === "jsonl") for await (const event of engine.reader(result.value).events({ from: invocation.from ?? 0, follow: false })) await output.event(event);
+      if (invocation.output === "jsonl")
+        for await (const event of engine
+          .reader(result.value)
+          .events({ from: invocation.from ?? 0, follow: false }))
+          await output.event(event);
     }
     return result;
   }
@@ -239,36 +378,72 @@ async function executeCommand(invocation: Invocation, output: Output, engine: En
   }
   if (invocation.command === "status") {
     if (invocation.output === "jsonl") {
-      for await (const event of reader.events({ from: invocation.from ?? 0, follow: false, signal: output.abort.signal })) await output.event(event);
+      for await (const event of reader.events({
+        from: invocation.from ?? 0,
+        follow: false,
+        signal: output.abort.signal,
+      }))
+        await output.event(event);
       return status;
     }
     return review(reader, invocation, status.value, status.value);
   }
-  if ((invocation.command === "plan" || invocation.command === "verify") && invocation.review) return review(reader, invocation, status.value, invocation.command === "plan" ? status.value.currentPlan : undefined);
+  if ((invocation.command === "plan" || invocation.command === "verify") && invocation.review)
+    return review(
+      reader,
+      invocation,
+      status.value,
+      invocation.command === "plan" ? status.value.currentPlan : undefined,
+    );
   if (invocation.command === "accept") {
-    if (!invocation.verificationDigest) return refusal("verification_unaccepted", "Acceptance requires the exact verification digest.");
-    if (!invocation.approver?.trim() || !invocation.codes.length) return refusal("usage", "Acceptance requires an approver and named codes.");
+    if (!invocation.verificationDigest)
+      return refusal(
+        "verification_unaccepted",
+        "Acceptance requires the exact verification digest.",
+      );
+    if (!invocation.approver?.trim() || !invocation.codes.length)
+      return refusal("usage", "Acceptance requires an approver and named codes.");
   }
   const result = await withEvents(invocation, output, reader, async () => {
-    if (invocation.command === "approve") return approve(invocation, output, engine, reader, status.value);
-    if (invocation.command === "reclaim") return engine.reclaim(job, { confirm: true, stopWorker: invocation.stopWorker });
+    if (invocation.command === "approve")
+      return approve(invocation, output, engine, reader, status.value);
+    if (invocation.command === "reclaim")
+      return engine.reclaim(job, { confirm: true, stopWorker: invocation.stopWorker });
     return engine.withWriterResult(job, async (writer: JobWriter): Promise<Outcome<unknown>> => {
       switch (invocation.command) {
-        case "creds init": return writer.onboard(config);
-        case "doctor": return writer.doctor();
-        case "plan": return writer.plan();
-        case "execute": return writer.execute({ signal: output.abort.signal });
-        case "verify": return writer.verify();
-        case "accept": return writer.accept({ verificationDigest: invocation.verificationDigest!, approver: invocation.approver!, codes: invocation.codes.map((code, index) => ({ code, ...(invocation.notes[index] === undefined ? {} : { note: invocation.notes[index] }) })) });
-        case "report": return writer.report();
-        case "close": return writer.close();
-        case "cancel": return writer.cancel(invocation.reason ?? "Operator cancelled the job.");
-        default: throw new Error("Unexpected writer command");
+        case "creds init":
+          return writer.onboard(config);
+        case "doctor":
+          return writer.doctor();
+        case "plan":
+          return writer.plan();
+        case "execute":
+          return writer.execute({ signal: output.abort.signal });
+        case "verify":
+          return writer.verify();
+        case "accept":
+          return writer.accept({
+            verificationDigest: invocation.verificationDigest!,
+            approver: invocation.approver!,
+            codes: invocation.codes.map((code, index) => ({
+              code,
+              ...(invocation.notes[index] === undefined ? {} : { note: invocation.notes[index] }),
+            })),
+          });
+        case "report":
+          return writer.report();
+        case "close":
+          return writer.close();
+        case "cancel":
+          return writer.cancel(invocation.reason ?? "Operator cancelled the job.");
+        default:
+          throw new Error("Unexpected writer command");
       }
     });
   });
   if (!result.ok) return result;
-  if (invocation.command === "execute") return { ok: true, value: terminalEnvelopeForExecute(result.value as ExecuteResult) };
+  if (invocation.command === "execute")
+    return { ok: true, value: terminalEnvelopeForExecute(result.value as ExecuteResult) };
   if (invocation.command === "plan" || invocation.command === "verify") {
     const current = await reader.status();
     if (!current.ok) return current;
@@ -299,7 +474,11 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
   } catch (error) {
     result = caught(error);
   } finally {
-    try { engine?.close(); } catch (error) { result = caught(error); }
+    try {
+      engine?.close();
+    } catch (error) {
+      result = caught(error);
+    }
     io.signal?.removeEventListener("abort", onAbort);
   }
   const signal = errorCode(io.signal?.reason);
@@ -310,12 +489,22 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     // JSONL has no synthetic cursor or synthetic terminal. A pre-lease refusal
     // still needs a result envelope when no matching durable refusal was logged.
     if (invocation?.help && output.mode === "text" && result.ok) await io.stdout.write(HELP);
-    else if (output.mode !== "jsonl" || (!result.ok && output.lastRefusal !== result.refusal.code) || (!output.attempted && result.ok)) await output.outcome(result);
+    else if (
+      output.mode !== "jsonl" ||
+      (!result.ok && output.lastRefusal !== result.refusal.code) ||
+      (!output.attempted && result.ok)
+    )
+      await output.outcome(result);
   } catch (error) {
     if (errorCode(error) === "EPIPE") return 141;
     if (!output.failed && !output.attempted) {
-      try { await output.outcome(refusal("internal_defect", "The command result could not be serialized.")); }
-      catch (failure) { if (errorCode(failure) === "EPIPE") return 141; }
+      try {
+        await output.outcome(
+          refusal("internal_defect", "The command result could not be serialized."),
+        );
+      } catch (failure) {
+        if (errorCode(failure) === "EPIPE") return 141;
+      }
     }
     return signal === "SIGINT" ? 130 : 1;
   }
@@ -327,11 +516,17 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
 // npm's POSIX bin is a symlink; emitted .js and source .ts share the same guard.
 let direct = false;
 if (process.argv[1]) {
-  try { direct = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; }
-  catch { direct = false; }
+  try {
+    direct = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    direct = false;
+  }
 }
 if (direct) {
   const transport = processIo();
-  try { process.exitCode = await run(process.argv.slice(2), transport.io); }
-  finally { transport.dispose(); }
+  try {
+    process.exitCode = await run(process.argv.slice(2), transport.io);
+  } finally {
+    transport.dispose();
+  }
 }

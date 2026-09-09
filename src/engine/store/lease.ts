@@ -2,8 +2,19 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import net from "node:net";
 import {
-  closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync,
-  openSync, readFileSync, readlinkSync, realpathSync, unlinkSync, writeFileSync,
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -108,8 +119,8 @@ interface ProcessIdentity {
   command: string | null;
 }
 
-type ProcessObservation = { status: "alive"; identity: ProcessIdentity } |
-  { status: "absent" | "unknown" };
+type ProcessObservation =
+  { status: "alive"; identity: ProcessIdentity } | { status: "absent" | "unknown" };
 
 const SELECT_LEASE_SQL = `SELECT owner_uuid AS ownerUuid, host_id AS hostId, pid,
   process_start_time AS processStartTime, heartbeat_at AS heartbeatAt, kind,
@@ -121,15 +132,37 @@ function isErrnoCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
-function windowsCommand(script: string, extra: NodeJS.ProcessEnv = {}, cwd?: string): string | null {
+function windowsCommand(
+  script: string,
+  extra: NodeJS.ProcessEnv = {},
+  cwd?: string,
+): string | null {
   const root = process.env.SystemRoot ?? process.env.SYSTEMROOT;
   if (!root || !isAbsolute(root)) return null;
-  const result = spawnSync(join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false); ${script}`], {
-      encoding: "utf8", timeout: 5_000, maxBuffer: 1024 * 1024, windowsHide: true, cwd,
-      env: { SystemRoot: root, SYSTEMROOT: root, TEMP: process.env.TEMP, TMP: process.env.TMP,
-        USERPROFILE: process.env.USERPROFILE, ...extra },
-    });
+  const result = spawnSync(
+    join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false); ${script}`,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+      cwd,
+      env: {
+        SystemRoot: root,
+        SYSTEMROOT: root,
+        TEMP: process.env.TEMP,
+        TMP: process.env.TMP,
+        USERPROFILE: process.env.USERPROFILE,
+        ...extra,
+      },
+    },
+  );
   return result.error || result.status !== 0 ? null : result.stdout.trim();
 }
 
@@ -162,7 +195,10 @@ function readProcess(pid: number): ProcessObservation {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
       const end = stat.lastIndexOf(") ");
       if (end < 0) return { status: "unknown" };
-      const fields = stat.slice(end + 2).trim().split(/\s+/u);
+      const fields = stat
+        .slice(end + 2)
+        .trim()
+        .split(/\s+/u);
       const startTime = Number(fields[19]);
       if (!Number.isSafeInteger(startTime) || startTime <= 0) return { status: "unknown" };
       if (fields[0] === "Z" || fields[0] === "X") return { status: "absent" };
@@ -173,41 +209,84 @@ function readProcess(pid: number): ProcessObservation {
         executable = readlinkSync(`/proc/${pid}/exe`);
         argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
         if (argv.at(-1) === "") argv.pop();
-      } catch { /* Inaccessible process details never authorize termination. */ }
-      return { status: "alive", identity: { startTime, uid: uid?.[2] ?? null, executable, argv, command: null } };
+      } catch {
+        /* Inaccessible process details never authorize termination. */
+      }
+      return {
+        status: "alive",
+        identity: { startTime, uid: uid?.[2] ?? null, executable, argv, command: null },
+      };
     }
     if (process.platform === "darwin") {
-      const result = spawnSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "lstart=", "-o", "uid=", "-o", "stat=", "-o", "comm="], {
-        encoding: "utf8", timeout: 2_000, maxBuffer: 1024 * 1024,
-        env: { LC_ALL: "C", TZ: "UTC", PATH: "/usr/bin:/bin" },
-      });
+      const result = spawnSync(
+        "/bin/ps",
+        ["-ww", "-p", String(pid), "-o", "lstart=", "-o", "uid=", "-o", "stat=", "-o", "comm="],
+        {
+          encoding: "utf8",
+          timeout: 2_000,
+          maxBuffer: 1024 * 1024,
+          env: { LC_ALL: "C", TZ: "UTC", PATH: "/usr/bin:/bin" },
+        },
+      );
       if (result.error || result.status !== 0 || !result.stdout.trim()) {
         return processExistence(pid);
       }
-      const match = /^\s*(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\d+)\s+(\S+)\s+(.+)$/u.exec(result.stdout.trim());
+      const match =
+        /^\s*(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\d+)\s+(\S+)\s+(.+)$/u.exec(
+          result.stdout.trim(),
+        );
       if (!match) return { status: "unknown" };
       const startTime = Date.parse(`${match[1]!} UTC`);
       if (!Number.isFinite(startTime)) return { status: "unknown" };
       if (match[3]!.startsWith("Z")) return { status: "absent" };
       const args = spawnSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "args="], {
-        encoding: "utf8", timeout: 2_000, maxBuffer: 1024 * 1024,
+        encoding: "utf8",
+        timeout: 2_000,
+        maxBuffer: 1024 * 1024,
         env: { LC_ALL: "C", PATH: "/usr/bin:/bin" },
       });
-      return { status: "alive", identity: { startTime, uid: match[2]!, executable: match[4]!, argv: null,
-        command: args.error || args.status !== 0 ? null : args.stdout.trim() } };
+      return {
+        status: "alive",
+        identity: {
+          startTime,
+          uid: match[2]!,
+          executable: match[4]!,
+          argv: null,
+          command: args.error || args.status !== 0 ? null : args.stdout.trim(),
+        },
+      };
     }
     if (process.platform === "win32") {
       const text = windowsCommand(WINDOWS_PROCESS_SCRIPT, { MIGMATE_INSPECT_PID: String(pid) });
       if (text === "absent") return { status: "absent" };
       if (text === null) return { status: "unknown" };
       const data: unknown = JSON.parse(text);
-      if (!data || typeof data !== "object" || !("startTime" in data) ||
-        typeof data.startTime !== "number" || !Number.isSafeInteger(data.startTime) || data.startTime <= 0 ||
-        !("uid" in data) || typeof data.uid !== "string" ||
-        !("executable" in data) || typeof data.executable !== "string" ||
-        !("argv" in data) || !Array.isArray(data.argv) || !data.argv.every((arg) => typeof arg === "string")) return { status: "unknown" };
-      return { status: "alive", identity: { startTime: data.startTime, uid: data.uid,
-        executable: data.executable, argv: data.argv, command: null } };
+      if (
+        !data ||
+        typeof data !== "object" ||
+        !("startTime" in data) ||
+        typeof data.startTime !== "number" ||
+        !Number.isSafeInteger(data.startTime) ||
+        data.startTime <= 0 ||
+        !("uid" in data) ||
+        typeof data.uid !== "string" ||
+        !("executable" in data) ||
+        typeof data.executable !== "string" ||
+        !("argv" in data) ||
+        !Array.isArray(data.argv) ||
+        !data.argv.every((arg) => typeof arg === "string")
+      )
+        return { status: "unknown" };
+      return {
+        status: "alive",
+        identity: {
+          startTime: data.startTime,
+          uid: data.uid,
+          executable: data.executable,
+          argv: data.argv,
+          command: null,
+        },
+      };
     }
   } catch (error) {
     // Only an absent process directory / ESRCH proves loss; EPERM, malformed
@@ -218,7 +297,9 @@ function readProcess(pid: number): ProcessObservation {
 }
 
 function processExistence(pid: number): ProcessObservation {
-  try { process.kill(pid, 0); } catch (error) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
     if (isErrnoCode(error, "ESRCH")) return { status: "absent" };
   }
   return { status: "unknown" };
@@ -232,7 +313,8 @@ function statusOf(observation: ProcessObservation, startTime: number): ProcessSt
 
 export function getProcessStartTime(pid = process.pid): number {
   const observed = readProcess(pid);
-  if (observed.status !== "alive") throw new Error("Process start identity could not be established");
+  if (observed.status !== "alive")
+    throw new Error("Process start identity could not be established");
   return observed.identity.startTime;
 }
 
@@ -243,13 +325,17 @@ export function processAlive(pid: number, startTime: number): boolean | null {
 }
 
 function windowsPrivate(path: string, create = false): boolean {
-  const setup = create ? `$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
+  const setup = create
+    ? `$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
 $acl=New-Object System.Security.AccessControl.FileSecurity;
 if(Test-Path -LiteralPath $env.MIGMATE_PRIVATE_PATH -PathType Container){$acl=New-Object System.Security.AccessControl.DirectorySecurity};
 $acl.SetOwner($sid);$acl.SetAccessRuleProtection($true,$false);
 $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow')));
-Set-Acl -LiteralPath $env.MIGMATE_PRIVATE_PATH -AclObject $acl;` : "";
-  return windowsCommand(`${setup}
+Set-Acl -LiteralPath $env.MIGMATE_PRIVATE_PATH -AclObject $acl;`
+    : "";
+  return (
+    windowsCommand(
+      `${setup}
 $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
 $item=Get-Item -LiteralPath $env.MIGMATE_PRIVATE_PATH -Force;
 if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){exit 1};
@@ -258,7 +344,10 @@ if(-not $acl.AreAccessRulesProtected -or $acl.GetOwner([System.Security.Principa
 $rules=$acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]);
 if($rules.Count -eq 0){exit 1};
 foreach($rule in $rules){if($rule.IdentityReference -ne $sid -or $rule.AccessControlType -ne 'Allow'){exit 1}};
-Write-Output 'private'`, { MIGMATE_PRIVATE_PATH: path }) === "private";
+Write-Output 'private'`,
+      { MIGMATE_PRIVATE_PATH: path },
+    ) === "private"
+  );
 }
 
 function privatePath(path: string, directory: boolean): boolean {
@@ -266,24 +355,42 @@ function privatePath(path: string, directory: boolean): boolean {
     const info = lstatSync(path);
     if (info.isSymbolicLink() || (directory ? !info.isDirectory() : !info.isFile())) return false;
     if (process.platform === "win32") return windowsPrivate(path);
-    return process.getuid !== undefined && info.uid === process.getuid() && (info.mode & 0o077) === 0;
-  } catch { return false; }
+    return (
+      process.getuid !== undefined && info.uid === process.getuid() && (info.mode & 0o077) === 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** A reader must not create a home, repair permissions, or replace identity. */
 export function readHostId(home: string): string | null {
   const file = join(home, "hostId");
   let fd: number;
-  try { fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); }
-  catch (error) { if (isErrnoCode(error, "ENOENT")) return null; throw error; }
   try {
-    const before = lstatSync(file), opened = fstatSync(fd);
-    if (!privatePath(home, true) || !privatePath(file, false) ||
-      before.dev !== opened.dev || before.ino !== opened.ino || !opened.isFile()) throw new Error("Unsafe host identity file");
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if (isErrnoCode(error, "ENOENT")) return null;
+    throw error;
+  }
+  try {
+    const before = lstatSync(file),
+      opened = fstatSync(fd);
+    if (
+      !privatePath(home, true) ||
+      !privatePath(file, false) ||
+      before.dev !== opened.dev ||
+      before.ino !== opened.ino ||
+      !opened.isFile()
+    )
+      throw new Error("Unsafe host identity file");
     const hostId = readFileSync(fd, "utf8").trim();
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(hostId)) throw new Error("Invalid host identity file");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(hostId))
+      throw new Error("Invalid host identity file");
     return hostId;
-  } finally { closeSync(fd); }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function getHostId(home: string): string {
@@ -291,25 +398,37 @@ export function getHostId(home: string): string {
   if (existing !== null) return existing;
   mkdirSync(home, { recursive: true, mode: 0o700 });
   if (lstatSync(home).isSymbolicLink()) throw new Error("Unsafe engine home");
-  if (process.platform === "win32" && !windowsPrivate(home, true)) throw new Error("Unsafe engine home");
+  if (process.platform === "win32" && !windowsPrivate(home, true))
+    throw new Error("Unsafe engine home");
   if (!privatePath(home, true)) throw new Error("Unsafe engine home");
-  const file = join(home, "hostId"), temp = join(home, `.hostId.${randomUUID()}.tmp`);
+  const file = join(home, "hostId"),
+    temp = join(home, `.hostId.${randomUUID()}.tmp`);
   const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
   try {
     try {
-      if (process.platform === "win32" && !windowsPrivate(temp, true)) throw new Error("Unsafe host identity file");
+      if (process.platform === "win32" && !windowsPrivate(temp, true))
+        throw new Error("Unsafe host identity file");
       writeFileSync(fd, `${randomUUID()}\n`);
       fsyncSync(fd);
-    } finally { closeSync(fd); }
-    try { linkSync(temp, file); }
-    catch (error) { if (!isErrnoCode(error, "EEXIST")) throw error; }
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      linkSync(temp, file);
+    } catch (error) {
+      if (!isErrnoCode(error, "EEXIST")) throw error;
+    }
   } finally {
     unlinkSync(temp);
     // Windows does not expose directory fsync through Node; the fully flushed
     // file is installed with a non-replacing hard link on its local volume.
     if (process.platform !== "win32") {
       const directory = openSync(home, constants.O_RDONLY | constants.O_DIRECTORY);
-      try { fsyncSync(directory); } finally { closeSync(directory); }
+      try {
+        fsyncSync(directory);
+      } finally {
+        closeSync(directory);
+      }
     }
   }
   const installed = readHostId(home);
@@ -348,23 +467,38 @@ public static class MigmateSocket {
 export async function probeWorker(socketPath: string): Promise<boolean | null> {
   if (!socketPath || !isAbsolute(socketPath)) return null;
   if (process.platform === "win32") {
-    try { lstatSync(socketPath); }
-    catch (error) { return isErrnoCode(error, "ENOENT") ? false : null; }
-    const state = windowsCommand(WINDOWS_SOCKET_SCRIPT, { MIGMATE_INSPECT_SOCKET: basename(socketPath) }, dirname(socketPath));
+    try {
+      lstatSync(socketPath);
+    } catch (error) {
+      return isErrnoCode(error, "ENOENT") ? false : null;
+    }
+    const state = windowsCommand(
+      WINDOWS_SOCKET_SCRIPT,
+      { MIGMATE_INSPECT_SOCKET: basename(socketPath) },
+      dirname(socketPath),
+    );
     return state === "alive" ? true : state === "absent" ? false : null;
   }
   try {
-    return await withSocketPath(socketPath, async (path) => await new Promise<boolean | null>((resolveProbe) => {
-      const socket = net.createConnection({ path });
-      const finish = (value: boolean | null): void => {
-        socket.removeAllListeners();
-        socket.destroy();
-        resolveProbe(value);
-      };
-      socket.once("connect", () => finish(true));
-      socket.once("error", (error) => finish(isErrnoCode(error, "ENOENT") || isErrnoCode(error, "ECONNREFUSED") ? false : null));
-      socket.setTimeout(1_000, () => finish(null));
-    }));
+    return await withSocketPath(
+      socketPath,
+      async (path) =>
+        await new Promise<boolean | null>((resolveProbe) => {
+          const socket = net.createConnection({ path });
+          const finish = (value: boolean | null): void => {
+            socket.removeAllListeners();
+            socket.destroy();
+            resolveProbe(value);
+          };
+          socket.once("connect", () => finish(true));
+          socket.once("error", (error) =>
+            finish(
+              isErrnoCode(error, "ENOENT") || isErrnoCode(error, "ECONNREFUSED") ? false : null,
+            ),
+          );
+          socket.setTimeout(1_000, () => finish(null));
+        }),
+    );
   } catch (error) {
     return isErrnoCode(error, "ENOENT") ? false : null;
   }
@@ -417,7 +551,9 @@ function readProcessCwd(pid: number): string | null {
     if (process.platform === "linux") return readlinkSync(`/proc/${pid}/cwd`);
     if (process.platform === "darwin") {
       const result = spawnSync("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd", "-F0n"], {
-        encoding: "utf8", timeout: 2_000, maxBuffer: 65536,
+        encoding: "utf8",
+        timeout: 2_000,
+        maxBuffer: 65536,
         env: { LC_ALL: "C", PATH: "/usr/bin:/bin:/usr/sbin" },
       });
       if (result.error || result.status !== 0) return null;
@@ -430,31 +566,62 @@ function readProcessCwd(pid: number): string | null {
       const cwd: unknown = JSON.parse(text);
       return typeof cwd === "string" ? cwd : null;
     }
-  } catch { /* Unknown cwd cannot prove relative socket ownership. */ }
+  } catch {
+    /* Unknown cwd cannot prove relative socket ownership. */
+  }
   return null;
 }
 
 function workerOwned(row: LeaseRow, observed: ProcessObservation): boolean {
-  if (observed.status !== "alive" || !row.workerPid || !row.workerProcessStartTime ||
-    !row.workerExecutable || !row.socketPath || !row.workerGroup?.trim() ||
-    !isAbsolute(row.workerExecutable) || !isAbsolute(row.socketPath) ||
-    statusOf(observed, row.workerProcessStartTime) !== "alive") return false;
-  const identity = observed.identity, directory = dirname(row.socketPath), cwd = readProcessCwd(row.workerPid);
-  if (identity.uid !== (process.platform === "win32" ? "self" : String(process.getuid?.())) ||
-    !identity.executable || !isAbsolute(identity.executable) || !cwd || !isAbsolute(cwd) ||
-    !privatePath(directory, true)) return false;
+  if (
+    observed.status !== "alive" ||
+    !row.workerPid ||
+    !row.workerProcessStartTime ||
+    !row.workerExecutable ||
+    !row.socketPath ||
+    !row.workerGroup?.trim() ||
+    !isAbsolute(row.workerExecutable) ||
+    !isAbsolute(row.socketPath) ||
+    statusOf(observed, row.workerProcessStartTime) !== "alive"
+  )
+    return false;
+  const identity = observed.identity,
+    directory = dirname(row.socketPath),
+    cwd = readProcessCwd(row.workerPid);
+  if (
+    identity.uid !== (process.platform === "win32" ? "self" : String(process.getuid?.())) ||
+    !identity.executable ||
+    !isAbsolute(identity.executable) ||
+    !cwd ||
+    !isAbsolute(cwd) ||
+    !privatePath(directory, true)
+  )
+    return false;
   try {
-    if (realpathSync(identity.executable) !== realpathSync(row.workerExecutable) ||
-      realpathSync(directory) !== resolve(directory) || realpathSync(cwd) !== realpathSync(directory)) return false;
-  } catch { return false; }
+    if (
+      realpathSync(identity.executable) !== realpathSync(row.workerExecutable) ||
+      realpathSync(directory) !== resolve(directory) ||
+      realpathSync(cwd) !== realpathSync(directory)
+    )
+      return false;
+  } catch {
+    return false;
+  }
   if (basename(row.socketPath) !== "s" || !basename(directory).startsWith("rc-")) return false;
   const expected = "unix://s";
   if (identity.argv !== null) {
     const argv = identity.argv;
-    if (argv[1] !== "rcd" || argv[2] !== "--rc-addr" || argv[3] !== expected || argv[4] !== "--rc-serve") return false;
+    if (
+      argv[1] !== "rcd" ||
+      argv[2] !== "--rc-addr" ||
+      argv[3] !== expected ||
+      argv[4] !== "--rc-serve"
+    )
+      return false;
     for (const flag of ["--cache-dir", "--temp-dir"]) {
       const index = argv.indexOf(flag);
-      if (index < 0 || argv[index + 1] !== directory || argv.lastIndexOf(flag) !== index) return false;
+      if (index < 0 || argv[index + 1] !== directory || argv.lastIndexOf(flag) !== index)
+        return false;
     }
     return argv.lastIndexOf("--rc-addr") === 2;
   }
@@ -462,17 +629,27 @@ function workerOwned(row: LeaseRow, observed: ProcessObservation): boolean {
   // is not shell syntax: compare the complete fixed leading arguments including
   // the trailing flag, so a socket substring or quoted lookalike cannot match.
   const directories = ` --cache-dir ${directory} --temp-dir ${directory}`;
-  return identity.command !== null &&
-    identity.command.startsWith(`${row.workerExecutable} rcd --rc-addr ${expected} --rc-serve --config `) &&
+  return (
+    identity.command !== null &&
+    identity.command.startsWith(
+      `${row.workerExecutable} rcd --rc-addr ${expected} --rc-serve --config `,
+    ) &&
     (identity.command.includes(`${directories} `) || identity.command.endsWith(directories)) &&
-    identity.command.indexOf(" --rc-addr ", identity.command.indexOf(" --rc-addr ") + 1) === -1;
+    identity.command.indexOf(" --rc-addr ", identity.command.indexOf(" --rc-addr ") + 1) === -1
+  );
 }
 
-export async function inspectLease(row: LeaseRow, thisHostId: string, opts: LeaseInspectionOptions = {}): Promise<LeaseInspection> {
+export async function inspectLease(
+  row: LeaseRow,
+  thisHostId: string,
+  opts: LeaseInspectionOptions = {},
+): Promise<LeaseInspection> {
   const now = opts.now ?? (() => new Date());
   const age = heartbeatAgeMs(row.heartbeatAt, now);
   const hostMatches = row.hostId === thisHostId;
-  let ownerStatus: ProcessStatus = "unknown", socketStatus: Presence = "unknown", workerStatus: Presence = "unknown";
+  let ownerStatus: ProcessStatus = "unknown",
+    socketStatus: Presence = "unknown",
+    workerStatus: Presence = "unknown";
   let worker: ProcessObservation = { status: "unknown" };
   if (hostMatches) {
     try {
@@ -480,39 +657,83 @@ export async function inspectLease(row: LeaseRow, thisHostId: string, opts: Leas
         const alive = opts.processAlive(row.pid, row.processStartTime);
         ownerStatus = alive === true ? "alive" : alive === false ? "absent" : "unknown";
       } else ownerStatus = statusOf(readProcess(row.pid), row.processStartTime);
-    } catch { ownerStatus = "unknown"; }
+    } catch {
+      ownerStatus = "unknown";
+    }
     if (row.socketPath === null) socketStatus = "absent";
     else {
       try {
         const alive = await (opts.probeWorker ?? probeWorker)(row.socketPath);
         socketStatus = alive === true ? "alive" : alive === false ? "absent" : "unknown";
-      } catch { socketStatus = "unknown"; }
+      } catch {
+        socketStatus = "unknown";
+      }
     }
     worker = row.workerPid === null ? { status: "absent" } : readProcess(row.workerPid);
     if (socketStatus === "alive") workerStatus = "alive";
     else if (worker.status === "alive") {
-      workerStatus = row.workerProcessStartTime !== null && statusOf(worker, row.workerProcessStartTime) === "alive" ? "alive" : "unknown";
+      workerStatus =
+        row.workerProcessStartTime !== null &&
+        statusOf(worker, row.workerProcessStartTime) === "alive"
+          ? "alive"
+          : "unknown";
     } else if (socketStatus === "absent" && worker.status === "absent") {
       // A socket/group claim without its PID is incomplete, not proof of loss.
-      workerStatus = row.workerPid !== null || (row.socketPath === null && row.workerGroup === null &&
-        row.workerProcessStartTime === null && row.workerExecutable === null) ? "absent" : "unknown";
+      workerStatus =
+        row.workerPid !== null ||
+        (row.socketPath === null &&
+          row.workerGroup === null &&
+          row.workerProcessStartTime === null &&
+          row.workerExecutable === null)
+          ? "absent"
+          : "unknown";
     }
   }
   const ownerGone = ownerStatus === "absent" || ownerStatus === "mismatched";
   const expired = age >= (opts.expiryMs ?? LEASE_EXPIRY_MS);
-  const decision = evaluateReclaim({ heartbeatExpired: expired, hostMatches, ownerProcessGone: ownerGone,
-    workerSocketSilent: socketStatus === "absent" && workerStatus === "absent" });
+  const decision = evaluateReclaim({
+    heartbeatExpired: expired,
+    hostMatches,
+    ownerProcessGone: ownerGone,
+    workerSocketSilent: socketStatus === "absent" && workerStatus === "absent",
+  });
   return {
-    decision, ownerStatus, workerStatus, socketStatus,
-    stopEligible: hostMatches && expired && ownerGone && workerStatus === "alive" && socketStatus !== "unknown" && workerOwned(row, worker),
-    report: { workerAlive: workerStatus === "alive", workerStatus, recordedHostId: row.hostId, thisHostId,
-      holder: { ownerUuid: row.ownerUuid, pid: row.pid, processStartTime: row.processStartTime,
-        heartbeatAt: row.heartbeatAt, heartbeatAgeMs: age, kind: row.kind },
-      workerGroup: row.workerGroup, lastCheckpoint: row.lastCheckpoint, reclaimable: decision.reclaimable },
+    decision,
+    ownerStatus,
+    workerStatus,
+    socketStatus,
+    stopEligible:
+      hostMatches &&
+      expired &&
+      ownerGone &&
+      workerStatus === "alive" &&
+      socketStatus !== "unknown" &&
+      workerOwned(row, worker),
+    report: {
+      workerAlive: workerStatus === "alive",
+      workerStatus,
+      recordedHostId: row.hostId,
+      thisHostId,
+      holder: {
+        ownerUuid: row.ownerUuid,
+        pid: row.pid,
+        processStartTime: row.processStartTime,
+        heartbeatAt: row.heartbeatAt,
+        heartbeatAgeMs: age,
+        kind: row.kind,
+      },
+      workerGroup: row.workerGroup,
+      lastCheckpoint: row.lastCheckpoint,
+      reclaimable: decision.reclaimable,
+    },
   };
 }
 
-export async function buildRecoveryReport(row: LeaseRow, thisHostId: string, opts: LeaseInspectionOptions = {}): Promise<RecoveryReport> {
+export async function buildRecoveryReport(
+  row: LeaseRow,
+  thisHostId: string,
+  opts: LeaseInspectionOptions = {},
+): Promise<RecoveryReport> {
   return (await inspectLease(row, thisHostId, opts)).report;
 }
 
@@ -524,10 +745,16 @@ export async function stopOrphanWorker(row: LeaseRow): Promise<boolean> {
   const maySignal = async (): Promise<boolean> => {
     const owner = statusOf(readProcess(row.pid), row.processStartTime);
     if (owner !== "absent" && owner !== "mismatched") return false;
-    if (heartbeatAgeMs(row.heartbeatAt, () => new Date()) < LEASE_EXPIRY_MS ||
-      row.socketPath === null || await probeWorker(row.socketPath) === null) return false;
-    return workerOwned(row, readProcess(row.workerPid!)) &&
-      statusOf(readProcess(row.workerPid!), row.workerProcessStartTime ?? Number.NaN) === "alive";
+    if (
+      heartbeatAgeMs(row.heartbeatAt, () => new Date()) < LEASE_EXPIRY_MS ||
+      row.socketPath === null ||
+      (await probeWorker(row.socketPath)) === null
+    )
+      return false;
+    return (
+      workerOwned(row, readProcess(row.workerPid!)) &&
+      statusOf(readProcess(row.workerPid!), row.workerProcessStartTime ?? Number.NaN) === "alive"
+    );
   };
   const awaitAbsent = async (timeout: number): Promise<boolean> => {
     const deadline = performance.now() + timeout;
@@ -540,9 +767,12 @@ export async function stopOrphanWorker(row: LeaseRow): Promise<boolean> {
     return false;
   };
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
-    if (!await maySignal()) return false;
-    try { process.kill(row.workerPid, signal); }
-    catch (error) { return isErrnoCode(error, "ESRCH"); }
+    if (!(await maySignal())) return false;
+    try {
+      process.kill(row.workerPid, signal);
+    } catch (error) {
+      return isErrnoCode(error, "ESRCH");
+    }
     if (await awaitAbsent(signal === "SIGTERM" ? 3_000 : 1_000)) return true;
   }
   return false;
@@ -553,106 +783,207 @@ function readLeaseRow(db: DatabaseSync): LeaseRow | null {
 }
 
 function readJobRow(db: DatabaseSync): JobRow {
-  const row = db.prepare("SELECT id, state, host_id AS hostId, last_checkpoint AS lastCheckpoint FROM job LIMIT 1").get() as JobRow | undefined;
+  const row = db
+    .prepare(
+      "SELECT id, state, host_id AS hostId, last_checkpoint AS lastCheckpoint FROM job LIMIT 1",
+    )
+    .get() as JobRow | undefined;
   if (!row) throw new Error("Job row missing");
   return row;
 }
 
 function rollback(db: DatabaseSync): void {
-  try { db.exec("ROLLBACK"); } catch { /* The failed transaction is already unwound. */ }
+  try {
+    db.exec("ROLLBACK");
+  } catch {
+    /* The failed transaction is already unwound. */
+  }
 }
 
-export async function acquire(db: DatabaseSync, identity: LeaseIdentity, opts: LeaseAcquireOptions): Promise<Outcome<LeaseHandle>> {
+export async function acquire(
+  db: DatabaseSync,
+  identity: LeaseIdentity,
+  opts: LeaseAcquireOptions,
+): Promise<Outcome<LeaseHandle>> {
   const now = opts.now ?? (() => new Date());
-  if (!identity.hostId || !Number.isSafeInteger(identity.pid) || identity.pid <= 0 ||
-    !Number.isSafeInteger(identity.processStartTime) || identity.processStartTime <= 0) throw new Error("Invalid lease identity");
+  if (
+    !identity.hostId ||
+    !Number.isSafeInteger(identity.pid) ||
+    identity.pid <= 0 ||
+    !Number.isSafeInteger(identity.processStartTime) ||
+    identity.processStartTime <= 0
+  )
+    throw new Error("Invalid lease identity");
   const ownerUuid = randomUUID();
   db.exec("BEGIN IMMEDIATE");
   let row: LeaseRow;
   try {
-    const job = readJobRow(db), existing = readLeaseRow(db);
+    const job = readJobRow(db),
+      existing = readLeaseRow(db);
     if (job.hostId !== null && job.hostId !== identity.hostId) {
       db.exec("ROLLBACK");
-      return refuse("foreign_host", "Live job state belongs to another host", { recovery: {
-        recordedHostId: job.hostId, thisHostId: identity.hostId, holder: null, workerAlive: false,
-        workerStatus: "unknown", workerGroup: existing?.workerGroup ?? null,
-        lastCheckpoint: job.lastCheckpoint, reclaimable: false,
-      } });
+      return refuse("foreign_host", "Live job state belongs to another host", {
+        recovery: {
+          recordedHostId: job.hostId,
+          thisHostId: identity.hostId,
+          holder: null,
+          workerAlive: false,
+          workerStatus: "unknown",
+          workerGroup: existing?.workerGroup ?? null,
+          lastCheckpoint: job.lastCheckpoint,
+          reclaimable: false,
+        },
+      });
     }
     if (existing !== null) {
       db.exec("ROLLBACK");
       const inspection = await inspectLease(existing, identity.hostId, opts);
-      return refuse(inspection.decision.code ?? "lease_held", "The existing lease requires explicit recovery", { recovery: inspection.report });
+      return refuse(
+        inspection.decision.code ?? "lease_held",
+        "The existing lease requires explicit recovery",
+        { recovery: inspection.report },
+      );
     }
-    row = { ...identity, ownerUuid, heartbeatAt: now().toISOString(), kind: opts.kind,
-      socketPath: opts.socketPath ?? null, workerGroup: opts.workerGroup ?? null,
-      workerPid: opts.workerPid ?? null, workerProcessStartTime: opts.workerProcessStartTime ?? null,
-      workerExecutable: opts.workerExecutable ?? null, lastCheckpoint: opts.lastCheckpoint ?? job.lastCheckpoint,
-      migmateVersion: opts.migmateVersion ?? MIGMATE_VERSION };
-    db.prepare(`INSERT INTO lease (id, owner_uuid, host_id, pid, process_start_time, heartbeat_at, kind,
+    row = {
+      ...identity,
+      ownerUuid,
+      heartbeatAt: now().toISOString(),
+      kind: opts.kind,
+      socketPath: opts.socketPath ?? null,
+      workerGroup: opts.workerGroup ?? null,
+      workerPid: opts.workerPid ?? null,
+      workerProcessStartTime: opts.workerProcessStartTime ?? null,
+      workerExecutable: opts.workerExecutable ?? null,
+      lastCheckpoint: opts.lastCheckpoint ?? job.lastCheckpoint,
+      migmateVersion: opts.migmateVersion ?? MIGMATE_VERSION,
+    };
+    db.prepare(
+      `INSERT INTO lease (id, owner_uuid, host_id, pid, process_start_time, heartbeat_at, kind,
       socket_path, worker_group, worker_pid, worker_process_start_time, worker_executable, last_checkpoint, migmate_version)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(row.ownerUuid, row.hostId, row.pid, row.processStartTime, row.heartbeatAt, row.kind,
-        row.socketPath, row.workerGroup, row.workerPid, row.workerProcessStartTime, row.workerExecutable,
-        row.lastCheckpoint, row.migmateVersion);
-    db.prepare("UPDATE job SET host_id = ? WHERE id = ? AND host_id IS NULL").run(identity.hostId, job.id);
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      row.ownerUuid,
+      row.hostId,
+      row.pid,
+      row.processStartTime,
+      row.heartbeatAt,
+      row.kind,
+      row.socketPath,
+      row.workerGroup,
+      row.workerPid,
+      row.workerProcessStartTime,
+      row.workerExecutable,
+      row.lastCheckpoint,
+      row.migmateVersion,
+    );
+    db.prepare("UPDATE job SET host_id = ? WHERE id = ? AND host_id IS NULL").run(
+      identity.hostId,
+      job.id,
+    );
     db.exec("COMMIT");
-  } catch (error) { rollback(db); throw error; }
+  } catch (error) {
+    rollback(db);
+    throw error;
+  }
   const handle: LeaseHandle = { row, timer: null };
   handle.timer = setInterval(() => {
-    try { heartbeat(db, handle, now); }
-    catch { clearInterval(handle.timer ?? undefined); handle.timer = null; }
+    try {
+      heartbeat(db, handle, now);
+    } catch {
+      clearInterval(handle.timer ?? undefined);
+      handle.timer = null;
+    }
   }, opts.heartbeatMs ?? HEARTBEAT_MS);
   handle.timer.unref();
   return ok(handle);
 }
 
-export function heartbeat(db: DatabaseSync, handle: LeaseHandle, now: () => Date = () => new Date()): boolean {
+export function heartbeat(
+  db: DatabaseSync,
+  handle: LeaseHandle,
+  now: () => Date = () => new Date(),
+): boolean {
   const row = handle.row;
-  const updated = db.prepare(`UPDATE lease SET heartbeat_at = ? WHERE id = 1 AND owner_uuid = ?
-    AND host_id = ? AND pid = ? AND process_start_time = ?`)
-    .run(now().toISOString(), row.ownerUuid, row.hostId, row.pid, row.processStartTime).changes === 1;
-  if (!updated && handle.timer !== null) { clearInterval(handle.timer); handle.timer = null; }
+  const updated =
+    db
+      .prepare(
+        `UPDATE lease SET heartbeat_at = ? WHERE id = 1 AND owner_uuid = ?
+    AND host_id = ? AND pid = ? AND process_start_time = ?`,
+      )
+      .run(now().toISOString(), row.ownerUuid, row.hostId, row.pid, row.processStartTime)
+      .changes === 1;
+  if (!updated && handle.timer !== null) {
+    clearInterval(handle.timer);
+    handle.timer = null;
+  }
   return updated;
 }
 
 export function release(db: DatabaseSync, handle: LeaseHandle): boolean {
-  if (handle.timer !== null) { clearInterval(handle.timer); handle.timer = null; }
+  if (handle.timer !== null) {
+    clearInterval(handle.timer);
+    handle.timer = null;
+  }
   const row = handle.row;
   // A surviving worker claim must be recovered explicitly, never discarded by
   // a finally block. The controlled supervisor clears the claim after exit.
-  return db.prepare(`DELETE FROM lease WHERE id = 1 AND owner_uuid = ? AND host_id = ?
+  return (
+    db
+      .prepare(
+        `DELETE FROM lease WHERE id = 1 AND owner_uuid = ? AND host_id = ?
     AND pid = ? AND process_start_time = ? AND socket_path IS NULL AND worker_pid IS NULL
-    AND worker_group IS NULL AND worker_process_start_time IS NULL AND worker_executable IS NULL`)
-    .run(row.ownerUuid, row.hostId, row.pid, row.processStartTime).changes === 1;
+    AND worker_group IS NULL AND worker_process_start_time IS NULL AND worker_executable IS NULL`,
+      )
+      .run(row.ownerUuid, row.hostId, row.pid, row.processStartTime).changes === 1
+  );
 }
 
-export async function withLease<T>(db: DatabaseSync, identity: LeaseIdentity, opts: LeaseAcquireOptions,
-  fn: (lease: LeaseHandle) => Promise<T>): Promise<Outcome<T>> {
+export async function withLease<T>(
+  db: DatabaseSync,
+  identity: LeaseIdentity,
+  opts: LeaseAcquireOptions,
+  fn: (lease: LeaseHandle) => Promise<T>,
+): Promise<Outcome<T>> {
   const acquired = await acquire(db, identity, opts);
   if (!acquired.ok) return acquired;
-  try { return ok(await fn(acquired.value)); }
-  finally { release(db, acquired.value); }
+  try {
+    return ok(await fn(acquired.value));
+  } finally {
+    release(db, acquired.value);
+  }
 }
 
 /** Writer-open reconciliation is not reclaim. Only the freshly acquired owner
  * may rewrite executing, under the same write lock that rechecks ownership. */
-export async function reconcileWriterOpen(db: DatabaseSync, reconcile: (state: JobState) => JobState,
-  opts: LeaseInspectionOptions & { hostId?: string; ownerUuid?: string } = {}): Promise<LeaseReconciliationResult> {
+export async function reconcileWriterOpen(
+  db: DatabaseSync,
+  reconcile: (state: JobState) => JobState,
+  opts: LeaseInspectionOptions & { hostId?: string; ownerUuid?: string } = {},
+): Promise<LeaseReconciliationResult> {
   db.exec("BEGIN IMMEDIATE");
   try {
-    const job = readJobRow(db), lease = readLeaseRow(db);
-    const owned = lease !== null && opts.ownerUuid !== undefined && lease.ownerUuid === opts.ownerUuid &&
-      opts.hostId === lease.hostId && job.hostId === opts.hostId && lease.pid === process.pid &&
+    const job = readJobRow(db),
+      lease = readLeaseRow(db);
+    const owned =
+      lease !== null &&
+      opts.ownerUuid !== undefined &&
+      lease.ownerUuid === opts.ownerUuid &&
+      opts.hostId === lease.hostId &&
+      job.hostId === opts.hostId &&
+      lease.pid === process.pid &&
       statusOf(readProcess(lease.pid), lease.processStartTime) === "alive";
     if (!owned || job.state !== "executing") {
       db.exec("ROLLBACK");
-      const recovery = lease === null ? null : (await inspectLease(lease, opts.hostId ?? "", opts)).report;
+      const recovery =
+        lease === null ? null : (await inspectLease(lease, opts.hostId ?? "", opts)).report;
       return { changed: false, state: job.state, recovery };
     }
     const next = reconcile(job.state);
     db.prepare("UPDATE job SET state = ? WHERE id = ?").run(next, job.id);
     db.exec("COMMIT");
     return { changed: next !== job.state, state: next, recovery: null };
-  } catch (error) { rollback(db); throw error; }
+  } catch (error) {
+    rollback(db);
+    throw error;
+  }
 }

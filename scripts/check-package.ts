@@ -17,7 +17,10 @@ interface PackageManifest {
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const desktop = process.argv.slice(2).includes("--desktop");
-assert.ok(process.argv.slice(2).every((argument) => argument === "--desktop"), "Unknown option");
+assert.ok(
+  process.argv.slice(2).every((argument) => argument === "--desktop"),
+  "Unknown option",
+);
 assert.equal(process.versions.node.split(".")[0], "24", "Package smoke requires Node 24");
 distributionPlatform();
 const npmCli =
@@ -70,7 +73,9 @@ async function sourceAssets(directory: string): Promise<string[]> {
 const temporary = await mkdtemp(join(tmpdir(), "migmate-package-"));
 try {
   // Run the real prepack lifecycle: emission and vendor verification, never an npm link to sources.
-  command(process.execPath, [npmCli, "pack", "--pack-destination", temporary], root, { inherit: true });
+  command(process.execPath, [npmCli, "pack", "--pack-destination", temporary], root, {
+    inherit: true,
+  });
   const tarballs = (await readdir(temporary)).filter((name) => name.endsWith(".tgz"));
   assert.equal(tarballs.length, 1, "npm pack must produce exactly one artifact");
   const prefix = join(temporary, "prefix");
@@ -91,7 +96,9 @@ try {
     { inherit: true },
   );
   const consumer = process.platform === "win32" ? prefix : join(prefix, "lib");
-  const expected = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as PackageManifest;
+  const expected = JSON.parse(
+    await readFile(join(root, "package.json"), "utf8"),
+  ) as PackageManifest;
   const installed = join(consumer, "node_modules", ...expected.name.split("/"));
   const manifest = JSON.parse(
     await readFile(join(installed, "package.json"), "utf8"),
@@ -106,13 +113,21 @@ try {
     "smol-toml": "1.8.0",
   });
   assert.equal(existsSync(join(installed, "src")), false, "Unemitted source must not be shipped");
-  assert.equal(existsSync(join(installed, "scripts")), false, "Repository tooling must not be shipped");
+  assert.equal(
+    existsSync(join(installed, "scripts")),
+    false,
+    "Repository tooling must not be shipped",
+  );
   assert.equal(existsSync(join(installed, "dist", "package.json")), false);
 
   const assets = await sourceAssets(join(root, "src"));
   for (const source of assets) {
     const destination = join(installed, "dist", relative(join(root, "src"), source));
-    assert.deepEqual(await readFile(destination), await readFile(source), `Embedded asset: ${source}`);
+    assert.deepEqual(
+      await readFile(destination),
+      await readFile(source),
+      `Embedded asset: ${source}`,
+    );
   }
   assert.ok((await stat(join(installed, "dist", "engine", "store", "schema.sql"))).isFile());
 
@@ -171,7 +186,10 @@ for (const specifier of ${JSON.stringify(privateSpecifiers)}) {
   ) as { command: string; job: { id: string }; ok: boolean };
   assert.equal(initialized.command, "init");
   assert.equal(initialized.ok, true);
-  assert.ok(initialized.job.id, "The installed CLI must create a durable job using its embedded schema");
+  assert.ok(
+    initialized.job.id,
+    "The installed CLI must create a durable job using its embedded schema",
+  );
   const status = JSON.parse(
     cli(["status", "--job", initialized.job.id, "--home", home, "--output", "json"]),
   ) as { command: string; job: { id: string }; ok: boolean };
@@ -181,7 +199,12 @@ for (const specifier of ${JSON.stringify(privateSpecifiers)}) {
 
   // Exercise embedded assets through the installed adapter, whether emitted from
   // TypeScript constants or copied files. A source-tree .html file is not the contract.
-  command(process.execPath, ["--input-type=module", "--eval", `
+  command(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -221,7 +244,10 @@ try {
   await session.close();
   engine.close();
 }
-`], temporary);
+`,
+    ],
+    temporary,
+  );
 
   if (desktop) {
     console.log(

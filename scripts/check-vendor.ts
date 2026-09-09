@@ -66,7 +66,9 @@ async function main(): Promise<void> {
   if (process.argv.length > 3) {
     throw new Error("Usage: node scripts/check-vendor.ts [package-root]");
   }
-  const root = await realpath(resolve(process.argv[2] ?? fileURLToPath(new URL("..", import.meta.url))));
+  const root = await realpath(
+    resolve(process.argv[2] ?? fileURLToPath(new URL("..", import.meta.url))),
+  );
   const manifestPath = await packageFile(root, "vendor/rclone/manifest.json");
   const manifest: unknown = JSON.parse(await readFile(manifestPath, "utf8"));
   if (
@@ -88,7 +90,9 @@ async function main(): Promise<void> {
   const binaries = manifest.binaries;
   const cells = Object.keys(RELEASES);
   if (Object.keys(binaries).length !== cells.length || cells.some((cell) => !(cell in binaries))) {
-    throw new Error("Vendor manifest must contain exactly the six supported platform/architecture cells");
+    throw new Error(
+      "Vendor manifest must contain exactly the six supported platform/architecture cells",
+    );
   }
 
   const checked: Array<{

@@ -25,8 +25,10 @@ export function errorCode(error: unknown): string | undefined {
 export function processIo(): { io: Io; dispose(): void } {
   const controller = new AbortController();
   let failure: Error | undefined;
-  const interrupt = () => controller.abort(Object.assign(new Error("Interrupted"), { code: "SIGINT" }));
-  const terminate = () => controller.abort(Object.assign(new Error("Terminated"), { code: "SIGTERM" }));
+  const interrupt = () =>
+    controller.abort(Object.assign(new Error("Interrupted"), { code: "SIGINT" }));
+  const terminate = () =>
+    controller.abort(Object.assign(new Error("Terminated"), { code: "SIGTERM" }));
   const brokenPipe = () => {
     failure = Object.assign(new Error("Output unavailable"), { code: "EPIPE" });
     controller.abort(failure);
@@ -58,14 +60,21 @@ export function processIo(): { io: Io; dispose(): void } {
           target.off("drain", onDrain);
           target.off("error", onWriteError);
           controller.signal.removeEventListener("abort", onAbort);
-          if (error) reject(error); else resolve();
+          if (error) reject(error);
+          else resolve();
         };
-        const onDrain = () => { drained = true; finish(); };
+        const onDrain = () => {
+          drained = true;
+          finish();
+        };
         const onWriteError = (error: Error) => finish(error);
         // A full pipe must not prevent an interrupted engine from checkpointing
         // and releasing the lease. No unbounded flush after a process signal.
         const onAbort = () => {
-          if (failure) { finish(failure); return; }
+          if (failure) {
+            finish(failure);
+            return;
+          }
           timer ??= setTimeout(() => finish(controller.signal.reason), 5000);
         };
         target.on("error", onWriteError);
@@ -73,9 +82,12 @@ export function processIo(): { io: Io; dispose(): void } {
         controller.signal.addEventListener("abort", onAbort, { once: true });
         if (controller.signal.aborted) onAbort();
         try {
-          drained = target.write(chunk, "utf8", error => {
+          drained = target.write(chunk, "utf8", (error) => {
             callbackDone = true;
-            if (error) { onError(error); finish(error); } else finish();
+            if (error) {
+              onError(error);
+              finish(error);
+            } else finish();
           });
           writeReturned = true;
           finish();
@@ -87,14 +99,21 @@ export function processIo(): { io: Io; dispose(): void } {
   });
   return {
     io: {
-      stdout: stream(process.stdout), stderr: stream(process.stderr), signal: controller.signal,
+      stdout: stream(process.stdout),
+      stderr: stream(process.stderr),
+      signal: controller.signal,
       stdin: {
         isTTY: Boolean(process.stdin.isTTY),
         async readLine(signal) {
           const input = createInterface({ input: process.stdin });
-          try { return await input.question("", signal ? { signal } : {}); }
-          catch { return null; }
-          finally { input.close(); process.stdin.pause(); }
+          try {
+            return await input.question("", signal ? { signal } : {});
+          } catch {
+            return null;
+          } finally {
+            input.close();
+            process.stdin.pause();
+          }
         },
       },
     },
