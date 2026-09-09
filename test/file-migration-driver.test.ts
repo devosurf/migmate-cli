@@ -1,503 +1,335 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { describe, it } from "node:test";
-import {
-  fileMigrationDriver,
-  type FileMigrationConfig,
-} from "../src/engine/drivers/file-migration.ts";
-import type { CommitUnit, DriverContext, FileCommitRow } from "../src/engine/drivers/types.ts";
-import {
-  FakeFileMigrationPort,
-  type FakeFileMigrationFixture,
-} from "../src/engine/providers/fake.ts";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it, type TestContext } from "node:test";
+import { openEngine, type Engine, type Outcome, type JobRef } from "../src/engine/index.ts";
+import { FakeFileMigrationPort, type FakeFileMigrationFixture } from "../src/engine/providers/fake.ts";
+import type { FileMigrationConfig } from "../src/engine/drivers/file-migration.ts";
+import type { FileProvider } from "../src/engine/drivers/file-state.ts";
 
-const fixedNow = "2026-09-01T00:00:00.000Z";
+const now = "2026-09-01T00:00:00.000Z";
+const config: FileMigrationConfig = {
+  mappings: [{ id: "mapping", sourceDriveId: "source-drive", sourceItemId: "source-root",
+    destDriveId: "destination-drive", destFolderId: "destination-root" }],
+};
 
-function bytes(value: string | number[]): Uint8Array {
-  if (typeof value === "string") {
-    return new TextEncoder().encode(value);
-  }
-
-  return new Uint8Array(value);
+function value<T>(outcome: Outcome<T>): T {
+  assert.equal(outcome.ok, true, outcome.ok ? undefined : outcome.refusal.code);
+  if (!outcome.ok) throw new Error(outcome.refusal.code);
+  return outcome.value;
 }
 
-function sha256(value: string | Uint8Array): string {
-  const input = value instanceof Uint8Array ? value : bytes(value);
-  return createHash("sha256").update(input).digest("hex");
-}
-
-async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
-  const items: T[] = [];
-  for await (const item of iterable) {
-    items.push(item);
-  }
-
-  return items;
-}
-
-function rowIndex(units: CommitUnit[]): Map<string, FileCommitRow> {
-  const rows = new Map<string, FileCommitRow>();
-  for (const unit of units) {
-    for (const row of unit.rows) {
-      // A file migration driver yields file rows only; anything else is a defect.
-      if (row.jobType !== "file_migration") continue;
-      rows.set(row.sourceItemId, row);
-    }
-  }
-
-  return rows;
-}
-
-function makeFixture(): { port: FakeFileMigrationPort; config: FileMigrationConfig } {
-  const sourceItems: FakeFileMigrationFixture["sourceItems"] = [
-    { id: "src-root", parentId: null, name: "root", kind: "folder", identity: "src-root" },
-    {
-      id: "zero",
-      parentId: "src-root",
-      name: "zero.txt",
-      kind: "file",
-      size: 0,
-      mimeType: "application/octet-stream",
-      content: "",
-      identity: "zero",
-    },
-    {
-      id: "binary",
-      parentId: "src-root",
-      name: "binary.bin",
-      kind: "file",
-      size: 4,
-      mimeType: "application/octet-stream",
-      content: bytes([1, 2, 3, 4]),
-      identity: "binary",
-    },
-    {
-      id: "office",
-      parentId: "src-root",
-      name: "doc.docx",
-      kind: "file",
-      size: 4,
-      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      content: "docx",
-      identity: "office",
-    },
-    {
-      id: "empty-folder",
-      parentId: "src-root",
-      name: "empty-folder",
-      kind: "folder",
-      identity: "empty-folder",
-    },
-    {
-      id: "changed",
-      parentId: "src-root",
-      name: "changed.txt",
-      kind: "file",
-      size: 11,
-      mimeType: "text/plain",
-      content: "old content",
-      identity: "changed",
-    },
-    {
-      id: "rename",
-      parentId: "src-root",
-      name: "rename.txt",
-      kind: "file",
-      size: 14,
-      mimeType: "text/plain",
-      content: "rename content",
-      identity: "rename",
-    },
-    {
-      id: "deleted",
-      parentId: "src-root",
-      name: "deleted.txt",
-      kind: "file",
-      size: 15,
-      mimeType: "text/plain",
-      content: "deleted content",
-      identity: "deleted",
-    },
-    {
-      id: "package",
-      parentId: "src-root",
-      name: "pkg.onepkg",
-      kind: "package",
-      downloadable: false,
-      identity: "package",
-    },
-    {
-      id: "reference",
-      parentId: "src-root",
-      name: "shortcut.url",
-      kind: "reference",
-      downloadable: false,
-      identity: "reference",
-    },
-    {
-      id: "undownloadable",
-      parentId: "src-root",
-      name: "blocked.bin",
-      kind: "undownloadable",
-      downloadable: false,
-      identity: "undownloadable",
-    },
-    {
-      id: "duplicate",
-      parentId: "src-root",
-      name: "duplicate.txt",
-      kind: "file",
-      size: 3,
-      mimeType: "text/plain",
-      content: "dup",
-      identity: "duplicate",
-    },
-    {
-      id: "type-conflict",
-      parentId: "src-root",
-      name: "type-conflict.txt",
-      kind: "file",
-      size: 4,
-      mimeType: "text/plain",
-      content: "type",
-      identity: "type-conflict",
-    },
-    {
-      id: "unowned",
-      parentId: "src-root",
-      name: "unowned.txt",
-      kind: "file",
-      size: 7,
-      mimeType: "text/plain",
-      content: "unowned",
-      identity: "unowned",
-    },
-    {
-      id: "drift",
-      parentId: "src-root",
-      name: "drift.txt",
-      kind: "file",
-      size: 12,
-      mimeType: "text/plain",
-      content: "drift-source",
-      identity: "drift",
-    },
-    {
-      id: "identity",
-      parentId: "src-root",
-      name: "identity.txt",
-      kind: "file",
-      size: 16,
-      mimeType: "text/plain",
-      content: "identity content",
-      identity: "identity-v1",
-    },
-  ];
-
-  const sourceItemsById = new Map(sourceItems.map((item) => [item.id, item] as const));
-  const driftSource = sourceItemsById.get("drift");
-  const identitySource = sourceItemsById.get("identity");
-  assert.ok(driftSource);
-  assert.ok(identitySource);
-
-  const destinationItems: FakeFileMigrationFixture["destinationItems"] = [
-    { id: "dest-root", parentId: null, name: "dest", kind: "folder", identity: "dest-root" },
-    {
-      id: "dup-a",
-      parentId: "dest-root",
-      name: "duplicate.txt",
-      kind: "file",
-      content: "A",
-      reportedChecksum: null,
-      provenance: null,
-    },
-    {
-      id: "dup-b",
-      parentId: "dest-root",
-      name: "duplicate.txt",
-      kind: "file",
-      content: "B",
-      reportedChecksum: null,
-      provenance: null,
-    },
-    {
-      id: "type-folder",
-      parentId: "dest-root",
-      name: "type-conflict.txt",
-      kind: "folder",
-      provenance: null,
-    },
-    {
-      id: "unowned-dest",
-      parentId: "dest-root",
-      name: "unowned.txt",
-      kind: "file",
-      content: "foreign",
-      provenance: null,
-    },
-    {
-      id: "drift-dest",
-      parentId: "dest-root",
-      name: "drift.txt",
-      kind: "file",
-      content: "corrupt",
-      provenance: {
-        mappingId: "mapping1",
-        sourceDriveId: "source-drive",
-        sourceItemId: "drift",
-        sourceIdentity: "drift",
-        sourceKind: "file",
-        sourceRelativePath: "drift.txt",
-        sourceFingerprint: sha256("drift-original"),
-        verifiedFingerprint: sha256("drift-original"),
-        createdAt: fixedNow,
-        modifiedAt: fixedNow,
-        mimeType: "text/plain",
-      },
-    },
-    {
-      id: "identity-dest",
-      parentId: "dest-root",
-      name: "identity.txt",
-      kind: "file",
-      content: "identity content",
-      provenance: {
-        mappingId: "mapping1",
-        sourceDriveId: "source-drive",
-        sourceItemId: "identity",
-        sourceIdentity: "identity-v1",
-        sourceKind: "file",
-        sourceRelativePath: "identity.txt",
-        sourceFingerprint: sha256("identity content"),
-        verifiedFingerprint: sha256("identity content"),
-        createdAt: fixedNow,
-        modifiedAt: fixedNow,
-        mimeType: "text/plain",
-      },
-    },
-  ];
-
-  const port = new FakeFileMigrationPort({
-    sourceDriveId: "source-drive",
-    sourceRootId: "src-root",
-    destinationDriveId: "dest-drive",
-    destinationRootId: "dest-root",
-    sourceItems,
-    destinationItems,
-    worker: { pid: 777, version: "worker-9.9.9", alive: true },
-  });
-
-  const config: FileMigrationConfig = {
-    mappings: [
-      {
-        id: "mapping1",
-        sourceDriveId: "source-drive",
-        sourceItemId: "src-root",
-        destDriveId: "dest-drive",
-        destFolderId: "dest-root",
-        exclusions: [],
-      },
-    ],
-  };
-
-  return { port, config };
-}
-
-function makeContext(
-  port: FakeFileMigrationPort,
-  config: FileMigrationConfig,
-  revision = 1,
-): DriverContext<FileMigrationConfig> {
+function fixture(): FakeFileMigrationFixture {
   return {
-    config,
-    revision,
-    resume: { checkpoint: null, watermarks: {} },
-    provider: port,
-    now: () => new Date(fixedNow),
+    sourceDriveId: "source-drive", sourceRootId: "source-root",
+    destinationDriveId: "destination-drive", destinationRootId: "destination-root",
+    sourceItems: [
+      { id: "source-root", parentId: null, name: "Do not wrap this root", kind: "folder" },
+      { id: "folder", parentId: "source-root", name: "nested", kind: "folder" },
+      { id: "empty", parentId: "folder", name: "empty", kind: "folder" },
+      { id: "zero", parentId: "folder", name: "zero.bin", kind: "file", content: "", mimeType: "application/octet-stream" },
+      { id: "binary", parentId: "source-root", name: "report.docx", kind: "file",
+        content: new Uint8Array([0, 255, 5, 0]), createdAt: "2020-01-01T01:02:03.000Z",
+        modifiedAt: "2024-05-06T07:08:09.000Z",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    ],
+    destinationItems: [{ id: "destination-root", parentId: null, name: "existing", kind: "folder" }],
   };
 }
 
-describe("file migration driver", () => {
-  it("collects typed omissions and executes the first pass", async () => {
-    const { port, config } = makeFixture();
-    const ctx = makeContext(port, config);
+async function harness(
+  t: TestContext,
+  input: FakeFileMigrationFixture = fixture(),
+  selected: FileMigrationConfig = config,
+  port: FakeFileMigrationPort = new FakeFileMigrationPort(input),
+): Promise<Harness> {
+  const home = await mkdtemp(join(tmpdir(), "migmate-file-contract-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const engine = openEngine({ home, now: () => new Date(now), provider: port });
+  const ref = value(await engine.initJob({ type: "file_migration", config: selected }));
+  return { home, engine, ref, port };
+}
 
-    const collected = await collect(fileMigrationDriver.collect(ctx));
-    const collectedRows = rowIndex(collected);
+interface Harness {
+  home: string;
+  engine: Engine;
+  ref: JobRef;
+  port: FakeFileMigrationPort;
+}
 
-    assert.equal(collectedRows.get("src-root")?.code, "unchanged");
-    assert.equal(collectedRows.get("zero")?.code, "created");
-    assert.equal(collectedRows.get("binary")?.code, "created");
-    assert.equal(collectedRows.get("office")?.code, "created");
-    assert.equal(collectedRows.get("empty-folder")?.code, "created");
-    assert.equal(collectedRows.get("package")?.code, "source_package_omitted");
-    assert.equal(collectedRows.get("reference")?.code, "source_reference_omitted");
-    assert.equal(collectedRows.get("undownloadable")?.code, "source_content_unavailable");
-    assert.equal(collectedRows.get("duplicate")?.code, "destination_duplicate_name");
-    assert.equal(collectedRows.get("type-conflict")?.code, "destination_type_conflict");
-    assert.equal(collectedRows.get("unowned")?.code, "unowned_path_collision");
-    assert.equal(collectedRows.get("drift")?.code, "prior_copy_drift");
-    assert.equal(collectedRows.get("identity")?.code, "unchanged");
+async function approve(h: Harness): Promise<string> {
+  return value(await h.engine.withWriter(h.ref, async (writer) => {
+    const plan = value(await writer.plan());
+    value(await writer.approve({ approver: "file-contract-test", mode: "unattended", planDigest: plan.planDigest }));
+    return plan.planDigest;
+  }));
+}
 
-    assert.ok(
-      collected.some((unit) =>
-        unit.findings.some((finding) => finding.code === "destination_duplicate_name"),
-      ),
-    );
-    assert.ok(
-      collected.some((unit) =>
-        unit.findings.some((finding) => finding.code === "prior_copy_drift"),
-      ),
-    );
+async function execute(h: Harness): Promise<void> {
+  value(value(await h.engine.withWriter(h.ref, (writer) => writer.execute())));
+}
 
-    const executed = await collect(fileMigrationDriver.execute(ctx));
-    const executedRows = rowIndex(executed);
-    const snapshot = Object.fromEntries(
-      port.snapshotDestination().map((entry) => [entry.path, entry] as const),
-    );
+async function codes(h: Harness, phase: "plan" | "execute" | "verify"): Promise<Map<string, string>> {
+  const page = value(await h.engine.reader(h.ref).rows({ phase, limit: 1000 }));
+  return new Map(page.rows.filter((item) => item.jobType === "file_migration")
+    .map((item) => [item.sourceItemId, item.code]));
+}
 
-    assert.equal(executedRows.get("zero")?.code, "created");
-    assert.equal(executedRows.get("binary")?.code, "created");
-    assert.equal(executedRows.get("office")?.code, "created");
-    assert.equal(executedRows.get("empty-folder")?.code, "created");
-    assert.equal(executedRows.get("package")?.code, "source_package_omitted");
-    assert.equal(executedRows.get("reference")?.code, "source_reference_omitted");
-    assert.equal(executedRows.get("undownloadable")?.code, "source_content_unavailable");
-    assert.equal(executedRows.get("duplicate")?.code, "destination_duplicate_name");
-    assert.equal(executedRows.get("type-conflict")?.code, "destination_type_conflict");
-    assert.equal(executedRows.get("unowned")?.code, "unowned_path_collision");
-    assert.equal(executedRows.get("drift")?.code, "prior_copy_drift");
-    assert.equal(executedRows.get("identity")?.code, "unchanged");
+function hash(content: string | Uint8Array): string {
+  return createHash("sha256").update(content).digest("hex");
+}
 
-    assert.ok(snapshot["zero.txt"]);
-    assert.ok(snapshot["binary.bin"]);
-    assert.ok(snapshot["doc.docx"]);
-    assert.ok(snapshot["empty-folder"]);
-    assert.equal(snapshot["zero.txt"]?.kind, "file");
-    assert.equal(snapshot["binary.bin"]?.kind, "file");
-    assert.equal(snapshot["doc.docx"]?.kind, "file");
-    assert.equal(
-      snapshot["doc.docx"]?.mimeType,
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    );
-    assert.equal(snapshot["zero.txt"]?.checksum, sha256(""));
-    assert.equal(snapshot["binary.bin"]?.checksum, sha256(bytes([1, 2, 3, 4])));
-    assert.equal(snapshot["doc.docx"]?.checksum, sha256("docx"));
+describe("file migration through the engine", () => {
+  it("preserves nested empty folders, zero bytes, binary Office content and initial created time across restart and deltas", async (t) => {
+    const h = await harness(t);
+    const approvedDigest = await approve(h);
+    await execute(h);
+    const first = h.port.snapshotDestination();
+    assert.deepEqual(first.map((item) => item.path).sort(), [".", "nested", "nested/empty", "nested/zero.bin", "report.docx"]);
+    const original = first.find((item) => item.path === "report.docx")!;
+    assert.equal(original.kind, "file");
+    assert.equal(original.checksum, hash(new Uint8Array([0, 255, 5, 0])));
+    assert.equal(first.find((item) => item.path === "nested/zero.bin")?.checksum, hash(""));
+    const copied = await h.port.resolveDestinationFolder({ destDriveId: "destination-drive", destFolderId: original.id });
+    assert.equal(copied?.createdAt, "2020-01-01T01:02:03.000Z");
+    assert.equal(copied?.modifiedAt, "2024-05-06T07:08:09.000Z");
+
+    h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+    h.port.renameSourceItem("binary", "renamed.docx");
+    h.port.mutateSourceItem("binary", { content: "new binary content", etag: "source-v2", modifiedAt: "2025-02-03T04:05:06.000Z" });
+    h.port.renameSourceItem("folder", "moved-parent");
+    await execute(h);
+    const second = h.port.snapshotDestination();
+    const renamed = second.find((item) => item.path === "renamed.docx")!;
+    assert.equal(renamed.id, original.id);
+    assert.equal(renamed.checksum, hash("new binary content"));
+    assert.equal(renamed.mimeType, original.mimeType);
+    assert.equal(second.some((item) => item.path === "report.docx"), false);
+    assert.ok(second.some((item) => item.path === "moved-parent/empty"));
+    assert.ok(second.some((item) => item.path === "moved-parent/zero.bin"));
+    const updated = await h.port.resolveDestinationFolder({ destDriveId: "destination-drive", destFolderId: original.id });
+    assert.equal(updated?.createdAt, copied?.createdAt);
+    assert.equal(updated?.modifiedAt, "2025-02-03T04:05:06.000Z");
+    const verification = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.equal(verification.clean, true);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.planDigest, approvedDigest);
   });
 
-  it("updates changed content, moves renamed sources, and retains deleted destinations", async () => {
-    const { port, config } = makeFixture();
-    const ctx = makeContext(port, config);
-
-    await collect(fileMigrationDriver.execute(ctx));
-
-    port.mutateSourceItem("changed", { content: "changed v2" });
-    port.renameSourceItem("rename", "renamed.txt");
-    port.deleteSourceItem("deleted");
-    port.mutateSourceItem("identity", { identity: "identity-v2" });
-
-    const executed = await collect(fileMigrationDriver.execute(ctx));
-    const rows = rowIndex(executed);
-    const snapshot = Object.fromEntries(
-      port.snapshotDestination().map((entry) => [entry.path, entry] as const),
-    );
-
-    assert.equal(rows.get("changed")?.code, "updated");
-    assert.equal(rows.get("rename")?.code, "moved");
-    assert.equal(rows.get("deleted")?.code, "source_deleted_destination_retained");
-    assert.equal(rows.get("identity")?.code, "source_identity_reuse_collision");
-    assert.equal(rows.get("zero")?.code, "unchanged");
-    assert.equal(rows.get("binary")?.code, "unchanged");
-    assert.equal(rows.get("office")?.code, "unchanged");
-
-    assert.ok(snapshot["renamed.txt"]);
-    assert.equal(snapshot["rename.txt"], undefined);
-    assert.ok(snapshot["deleted.txt"]);
-    assert.equal(snapshot["changed.txt"]?.checksum, sha256("changed v2"));
-    assert.equal(snapshot["renamed.txt"]?.checksum, sha256("rename content"));
-    assert.equal(snapshot["deleted.txt"]?.checksum, sha256("deleted content"));
+  it("retains source-deleted and unrelated destination objects without introducing exceptions", async (t) => {
+    const input = fixture();
+    input.destinationItems.push({ id: "operator-owned", parentId: "destination-root", name: "keep.txt", kind: "file", content: "external" });
+    const h = await harness(t, input);
+    await approve(h);
+    await execute(h);
+    const copied = h.port.snapshotDestination().find((item) => item.path === "report.docx")!;
+    h.port.deleteSourceItem("binary");
+    await execute(h);
+    assert.equal(h.port.snapshotDestination().find((item) => item.id === copied.id)?.checksum, copied.checksum);
+    assert.equal(h.port.snapshotDestination().find((item) => item.id === "operator-owned")?.checksum, hash("external"));
+    assert.equal((await codes(h, "execute")).get("binary"), "source_deleted_destination_retained");
+    assert.equal((await codes(h, "execute")).get("destination:operator-owned"), "destination_only_retained");
+    assert.equal(value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean, true);
   });
 
-  it("verifies content through a withheld checksum and degrades when no proof is possible", async () => {
-    const { port, config } = makeFixture();
-    const ctx = makeContext(port, config);
-
-    await collect(fileMigrationDriver.execute(ctx));
-
-    const office = port.snapshotDestination().find((entry) => entry.path === "doc.docx");
-    assert.ok(office);
-
-    port.withholdDestinationChecksum(office.id);
-    const verified = await collect(fileMigrationDriver.verify(ctx));
-    const verifiedRows = rowIndex(verified);
-    const officeVerify = verifiedRows.get("office");
-    assert.equal(officeVerify?.code, "unchanged");
-    const officeUnit = verified.find((unit) =>
-      unit.rows.some((row) => row.jobType === "file_migration" && row.sourceItemId === "office"),
-    );
-    assert.equal(officeUnit?.findings.length ?? 0, 0);
-
-    port.blockDestinationStream(office.id);
-    const degraded = await collect(fileMigrationDriver.verify(ctx));
-    const degradedRows = rowIndex(degraded);
-    assert.equal(degradedRows.get("office")?.code, "content_verification_degraded");
+  it("never adopts a marker-only object, including an exact same-source marker", async (t) => {
+    const input = fixture();
+    input.destinationItems.push({ id: "unknown-copy", parentId: "destination-root", name: "report.docx", kind: "file", content: "foreign",
+      provenance: { mappingId: "mapping", sourceDriveId: "source-drive", sourceItemId: "binary", sourceIdentity: "binary", sourceKind: "file",
+        sourceRelativePath: "report.docx", sourceFingerprint: hash("foreign"), verifiedFingerprint: hash("foreign"),
+        createdAt: now, modifiedAt: now, mimeType: "application/octet-stream" } });
+    const h = await harness(t, input);
+    await h.engine.withWriter(h.ref, (writer) => writer.plan());
+    assert.equal((await codes(h, "plan")).get("binary"), "unowned_path_collision");
+    assert.equal(h.port.snapshotDestination().find((item) => item.id === "unknown-copy")?.checksum, hash("foreign"));
   });
 
-  it("replays an interrupted unit without duplicating the destination write", async () => {
-    const sourceItems: FakeFileMigrationFixture["sourceItems"] = [
-      { id: "src-root", parentId: null, name: "root", kind: "folder", identity: "src-root" },
-      {
-        id: "solo",
-        parentId: "src-root",
-        name: "solo.txt",
-        kind: "file",
-        size: 4,
-        mimeType: "text/plain",
-        content: "solo",
-        identity: "solo",
-      },
-    ];
+  it("reports duplicate names and ordinary-file/folder/shortcut/native-document conflicts without choosing an object", async (t) => {
+    const input = fixture();
+    input.sourceItems.push(
+      { id: "duplicate", parentId: "source-root", name: "duplicate", kind: "file", content: "source" },
+      { id: "shortcut", parentId: "source-root", name: "shortcut", kind: "folder" },
+      { id: "native", parentId: "source-root", name: "native", kind: "file", content: "binary" },
+    );
+    input.destinationItems.push(
+      { id: "duplicate-a", parentId: "destination-root", name: "duplicate", kind: "file", content: "a" },
+      { id: "duplicate-b", parentId: "destination-root", name: "duplicate", kind: "file", content: "b" },
+      { id: "wrong-folder", parentId: "destination-root", name: "report.docx", kind: "folder" },
+      { id: "wrong-shortcut", parentId: "destination-root", name: "shortcut", kind: "shortcut" },
+      { id: "wrong-native", parentId: "destination-root", name: "native", kind: "document" },
+    );
+    const h = await harness(t, input);
+    await h.engine.withWriter(h.ref, (writer) => writer.plan());
+    const outcomes = await codes(h, "plan");
+    assert.equal(outcomes.get("duplicate"), "destination_duplicate_name");
+    assert.equal(outcomes.get("binary"), "destination_type_conflict");
+    assert.equal(outcomes.get("shortcut"), "destination_type_conflict");
+    assert.equal(outcomes.get("native"), "destination_type_conflict");
+  });
 
-    const port = new FakeFileMigrationPort({
-      sourceDriveId: "source-drive",
-      sourceRootId: "src-root",
-      destinationDriveId: "dest-drive",
-      destinationRootId: "dest-root",
-      sourceItems,
-      destinationItems: [
-        { id: "dest-root", parentId: null, name: "dest", kind: "folder", identity: "dest-root" },
-      ],
-    });
+  it("refuses drift of its last verified output and reports byte mismatch instead of a degraded comparison", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    await execute(h);
+    const item = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+    const metadata = (await h.port.resolveDestinationFolder({ destDriveId: "destination-drive", destFolderId: item.id }))!;
+    await h.port.uploadDestinationContent({ destinationId: item.id, parentFolderId: "destination-root", name: item.name,
+      content: new Uint8Array([1, 1, 1, 1]), createdAt: metadata.createdAt, modifiedAt: metadata.modifiedAt, mimeType: metadata.mimeType });
+    const verification = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.equal(verification.clean, false);
+    assert.ok(verification.findings.some((entry) => entry.code === "content_mismatch"));
+    assert.ok(verification.findings.some((entry) => entry.code === "prior_copy_drift"));
+    assert.equal(verification.findings.some((entry) => entry.code === "content_verification_degraded"), false);
+    await h.engine.withWriter(h.ref, (writer) => writer.plan());
+    assert.equal((await codes(h, "plan")).get("binary"), "prior_copy_drift");
+    assert.equal(h.port.snapshotDestination().find((entry) => entry.id === item.id)?.checksum, hash(new Uint8Array([1, 1, 1, 1])));
+  });
 
-    const config: FileMigrationConfig = {
-      mappings: [
-        {
-          id: "mapping1",
-          sourceDriveId: "source-drive",
-          sourceItemId: "src-root",
-          destDriveId: "dest-drive",
-          destFolderId: "dest-root",
-        },
-      ],
-    };
+  it("blocks a different stable source identity reusing a retained prior path", async (t) => {
+    const input = fixture();
+    input.sourceItems.push({ id: "replacement", parentId: "source-root", name: "report.docx", kind: "file", content: "replacement" });
+    const h = await harness(t, input);
+    h.port.overrideSourceChildren("source-root", ["binary"]);
+    await approve(h);
+    await execute(h);
+    const original = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+    h.port.deleteSourceItem("binary");
+    h.port.overrideSourceChildren("source-root", ["replacement"]);
+    await execute(h);
+    assert.equal((await codes(h, "execute")).get("replacement"), "source_identity_reuse_collision");
+    assert.equal(h.port.snapshotDestination().find((entry) => entry.path === "report.docx")?.id, original.id);
+    assert.equal(h.port.snapshotDestination().find((entry) => entry.id === original.id)?.checksum, original.checksum);
+  });
 
-    const ctx = makeContext(port, config);
-    port.interruptAfterMarkerOnce("file-1");
+  it("expands subtree exclusions to exact source identities and never creates their descendants", async (t) => {
+    const selected: FileMigrationConfig = { mappings: [{ ...config.mappings[0]!, exclusions: [{ sourceItemId: "folder", reason: "Outside approved migration scope" }] }] };
+    const h = await harness(t, fixture(), selected);
+    await approve(h);
+    const planned = await codes(h, "plan");
+    assert.equal(planned.get("folder"), "omitted_by_rule");
+    assert.equal(planned.get("empty"), "omitted_by_rule");
+    assert.equal(planned.get("zero"), "omitted_by_rule");
+    await execute(h);
+    assert.deepEqual(h.port.snapshotDestination().map((entry) => entry.path).sort(), [".", "report.docx"]);
+    assert.equal((await codes(h, "verify")).get("zero"), "omitted_by_rule");
+  });
 
-    await assert.rejects(async () => {
-      for await (const _unit of fileMigrationDriver.execute(ctx)) {
-        void _unit;
+  it("requires a new plan when an excluded subtree gains a new stable member", async (t) => {
+    const input = fixture();
+    input.sourceItems.push({ id: "later", parentId: "folder", name: "later.bin", kind: "file", content: "later" });
+    const selected: FileMigrationConfig = { mappings: [{ ...config.mappings[0]!, exclusions: [{ sourceItemId: "folder", reason: "Explicitly excluded" }] }] };
+    const h = await harness(t, input, selected);
+    h.port.overrideSourceChildren("folder", ["empty", "zero"]);
+    await approve(h);
+    await execute(h);
+    value(await h.engine.withWriter(h.ref, async (writer) => {
+      const verified = value(await writer.verify());
+      value(await writer.accept({ verificationDigest: verified.verificationDigest,
+        codes: verified.findings.map((entry) => ({ code: entry.code })), approver: "file-contract-test" }));
+    }));
+    h.port.overrideSourceChildren("folder", ["empty", "zero", "later"]);
+    const refused = value(await h.engine.withWriter(h.ref, (writer) => writer.execute()));
+    assert.equal(refused.ok, false);
+    if (refused.ok) throw new Error("Expanded exclusions were silently admitted");
+    assert.equal(refused.refusal.code, "plan_revision_required");
+    assert.equal(h.port.snapshotDestination().some((entry) => entry.path.includes("later")), false);
+  });
+
+  it("does not move an owned source over another object's destination path", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    await execute(h);
+    const original = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+    await h.port.uploadDestinationContent({ parentFolderId: "destination-root", name: "occupied.docx",
+      content: new TextEncoder().encode("external"), createdAt: now, modifiedAt: now, mimeType: "application/octet-stream" });
+    h.port.renameSourceItem("binary", "occupied.docx");
+    await h.engine.withWriter(h.ref, (writer) => writer.plan());
+    assert.equal((await codes(h, "plan")).get("binary"), "unowned_path_collision");
+    assert.equal(h.port.snapshotDestination().find((entry) => entry.id === original.id)?.path, "report.docx");
+    assert.equal(h.port.snapshotDestination().find((entry) => entry.path === "occupied.docx")?.checksum, hash("external"));
+  });
+
+  it("blocks nested mappings and unrepresentable ancestor paths before descendant writes", async (t) => {
+    const input = fixture();
+    input.destinationItems.push({ id: "other-root", parentId: null, name: "other", kind: "folder" });
+    const selected: FileMigrationConfig = { mappings: [config.mappings[0]!, { ...config.mappings[0]!, id: "nested-mapping", sourceItemId: "folder", destFolderId: "other-root" }] };
+    const h = await harness(t, input, selected);
+    await h.engine.withWriter(h.ref, (writer) => writer.plan());
+    const overlap = value(await h.engine.reader(h.ref).rows({ phase: "plan", codes: ["mapping_overlap"] }));
+    assert.equal(overlap.totalRows, 2);
+    const other = await harness(t);
+    other.port.renameSourceItem("folder", "bad/name");
+    await other.engine.withWriter(other.ref, (writer) => writer.plan());
+    const planned = await codes(other, "plan");
+    assert.equal(planned.get("folder"), "path_unrepresentable");
+    assert.equal(planned.get("zero"), "path_unrepresentable");
+    assert.equal(planned.get("empty"), "path_unrepresentable");
+  });
+
+  it("streams a withheld destination SHA-256 and requires an exception when byte proof is unavailable", async (t) => {
+    class UnavailableStreamPort extends FakeFileMigrationPort {
+      unavailable = false;
+      override streamDestinationContent(objectId: string): AsyncIterable<Uint8Array> {
+        if (this.unavailable) throw Object.assign(new Error("Destination read denied"), { status: 403 });
+        return super.streamDestinationContent(objectId);
       }
-    }, /interrupted after marker/);
+    }
+    const port = new UnavailableStreamPort(fixture());
+    const h = await harness(t, fixture(), config, port);
+    await approve(h);
+    await execute(h);
+    const item = port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+    port.withholdDestinationChecksum(item.id);
+    assert.equal(value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean, true);
+    port.unavailable = true;
+    const degraded = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.equal(degraded.clean, false);
+    assert.ok(degraded.findings.some((entry) => entry.code === "content_verification_degraded"));
+    const closed = value(await h.engine.withWriter(h.ref, (writer) => writer.close()));
+    assert.equal(closed.ok, false);
+    if (closed.ok) throw new Error("A size-only verification closed cleanly");
+    assert.equal(closed.refusal.code, "verification_unaccepted");
+  });
 
-    const replay = await collect(fileMigrationDriver.execute(ctx));
-    const rows = rowIndex(replay);
-    const snapshot = Object.fromEntries(
-      port.snapshotDestination().map((entry) => [entry.path, entry] as const),
-    );
+  it("reconciles a lost upload response by its durably reserved identity across engine restart", async (t) => {
+    class LostResponsePort extends FakeFileMigrationPort {
+      lost = false;
+      override async uploadDestinationContent(input: Parameters<FileProvider["uploadDestinationContent"]>[0]) {
+        const uploaded = await super.uploadDestinationContent(input);
+        if (input.marker) await super.writeDestinationMarker({ objectId: uploaded.id, marker: input.marker });
+        if (!this.lost) {
+          this.lost = true;
+          throw Object.assign(new Error("Simulated lost successful response"), { name: "AbortError" });
+        }
+        return uploaded;
+      }
+    }
+    const input = fixture();
+    input.sourceItems = input.sourceItems.filter((entry) => entry.id === "source-root" || entry.id === "binary");
+    const port = new LostResponsePort(input);
+    Object.assign(port, { reserveDestinationId: async () => "reserved-file" });
+    const h = await harness(t, input, config, port);
+    await approve(h);
+    const interrupted = value(value(await h.engine.withWriter(h.ref, (writer) => writer.execute())));
+    assert.equal(interrupted.outcome, "interrupted");
+    h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: port });
+    await execute(h);
+    const copies = port.snapshotDestination().filter((entry) => entry.path === "report.docx");
+    assert.equal(copies.length, 1);
+    assert.equal(copies[0]?.id, "reserved-file");
+    assert.equal(copies[0]?.checksum, hash(new Uint8Array([0, 255, 5, 0])));
+    assert.equal(value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean, true);
+  });
 
-    assert.equal(rows.get("solo")?.code, "unchanged");
-    assert.ok(snapshot["solo.txt"]);
-    assert.equal(port.snapshotDestination().filter((entry) => entry.path === "solo.txt").length, 1);
+  it("requeues a source that changes during streaming instead of accepting its old bytes", async (t) => {
+    const input = fixture();
+    input.sourceMutations = [{ sourceItemId: "binary", nextContent: "new source version", nextEtag: "changed-during-read" }];
+    const h = await harness(t, input);
+    await approve(h);
+    await execute(h);
+    assert.equal(h.port.snapshotDestination().find((entry) => entry.path === "report.docx")?.checksum, hash("new source version"));
+    assert.equal(value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean, true);
   });
 });
