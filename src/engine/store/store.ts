@@ -828,7 +828,11 @@ class StoreImpl implements Store {
         .prepare("UPDATE job SET plan_revision=?,verification_revision=NULL")
         .run(record.revision);
       this.db.prepare("DELETE FROM projection_progress").run();
-      this.db.prepare("DELETE FROM projection_verb_state WHERE verb IN ('approve','execute','verify','report','close','cancel')").run();
+      this.db
+        .prepare(
+          "DELETE FROM projection_verb_state WHERE verb IN ('approve','execute','verify','report','close','cancel')",
+        )
+        .run();
     });
   }
   readApproval(revision: number): ApprovalRecord | null {
@@ -892,7 +896,9 @@ class StoreImpl implements Store {
       if (previous !== undefined) this.#snapshotVerification(planRev, Number(previous.run));
       for (const table of ["item", "conversation", "finding", "projection_facet"])
         this.db.prepare(`DELETE FROM ${table} WHERE rev=? AND phase='verify'`).run(planRev);
-      this.db.prepare("DELETE FROM projection_verb_state WHERE verb IN ('verify','report','close')").run();
+      this.db
+        .prepare("DELETE FROM projection_verb_state WHERE verb IN ('verify','report','close')")
+        .run();
       this.db.prepare("DELETE FROM projection_progress").run();
       this.db
         .prepare(
@@ -947,13 +953,7 @@ class StoreImpl implements Store {
       )
         throw new Error("Verification digest must be fresh");
       this.#snapshotVerification(record.planRev, record.revision);
-      const summary = facets(
-        this.db
-          .prepare(
-            "SELECT code,kind,COUNT(*) AS count FROM finding WHERE rev=? AND phase='verify' GROUP BY code,kind ORDER BY code",
-          )
-          .all(record.planRev),
-      );
+      const summary = this.currentFindingCounts(record.planRev, "verify");
       this.db
         .prepare(
           "INSERT INTO verification_revision (rev,plan_rev,verification_digest,clean,findings,payload,at) VALUES (?,?,?,?,?,?,?)",
@@ -1020,20 +1020,28 @@ class StoreImpl implements Store {
       .map(rowToFinding);
   }
   currentPhase(revision: number): RowPhase {
-    const active = this.db.prepare(
-      "SELECT verb FROM projection_verb_state WHERE state='current' AND verb IN ('plan','execute','verify') LIMIT 1",
-    ).get()?.verb;
+    const active = this.db
+      .prepare(
+        "SELECT verb FROM projection_verb_state WHERE state='current' AND verb IN ('plan','execute','verify') LIMIT 1",
+      )
+      .get()?.verb;
     if (active === "execute" || active === "verify") return active;
-    if (active === "plan" && this.readJob()?.planningRevision === revision) return "plan";
-    const phase = this.db.prepare(
-      "SELECT phase FROM commit_log WHERE rev=? ORDER BY rowid DESC LIMIT 1",
-    ).get(revision)?.phase;
+    const phase = this.db
+      .prepare("SELECT phase FROM commit_log WHERE rev=? ORDER BY rowid DESC LIMIT 1")
+      .get(revision)?.phase;
     return phase === "execute" || phase === "verify" ? phase : "plan";
   }
-  #currentFindingIds(revision: number, phase: RowPhase): { sql: string; params: (number | string)[] } {
+  #currentFindingIds(
+    revision: number,
+    phase: RowPhase,
+  ): { sql: string; params: (number | string)[] } {
     const archive = this.readJob()?.type === "teams_archive";
     const phases: RowPhase[] = archive
-      ? phase === "plan" ? ["plan"] : phase === "execute" ? ["plan", "execute"] : ["plan", "execute", "verify"]
+      ? phase === "plan"
+        ? ["plan"]
+        : phase === "execute"
+          ? ["plan", "execute"]
+          : ["plan", "execute", "verify"]
       : [phase];
     return {
       sql: `SELECT MAX(id) FROM finding WHERE rev=? AND phase IN (${phases.map(() => "?").join(",")}) GROUP BY code,subject_kind,subject_id`,
@@ -1042,14 +1050,20 @@ class StoreImpl implements Store {
   }
   readCurrentFindings(revision: number, phase: RowPhase): FindingRecord[] {
     const selection = this.#currentFindingIds(revision, phase);
-    return this.db.prepare(`SELECT * FROM finding WHERE id IN (${selection.sql}) ORDER BY id`)
-      .all(...selection.params).map(rowToFinding);
+    return this.db
+      .prepare(`SELECT * FROM finding WHERE id IN (${selection.sql}) ORDER BY id`)
+      .all(...selection.params)
+      .map(rowToFinding);
   }
   currentFindingCounts(revision: number, phase: RowPhase): FacetCount[] {
     const selection = this.#currentFindingIds(revision, phase);
-    return facets(this.db.prepare(
-      `SELECT code,kind,COUNT(*) AS count FROM finding WHERE id IN (${selection.sql}) AND kind<>'policy_outcome' GROUP BY code,kind ORDER BY code`,
-    ).all(...selection.params));
+    return facets(
+      this.db
+        .prepare(
+          `SELECT code,kind,COUNT(*) AS count FROM finding WHERE id IN (${selection.sql}) AND kind<>'policy_outcome' GROUP BY code,kind ORDER BY code`,
+        )
+        .all(...selection.params),
+    );
   }
   writeFinding(record: FindingRecord): void {
     this.db
@@ -1618,7 +1632,9 @@ class StoreImpl implements Store {
           )
           .run(unit.rev, unit.watermark.unitKey, unit.watermark.value, at);
       this.db
-        .prepare("UPDATE projection_verb_state SET state='pending' WHERE state='current' AND verb<>?")
+        .prepare(
+          "UPDATE projection_verb_state SET state='pending' WHERE state='current' AND verb<>?",
+        )
         .run(unit.phase);
       this.db
         .prepare(
@@ -1812,31 +1828,44 @@ class StoreImpl implements Store {
   }
   #readProgress(): Pick<JobStatus, "progress" | "archiveProgress"> {
     const job = this.readJob();
-    const row = this.db.prepare(
-      "SELECT unit,done,total FROM projection_progress ORDER BY updated_at DESC,unit DESC LIMIT 1",
-    ).get();
-    const archive = job?.type === "teams_archive"
-      ? this.db.prepare("SELECT * FROM projection_archive WHERE rev=?").get(job.planRevision ?? 0)
+    const row = this.db
+      .prepare(
+        "SELECT unit,done,total FROM projection_progress ORDER BY updated_at DESC,unit DESC LIMIT 1",
+      )
+      .get();
+    const archive =
+      job?.type === "teams_archive"
+        ? this.db.prepare("SELECT * FROM projection_archive WHERE rev=?").get(job.planRevision ?? 0)
+        : undefined;
+    const archiveProgress = archive
+      ? {
+          conversations: Number(archive.conversations),
+          totalConversations: Number(archive.total_conversations),
+          records: Number(archive.records),
+          totalRecords: nullableNumber(archive.total_records),
+          assets: Number(archive.assets),
+          bytes: Number(archive.bytes),
+        }
       : undefined;
-    const archiveProgress = archive ? {
-      conversations: Number(archive.conversations),
-      totalConversations: Number(archive.total_conversations),
-      records: Number(archive.records),
-      totalRecords: nullableNumber(archive.total_records),
-      assets: Number(archive.assets),
-      bytes: Number(archive.bytes),
-    } : undefined;
     return {
       progress: archiveProgress
         ? { unit: "records", done: archiveProgress.records, total: archiveProgress.totalRecords }
-        : row ? { unit: row.unit as Progress["unit"], done: Number(row.done), total: nullableNumber(row.total) } : null,
+        : row
+          ? {
+              unit: row.unit as Progress["unit"],
+              done: Number(row.done),
+              total: nullableNumber(row.total),
+            }
+          : null,
       ...(archiveProgress ? { archiveProgress } : {}),
     };
   }
   publishProgress(): void {
     if (!this.#pendingProgress) return;
     if (this.#lastProgressAt === undefined) {
-      const previous = this.db.prepare("SELECT at FROM event WHERE kind='progress' ORDER BY cursor DESC LIMIT 1").get();
+      const previous = this.db
+        .prepare("SELECT at FROM event WHERE kind='progress' ORDER BY cursor DESC LIMIT 1")
+        .get();
       this.#lastProgressAt = previous ? Date.parse(String(previous.at)) : -Infinity;
     }
     const at = this.#now().getTime();
@@ -1862,16 +1891,26 @@ class StoreImpl implements Store {
   }): number {
     return this.atomic(() => {
       if (e.kind === "phase_started") {
-        this.db.prepare("UPDATE projection_verb_state SET state='pending' WHERE state='current'").run();
+        this.db
+          .prepare("UPDATE projection_verb_state SET state='pending' WHERE state='current'")
+          .run();
       }
       if (e.kind === "phase_started" || e.kind === "phase_completed" || e.kind === "terminal") {
-        const state = e.kind === "phase_started" ? "current"
-          : e.payload.state === "interrupted" ? "checkpoint"
-          : e.payload.state === "blocked" || e.payload.passed === false ? "blocked"
-          : e.payload.state === "executing" ? "current" : "done";
-        this.db.prepare(
-          "INSERT INTO projection_verb_state (verb,state,checkpoint,updated_at) VALUES (?,?,NULL,?) ON CONFLICT(verb) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
-        ).run(e.phase, state, this.#now().toISOString());
+        const state =
+          e.kind === "phase_started"
+            ? "current"
+            : e.payload.state === "interrupted"
+              ? "checkpoint"
+              : e.payload.state === "blocked" || e.payload.passed === false
+                ? "blocked"
+                : e.payload.state === "executing"
+                  ? "current"
+                  : "done";
+        this.db
+          .prepare(
+            "INSERT INTO projection_verb_state (verb,state,checkpoint,updated_at) VALUES (?,?,NULL,?) ON CONFLICT(verb) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
+          )
+          .run(e.phase, state, this.#now().toISOString());
       }
       const result = this.db
         .prepare("INSERT INTO event (at,verb,phase,kind,payload) VALUES (?,?,?,?,?)")
@@ -1923,19 +1962,26 @@ class StoreImpl implements Store {
           .map((row) => [String(row.verb), String(row.state)]),
       );
       const terminal = job.state === "closed" || job.state === "cancelled";
-      const active = !terminal && lease && job.state !== "interrupted" && job.state !== "blocked"
-        ? VERBS.find((verb) => states.get(verb) === "current")
-        : undefined;
-      const gate = active ?? (job.state === "verified" && states.get("report") === "done"
-        ? "close"
-        : VERBS.find((verb) => ["current", "blocked", "checkpoint"].includes(fallback[verb])));
+      const active =
+        !terminal && lease && job.state !== "interrupted" && job.state !== "blocked"
+          ? VERBS.find((verb) => states.get(verb) === "current")
+          : undefined;
+      const gate =
+        active ??
+        (job.state === "verified" && states.get("report") === "done"
+          ? "close"
+          : VERBS.find((verb) => ["current", "blocked", "checkpoint"].includes(fallback[verb])));
       const rail = VERBS.map((verb) => {
         let state = states.get(verb) === "done" ? "done" : fallback[verb];
-        if (["current", "blocked", "checkpoint"].includes(state) && verb !== gate) state = "pending";
+        if (["current", "blocked", "checkpoint"].includes(state) && verb !== gate)
+          state = "pending";
         if (!terminal && verb === gate)
-          state = active || (verb === "close" && job.state === "verified") ? "current" : fallback[verb];
+          state =
+            active || (verb === "close" && job.state === "verified") ? "current" : fallback[verb];
         if (terminal && (verb === "cancel" || verb === "close"))
-          state = (job.state === "closed" ? verb === "close" : verb === "cancel") ? "done" : "pending";
+          state = (job.state === "closed" ? verb === "close" : verb === "cancel")
+            ? "done"
+            : "pending";
         return { verb, state: state as JobStatus["rail"][number]["state"] };
       });
       const plan = job.planRevision === null ? null : this.readPlanRevision(job.planRevision);

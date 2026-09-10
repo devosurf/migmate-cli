@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -87,7 +87,14 @@ test("archive approval freezes empty conversations and offline verification surv
         throw new Error("transcripts not requested");
       },
       async *assetRequests(conversation, record, route) {
-        yield { conversation, record, route, kind: "hosted_content", id: "missing-image", name: "image" } as const;
+        yield {
+          conversation,
+          record,
+          route,
+          kind: "hosted_content",
+          id: "missing-image",
+          name: "image",
+        } as const;
       },
       async *openAsset() {
         throw new ArchiveEffectError("message_collection_incomplete", 404);
@@ -186,11 +193,141 @@ test("archive approval freezes empty conversations and offline verification surv
     assert.ok(!verificationCodes.includes("record_unrendered"));
     assert.ok(!verificationCodes.includes("manifest_digest_mismatch"));
     assert.ok(verificationCodes.includes("retained_history_not_requested"));
-    assert.equal(verified.value.value.findings.find((facet) => facet.code === "retained_history_not_requested")?.count, 2);
-    assert.equal(verified.value.value.findings.find((facet) => facet.code === "message_collection_incomplete")?.count, 1);
+    assert.equal(
+      verified.value.value.findings.find((facet) => facet.code === "retained_history_not_requested")
+        ?.count,
+      2,
+    );
+    assert.equal(
+      verified.value.value.findings.find((facet) => facet.code === "message_collection_incomplete")
+        ?.count,
+      1,
+    );
+    for (const phase of ["plan", "execute", "verify"] as const) {
+      const code =
+        phase === "plan" ? "retained_history_not_requested" : "message_collection_incomplete";
+      const page = await reopened.reader(ref).rows({ phase, codes: [code], limit: 1 });
+      assert.ok(page.ok);
+      assert.deepEqual(page.value.facets, [
+        {
+          code,
+          kind: phase === "plan" ? "planned_omission" : "finding",
+          count: phase === "plan" ? 2 : 1,
+        },
+      ]);
+      assert.equal(page.value.rows[0]?.code, code);
+      assert.equal(page.value.rows[0]?.phase, phase);
+      if (phase === "plan") {
+        assert.ok(page.value.nextCursor);
+        const next = await reopened.reader(ref).rows({
+          phase,
+          codes: [code],
+          limit: 1,
+          cursor: page.value.nextCursor,
+        });
+        assert.ok(next.ok);
+        assert.deepEqual(next.value.facets, page.value.facets);
+        assert.notEqual(next.value.rows[0]?.id, page.value.rows[0]?.id);
+        assert.equal(next.value.nextCursor, null);
+      }
+    }
+    const verificationDigest = verified.value.value.verificationDigest;
+    const accepted = await reopened.withWriterResult(ref, (writer) =>
+      writer.accept({
+        verificationDigest,
+        approver: "test",
+        codes: [
+          { code: "message_collection_incomplete" },
+          { code: "retained_history_not_requested" },
+          { code: "attachment_metadata_only" },
+        ],
+      }),
+    );
+    assert.ok(accepted.ok);
+    const acceptedRows = await reopened.reader(ref).rows({
+      phase: "verify",
+      codes: ["retained_history_not_requested"],
+    });
+    assert.ok(acceptedRows.ok);
+    assert.equal(acceptedRows.value.rows[0]?.accepted, true);
     const again = await reopened.withWriterResult(ref, (writer) => writer.verify());
     assert.ok(again.ok);
     assert.deepEqual(again.value.findings, verified.value.value.findings);
+    const currentRows = await reopened.reader(ref).rows({ phase: "verify" });
+    assert.ok(currentRows.ok);
+    assert.deepEqual(
+      currentRows.value.facets.filter((facet) => facet.kind !== "policy_outcome"),
+      again.value.findings,
+    );
+    assert.equal(
+      currentRows.value.rows.some((row) => row.accepted),
+      false,
+    );
+    const packageRoot = join(home, "jobs", ref.id, "archive");
+    const damagedPaths = ["manifest.json", "index.html"];
+    const originalBytes = await Promise.all(
+      damagedPaths.map((path) => readFile(join(packageRoot, path))),
+    );
+    for (const [index, path] of damagedPaths.entries())
+      await writeFile(
+        join(packageRoot, path),
+        Buffer.concat([originalBytes[index]!, Buffer.from("\n")]),
+      );
+    const damaged = await reopened.withWriterResult(ref, (writer) => writer.verify());
+    assert.ok(damaged.ok);
+    assert.equal(
+      damaged.value.findings.find((facet) => facet.code === "manifest_digest_mismatch")?.count,
+      2,
+    );
+    const firstDamage = await reopened.reader(ref).rows({
+      phase: "verify",
+      codes: ["manifest_digest_mismatch"],
+      limit: 1,
+    });
+    assert.ok(firstDamage.ok);
+    assert.equal(firstDamage.value.totalRows, 2);
+    assert.ok(firstDamage.value.nextCursor);
+    const nextDamage = await reopened.reader(ref).rows({
+      phase: "verify",
+      codes: ["manifest_digest_mismatch"],
+      limit: 1,
+      cursor: firstDamage.value.nextCursor,
+    });
+    assert.ok(nextDamage.ok);
+    assert.deepEqual(nextDamage.value.facets, firstDamage.value.facets);
+    assert.notEqual(nextDamage.value.rows[0]?.id, firstDamage.value.rows[0]?.id);
+    for (const [index, path] of damagedPaths.entries())
+      await writeFile(join(packageRoot, path), originalBytes[index]!);
+    const repairedVerification = await reopened.withWriterResult(ref, (writer) => writer.verify());
+    assert.ok(repairedVerification.ok);
+    const repaired = await reopened
+      .reader(ref)
+      .rows({ phase: "verify", codes: ["manifest_digest_mismatch"] });
+    assert.ok(repaired.ok);
+    assert.equal(repaired.value.totalRows, 0);
+    const repairedDigest = repairedVerification.value.verificationDigest;
+    const closure = await reopened.withWriterResult(ref, async (writer) => {
+      const acceptance = await writer.accept({
+        verificationDigest: repairedDigest,
+        approver: "test",
+        codes: [
+          { code: "message_collection_incomplete" },
+          { code: "retained_history_not_requested" },
+          { code: "attachment_metadata_only" },
+        ],
+      });
+      assert.ok(acceptance.ok);
+      return writer.close();
+    });
+    assert.ok(closure.ok);
+    assert.equal(closure.value.outcome, "completed_with_accepted_exceptions");
+    const closedRows = await reopened.reader(ref).rows({
+      phase: "verify",
+      codes: ["retained_history_not_requested"],
+    });
+    assert.ok(closedRows.ok);
+    assert.equal(closedRows.value.totalRows, 2);
+    assert.ok(closedRows.value.rows.every((row) => row.accepted));
     reopened.close();
   } finally {
     await rm(home, { recursive: true, force: true });

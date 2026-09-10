@@ -29,6 +29,7 @@ import {
   analyzeRecord,
   assetPath,
   buildArchivePackage,
+  conversationPath,
   verifyArchivePackage,
 } from "../archive/package.ts";
 import { canonicalJson } from "../store/digest.ts";
@@ -101,6 +102,55 @@ function commit(ctx: ArchiveDriverContext, phase: RowPhase, key: string): Archiv
     findings: [],
   };
 }
+function findingRowProjection(plan: ArchivePlan) {
+  const conversations = new Map(
+    plan.conversations.map((conversation) => [conversation.id, conversation]),
+  );
+  const paths = new Map(
+    plan.conversations.map((conversation) => [conversationPath(conversation), conversation]),
+  );
+  const scopes = new Set(plan.scopes.map((scope) => scope.id));
+  return (
+    unit: ArchiveCommit,
+    records: ArchiveRecord[],
+    priorRows: ConversationCommitRow[] = [],
+  ): ArchiveCommit => {
+    const rows = new Map(priorRows.map((row) => [row.id, { ...row, phase: unit.phase }]));
+    const byKey = new Map(records.map((record) => [record.key, record]));
+    for (const gap of unit.findings) {
+      if (gap.kind === "policy_outcome") continue;
+      const record = byKey.get(gap.subjectId);
+      const conversation =
+        conversations.get(record?.conversationId ?? gap.subjectId) ??
+        paths.get(gap.subjectId.split("/", 2).join("/"));
+      const id = `finding:${digest(canonicalJson([gap.code, gap.subjectKind, gap.subjectId]))}`;
+      rows.set(id, {
+        id,
+        rev: unit.rev,
+        phase: unit.phase,
+        code: gap.code,
+        kind: gap.kind,
+        jobType: "teams_archive",
+        scopeEntryId:
+          conversation?.scopeEntryId ?? (scopes.has(gap.subjectId) ? gap.subjectId : ""),
+        conversationId: conversation?.id ?? gap.subjectId,
+        title: conversation?.title ?? gap.subjectId,
+        records: record ? 1 : 0,
+        assets: record?.assets.length ?? 0,
+      });
+    }
+    unit.rows.push(...rows.values());
+    return unit;
+  };
+}
+
+function priorFindingRows(ctx: ArchiveDriverContext): ConversationCommitRow[] {
+  return (ctx.resume.rows ?? []).filter(
+    (row): row is ConversationCommitRow =>
+      row.jobType === "teams_archive" && row.kind !== "policy_outcome" && row.phase !== "verify",
+  );
+}
+
 function routes(plan: ArchivePlan, scope: ArchiveScopeBinding): ArchiveRoute[] {
   const result: ArchiveRoute[] = ["messages"];
   const privateChannel =
@@ -417,7 +467,8 @@ export const teamsArchiveDriver = {
     }
   },
   async *collect(ctx: ArchiveDriverContext): AsyncGenerator<ArchiveCommit> {
-    const plan = await expandPlan(ctx);
+    const plan = ctx.resume.archivePlan ? approvedPlan(ctx) : await expandPlan(ctx);
+    const withFindingRows = findingRowProjection(plan);
     const frozen = commit(ctx, "plan", "scope");
     frozen.archivePlan = plan;
     yield frozen;
@@ -472,11 +523,12 @@ export const teamsArchiveDriver = {
           "planned_omission",
         ),
       );
-      yield unit;
+      yield withFindingRows(unit, []);
     }
   },
   async *execute(ctx: ArchiveDriverContext): AsyncGenerator<ArchiveCommit> {
     const plan = approvedPlan(ctx);
+    const withFindingRows = findingRowProjection(plan);
     const records = new Map(
       (ctx.resume.archiveRecords ?? []).map((record) => [record.key, record]),
     );
@@ -577,7 +629,9 @@ export const teamsArchiveDriver = {
             recordKeys: pageRecords.map((record) => record.key),
             findingCodes: [
               ...new Set(
-                unit.findings.filter((gap) => gap.kind === "finding").map((gap) => gap.code),
+                unit.findings
+                  .filter((gap) => gap.kind === "finding" && gap.subjectId === scope.id)
+                  .map((gap) => gap.code),
               ),
             ],
           };
@@ -597,7 +651,7 @@ export const teamsArchiveDriver = {
             .map((conversation) => row(ctx, "execute", conversation, [...records.values()]));
           unit.progress = { unit: "records", done: records.size, total: null };
           evidence.push(pageEvidence);
-          yield unit;
+          yield withFindingRows(unit, pageRecords);
           cursor = nextLink;
           if (cursor) visited.add(cursor);
         } while (cursor);
@@ -627,10 +681,11 @@ export const teamsArchiveDriver = {
       done: plan.conversations.length,
       total: plan.conversations.length,
     };
-    yield packageUnit;
+    yield withFindingRows(packageUnit, allRecords, priorFindingRows(ctx));
   },
   async *verify(ctx: ArchiveDriverContext): AsyncGenerator<ArchiveCommit> {
     const plan = approvedPlan(ctx);
+    const withFindingRows = findingRowProjection(plan);
     const records = ctx.resume.archiveRecords ?? [];
     const unit = commit(ctx, "verify", "package");
     const results = ctx.resume.archiveManifestDigest
@@ -661,7 +716,7 @@ export const teamsArchiveDriver = {
           : "empty_conversation",
       ),
     );
-    yield unit;
+    yield withFindingRows(unit, records, priorFindingRows(ctx));
   },
   async *reportSections(ctx: ArchiveDriverContext): AsyncGenerator<ReportSection> {
     const plan = approvedPlan(ctx);

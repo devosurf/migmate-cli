@@ -8,6 +8,9 @@ import { describe, it } from "node:test";
 import { ProviderFault } from "./credentials.ts";
 import { createTransferSupervisor } from "./transfer-worker.ts";
 import { withSocketPath } from "./socket-path.ts";
+import { openEngine } from "../index.ts";
+import { FakeFileMigrationPort } from "./fake.ts";
+import { approve, fileConfig, fileFixture, value } from "../../../test/engine-fixture.ts";
 
 // Opt-in, real executable only. These exercise the supervisor seam, not route qualification.
 const binaryPath = process.env.MIGMATE_TEST_RCLONE_BINARY;
@@ -53,6 +56,41 @@ function fault(code: string, reason?: string) {
 }
 
 describe("real rclone transfer supervisor", { skip: !enabled }, () => {
+  it("completes preflight and repeated engine worker lifetimes without a cleanup refusal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mm-engine-rc-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: root,
+      binary: suppliedBinary(),
+    });
+    const port = Object.assign(new FakeFileMigrationPort(fileFixture()), {
+      startTransferWorker: supervisor.startTransferWorker,
+      stopTransferWorker: supervisor.stopTransferWorker,
+      terminateTransferWorker: supervisor.terminateTransferWorker,
+      transferWorkerVersion: supervisor.transferWorkerVersion,
+    });
+    const engine = openEngine({ home: join(root, "home"), provider: port });
+    try {
+      const ref = value(await engine.initJob({ type: "file_migration", config: fileConfig() }));
+      const doctor = value(await engine.withWriterResult(ref, (writer) => writer.doctor()));
+      assert.equal(doctor.passed, true);
+      await approve({ engine, ref });
+      assert.equal(
+        value(await engine.withWriterResult(ref, (writer) => writer.execute())).outcome,
+        "completed",
+      );
+      assert.equal(
+        value(await engine.withWriterResult(ref, (writer) => writer.verify())).clean,
+        true,
+      );
+      assert.equal(value(await engine.reader(ref).status()).ownership.held, false);
+    } finally {
+      engine.close();
+      await supervisor.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("requires socket authentication, streams exact remote bytes, and refuses unowned shutdown", async () => {
     const root = await mkdtemp(join(tmpdir(), "mm-rc-"));
     const source = join(root, "source");

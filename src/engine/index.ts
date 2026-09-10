@@ -1230,8 +1230,11 @@ function makeWriter(
           message: "The operation is not available in the current state.",
           detail: { state: record.state, verb },
         });
-      store.writeJob({ ...record, state: target,
-        verificationRevision: t === "execute" ? null : record.verificationRevision });
+      store.writeJob({
+        ...record,
+        state: target,
+        verificationRevision: t === "execute" ? null : record.verificationRevision,
+      });
       store.appendEvent({
         verb,
         phase: verb,
@@ -1441,7 +1444,12 @@ function makeWriter(
   ): Promise<Outcome<VerificationRevision & { planRev: number }>> {
     const run = store.nextVerificationRun();
     store.beginVerification(revision, run);
-    store.appendEvent({ verb: "verify", phase: "verify", kind: "phase_started", payload: { revision, run } });
+    store.appendEvent({
+      verb: "verify",
+      phase: "verify",
+      kind: "phase_started",
+      payload: { revision, run },
+    });
     const drained = await drain(p, config, revision, "verify", budget, signal, run);
     if (drained.interrupted)
       return refuse(
@@ -1530,11 +1538,7 @@ function makeWriter(
     return worker;
   }
   async function stopWorker(p: ProviderPort, worker: TransferWorkerHandle): Promise<void> {
-    try {
-      await p.stopTransferWorker({ socketPath: worker.socketPath });
-    } finally {
-      await p.terminateTransferWorker({ socketPath: worker.socketPath });
-    }
+    await p.stopTransferWorker({ socketPath: worker.socketPath });
     const lease = store.readLease();
     if (lease)
       store.writeLease({
@@ -1809,7 +1813,9 @@ function makeWriter(
             );
           store.writeJob({ ...job(), executionCompleted: true });
           store.appendEvent({
-            verb: "execute", phase: "execute", kind: "phase_completed",
+            verb: "execute",
+            phase: "execute",
+            kind: "phase_completed",
             payload: { revision: plan.revision, committed: drained.committed },
           });
           const verified = await verifyRun(p, config, plan.revision, budget, signal);
@@ -1844,12 +1850,21 @@ function makeWriter(
             const bound = readBoundEvidence(plan.evidence);
             const evidence = await boundEvidence(p, job().type);
             if (canonicalJson(evidence) !== canonicalJson(bound))
-              return refuse("plan_revision_required", "The approved application, route, or binary evidence changed.");
+              return refuse(
+                "plan_revision_required",
+                "The approved application, route, or binary evidence changed.",
+              );
             if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
             worker = await startWorker(p, evidence.binaryPath);
             const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
-            if (version !== worker.version || (bound.binaryVersion && version !== bound.binaryVersion))
-              return refuse("plan_revision_required", "The live worker version changed after approval.");
+            if (
+              version !== worker.version ||
+              (bound.binaryVersion && version !== bound.binaryVersion)
+            )
+              return refuse(
+                "plan_revision_required",
+                "The live worker version changed after approval.",
+              );
             if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
           }
           const result = await verifyRun(p, config, revision, new RetryBudget(plan.rowCount));
@@ -1936,21 +1951,19 @@ function makeWriter(
         const findings = store.readCurrentFindings(revision, phase),
           rows = store.readAllRows(revision);
         const accepted = verification
-          ? store
-              .readAcceptances(verification.verificationDigest)
-              .map((a) => ({
-                ...a,
-                evidenceDigest: verification.evidenceDigest ?? verification.verificationDigest,
-                items: findings
-                  .filter((f) => f.code === a.code)
-                  .map((f) => ({
-                    subjectKind: f.subjectKind,
-                    subjectId: f.subjectId,
-                    phase: f.phase,
-                    evidence: f.evidence,
-                    consequence: consequence(f.code),
-                  })),
-              }))
+          ? store.readAcceptances(verification.verificationDigest).map((a) => ({
+              ...a,
+              evidenceDigest: verification.evidenceDigest ?? verification.verificationDigest,
+              items: findings
+                .filter((f) => f.code === a.code)
+                .map((f) => ({
+                  subjectKind: f.subjectKind,
+                  subjectId: f.subjectId,
+                  phase: f.phase,
+                  evidence: f.evidence,
+                  consequence: consequence(f.code),
+                })),
+            }))
           : [];
         const acceptedCodes = new Set(accepted.map((a) => a.code));
         const report = {
