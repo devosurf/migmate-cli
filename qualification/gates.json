@@ -4,14 +4,7 @@
   "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
   "transferVersion": "v1.75.0",
   "macosMinimumVersion": "13.5",
-  "desktopCells": [
-    "darwin-arm64",
-    "darwin-x64",
-    "linux-arm64",
-    "linux-x64",
-    "win32-arm64",
-    "win32-x64"
-  ],
+  "desktopCells": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
   "gates": [
     {
       "id": "installed_artifact_matrix",
@@ -23,7 +16,7 @@
       "id": "native_desktop_lifecycle_matrix",
       "status": "not_run",
       "command": "npm run check:package -- --desktop",
-      "scope": "Inspect the actual installed native window on all six cells. Native custom-protocol readiness alone does not prove ten-verb lifecycle parity or the absence of listeners; retain the separate per-cell launch/interaction evidence."
+      "scope": "Inspect the actual installed native window on all four cells. Native custom-protocol readiness alone does not prove ten-verb lifecycle parity or the absence of listeners; retain the separate per-cell launch/interaction evidence."
     },
     {
       "id": "real_tenant_route_matrix",
@@ -42,7 +35,6 @@
   ],
   "nativePrerequisites": {
     "darwin": "macOS 13.5 or newer with system WebKit and Node 24, on x64 or arm64. The user explicitly raised the floor to match the retained Node baseline.",
-    "win32": "An interactive Windows 10/11 session and WebView2; WebView2 may need separate administration on Windows 10.",
     "linux": "A real X11 or Wayland desktop, WebKitGTK 4.1 and libxdo. Missing these blocks web only; there is no listener or external-browser fallback. Official Node GNU/Linux binaries require kernel 4.18+ and glibc 2.28+."
   }
 }

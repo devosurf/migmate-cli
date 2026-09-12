@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { isAbsolute, posix, resolve, win32 } from "node:path";
+import { isAbsolute, posix, resolve } from "node:path";
 import { VERBS, type JobType, type RowQuery, type Verb } from "../engine/types.ts";
 
 export type OutputMode = "text" | "json" | "jsonl";
@@ -37,18 +37,15 @@ export function defaultHome(
   switch (platform) {
     case "darwin":
       return posix.join(home, "Library", "Application Support", "Migmate");
-    case "win32":
-      return win32.join(
-        environment.LOCALAPPDATA || win32.join(home, "AppData", "Local"),
-        "Migmate",
-      );
-    default:
+    case "linux":
       return posix.join(
         environment.XDG_STATE_HOME && posix.isAbsolute(environment.XDG_STATE_HOME)
           ? environment.XDG_STATE_HOME
           : posix.join(home, ".local", "state"),
         "migmate",
       );
+    default:
+      throw new UsageFailure("Unsupported platform.");
   }
 }
 

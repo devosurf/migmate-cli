@@ -4,7 +4,7 @@ import type { KeyObject } from "node:crypto";
 import { constants } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { JobType } from "../types.ts";
 
 /** Only static, secret-free messages and explicitly selected evidence belong here. */
@@ -172,123 +172,6 @@ function sameFile(left: BigIntStats, right: BigIntStats): boolean {
   );
 }
 
-// Windows has no POSIX owner/mode proof. Inspect the opened handle's DACL instead,
-// with sharing that excludes mutation/replacement until the bounded read finishes.
-// FileStream.GetAccessControl: https://learn.microsoft.com/en-us/dotnet/api/system.io.filestream.getaccesscontrol?view=netframework-4.8.1
-// Handle identity/attributes: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle
-const WINDOWS_READ = String.raw`
-$ErrorActionPreference = 'Stop'
-try {
-  Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-using System.Security.Principal;
-using System.Text;
-using Microsoft.Win32.SafeHandles;
-public static class MigmateCredentialRead {
-  [StructLayout(LayoutKind.Sequential)] public struct Info {
-    public uint Attributes;
-    public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
-    public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
-  }
-  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-  static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
-  [DllImport("kernel32.dll", SetLastError=true)]
-  static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Info info);
-  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-  static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder path, uint length, uint flags);
-  static void Permissions(FileStream stream) {
-    var acl = stream.GetAccessControl();
-    var owner = WindowsIdentity.GetCurrent().User;
-    if (!owner.Equals(acl.GetOwner(typeof(SecurityIdentifier)))) throw new Exception();
-    bool readable = false;
-    foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true, typeof(SecurityIdentifier))) {
-      if (rule.AccessControlType != AccessControlType.Allow) continue;
-      var sid = (SecurityIdentifier)rule.IdentityReference;
-      if (!sid.Equals(owner) && sid.Value != "S-1-5-18" && sid.Value != "S-1-5-32-544") throw new Exception();
-      if (sid.Equals(owner) && (rule.FileSystemRights & FileSystemRights.ReadData) != 0) readable = true;
-    }
-    if (!readable) throw new Exception();
-  }
-  public static byte[] Read(string path, string job) {
-    // GENERIC_READ | READ_CONTROL; FILE_SHARE_READ; OPEN_EXISTING; OPEN_REPARSE_POINT.
-    using (var handle = CreateFile(path, 0x80020000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
-      if (handle.IsInvalid) throw new Exception();
-      Info info;
-      if (!GetFileInformationByHandle(handle, out info) || (info.Attributes & 0x450) != 0 || info.Links != 1) throw new Exception();
-      var final = new StringBuilder(32768);
-      uint length = GetFinalPathNameByHandle(handle, final, (uint)final.Capacity, 0);
-      if (length == 0 || length >= final.Capacity) throw new Exception();
-      string actual = final.ToString();
-      if (actual.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) throw new Exception();
-      if (actual.StartsWith(@"\\?\", StringComparison.Ordinal)) actual = actual.Substring(4);
-      string root = Path.GetFullPath(job).TrimEnd('\\');
-      if (actual.Equals(root, StringComparison.OrdinalIgnoreCase) || actual.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)) throw new Exception();
-      using (var stream = new FileStream(handle, FileAccess.Read)) {
-        Permissions(stream);
-        if (stream.Length < 1 || stream.Length > 1048576) throw new Exception();
-        var bytes = new byte[(int)stream.Length];
-        try {
-          int offset = 0;
-          while (offset < bytes.Length) {
-            int count = stream.Read(bytes, offset, bytes.Length - offset);
-            if (count == 0) throw new Exception();
-            offset += count;
-          }
-          if (stream.ReadByte() != -1) throw new Exception();
-          Permissions(stream);
-          return bytes;
-        } catch { Array.Clear(bytes, 0, bytes.Length); throw; }
-      }
-    }
-  }
-}
-'@
-  $inputValue = [Console]::In.ReadToEnd() | ConvertFrom-Json
-  $bytes = [MigmateCredentialRead]::Read($inputValue.path, $inputValue.job)
-  try { [Console]::Out.Write([Convert]::ToBase64String($bytes)) }
-  finally { [Array]::Clear($bytes, 0, $bytes.Length) }
-} catch { exit 1 }
-`;
-
-async function readWindowsCredential(path: string, job: string): Promise<Buffer> {
-  const systemRoot = process.env.SystemRoot;
-  if (!systemRoot || !isAbsolute(systemRoot)) throw refused("credential_ownership_unverifiable");
-  const { promise, resolve: accept, reject } = Promise.withResolvers<Buffer>();
-  const child = execFile(
-    join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-EncodedCommand",
-      Buffer.from(WINDOWS_READ, "utf16le").toString("base64"),
-    ],
-    { encoding: "buffer", windowsHide: true, timeout: 30_000, maxBuffer: MAX_CREDENTIAL_BYTES * 2 },
-    (error, stdout, stderr) => {
-      stderr.fill(0);
-      try {
-        if (error) throw refused("credential_file_unsafe");
-        const bytes = Buffer.from(stdout.toString("ascii"), "base64");
-        if (bytes.length === 0 || bytes.length > MAX_CREDENTIAL_BYTES) {
-          bytes.fill(0);
-          throw refused("credential_file_invalid");
-        }
-        accept(bytes);
-      } catch {
-        reject(refused("credential_file_unsafe"));
-      } finally {
-        stdout.fill(0);
-      }
-    },
-  );
-  child.stdin?.on("error", () => reject(refused("credential_file_unreadable")));
-  child.stdin?.end(JSON.stringify({ path, job }));
-  return promise;
-}
-
 async function checkMacFileAcl(path: string): Promise<void> {
   // Darwin ACL grants are independent of mode bits. Refuse extended ACLs rather
   // than interpreting a second permission system as an owner-only file.
@@ -330,8 +213,6 @@ export async function readCredentialFile(
       throw refused("credential_file_unsafe");
     const path = await realpath(requested);
     if (inside(job, path)) throw refused("credential_inside_job");
-    if (process.platform === "win32")
-      return { path, bytes: await readWindowsCredential(path, job) };
     checkStat(before);
     const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let bytes: Buffer | undefined;

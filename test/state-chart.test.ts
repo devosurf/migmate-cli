@@ -198,6 +198,9 @@ describe("engine lifecycle boundaries", () => {
     assert.equal(states.cancel, "done");
     assert.equal(states.close, "pending");
     assert.equal(states.execute, "pending");
-    assert.equal(status.value.rail.some(({ state }) => state === "current"), false);
+    assert.equal(
+      status.value.rail.some(({ state }) => state === "current"),
+      false,
+    );
   });
 });

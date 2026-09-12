@@ -25,12 +25,7 @@ assert.equal(process.versions.node.split(".")[0], "24", "Package smoke requires 
 distributionPlatform();
 const npmCli =
   process.env.npm_execpath ??
-  resolve(
-    dirname(process.execPath),
-    process.platform === "win32"
-      ? "node_modules/npm/bin/npm-cli.js"
-      : "../lib/node_modules/npm/bin/npm-cli.js",
-  );
+  resolve(dirname(process.execPath), "../lib/node_modules/npm/bin/npm-cli.js");
 assert.ok(existsSync(npmCli), "Cannot locate npm; invoke this script with npm run check:package");
 const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
 const env: NodeJS.ProcessEnv = {
@@ -42,14 +37,13 @@ function command(
   file: string,
   args: string[],
   cwd: string,
-  options: { inherit?: boolean; windowsVerbatimArguments?: boolean } = {},
+  options: { inherit?: boolean } = {},
 ): string {
   const result = spawnSync(file, args, {
     cwd,
     env,
     encoding: "utf8",
     stdio: options.inherit ? "inherit" : "pipe",
-    windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
   });
   if (result.error !== undefined) throw result.error;
   assert.equal(
@@ -95,7 +89,7 @@ try {
     temporary,
     { inherit: true },
   );
-  const consumer = process.platform === "win32" ? prefix : join(prefix, "lib");
+  const consumer = join(prefix, "lib");
   const expected = JSON.parse(
     await readFile(join(root, "package.json"), "utf8"),
   ) as PackageManifest;
@@ -150,32 +144,22 @@ for (const specifier of ${JSON.stringify(privateSpecifiers)}) {
     consumer,
   );
 
-  // The verifier hashes all six installed binaries and asserts the host's local core/version.
+  // The verifier hashes all four installed binaries and asserts the host's local core/version.
   command(process.execPath, [join(root, "scripts", "check-vendor.ts"), installed], temporary, {
     inherit: true,
   });
 
-  const binDirectory = process.platform === "win32" ? prefix : join(prefix, "bin");
+  const binDirectory = join(prefix, "bin");
   const binFiles = (await readdir(binDirectory)).filter((name) => name !== "node_modules");
   assert.deepEqual(
     binFiles.sort(),
-    process.platform === "win32" ? ["migmate", "migmate.cmd", "migmate.ps1"] : ["migmate"],
-    "Global install must expose only the migmate command (including npm's Windows shims)",
+    ["migmate"],
+    "Global install must expose only the migmate command",
   );
-  const bin = join(binDirectory, process.platform === "win32" ? "migmate.cmd" : "migmate");
-  if (process.platform !== "win32") {
-    assert.ok((await stat(bin)).mode & 0o111, "The installed CLI must be executable");
-  }
+  const bin = join(binDirectory, "migmate");
+  assert.ok((await stat(bin)).mode & 0o111, "The installed CLI must be executable");
   function cli(args: string[], inherit = false): string {
-    if (process.platform !== "win32") return command(bin, args, temporary, { inherit });
-    // cmd.exe is required for npm's .cmd shim; every argument here is generated locally.
-    const invocation = [bin, ...args].map((argument) => `"${argument}"`).join(" ");
-    return command(
-      process.env.ComSpec ?? "cmd.exe",
-      ["/d", "/s", "/c", `"${invocation}"`],
-      temporary,
-      { inherit, windowsVerbatimArguments: true },
-    );
+    return command(bin, args, temporary, { inherit });
   }
 
   const home = join(temporary, "home");

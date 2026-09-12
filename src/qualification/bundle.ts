@@ -4,14 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, digestJson } from "../engine/store/digest.ts";
 
-export const desktopCells = [
-  "darwin-arm64",
-  "darwin-x64",
-  "linux-arm64",
-  "linux-x64",
-  "win32-arm64",
-  "win32-x64",
-] as const;
+export const desktopCells = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"] as const;
 export const fileProbeIds = [
   "zero_byte_and_empty_folder_copy",
   "stable_id_additive_rerun_and_move",

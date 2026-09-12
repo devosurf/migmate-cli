@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir, userInfo, hostname } from "node:os";
 import { join } from "node:path";
 import { it, type TestContext } from "node:test";
@@ -496,14 +503,6 @@ it("uses OS-specific persistent engine homes", () => {
   assert.equal(
     defaultHome("linux", { XDG_STATE_HOME: "/local/state" }, "/home/operator"),
     "/local/state/migmate",
-  );
-  assert.equal(
-    defaultHome(
-      "win32",
-      { LOCALAPPDATA: "C:\\Users\\operator\\AppData\\Local" },
-      "C:\\Users\\operator",
-    ),
-    "C:\\Users\\operator\\AppData\\Local\\Migmate",
   );
 });
 

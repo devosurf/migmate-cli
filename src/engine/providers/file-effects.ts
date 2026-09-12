@@ -303,10 +303,17 @@ export class FileEffects {
     if (entry.kind !== "file") return entry;
     const base = `/v1.0/drives/${encodeURIComponent(entry.driveId)}/items/${encodeURIComponent(entry.id)}`;
     let versionCount = 0;
-    for await (const versions of cursorPages(`${base}/versions?$select=id`, async (cursor) => {
-      const page = await this.#graph.request<{ value: unknown[]; "@odata.nextLink"?: string }>(cursor!);
-      return { value: page.value, next: page["@odata.nextLink"] };
-    }, () => new ProviderFault("provider_request_failed", "Source version paging repeated a cursor."))) {
+    for await (const versions of cursorPages(
+      `${base}/versions?$select=id`,
+      async (cursor) => {
+        const page = await this.#graph.request<{ value: unknown[]; "@odata.nextLink"?: string }>(
+          cursor!,
+        );
+        return { value: page.value, next: page["@odata.nextLink"] };
+      },
+      () =>
+        new ProviderFault("provider_request_failed", "Source version paging repeated a cursor."),
+    )) {
       versionCount += versions.length;
     }
     let retentionLabel: unknown = null;
@@ -353,10 +360,16 @@ export class FileEffects {
       );
     const items: SourceEntry[] = [];
     const initial = `/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(sourceItemId)}/children?$top=200&$expand=listItem($expand=fields)`;
-    for await (const page of cursorPages(initial, async (cursor) => {
-      const page = await this.#graph.request<{ value: GraphItem[]; "@odata.nextLink"?: string }>(cursor!);
-      return { value: page.value, next: page["@odata.nextLink"] };
-    }, () => new ProviderFault("provider_request_failed", "Source paging repeated a cursor."))) {
+    for await (const page of cursorPages(
+      initial,
+      async (cursor) => {
+        const page = await this.#graph.request<{ value: GraphItem[]; "@odata.nextLink"?: string }>(
+          cursor!,
+        );
+        return { value: page.value, next: page["@odata.nextLink"] };
+      },
+      () => new ProviderFault("provider_request_failed", "Source paging repeated a cursor."),
+    )) {
       for (const raw of page) items.push(await this.#sourceMetadata(this.#source(raw, driveId)));
     }
     return items;
@@ -435,26 +448,30 @@ export class FileEffects {
         "The destination parent is not in an explicitly mapped Shared Drive.",
       );
     const items: DestinationEntry[] = [];
-    for await (const files of cursorPages(null, async (token) => {
-      const query = new URLSearchParams({
-        corpora: "drive",
-        driveId: driveId!,
-        supportsAllDrives: "true",
-        includeItemsFromAllDrives: "true",
-        q: `'${destFolderId.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}' in parents and trashed = false`,
-        pageSize: "1000",
-        fields: `nextPageToken,incompleteSearch,files(${FILE_FIELDS})`,
-        ...(token ? { pageToken: token } : {}),
-      });
-      const page = await responseJson<{
-        files: GoogleFile[];
-        nextPageToken?: string;
-        incompleteSearch?: boolean;
-      }>(await this.#google(`/drive/v3/files?${query}`));
-      if (page.incompleteSearch)
-        throw new ProviderFault("provider_request_failed", "Destination listing was incomplete.");
-      return { value: page.files, next: page.nextPageToken };
-    }, () => new ProviderFault("provider_request_failed", "Destination paging repeated a cursor."))) {
+    for await (const files of cursorPages(
+      null,
+      async (token) => {
+        const query = new URLSearchParams({
+          corpora: "drive",
+          driveId: driveId!,
+          supportsAllDrives: "true",
+          includeItemsFromAllDrives: "true",
+          q: `'${destFolderId.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}' in parents and trashed = false`,
+          pageSize: "1000",
+          fields: `nextPageToken,incompleteSearch,files(${FILE_FIELDS})`,
+          ...(token ? { pageToken: token } : {}),
+        });
+        const page = await responseJson<{
+          files: GoogleFile[];
+          nextPageToken?: string;
+          incompleteSearch?: boolean;
+        }>(await this.#google(`/drive/v3/files?${query}`));
+        if (page.incompleteSearch)
+          throw new ProviderFault("provider_request_failed", "Destination listing was incomplete.");
+        return { value: page.files, next: page.nextPageToken };
+      },
+      () => new ProviderFault("provider_request_failed", "Destination paging repeated a cursor."),
+    )) {
       for (const file of files) items.push(this.#destination(file));
     }
     return items;
@@ -737,10 +754,18 @@ export class FileEffects {
         if (mapping.sourceSiteId) {
           const initial = `/v1.0/sites/${encodeURIComponent(mapping.sourceSiteId)}/drives?$select=id`;
           let found = false;
-          for await (const items of cursorPages(initial, async (cursor) => {
-            const page = await this.#graph.request<{ value: { id: string }[]; "@odata.nextLink"?: string }>(cursor!);
-            return { value: page.value, next: page["@odata.nextLink"] };
-          }, () => new ProviderFault("provider_request_failed", "Site drive paging repeated a cursor."))) {
+          for await (const items of cursorPages(
+            initial,
+            async (cursor) => {
+              const page = await this.#graph.request<{
+                value: { id: string }[];
+                "@odata.nextLink"?: string;
+              }>(cursor!);
+              return { value: page.value, next: page["@odata.nextLink"] };
+            },
+            () =>
+              new ProviderFault("provider_request_failed", "Site drive paging repeated a cursor."),
+          )) {
             found ||= items.some((item) => item.id === mapping.sourceDriveId);
           }
           if (!found)

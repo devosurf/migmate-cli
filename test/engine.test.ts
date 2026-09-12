@@ -16,36 +16,35 @@ const FIXED_NOW = new Date("2026-09-01T00:00:00.000Z");
 
 function fixture(): FakeFileMigrationFixture {
   return fileFixture([
-      {
-        id: "zero",
-        parentId: "source-root",
-        name: "zero.txt",
-        kind: "file",
-        size: 0,
-        mimeType: "text/plain",
-        content: "",
-        identity: "zero",
-      },
-      {
-        id: "binary",
-        parentId: "source-root",
-        name: "binary.bin",
-        kind: "file",
-        size: 4,
-        mimeType: "application/octet-stream",
-        content: new Uint8Array([1, 2, 3, 4]),
-        identity: "binary",
-      },
-      {
-        id: "empty-folder",
-        parentId: "source-root",
-        name: "empty-folder",
-        kind: "folder",
-        identity: "empty-folder",
-      },
+    {
+      id: "zero",
+      parentId: "source-root",
+      name: "zero.txt",
+      kind: "file",
+      size: 0,
+      mimeType: "text/plain",
+      content: "",
+      identity: "zero",
+    },
+    {
+      id: "binary",
+      parentId: "source-root",
+      name: "binary.bin",
+      kind: "file",
+      size: 4,
+      mimeType: "application/octet-stream",
+      content: new Uint8Array([1, 2, 3, 4]),
+      identity: "binary",
+    },
+    {
+      id: "empty-folder",
+      parentId: "source-root",
+      name: "empty-folder",
+      kind: "folder",
+      identity: "empty-folder",
+    },
   ]);
 }
-
 
 interface Harness {
   engine: Engine;

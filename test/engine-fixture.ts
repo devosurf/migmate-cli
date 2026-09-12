@@ -29,18 +29,32 @@ export function fileFixture(
 export function fileConfig(
   exclusions: Array<{ sourceItemId: string; reason: string }> = [],
 ): FileMigrationConfig {
-  return { mappings: [{
-    id: "mapping", sourceDriveId: "source-drive", sourceItemId: "source-root",
-    destDriveId: "destination-drive", destFolderId: "destination-root", exclusions,
-  }] };
+  return {
+    mappings: [
+      {
+        id: "mapping",
+        sourceDriveId: "source-drive",
+        sourceItemId: "source-root",
+        destDriveId: "destination-drive",
+        destFolderId: "destination-root",
+        exclusions,
+      },
+    ],
+  };
 }
 
 export async function approve(h: { engine: Engine; ref: JobRef }): Promise<string> {
-  return value(await h.engine.withWriter(h.ref, async (writer) => {
-    const plan = value(await writer.plan());
-    value(await writer.approve({
-      approver: "engine-contract-test", mode: "unattended", planDigest: plan.planDigest,
-    }));
-    return plan.planDigest;
-  }));
+  return value(
+    await h.engine.withWriter(h.ref, async (writer) => {
+      const plan = value(await writer.plan());
+      value(
+        await writer.approve({
+          approver: "engine-contract-test",
+          mode: "unattended",
+          planDigest: plan.planDigest,
+        }),
+      );
+      return plan.planDigest;
+    }),
+  );
 }

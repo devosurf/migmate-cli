@@ -17,8 +17,7 @@ export async function withSocketPath<T>(
       "A worker socket requires an absolute recorded identity.",
     );
   const limit = process.platform === "darwin" ? 103 : 107;
-  if (Buffer.byteLength(socketPath) <= limit || process.platform === "win32")
-    return connect(socketPath);
+  if (Buffer.byteLength(socketPath) <= limit) return connect(socketPath);
   let alias: string | undefined;
   try {
     const parent = await realpath(dirname(socketPath));

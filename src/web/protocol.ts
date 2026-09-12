@@ -8,25 +8,19 @@ const CSP =
   "default-src 'none'; script-src 'self' migmate://localhost; style-src 'self' migmate://localhost; connect-src 'self' migmate://localhost; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const MAX_BODY_BYTES = 1024 * 1024;
 
-/** Windows' Wry URL is intercepted natively. It is not an HTTP listener. */
-function localUrl(raw: string, platform: NodeJS.Platform): URL | null {
+function localUrl(raw: string): URL | null {
   try {
     const url = new URL(raw);
     if (url.username || url.password || url.port || url.hash) return null;
     if (url.protocol === "migmate:" && url.hostname === "localhost") return url;
-    if (platform === "win32" && url.protocol === "http:" && url.hostname === "migmate.localhost")
-      return url;
   } catch {
     /* Malformed URLs never reach an engine call. */
   }
   return null;
 }
 
-export function allowedNavigation(
-  raw: string,
-  platform: NodeJS.Platform = process.platform,
-): boolean {
-  const url = localUrl(raw, platform);
+export function allowedNavigation(raw: string): boolean {
+  const url = localUrl(raw);
   return url !== null && url.pathname === "/" && url.search === "";
 }
 
@@ -93,18 +87,12 @@ async function readBody(request: Request): Promise<unknown> {
 
 export function createProtocolHandler(options: {
   session: WebSession;
-  platform?: NodeJS.Platform;
   onQuit?: () => void;
 }): (request: Request) => Promise<Response> {
-  const platform = options.platform ?? process.platform;
   return async (request) => {
-    const url = localUrl(request.url, platform);
+    const url = localUrl(request.url);
     const origin = request.headers.get("origin");
-    const localOrigin =
-      origin === null ||
-      origin === "null" ||
-      origin === "migmate://localhost" ||
-      (platform === "win32" && origin === "http://migmate.localhost");
+    const localOrigin = origin === null || origin === "null" || origin === "migmate://localhost";
     const headers: Record<string, string> = {
       "Content-Security-Policy": CSP,
       "Cache-Control": "no-store",

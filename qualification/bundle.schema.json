@@ -3,13 +3,7 @@
   "$id": "https://github.com/devosurf/migmate-cli/qualification/bundle.schema.json",
   "title": "Immutable exact-route evidence bundle, schema version 1",
   "type": "object",
-  "required": [
-    "schemaVersion",
-    "tuple",
-    "capture",
-    "probes",
-    "artifacts"
-  ],
+  "required": ["schemaVersion", "tuple", "capture", "probes", "artifacts"],
   "properties": {
     "schemaVersion": {
       "const": 1
@@ -60,12 +54,7 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": [
-          "id",
-          "expectedCodes",
-          "observedCodes",
-          "output"
-        ],
+        "required": ["id", "expectedCodes", "observedCodes", "output"],
         "properties": {
           "id": {
             "$ref": "#/$defs/id"
@@ -88,11 +77,7 @@
       "maxItems": 1024,
       "items": {
         "type": "object",
-        "required": [
-          "path",
-          "sha256",
-          "size"
-        ],
+        "required": ["path", "sha256", "size"],
         "properties": {
           "path": {
             "$ref": "#/$defs/capturePath"
@@ -111,14 +96,7 @@
   },
   "$defs": {
     "cell": {
-      "enum": [
-        "darwin-arm64",
-        "darwin-x64",
-        "linux-arm64",
-        "linux-x64",
-        "win32-arm64",
-        "win32-x64"
-      ]
+      "enum": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
     },
     "sha256": {
       "type": "string",
@@ -151,10 +129,7 @@
       ],
       "properties": {
         "jobType": {
-          "enum": [
-            "file_migration",
-            "teams_archive"
-          ]
+          "enum": ["file_migration", "teams_archive"]
         },
         "source": {
           "type": "object"
@@ -209,11 +184,7 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": [
-              "id",
-              "expected",
-              "observed"
-            ],
+            "required": ["id", "expected", "observed"],
             "properties": {
               "id": {
                 "$ref": "#/$defs/id"

@@ -38,24 +38,6 @@
       "executableMember": "rclone-v1.75.0-linux-amd64/rclone",
       "executableSha256": "f3f9aff817f9766029e50adf9a7963c169e475b8f10c7927823568a0d9443db7",
       "executableSize": 85323938
-    },
-    "win32-arm64": {
-      "sourceUrl": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-windows-arm64.zip",
-      "archiveSha256": "bcf628fa6bb3b6ae9fdf105d04acafb40ec77841f686dc6dd7d126dde04c5f6a",
-      "archiveSize": 28410366,
-      "executablePath": "vendor/rclone/windows-arm64/rclone.exe",
-      "executableMember": "rclone-v1.75.0-windows-arm64/rclone.exe",
-      "executableSha256": "60dc6d41f820a7fc4643868bda001ca8a930ef0276abc8f43bc80f162c88548f",
-      "executableSize": 78024192
-    },
-    "win32-x64": {
-      "sourceUrl": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-windows-amd64.zip",
-      "archiveSha256": "203581f0a7baeae873f2347483a798c79e2eaf5c384a4e9d866aa374f1c89ac0",
-      "archiveSize": 31472895,
-      "executablePath": "vendor/rclone/windows-amd64/rclone.exe",
-      "executableMember": "rclone-v1.75.0-windows-amd64/rclone.exe",
-      "executableSha256": "8be30f02266a6eaad9d481941ef287b9744bb7140034b097ad862a2ccff3e24c",
-      "executableSize": 85160448
     }
   },
   "license": {

@@ -21,16 +21,6 @@
       "path": "vendor/rclone/linux-amd64/rclone",
       "sha256": "f3f9aff817f9766029e50adf9a7963c169e475b8f10c7927823568a0d9443db7",
       "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-amd64.zip"
-    },
-    "win32-arm64": {
-      "path": "vendor/rclone/windows-arm64/rclone.exe",
-      "sha256": "60dc6d41f820a7fc4643868bda001ca8a930ef0276abc8f43bc80f162c88548f",
-      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-windows-arm64.zip"
-    },
-    "win32-x64": {
-      "path": "vendor/rclone/windows-amd64/rclone.exe",
-      "sha256": "8be30f02266a6eaad9d481941ef287b9744bb7140034b097ad862a2ccff3e24c",
-      "provenance": "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-windows-amd64.zip"
     }
   }
 }

@@ -9,8 +9,16 @@ export type JobType = (typeof JOB_TYPES)[number];
 
 /** The ten durable job states. `closed` and `cancelled` are absorbing. */
 export const JOB_STATES = [
-  "new", "planned", "approved", "executing", "interrupted", "blocked",
-  "needs_attention", "verified", "closed", "cancelled",
+  "new",
+  "planned",
+  "approved",
+  "executing",
+  "interrupted",
+  "blocked",
+  "needs_attention",
+  "verified",
+  "closed",
+  "cancelled",
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
 
@@ -137,8 +145,13 @@ export interface Progress {
 }
 
 export const EVENT_KINDS = [
-  "phase_started", "phase_completed", "check_result", "unit_committed",
-  "progress", "refusal", "terminal",
+  "phase_started",
+  "phase_completed",
+  "check_result",
+  "unit_committed",
+  "progress",
+  "refusal",
+  "terminal",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -152,7 +165,12 @@ export interface JobEvent {
   payload: Record<string, unknown>;
 }
 
-export const EXECUTION_TERMINAL_STATES = ["completed", "interrupted", "blocked", "cancelled"] as const;
+export const EXECUTION_TERMINAL_STATES = [
+  "completed",
+  "interrupted",
+  "blocked",
+  "cancelled",
+] as const;
 export type TerminalState = (typeof EXECUTION_TERMINAL_STATES)[number];
 
 export interface ExecuteResult {
@@ -227,7 +245,11 @@ export interface ArtifactSet {
   artifacts: Artifact[];
 }
 
-export const CLOSURE_OUTCOMES = ["completed", "completed_with_accepted_exceptions", "cancelled"] as const;
+export const CLOSURE_OUTCOMES = [
+  "completed",
+  "completed_with_accepted_exceptions",
+  "cancelled",
+] as const;
 export type ClosureOutcome = (typeof CLOSURE_OUTCOMES)[number];
 export interface Closure {
   state: "closed" | "cancelled";

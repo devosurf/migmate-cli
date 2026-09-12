@@ -67,7 +67,6 @@ import {
   inspectLease,
   probeWorker,
   stopOrphanWorker,
-  windowsCommand,
 } from "./store/lease.ts";
 import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
@@ -385,7 +384,6 @@ function within(root: string, path: string): boolean {
   return r === "" || (!r.startsWith(`..${sep}`) && r !== ".." && !isAbsolute(r));
 }
 function syncDirectory(path: string): void {
-  if (process.platform === "win32") return;
   const fd = openSync(path, "r");
   try {
     fsyncSync(fd);
@@ -436,18 +434,16 @@ function localFilesystem(home: string): Outcome<null> {
         "local_filesystem_required",
         "Live job state requires local, non-synced storage.",
       );
-    if (process.platform !== "win32") {
-      const fs = statfsSync(existing);
-      if (
-        [0x6969, 0x517b, 0x5346414f, 0xff534d42, 0x65735546, 0x01021997, 0x564c].includes(
-          Number(fs.type),
-        )
+    const fs = statfsSync(existing);
+    if (
+      [0x6969, 0x517b, 0x5346414f, 0xff534d42, 0x65735546, 0x01021997, 0x564c].includes(
+        Number(fs.type),
       )
-        return refuse(
-          "local_filesystem_required",
-          "The filesystem cannot establish local WAL ownership.",
-        );
-    }
+    )
+      return refuse(
+        "local_filesystem_required",
+        "The filesystem cannot establish local WAL ownership.",
+      );
     if (process.platform === "darwin") {
       const mounts = execFileSync("/sbin/mount", [], { encoding: "utf8", timeout: 5000 })
         .trim()
@@ -470,13 +466,6 @@ function localFilesystem(home: string): Outcome<null> {
           "local_filesystem_required",
           "The filesystem is not a supported local volume.",
         );
-    }
-    if (process.platform === "win32") {
-      const script =
-        "$d=New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot($env:MIGMATE_LOCAL_PATH));[Console]::Write([int]$d.DriveType)";
-      const drive = windowsCommand(script, { MIGMATE_LOCAL_PATH: real });
-      if (drive !== "3")
-        return refuse("local_filesystem_required", "The job requires a fixed local volume.");
     }
     return ok(null);
   } catch {

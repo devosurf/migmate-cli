@@ -18,26 +18,26 @@ const config = fileConfig();
 
 function fixture(): FakeFileMigrationFixture {
   return fileFixture([
-      { id: "folder", parentId: "source-root", name: "nested", kind: "folder" },
-      { id: "empty", parentId: "folder", name: "empty", kind: "folder" },
-      {
-        id: "zero",
-        parentId: "folder",
-        name: "zero.bin",
-        kind: "file",
-        content: "",
-        mimeType: "application/octet-stream",
-      },
-      {
-        id: "binary",
-        parentId: "source-root",
-        name: "report.docx",
-        kind: "file",
-        content: new Uint8Array([0, 255, 5, 0]),
-        createdAt: "2020-01-01T01:02:03.000Z",
-        modifiedAt: "2024-05-06T07:08:09.000Z",
-        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      },
+    { id: "folder", parentId: "source-root", name: "nested", kind: "folder" },
+    { id: "empty", parentId: "folder", name: "empty", kind: "folder" },
+    {
+      id: "zero",
+      parentId: "folder",
+      name: "zero.bin",
+      kind: "file",
+      content: "",
+      mimeType: "application/octet-stream",
+    },
+    {
+      id: "binary",
+      parentId: "source-root",
+      name: "report.docx",
+      kind: "file",
+      content: new Uint8Array([0, 255, 5, 0]),
+      createdAt: "2020-01-01T01:02:03.000Z",
+      modifiedAt: "2024-05-06T07:08:09.000Z",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
   ]);
 }
 
@@ -60,7 +60,6 @@ interface Harness {
   ref: JobRef;
   port: FakeFileMigrationPort;
 }
-
 
 async function execute(h: Harness): Promise<void> {
   value(value(await h.engine.withWriter(h.ref, (writer) => writer.execute())));

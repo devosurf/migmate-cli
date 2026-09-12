@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { request, type IncomingMessage } from "node:http";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ProviderFault } from "./credentials.ts";
@@ -102,16 +102,7 @@ function systemEnvironment(): NodeJS.ProcessEnv {
   // An allowlist also excludes RCLONE_*, all proxy variants, activation FDs,
   // loader injection, cloud credentials and inherited debug/log destinations.
   const result: NodeJS.ProcessEnv = {};
-  for (const key of [
-    "SystemRoot",
-    "SYSTEMROOT",
-    "WINDIR",
-    "HOME",
-    "USERPROFILE",
-    "LANG",
-    "LC_ALL",
-    "TZ",
-  ]) {
+  for (const key of ["HOME", "LANG", "LC_ALL", "TZ"]) {
     if (process.env[key] !== undefined) result[key] = process.env[key];
   }
   return result;
@@ -131,7 +122,6 @@ function spawnOwned(
       env,
       ...(cwd === undefined ? {} : { cwd }),
       shell: false,
-      windowsHide: true,
       stdio: ["ignore", capture ? "pipe" : "ignore", "ignore"],
     });
   } catch {
@@ -189,9 +179,8 @@ async function capture(
   args: string[],
   env: NodeJS.ProcessEnv,
   timeout = REQUEST_TIMEOUT,
-  cwd?: string,
 ): Promise<{ value: unknown; success: boolean }> {
-  const child = spawnOwned(binary, args, env, cwd, true);
+  const child = spawnOwned(binary, args, env, undefined, true);
   const chunks: Buffer[] = [];
   let size = 0;
   let overflow = false;
@@ -268,45 +257,16 @@ function version(value: unknown): string {
 }
 
 async function privateDirectory(path: string): Promise<void> {
-  if (process.platform !== "win32") {
-    await chmod(path, 0o700);
-    const info = await lstat(path);
-    if (
-      !info.isDirectory() ||
-      info.isSymbolicLink() ||
-      (info.mode & 0o777) !== 0o700 ||
-      (process.getuid !== undefined && info.uid !== process.getuid())
-    ) {
-      throw fail("preflight_failed", "run_directory_permissions");
-    }
-    return;
+  await chmod(path, 0o700);
+  const info = await lstat(path);
+  if (
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    (info.mode & 0o777) !== 0o700 ||
+    (process.getuid !== undefined && info.uid !== process.getuid())
+  ) {
+    throw fail("preflight_failed", "run_directory_permissions");
   }
-  // chmod is not an ACL seam on Windows. Set and verify an owner-only DACL
-  // before rclone is spawned; PowerShell is resolved explicitly, never via PATH.
-  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
-  if (systemRoot === undefined || !isAbsolute(systemRoot))
-    throw fail("preflight_failed", "run_directory_permissions");
-  const script =
-    "$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; " +
-    "$acl=New-Object System.Security.AccessControl.DirectorySecurity; $acl.SetOwner($sid); " +
-    "$acl.SetAccessRuleProtection($true,$false); " +
-    "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); " +
-    "$acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:MIGMATE_RUN_DIRECTORY -AclObject $acl; " +
-    "$actual=Get-Acl -LiteralPath $env:MIGMATE_RUN_DIRECTORY; " +
-    "if(-not $actual.AreAccessRulesProtected){exit 1}; " +
-    "$rules=$actual.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); " +
-    "if($rules.Count -ne 1 -or $rules[0].IdentityReference -ne $sid -or $rules[0].AccessControlType -ne 'Allow'){exit 1}; " +
-    "if($actual.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $sid -or " +
-    "($rules[0].FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne " +
-    "[System.Security.AccessControl.FileSystemRights]::FullControl){exit 1}; " +
-    "Write-Output 'true'";
-  const result = await capture(
-    join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { ...systemEnvironment(), MIGMATE_RUN_DIRECTORY: path },
-  );
-  if (!result.success || result.value !== true)
-    throw fail("preflight_failed", "run_directory_permissions");
 }
 
 function response(
@@ -484,13 +444,7 @@ export function createTransferSupervisor(options: {
     // core/version locally, with no listener; live RC proof is separate below.
     const own = await capture(
       binary.path,
-      [
-        "rc",
-        "--loopback",
-        "core/version",
-        "--config",
-        process.platform === "win32" ? "NUL" : "/dev/null",
-      ],
+      ["rc", "--loopback", "core/version", "--config", "/dev/null"],
       systemEnvironment(),
     );
     if (!own.success || !record(own.value)) throw fail("preflight_failed", "version_proof_invalid");
@@ -532,7 +486,7 @@ export function createTransferSupervisor(options: {
       const socket = await lstat(worker.socketPath);
       if (
         socket.isSymbolicLink() ||
-        (process.platform !== "win32" && !socket.isSocket()) ||
+        !socket.isSocket() ||
         (worker.socketIdentity !== null && !sameFile(socket, worker.socketIdentity))
       )
         throw new Error();
@@ -548,45 +502,12 @@ export function createTransferSupervisor(options: {
     input: Record<string, unknown>,
     worker: Worker | undefined,
     timeout = REQUEST_TIMEOUT,
-  ): Promise<{ status: number; answered: boolean; value: unknown }> {
+  ): Promise<{ status: number; value: unknown }> {
     let body: string;
     try {
       body = JSON.stringify(input);
     } catch {
       throw fail("provider_failed", "worker_request_invalid");
-    }
-    if (process.platform === "win32") {
-      const executable = worker?.proof ?? (await proveBinary());
-      await rehash(executable);
-      // Go's native client supplies AF_UNIX on Windows. Request JSON and Basic
-      // credentials are environment-only, not CLI arguments or files.
-      const result = await capture(
-        executable.path,
-        ["rc", "--unix-socket", basename(socketPath), method, "--config", "NUL"],
-        {
-          ...systemEnvironment(),
-          RCLONE_JSON: body,
-          ...(worker === undefined
-            ? {}
-            : { RCLONE_USER: worker.user, RCLONE_PASS: worker.password }),
-        },
-        timeout,
-        dirname(socketPath),
-      );
-      const status = result.success
-        ? 200
-        : record(result.value) && typeof result.value.status === "number"
-          ? result.value.status
-          : 503;
-      // The native client synthesizes 503 only when dialing fails; a real HTTP
-      // 503 still proves liveness. Never publish its diagnostic error string.
-      const noConnection =
-        !result.success &&
-        status === 503 &&
-        record(result.value) &&
-        typeof result.value.error === "string" &&
-        result.value.error.startsWith("connection failed:");
-      return { status, answered: !noConnection, value: status === 200 ? result.value : null };
     }
     const res = await response(
       socketPath,
@@ -599,9 +520,9 @@ export function createTransferSupervisor(options: {
     const status = res.statusCode ?? 0;
     if (status !== 200 || worker === undefined) {
       res.destroy();
-      return { status, answered: true, value: null };
+      return { status, value: null };
     }
-    return { status, answered: true, value: await readJson(res, timeout) };
+    return { status, value: await readJson(res, timeout) };
   }
 
   async function authenticated(
@@ -713,14 +634,8 @@ export function createTransferSupervisor(options: {
       const socketPath = join(directory, "s");
       const user = randomBytes(18).toString("hex");
       const password = randomBytes(32).toString("base64url");
-      const configPath =
-        options.configPath === null
-          ? process.platform === "win32"
-            ? "NUL"
-            : "/dev/null"
-          : options.configPath;
-      if (!isAbsolute(configPath) && configPath !== "NUL")
-        throw fail("preflight_failed", "worker_config_path_invalid");
+      const configPath = options.configPath === null ? "/dev/null" : options.configPath;
+      if (!isAbsolute(configPath)) throw fail("preflight_failed", "worker_config_path_invalid");
       await rehash(executable);
       const group = `migmate-${randomBytes(16).toString("hex")}`;
       input.onPrepare?.({ socketPath, group, executablePath: executable.path });
@@ -795,7 +710,6 @@ export function createTransferSupervisor(options: {
             undefined,
             Math.min(1_000, deadline - Date.now()),
           );
-          if (!probe.answered) throw fail("provider_failed", "worker_unreachable");
           if (probe.status !== 401) throw fail("preflight_failed", "worker_auth_not_enforced");
           await authenticated(
             worker,
@@ -839,8 +753,7 @@ export function createTransferSupervisor(options: {
   async function probeTransferWorker(input: { socketPath: string }): Promise<TransferWorkerProbe> {
     try {
       await socketWithinJob(input.socketPath);
-      const result = await rc(input.socketPath, "rc/noop", {}, undefined, 1_000);
-      if (!result.answered) return { alive: false, version: null };
+      await rc(input.socketPath, "rc/noop", {}, undefined, 1_000);
     } catch (error) {
       if (error instanceof ProviderFault) {
         if (error.code !== "provider_failed") throw error;
@@ -867,33 +780,6 @@ export function createTransferSupervisor(options: {
     if (!worker.child.alive) throw fail("provider_failed", "worker_exited");
     if (worker.stopping !== null) throw fail("provider_failed", "worker_stopping");
     await verifySocket(worker);
-    if (process.platform === "win32") {
-      // Node exposes named pipes rather than AF_UNIX here. The verified rclone
-      // client requests a real worker copy into an owned private temporary file.
-      const name = `read-${randomBytes(16).toString("hex")}`;
-      const target = join(worker.directory, name);
-      try {
-        await authenticated(
-          worker,
-          "operations/copyfile",
-          {
-            srcFs: fs,
-            srcRemote: path,
-            dstFs: worker.directory,
-            dstRemote: name,
-            _group: worker.group,
-          },
-          60 * 60 * 1_000,
-        );
-        for await (const chunk of createReadStream(target)) yield chunk;
-      } catch (error) {
-        if (error instanceof ProviderFault) throw error;
-        throw fail("provider_failed", "worker_read_failed");
-      } finally {
-        await rm(target, { force: true }).catch(() => undefined);
-      }
-      return;
-    }
     const res = await response(
       worker.socketPath,
       `/${encodeURIComponent(`[${fs}]`)}/${encodedPath}`,

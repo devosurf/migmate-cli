@@ -4,11 +4,8 @@ import { release } from "node:os";
 /** Distribution and capture agree on the actual native cell and approved macOS floor. */
 export function distributionPlatform(): { cell: string; osVersion: string } {
   const cell = `${process.platform}-${process.arch}`;
-  if (
-    !["darwin", "linux", "win32"].includes(process.platform) ||
-    !["arm64", "x64"].includes(process.arch)
-  ) {
-    throw new Error("This operating system and architecture are outside the distribution matrix.");
+  if (!["darwin", "linux"].includes(process.platform) || !["arm64", "x64"].includes(process.arch)) {
+    throw new Error("The distribution requires darwin or linux on arm64 or x64.");
   }
   let osVersion = release();
   if (process.platform === "darwin") {

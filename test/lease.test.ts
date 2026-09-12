@@ -40,19 +40,21 @@ import type { JobState } from "../src/engine/types.ts";
 const schema = readFileSync(new URL("../src/engine/store/schema.sql", import.meta.url), "utf8");
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 
-function engineHome(t: TestContext) { const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-")));
-const home = join(root, "home");
-const db = new DatabaseSync(join(root, "state.db"));
-db.exec(schema);
-db.prepare(
-  `INSERT INTO job (id,type,state,schema_version,migmate_version,created_at,last_checkpoint)
+function engineHome(t: TestContext) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-")));
+  const home = join(root, "home");
+  const db = new DatabaseSync(join(root, "state.db"));
+  db.exec(schema);
+  db.prepare(
+    `INSERT INTO job (id,type,state,schema_version,migmate_version,created_at,last_checkpoint)
   VALUES ('job-1','file_migration','new',2,'test',?,'checkpoint-7')`,
-).run(NOW.toISOString());
-t.after(() => {
-  db.close();
-  rmSync(root, { recursive: true, force: true });
-});
-return { root, home, db }; }
+  ).run(NOW.toISOString());
+  t.after(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  return { root, home, db };
+}
 
 function staleRow(overrides: Partial<LeaseRow> = {}): LeaseRow {
   return {
@@ -121,7 +123,7 @@ async function orphan(
       "unix://s",
       "--rc-serve",
       "--config",
-      process.platform === "win32" ? "NUL" : "/dev/null",
+      "/dev/null",
       "--cache-dir",
       directory,
       "--temp-dir",
@@ -195,27 +197,21 @@ describe("persistent host identity", () => {
     assert.equal(new Set(outputs).size, 1);
     assert.equal(getHostId(home), outputs[0]);
     assert.equal(readHostId(home), outputs[0]);
-    if (process.platform !== "win32") {
-      assert.equal(lstatSync(home).mode & 0o777, 0o700);
-      assert.equal(lstatSync(join(home, "hostId")).mode & 0o777, 0o600);
-    }
+    assert.equal(lstatSync(home).mode & 0o777, 0o700);
+    assert.equal(lstatSync(join(home, "hostId")).mode & 0o777, 0o600);
   });
 
-  it(
-    "refuses a symlink identity instead of trusting or replacing its target",
-    { skip: process.platform === "win32" },
-    (t) => {
-      const { root, home } = engineHome(t);
-      mkdirSync(home, { mode: 0o700 });
-      const target = join(root, "unrelated");
-      const contents = "8a6ea0dd-5a15-4acd-a3c3-5cc35df2f2ed\n";
-      writeFileSync(target, contents, { mode: 0o600 });
-      symlinkSync(target, join(home, "hostId"));
-      assert.throws(() => readHostId(home));
-      assert.throws(() => getHostId(home));
-      assert.equal(readFileSync(target, "utf8"), contents);
-    },
-  );
+  it("refuses a symlink identity instead of trusting or replacing its target", (t) => {
+    const { root, home } = engineHome(t);
+    mkdirSync(home, { mode: 0o700 });
+    const target = join(root, "unrelated");
+    const contents = "8a6ea0dd-5a15-4acd-a3c3-5cc35df2f2ed\n";
+    writeFileSync(target, contents, { mode: 0o600 });
+    symlinkSync(target, join(home, "hostId"));
+    assert.throws(() => readHostId(home));
+    assert.throws(() => getHostId(home));
+    assert.equal(readFileSync(target, "utf8"), contents);
+  });
 });
 
 describe("lease adjudication", () => {
@@ -337,44 +333,40 @@ describe("lease adjudication", () => {
     assert.equal(await probeWorker(""), null);
   });
 
-  it(
-    "does not mistake a live long-path AF_UNIX worker for an absent socket",
-    { skip: process.platform === "win32" },
-    async (t) => {
-      const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-long-socket-")));
-      const directory = join(root, "long-engine-home-".repeat(8), "run", "rc-owned");
-      getHostId(directory);
-      const socketPath = join(directory, "s");
-      const child = spawn(
-        process.execPath,
-        [
-          "-e",
-          "require('node:net').createServer(s=>s.end()).listen('s',()=>process.stdout.write('ready\\n'));",
-        ],
-        {
-          cwd: directory,
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-      const exited = once(child, "exit");
-      t.after(async () => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-        await exited;
-        rmSync(root, { recursive: true, force: true });
-      });
-      assert.ok(child.stdout);
-      await once(child.stdout, "data");
-      assert.equal(await probeWorker(socketPath), true);
-      const row = staleRow({
-        socketPath,
-        workerPid: child.pid!,
-        workerProcessStartTime: getProcessStartTime(child.pid),
-      });
-      const result = await inspectLease(row, row.hostId, { now: () => NOW });
-      assert.equal(result.workerStatus, "alive");
-      assert.equal(result.decision.reclaimable, false);
-    },
-  );
+  it("does not mistake a live long-path AF_UNIX worker for an absent socket", async (t) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-long-socket-")));
+    const directory = join(root, "long-engine-home-".repeat(8), "run", "rc-owned");
+    getHostId(directory);
+    const socketPath = join(directory, "s");
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        "require('node:net').createServer(s=>s.end()).listen('s',()=>process.stdout.write('ready\\n'));",
+      ],
+      {
+        cwd: directory,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const exited = once(child, "exit");
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+      rmSync(root, { recursive: true, force: true });
+    });
+    assert.ok(child.stdout);
+    await once(child.stdout, "data");
+    assert.equal(await probeWorker(socketPath), true);
+    const row = staleRow({
+      socketPath,
+      workerPid: child.pid!,
+      workerProcessStartTime: getProcessStartTime(child.pid),
+    });
+    const result = await inspectLease(row, row.hostId, { now: () => NOW });
+    assert.equal(result.workerStatus, "alive");
+    assert.equal(result.decision.reclaimable, false);
+  });
 
   it("does not bless a launch intent with a missing PID merely because its socket is absent", async () => {
     const row = staleRow({
@@ -404,18 +396,14 @@ describe("exact orphan termination", () => {
     assert.equal((await inspectLease(row, row.hostId)).decision.reclaimable, true);
   });
 
-  it(
-    "rechecks ownership before escalating an unresponsive exact worker",
-    { skip: process.platform === "win32" },
-    async (t) => {
-      // This exercises the production bounded OS kill escalation, not a sleep
-      // standing in for readiness. A child-process clock cannot use test timers.
-      const { row, child, exited } = await orphan(t, true);
-      assert.equal(await stopOrphanWorker(row), true);
-      await exited;
-      assert.equal(child.signalCode, "SIGKILL");
-    },
-  );
+  it("rechecks ownership before escalating an unresponsive exact worker", async (t) => {
+    // This exercises the production bounded OS kill escalation, not a sleep
+    // standing in for readiness. A child-process clock cannot use test timers.
+    const { row, child, exited } = await orphan(t, true);
+    assert.equal(await stopOrphanWorker(row), true);
+    await exited;
+    assert.equal(child.signalCode, "SIGKILL");
+  });
 
   it("refuses mismatched executable, PID start, socket argv, group and live-owner claims without killing the child", async (t) => {
     const { row } = await orphan(t);
