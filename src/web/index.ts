@@ -40,11 +40,8 @@ export async function launchWeb(options: {
   engine: Engine;
   job: JobRef;
 }): Promise<WebOutcome<WebExit>> {
-  if (
-    !["darwin", "win32", "linux"].includes(process.platform) ||
-    !["x64", "arm64"].includes(process.arch)
-  ) {
-    return unavailable("macOS 13.5+, Windows 10/11, or a Linux desktop on x64/arm64 with Node 24");
+  if (!["darwin", "linux"].includes(process.platform) || !["x64", "arm64"].includes(process.arch)) {
+    return unavailable("macOS 13.5+ or a Linux desktop on x64/arm64 with Node 24");
   }
   if (process.platform === "darwin") {
     const [major, minor] = release().split(".").map(Number);
@@ -65,9 +62,7 @@ export async function launchWeb(options: {
     return unavailable(
       process.platform === "linux"
         ? "WebKitGTK 4.1 and libxdo, plus the matching @webviewjs/webview 0.4.5 binding"
-        : process.platform === "win32"
-          ? "WebView2 and the matching @webviewjs/webview 0.4.5 binding"
-          : "WKWebView and the matching @webviewjs/webview 0.4.5 binding",
+        : "WKWebView and the matching @webviewjs/webview 0.4.5 binding",
     );
   }
 
@@ -154,7 +149,7 @@ export async function launchWeb(options: {
     } catch {
       await session.close(true);
       return unavailable(
-        "A working native desktop webview: WKWebView, WebView2, or WebKitGTK 4.1 with libxdo",
+        "A working native desktop webview: WKWebView or WebKitGTK 4.1 with libxdo",
       );
     }
     await lifetime;

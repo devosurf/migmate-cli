@@ -38,14 +38,6 @@ ARCHIVES = {
         "linux-amd64",
         "aa2804e08f48250e71009c727124b6341cd0288465804a9a09d14663cabafbaa",
     ),
-    "win32-arm64": (
-        "windows-arm64",
-        "bcf628fa6bb3b6ae9fdf105d04acafb40ec77841f686dc6dd7d126dde04c5f6a",
-    ),
-    "win32-x64": (
-        "windows-amd64",
-        "203581f0a7baeae873f2347483a798c79e2eaf5c384a4e9d866aa374f1c89ac0",
-    ),
 }
 # These release ZIPs have no standalone license. Preserve the official COPYING
 # from the same release tag, byte-for-byte, under the package's LICENSE name.
@@ -95,14 +87,13 @@ def load_manifest(root):
         or not isinstance(manifest["binaries"], dict)
         or set(manifest["binaries"]) != set(ARCHIVES)
     ):
-        raise ValueError("Manifest must pin exactly the six supported v1.75.0 cells")
+        raise ValueError("Manifest must pin exactly the four supported v1.75.0 cells")
     for cell, (release, _) in ARCHIVES.items():
-        executable = "rclone.exe" if cell.startswith("win32-") else "rclone"
         entry = manifest["binaries"][cell]
         if (
             not isinstance(entry, dict)
             or set(entry) != {"path", "sha256", "provenance"}
-            or entry["path"] != f"vendor/rclone/{release}/{executable}"
+            or entry["path"] != f"vendor/rclone/{release}/rclone"
             or entry["provenance"] != f"{BASE_URL}/rclone-{VERSION}-{release}.zip"
             or not isinstance(entry["sha256"], str)
             or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None
@@ -176,9 +167,8 @@ def main():
                 actual_archive_sha256, archive_size = download(entry["provenance"], archive_path)
             if actual_archive_sha256 != archive_sha256:
                 raise ValueError(f"Archive checksum differs from pinned SHA256SUMS: {archive_name}")
-            executable = "rclone.exe" if cell.startswith("win32-") else "rclone"
-            member = f"rclone-{VERSION}-{release}/{executable}"
-            staged_executable = staging / f"{cell}-{executable}"
+            member = f"rclone-{VERSION}-{release}/rclone"
+            staged_executable = staging / f"{cell}-rclone"
             executable_sha256, executable_size = stage_executable(
                 archive_path, member, staged_executable, entry["sha256"]
             )
@@ -205,7 +195,7 @@ def main():
         if proof != expected_proof:
             raise ValueError("Acquisition differs from the committed immutable acquisition proof")
         installs.append((staged_license, proof["license"]["path"], 0o644))
-        # All six binaries and the license are authenticated before any installation.
+        # All four binaries and the license are authenticated before any installation.
         for source, relative, mode in installs:
             install_file(source, package_path(root, relative), mode)
     print(json.dumps(proof, indent=2))

@@ -13,19 +13,17 @@ on:
         type: choice
         required: true
         options:
-          - darwin-x64
           - darwin-arm64
-          - linux-x64
+          - darwin-x64
           - linux-arm64
-          - win32-x64
-          - win32-arm64
+          - linux-x64
 
 permissions:
   contents: read
 
 # Configure these environments with required reviewers. Do not run tenant or desktop gates on PRs.
 # migmate-desktop runners need an interactive logged-in desktop, an operator, and the native runtime:
-# macOS WebKit, Windows WebView2, or Linux WebKitGTK 4.1 + libxdo and a display session.
+# macOS WebKit or Linux WebKitGTK 4.1 + libxdo and a display session.
 # migmate-live runners need the operator-prepared config and credential files outside the checkout.
 jobs:
   desktop:

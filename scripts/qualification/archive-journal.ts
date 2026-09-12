@@ -30,9 +30,6 @@ function requireFact(value: unknown, gate: string): asserts value {
 }
 
 async function syncDirectory(path: string): Promise<void> {
-  // Node cannot open directories for FlushFileBuffers on Windows. File handles
-  // are still flushed before rename and before a journal commit on that cell.
-  if (process.platform === "win32") return;
   const handle = await open(path, "r");
   try {
     await handle.sync();

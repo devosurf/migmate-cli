@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import { request } from "node:http";
 import { dirname, join } from "node:path";
@@ -11,36 +10,7 @@ import {
 import type { ProbeCapture } from "../../src/qualification/bundle.ts";
 import { QualificationBlocked } from "./common.ts";
 
-async function unauthenticatedStatus(binary: string, socketPath: string): Promise<number> {
-  if (process.platform === "win32") {
-    const environment: NodeJS.ProcessEnv = {};
-    for (const key of ["SystemRoot", "WINDIR", "PATH", "TEMP", "TMP", "PATHEXT"]) {
-      if (process.env[key]) environment[key] = process.env[key];
-    }
-    const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
-        binary,
-        ["rc", "--unix-socket", socketPath, "rc/noop", "--config", "NUL"],
-        { env: environment, timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true },
-        (_error, out) => {
-          // HTTP 401 is an expected native-client nonzero exit; only its bounded JSON status is evidence.
-          if (!out)
-            reject(new QualificationBlocked("file_worker_negative_auth_response_unavailable"));
-          else resolve(out);
-        },
-      );
-    });
-    const value: unknown = JSON.parse(stdout);
-    if (
-      !value ||
-      typeof value !== "object" ||
-      !("status" in value) ||
-      typeof value.status !== "number"
-    ) {
-      throw new QualificationBlocked("file_worker_negative_auth_response_unavailable");
-    }
-    return value.status;
-  }
+async function unauthenticatedStatus(socketPath: string): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const call = request(
       {
@@ -100,16 +70,10 @@ export async function fileWorkerQualification(input: {
       true,
       privateDirectory.isDirectory() && !privateDirectory.isSymbolicLink(),
     );
-    if (process.platform !== "win32") {
-      expect("private_socket_mode", 0o700, privateDirectory.mode & 0o777);
-      expect("socket_owner", process.getuid?.(), privateDirectory.uid);
-      expect("native_unix_socket", true, (await lstat(handle.socketPath)).isSocket());
-    }
-    expect(
-      "missing_authentication_status",
-      401,
-      await unauthenticatedStatus(proof.path, handle.socketPath),
-    );
+    expect("private_socket_mode", 0o700, privateDirectory.mode & 0o777);
+    expect("socket_owner", process.getuid?.(), privateDirectory.uid);
+    expect("native_unix_socket", true, (await lstat(handle.socketPath)).isSocket());
+    expect("missing_authentication_status", 401, await unauthenticatedStatus(handle.socketPath));
     const nonce = "live-qualification-owned-worker";
     const noop = await supervisor.call<{ nonce?: string }>(handle.socketPath, "rc/noop", { nonce });
     expect("authenticated_round_trip", nonce, noop.nonce);
@@ -199,7 +163,6 @@ export async function fileWorkerQualification(input: {
         cooperativeShutdown: true,
         forcedShutdown: true,
         sessionCloseShutdown: true,
-        windowsAclValidatedBySupervisor: process.platform === "win32",
       },
     };
   } finally {

@@ -14,8 +14,6 @@ const RELEASES = {
   "darwin-x64": "osx-amd64",
   "linux-arm64": "linux-arm64",
   "linux-x64": "linux-amd64",
-  "win32-arm64": "windows-arm64",
-  "win32-x64": "windows-amd64",
 };
 const executeFile = promisify(execFile);
 
@@ -91,7 +89,7 @@ async function main(): Promise<void> {
   const cells = Object.keys(RELEASES);
   if (Object.keys(binaries).length !== cells.length || cells.some((cell) => !(cell in binaries))) {
     throw new Error(
-      "Vendor manifest must contain exactly the six supported platform/architecture cells",
+      "Vendor manifest must contain exactly the four supported platform/architecture cells",
     );
   }
 
@@ -108,8 +106,7 @@ async function main(): Promise<void> {
   const entries = Object.entries(binaries) as Array<[keyof typeof RELEASES, unknown]>;
   for (const [cell, entry] of entries) {
     const release = RELEASES[cell];
-    const executable = cell.startsWith("win32-") ? "rclone.exe" : "rclone";
-    const expectedPath = `vendor/rclone/${release}/${executable}`;
+    const expectedPath = `vendor/rclone/${release}/rclone`;
     const expectedProvenance = `https://downloads.rclone.org/${VERSION}/rclone-${VERSION}-${release}.zip`;
     if (
       typeof entry !== "object" ||
@@ -128,7 +125,7 @@ async function main(): Promise<void> {
     }
     const path = await packageFile(root, expectedPath);
     const metadata = await lstat(path);
-    if (process.platform !== "win32" && (metadata.mode & 0o111) === 0) {
+    if ((metadata.mode & 0o111) === 0) {
       throw new Error(`Packaged binary is not executable: ${path}`);
     }
     const actual = await hashExecutable(path);
@@ -155,7 +152,6 @@ async function main(): Promise<void> {
     encoding: "utf8",
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
-    windowsHide: true,
   });
   const version: unknown = JSON.parse(stdout);
   if (

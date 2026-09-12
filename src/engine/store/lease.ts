@@ -113,7 +113,7 @@ interface ProcessIdentity {
   startTime: number;
   uid: string | null;
   executable: string | null;
-  // Linux and Windows expose argv boundaries. macOS ps exposes a flat command;
+  // Linux exposes argv boundaries. macOS ps exposes a flat command;
   // its exact rcd prefix is checked separately, never shell-tokenized.
   argv: string[] | null;
   command: string | null;
@@ -131,60 +131,6 @@ const SELECT_LEASE_SQL = `SELECT owner_uuid AS ownerUuid, host_id AS hostId, pid
 function isErrnoCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
-
-export function windowsCommand(
-  script: string,
-  extra: NodeJS.ProcessEnv = {},
-  cwd?: string,
-): string | null {
-  const root = process.env.SystemRoot ?? process.env.SYSTEMROOT;
-  if (!root || !isAbsolute(root)) return null;
-  const result = spawnSync(
-    join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false); ${script}`,
-    ],
-    {
-      encoding: "utf8",
-      timeout: 5_000,
-      maxBuffer: 1024 * 1024,
-      windowsHide: true,
-      cwd,
-      env: {
-        SystemRoot: root,
-        SYSTEMROOT: root,
-        TEMP: process.env.TEMP,
-        TMP: process.env.TMP,
-        USERPROFILE: process.env.USERPROFILE,
-        ...extra,
-      },
-    },
-  );
-  return result.error || result.status !== 0 ? null : result.stdout.trim();
-}
-
-// GetOwnerSid and CreationDate come from the actual process, not an estimate of
-// this coordinator's uptime. CommandLineToArgvW preserves quoted path boundaries.
-const WINDOWS_PROCESS_SCRIPT = `
-$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$env:MIGMATE_INSPECT_PID);
-if($null -eq $p){Write-Output 'absent';exit 0};
-$owner=Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid;
-if($owner.ReturnValue -ne 0){throw 'owner unavailable'};
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices;
-public static class MigmateArgv {
- [DllImport("shell32.dll",SetLastError=true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string s,out int n);
- [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
- public static string[] Parse(string s) { int n; IntPtr p=CommandLineToArgvW(s,out n); if(p==IntPtr.Zero)throw new Exception();
- try { string[] a=new string[n]; for(int i=0;i<n;i++)a[i]=Marshal.PtrToStringUni(Marshal.ReadIntPtr(p,i*IntPtr.Size)); return a; } finally {LocalFree(p);} }
-}';
-$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
-@{ startTime=([DateTimeOffset]$p.CreationDate.ToUniversalTime()).ToUnixTimeMilliseconds();
- uid=($(if($owner.Sid -eq $current){'self'}else{$owner.Sid}));
- executable=$p.ExecutablePath; argv=@([MigmateArgv]::Parse($p.CommandLine)); command=$null } | ConvertTo-Json -Compress
-`;
 
 function readProcess(pid: number): ProcessObservation {
   if (!Number.isSafeInteger(pid) || pid <= 0) return { status: "unknown" };
@@ -256,38 +202,6 @@ function readProcess(pid: number): ProcessObservation {
         },
       };
     }
-    if (process.platform === "win32") {
-      const text = windowsCommand(WINDOWS_PROCESS_SCRIPT, { MIGMATE_INSPECT_PID: String(pid) });
-      if (text === "absent") return { status: "absent" };
-      if (text === null) return { status: "unknown" };
-      const data: unknown = JSON.parse(text);
-      if (
-        !data ||
-        typeof data !== "object" ||
-        !("startTime" in data) ||
-        typeof data.startTime !== "number" ||
-        !Number.isSafeInteger(data.startTime) ||
-        data.startTime <= 0 ||
-        !("uid" in data) ||
-        typeof data.uid !== "string" ||
-        !("executable" in data) ||
-        typeof data.executable !== "string" ||
-        !("argv" in data) ||
-        !Array.isArray(data.argv) ||
-        !data.argv.every((arg) => typeof arg === "string")
-      )
-        return { status: "unknown" };
-      return {
-        status: "alive",
-        identity: {
-          startTime: data.startTime,
-          uid: data.uid,
-          executable: data.executable,
-          argv: data.argv,
-          command: null,
-        },
-      };
-    }
   } catch (error) {
     // Only an absent process directory / ESRCH proves loss; EPERM, malformed
     // output, missing tools, timeouts and unsupported platforms remain unknown.
@@ -324,37 +238,10 @@ export function processAlive(pid: number, startTime: number): boolean | null {
   return status === "unknown" ? null : status === "alive";
 }
 
-function windowsPrivate(path: string, create = false): boolean {
-  const setup = create
-    ? `$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
-$acl=New-Object System.Security.AccessControl.FileSecurity;
-if(Test-Path -LiteralPath $env:MIGMATE_PRIVATE_PATH -PathType Container){$acl=New-Object System.Security.AccessControl.DirectorySecurity};
-$acl.SetOwner($sid);$acl.SetAccessRuleProtection($true,$false);
-$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow')));
-Set-Acl -LiteralPath $env:MIGMATE_PRIVATE_PATH -AclObject $acl;`
-    : "";
-  return (
-    windowsCommand(
-      `${setup}
-$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
-$item=Get-Item -LiteralPath $env:MIGMATE_PRIVATE_PATH -Force;
-if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){exit 1};
-$acl=Get-Acl -LiteralPath $env:MIGMATE_PRIVATE_PATH;
-if(-not $acl.AreAccessRulesProtected -or $acl.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $sid){exit 1};
-$rules=$acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]);
-if($rules.Count -eq 0){exit 1};
-foreach($rule in $rules){if($rule.IdentityReference -ne $sid -or $rule.AccessControlType -ne 'Allow'){exit 1}};
-Write-Output 'private'`,
-      { MIGMATE_PRIVATE_PATH: path },
-    ) === "private"
-  );
-}
-
 function privatePath(path: string, directory: boolean): boolean {
   try {
     const info = lstatSync(path);
     if (info.isSymbolicLink() || (directory ? !info.isDirectory() : !info.isFile())) return false;
-    if (process.platform === "win32") return windowsPrivate(path);
     return (
       process.getuid !== undefined && info.uid === process.getuid() && (info.mode & 0o077) === 0
     );
@@ -398,16 +285,12 @@ export function getHostId(home: string): string {
   if (existing !== null) return existing;
   mkdirSync(home, { recursive: true, mode: 0o700 });
   if (lstatSync(home).isSymbolicLink()) throw new Error("Unsafe engine home");
-  if (process.platform === "win32" && !windowsPrivate(home, true))
-    throw new Error("Unsafe engine home");
   if (!privatePath(home, true)) throw new Error("Unsafe engine home");
   const file = join(home, "hostId"),
     temp = join(home, `.hostId.${randomUUID()}.tmp`);
   const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
   try {
     try {
-      if (process.platform === "win32" && !windowsPrivate(temp, true))
-        throw new Error("Unsafe host identity file");
       writeFileSync(fd, `${randomUUID()}\n`);
       fsyncSync(fd);
     } finally {
@@ -420,15 +303,11 @@ export function getHostId(home: string): string {
     }
   } finally {
     unlinkSync(temp);
-    // Windows does not expose directory fsync through Node; the fully flushed
-    // file is installed with a non-replacing hard link on its local volume.
-    if (process.platform !== "win32") {
-      const directory = openSync(home, constants.O_RDONLY | constants.O_DIRECTORY);
-      try {
-        fsyncSync(directory);
-      } finally {
-        closeSync(directory);
-      }
+    const directory = openSync(home, constants.O_RDONLY | constants.O_DIRECTORY);
+    try {
+      fsyncSync(directory);
+    } finally {
+      closeSync(directory);
     }
   }
   const installed = readHostId(home);
@@ -436,49 +315,9 @@ export function getHostId(home: string): string {
   return installed;
 }
 
-// Node's Windows path sockets are named pipes, not AF_UNIX. Use native Winsock
-// to check the recorded rclone AF_UNIX endpoint, without executing a worker or
-// attempting authenticated RC (its credentials died with the original owner).
-const WINDOWS_SOCKET_SCRIPT = `
-Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; using System.Threading.Tasks;
-public static class MigmateSocket {
- [DllImport("ws2_32.dll")] static extern int WSAStartup(ushort v,byte[] d);
- [DllImport("ws2_32.dll")] static extern int WSACleanup();
- [DllImport("ws2_32.dll")] static extern UIntPtr socket(int a,int t,int p);
- [DllImport("ws2_32.dll")] static extern int connect(UIntPtr s,byte[] a,int n);
- [DllImport("ws2_32.dll")] static extern int closesocket(UIntPtr s);
- [DllImport("ws2_32.dll")] static extern int WSAGetLastError();
- public static string Probe(string path) {
-  byte[] name=Encoding.UTF8.GetBytes(path); if(name.Length>=108)return "unknown";
-  if(WSAStartup(0x202,new byte[512])!=0)return "unknown";
-  UIntPtr s=socket(1,1,0);
-  if(s==new UIntPtr(UInt64.MaxValue)){WSACleanup();return "unknown";}
-  try { byte[] a=new byte[110];a[0]=1;Array.Copy(name,0,a,2,name.Length);
-   Task<int> task=Task.Run(()=>{int r=connect(s,a,a.Length);return r==0?0:WSAGetLastError();});
-   if(!task.Wait(1000))return "unknown"; int e=task.Result;
-   return e==0?"alive":e==10061?"absent":"unknown";
-  } finally {closesocket(s);WSACleanup();}
- }
-}';
-[MigmateSocket]::Probe($env:MIGMATE_INSPECT_SOCKET)
-`;
-
 /** Any answer proves liveness; only definitive refusal/absence proves silence. */
 export async function probeWorker(socketPath: string): Promise<boolean | null> {
   if (!socketPath || !isAbsolute(socketPath)) return null;
-  if (process.platform === "win32") {
-    try {
-      lstatSync(socketPath);
-    } catch (error) {
-      return isErrnoCode(error, "ENOENT") ? false : null;
-    }
-    const state = windowsCommand(
-      WINDOWS_SOCKET_SCRIPT,
-      { MIGMATE_INSPECT_SOCKET: basename(socketPath) },
-      dirname(socketPath),
-    );
-    return state === "alive" ? true : state === "absent" ? false : null;
-  }
   try {
     return await withSocketPath(
       socketPath,
@@ -518,34 +357,6 @@ export function evaluateReclaim(i: ReclaimInputs): ReclaimDecision {
 }
 
 // CWD is an OS fact, not inferred from the worker's --cache-dir argument.
-// On native 64-bit Windows, read the process parameters through a query/read
-// handle. WOW64/denied handles are unknown; no address or path is guessed.
-const WINDOWS_CWD_SCRIPT = `
-Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices;
-public static class MigmateCwd {
- [StructLayout(LayoutKind.Sequential)] struct Basic { public IntPtr Reserved, Peb, R1, R2, Pid, R3; }
- [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
- [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr p);
- [DllImport("kernel32.dll",SetLastError=true)] static extern bool ReadProcessMemory(IntPtr p,IntPtr a,byte[] b,IntPtr n,out IntPtr read);
- [DllImport("kernel32.dll",SetLastError=true)] static extern bool IsWow64Process(IntPtr p,out bool wow);
- [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr p,int c,out Basic b,int n,out int read);
- static byte[] Read(IntPtr h,IntPtr p,int n) { byte[] b=new byte[n];IntPtr count;
-  if(!ReadProcessMemory(h,p,b,new IntPtr(n),out count)||count.ToInt64()!=n)throw new Exception();return b; }
- public static string Read(int pid) {
-  if(IntPtr.Size!=8)return null; IntPtr h=OpenProcess(0x410,false,pid);if(h==IntPtr.Zero)return null;
-  try { bool wow; if(!IsWow64Process(h,out wow)||wow)return null;
-   Basic b;int count;if(NtQueryInformationProcess(h,0,out b,Marshal.SizeOf(typeof(Basic)),out count)!=0)return null;
-   IntPtr parameters=new IntPtr(BitConverter.ToInt64(Read(h,IntPtr.Add(b.Peb,0x20),8),0));
-   byte[] path=Read(h,IntPtr.Add(parameters,0x38),16);int length=BitConverter.ToUInt16(path,0);
-   if(length<=0||length>32766||(length%2)!=0)return null;
-   IntPtr buffer=new IntPtr(BitConverter.ToInt64(path,8));
-   return Encoding.Unicode.GetString(Read(h,buffer,length));
-  } catch { return null; } finally {CloseHandle(h);}
- }
-}';
-$cwd=[MigmateCwd]::Read([int]$env:MIGMATE_INSPECT_PID); if($null -eq $cwd){exit 1}; ConvertTo-Json -Compress -InputObject $cwd
-`;
-
 function readProcessCwd(pid: number): string | null {
   try {
     if (process.platform === "linux") return readlinkSync(`/proc/${pid}/cwd`);
@@ -559,12 +370,6 @@ function readProcessCwd(pid: number): string | null {
       if (result.error || result.status !== 0) return null;
       const names = result.stdout.split("\0").filter((field) => field.startsWith("n"));
       return names.length === 1 ? names[0]!.slice(1) : null;
-    }
-    if (process.platform === "win32") {
-      const text = windowsCommand(WINDOWS_CWD_SCRIPT, { MIGMATE_INSPECT_PID: String(pid) });
-      if (text === null) return null;
-      const cwd: unknown = JSON.parse(text);
-      return typeof cwd === "string" ? cwd : null;
     }
   } catch {
     /* Unknown cwd cannot prove relative socket ownership. */
@@ -589,7 +394,7 @@ function workerOwned(row: LeaseRow, observed: ProcessObservation): boolean {
     directory = dirname(row.socketPath),
     cwd = readProcessCwd(row.workerPid);
   if (
-    identity.uid !== (process.platform === "win32" ? "self" : String(process.getuid?.())) ||
+    identity.uid !== String(process.getuid?.()) ||
     !identity.executable ||
     !isAbsolute(identity.executable) ||
     !cwd ||

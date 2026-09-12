@@ -228,11 +228,9 @@ function setup(t: TestContext, type: JobType = "file_migration") {
   };
 }
 
-// Windows child.kill("SIGINT") terminates instead of generating console Ctrl-C.
-// The actual Windows console-interrupt gate belongs to the native launch smoke.
 it(
   "SIGINT checkpoints before exit130; resume emits one new terminal and no duplicate writes",
-  { timeout: 120000, skip: process.platform === "win32" },
+  { timeout: 120000 },
   async (t) => {
     const h = setup(t);
     const id = await h.approve();
@@ -386,7 +384,7 @@ it(
 
 it(
   "the actual source bin symlink initializes structured output for usage failures",
-  { timeout: 30000, skip: process.platform === "win32" },
+  { timeout: 30000 },
   async (t) => {
     const h = setup(t);
     const shim = join(h.root, "migmate");
@@ -419,7 +417,7 @@ it(
 for (const stop of ["SIGINT", "SIGKILL", "EPIPE"] as const) {
   it(
     `Teams archive ${stop} and resume preserve durable records with one terminal per attempt`,
-    { timeout: 120000, skip: process.platform === "win32" && stop === "SIGINT" },
+    { timeout: 120000 },
     async (t) => {
       const h = setup(t, "teams_archive");
       const id = await h.approve();

@@ -17,24 +17,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - cell: darwin-x64
-            runner: macos-15-intel
-            architecture: x64
           - cell: darwin-arm64
             runner: macos-15
             architecture: arm64
-          - cell: linux-x64
-            runner: ubuntu-24.04
+          - cell: darwin-x64
+            runner: macos-15-intel
             architecture: x64
           - cell: linux-arm64
             runner: ubuntu-24.04-arm
             architecture: arm64
-          - cell: win32-x64
-            runner: windows-2025
+          - cell: linux-x64
+            runner: ubuntu-24.04
             architecture: x64
-          - cell: win32-arm64
-            runner: windows-11-arm
-            architecture: arm64
     env:
       MIGMATE_EXPECTED_CELL: ${{ matrix.cell }}
     steps:

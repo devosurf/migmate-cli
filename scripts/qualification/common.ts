@@ -8,7 +8,10 @@ export function same(left: unknown, right: unknown): boolean {
 }
 
 export function qualificationAssertion(
-  prefix: string, id: string, expected: unknown, observed: unknown,
+  prefix: string,
+  id: string,
+  expected: unknown,
+  observed: unknown,
 ): ProbeCapture["assertions"][number] {
   if (!same(expected, observed)) throw new QualificationBlocked(`${prefix}${id}`);
   return { id, expected, observed };
@@ -24,8 +27,12 @@ export function registeredCodes(values: Iterable<string>, gate: string): string[
 }
 
 export function privatePathOwned(info: Stats, kind: "file" | "directory"): boolean {
-  return (kind === "file" ? info.isFile() : info.isDirectory()) && !info.isSymbolicLink() &&
-    (process.platform === "win32" || ((info.mode & 0o077) === 0 && info.uid === process.getuid?.()));
+  return (
+    (kind === "file" ? info.isFile() : info.isDirectory()) &&
+    !info.isSymbolicLink() &&
+    (info.mode & 0o077) === 0 &&
+    info.uid === process.getuid?.()
+  );
 }
 
 export interface QualificationInput {

@@ -17,10 +17,7 @@ const binaryPath = process.env.MIGMATE_TEST_RCLONE_BINARY;
 const binarySha256 = process.env.MIGMATE_TEST_RCLONE_SHA256;
 const binaryProvenance = process.env.MIGMATE_TEST_RCLONE_PROVENANCE;
 const enabled =
-  process.platform !== "win32" &&
-  binaryPath !== undefined &&
-  binarySha256 !== undefined &&
-  binaryProvenance !== undefined;
+  binaryPath !== undefined && binarySha256 !== undefined && binaryProvenance !== undefined;
 
 function suppliedBinary() {
   assert.ok(binaryPath);

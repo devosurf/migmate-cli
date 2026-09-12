@@ -274,7 +274,7 @@ describe("windowless native protocol", () => {
 
   it("serves only exact embedded paths and rejects cross-origin, unknown, and non-JSON actions", async () => {
     const session = new WebSession({ engine: readerEngine(status(), EMPTY), job: JOB });
-    const handle = createProtocolHandler({ session, platform: "darwin" });
+    const handle = createProtocolHandler({ session });
     const root = await handle(new Request("migmate://localhost/"));
     assert.equal(root.status, 200);
     assert.match(root.headers.get("content-security-policy")!, /default-src 'none'/);
@@ -323,21 +323,21 @@ describe("windowless native protocol", () => {
     assert.equal(allowedNavigation("migmate://localhost/client.js"), false);
     assert.equal(allowedNavigation("https://attacker.invalid/"), false);
     assert.equal(allowedNavigation("file:///etc/passwd"), false);
-    assert.equal(allowedNavigation("http://migmate.localhost/", "win32"), true);
-    assert.equal(allowedNavigation("http://migmate.localhost.evil/", "win32"), false);
     await session.close();
   });
 
   it("pages and facets real file evidence without changing approval, then binds an explicit approval to its digest", async () => {
     const home = mkdtempSync(join(tmpdir(), "migmate-web-"));
-    const provider = new FakeFileMigrationPort(fileFixture(
-      Array.from({ length: 61 }, (_, index) => ({
-        id: `package-${index}`,
-        parentId: "source-root",
-        name: `package-${String(index).padStart(2, "0")}`,
-        kind: "package" as const,
-      })),
-    ));
+    const provider = new FakeFileMigrationPort(
+      fileFixture(
+        Array.from({ length: 61 }, (_, index) => ({
+          id: `package-${index}`,
+          parentId: "source-root",
+          name: `package-${String(index).padStart(2, "0")}`,
+          kind: "package" as const,
+        })),
+      ),
+    );
     const engine = openEngine({ home, provider, adapter: "web" });
     let session: WebSession | undefined;
     try {

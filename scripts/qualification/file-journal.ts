@@ -55,13 +55,11 @@ export class FileJournal {
     } finally {
       database.close();
     }
-    if (process.platform !== "win32") {
-      const directory = await open(jobDirectory, "r");
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
+    const directory = await open(jobDirectory, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
     }
     return new FileJournal(path, jobDirectory, signal, onDurable);
   }
@@ -72,10 +70,7 @@ export class FileJournal {
     onDurable: (unit: CommitUnit) => Promise<void>,
   ): Promise<FileJournal> {
     const info = await lstat(path);
-    if (
-      dirname(path) !== jobDirectory ||
-      !privatePathOwned(info, "file")
-    ) {
+    if (dirname(path) !== jobDirectory || !privatePathOwned(info, "file")) {
       throw new QualificationBlocked("file_journal_ownership_invalid");
     }
     const journal = new FileJournal(path, jobDirectory, signal, onDurable);
@@ -199,10 +194,19 @@ export class FileJournal {
 }
 
 export function observedCodes(units: readonly CommitUnit[], sourceId?: string): string[] {
-  return registeredCodes(units.flatMap((unit) => [
-    ...unit.rows.filter((row) => sourceId === undefined ||
-      (row.jobType === "file_migration" && row.sourceItemId === sourceId)).map((row) => row.code),
-    ...unit.findings.filter((finding) => sourceId === undefined ||
-      finding.subjectId === sourceId).map((finding) => finding.code),
-  ]), "file_probe_unregistered_driver_code");
+  return registeredCodes(
+    units.flatMap((unit) => [
+      ...unit.rows
+        .filter(
+          (row) =>
+            sourceId === undefined ||
+            (row.jobType === "file_migration" && row.sourceItemId === sourceId),
+        )
+        .map((row) => row.code),
+      ...unit.findings
+        .filter((finding) => sourceId === undefined || finding.subjectId === sourceId)
+        .map((finding) => finding.code),
+    ]),
+    "file_probe_unregistered_driver_code",
+  );
 }
