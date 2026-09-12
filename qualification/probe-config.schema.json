@@ -3,21 +3,13 @@
   "$id": "https://github.com/devosurf/migmate-cli/qualification/probe-config.schema.json",
   "title": "Maintainer-only live exact-route probe configuration",
   "type": "object",
-  "required": [
-    "schemaVersion",
-    "jobType",
-    "jobConfig",
-    "acknowledgement"
-  ],
+  "required": ["schemaVersion", "jobType", "jobConfig", "acknowledgement"],
   "properties": {
     "schemaVersion": {
       "const": 1
     },
     "jobType": {
-      "enum": [
-        "file_migration",
-        "teams_archive"
-      ]
+      "enum": ["file_migration", "teams_archive"]
     },
     "acknowledgement": {
       "const": "I authorize disposable live qualification probes"
@@ -33,11 +25,7 @@
         },
         "rclone": {
           "type": "object",
-          "required": [
-            "config",
-            "sourceRemote",
-            "destinationRemote"
-          ],
+          "required": ["config", "sourceRemote", "destinationRemote"],
           "properties": {
             "config": {
               "$ref": "#/$defs/fileReference"
@@ -57,13 +45,7 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": [
-              "id",
-              "sourceDriveId",
-              "sourceItemId",
-              "destDriveId",
-              "destFolderId"
-            ],
+            "required": ["id", "sourceDriveId", "sourceItemId", "destDriveId", "destFolderId"],
             "properties": {
               "id": {
                 "type": "string",
@@ -94,10 +76,7 @@
         },
         "graph": {
           "type": "object",
-          "required": [
-            "tenantId",
-            "clientId"
-          ],
+          "required": ["tenantId", "clientId"],
           "properties": {
             "tenantId": {
               "type": "string",
@@ -112,9 +91,7 @@
         },
         "secrets": {
           "type": "object",
-          "required": [
-            "teams_graph_client_secret"
-          ],
+          "required": ["teams_graph_client_secret"],
           "properties": {
             "teams_graph_client_secret": {
               "$ref": "#/$defs/fileReference"
@@ -129,11 +106,7 @@
             "oneOf": [
               {
                 "type": "object",
-                "required": [
-                  "kind",
-                  "teamId",
-                  "channelId"
-                ],
+                "required": ["kind", "teamId", "channelId"],
                 "properties": {
                   "kind": {
                     "const": "channel"
@@ -148,10 +121,7 @@
               },
               {
                 "type": "object",
-                "required": [
-                  "kind",
-                  "teamId"
-                ],
+                "required": ["kind", "teamId"],
                 "properties": {
                   "kind": {
                     "const": "team"
@@ -163,10 +133,7 @@
               },
               {
                 "type": "object",
-                "required": [
-                  "kind",
-                  "userId"
-                ],
+                "required": ["kind", "userId"],
                 "properties": {
                   "kind": {
                     "const": "user-chats"
@@ -181,10 +148,7 @@
         },
         "window": {
           "type": "object",
-          "required": [
-            "from",
-            "to"
-          ],
+          "required": ["from", "to"],
           "properties": {
             "from": {
               "type": "string",
@@ -251,11 +215,7 @@
         },
         "graphMutation": {
           "type": "object",
-          "required": [
-            "tenantId",
-            "clientId",
-            "clientSecret"
-          ],
+          "required": ["tenantId", "clientId", "clientSecret"],
           "properties": {
             "tenantId": {
               "type": "string",
@@ -298,10 +258,7 @@
   "$defs": {
     "fileReference": {
       "type": "object",
-      "required": [
-        "resolver",
-        "path"
-      ],
+      "required": ["resolver", "path"],
       "properties": {
         "resolver": {
           "const": "file"
@@ -327,21 +284,13 @@
         }
       },
       "then": {
-        "required": [
-          "fixtures"
-        ],
+        "required": ["fixtures"],
         "properties": {
           "jobConfig": {
-            "required": [
-              "rclone",
-              "mappings"
-            ]
+            "required": ["rclone", "mappings"]
           },
           "fixtures": {
-            "required": [
-              "disposableRoots",
-              "graphMutation"
-            ]
+            "required": ["disposableRoots", "graphMutation"]
           }
         }
       }
@@ -357,14 +306,7 @@
       "then": {
         "properties": {
           "jobConfig": {
-            "required": [
-              "graph",
-              "secrets",
-              "scopes",
-              "window",
-              "cloud",
-              "timezone"
-            ]
+            "required": ["graph", "secrets", "scopes", "window", "cloud", "timezone"]
           }
         }
       }

@@ -319,8 +319,12 @@ export async function verifyPackageFiles(
     }
     for (const part of index.parts) {
       const { jsonl, html } = part;
-      if (!safePath(jsonl.path) || !safePath(html.path) ||
-        !expectedParts.has(jsonl.path) || !expectedFiles.has(html.path)) {
+      if (
+        !safePath(jsonl.path) ||
+        !safePath(html.path) ||
+        !expectedParts.has(jsonl.path) ||
+        !expectedFiles.has(html.path)
+      ) {
         report("manifest_digest_mismatch", path, {
           reason: "invalid_or_unconfined_part_descriptor",
         });

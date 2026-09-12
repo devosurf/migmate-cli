@@ -4,7 +4,9 @@ import type { ReadableStreamReadResult } from "node:stream/web";
 import { ProviderFault, type CredentialSession } from "./credentials.ts";
 
 export function retryableStatus(status: number | undefined): boolean {
-  return status !== undefined && (status === 0 || status === 408 || status === 429 || status >= 500);
+  return (
+    status !== undefined && (status === 0 || status === 408 || status === 429 || status >= 500)
+  );
 }
 
 export async function* cursorPages<T>(

@@ -8,8 +8,15 @@ import type {
 } from "../engine/types.ts";
 import { CODE_BY_NAME } from "../engine/codes.ts";
 import {
-  VERBS, JOB_TYPES, JOB_STATES, WORKER_STATUSES, EVENT_KINDS,
-  EXECUTION_TERMINAL_STATES, CLOSURE_OUTCOMES, VERB_STATES, PROGRESS_UNITS,
+  VERBS,
+  JOB_TYPES,
+  JOB_STATES,
+  WORKER_STATUSES,
+  EVENT_KINDS,
+  EXECUTION_TERMINAL_STATES,
+  CLOSURE_OUTCOMES,
+  VERB_STATES,
+  PROGRESS_UNITS,
 } from "../engine/types.ts";
 import { EXIT_CODE_BY_REFUSAL_CODE, exitCodeForRefusalCode } from "./exit-codes.ts";
 
@@ -40,15 +47,7 @@ const enums: Record<string, readonly unknown[]> = {
   jobType: JOB_TYPES,
   phase: VERBS,
   verb: VERBS,
-  kind: [
-    "policy_outcome",
-    "planned_omission",
-    "finding",
-    ...EVENT_KINDS,
-    "cli",
-    "web",
-    null,
-  ],
+  kind: ["policy_outcome", "planned_omission", "finding", ...EVENT_KINDS, "cli", "web", null],
   state: [...JOB_STATES, ...EXECUTION_TERMINAL_STATES, ...VERB_STATES],
   terminalState: [...EXECUTION_TERMINAL_STATES, null],
   outcome: [...EXECUTION_TERMINAL_STATES, ...CLOSURE_OUTCOMES],

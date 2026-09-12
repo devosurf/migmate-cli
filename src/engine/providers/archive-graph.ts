@@ -410,10 +410,14 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
     };
   }
   async function* list(path: string, code: string, signal?: AbortSignal): AsyncIterable<Json> {
-    for await (const records of cursorPages(null, async (cursor) => {
-      const page = await readPage(path, cursor, code, signal);
-      return { value: page.records, next: page.nextLink };
-    }, () => new ArchiveEffectError("archive_paging_cycle"))) {
+    for await (const records of cursorPages(
+      null,
+      async (cursor) => {
+        const page = await readPage(path, cursor, code, signal);
+        return { value: page.records, next: page.nextLink };
+      },
+      () => new ArchiveEffectError("archive_paging_cycle"),
+    )) {
       yield* records;
     }
   }
@@ -858,7 +862,9 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
             const identity = messageConversation(record, scope);
             const conversation = identity ? byId.get(identity) : undefined;
             if (!conversation || !scope.conversationIds.includes(conversation.id)) continue;
-            const hasAttachment = config.attachmentBytes && Array.isArray(record.attachments) &&
+            const hasAttachment =
+              config.attachmentBytes &&
+              Array.isArray(record.attachments) &&
               record.attachments.some((entry) => object(entry)?.contentType === "reference");
             attachmentFound ||= hasAttachment;
             if (hosted.has(conversation.kind) && (!config.attachmentBytes || attachmentProved))
