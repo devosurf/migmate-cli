@@ -10,20 +10,15 @@ import {
   FakeFileMigrationPort,
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
+import { fileConfig as jobConfig, fileFixture } from "./engine-fixture.ts";
 
 const FIXED_NOW = new Date("2026-09-01T00:00:00.000Z");
 
 function fixture(): FakeFileMigrationFixture {
-  return {
-    sourceDriveId: "src-drive",
-    sourceRootId: "src-root",
-    destinationDriveId: "dst-drive",
-    destinationRootId: "dst-root",
-    sourceItems: [
-      { id: "src-root", parentId: null, name: "root", kind: "folder", identity: "src-root" },
+  return fileFixture([
       {
         id: "zero",
-        parentId: "src-root",
+        parentId: "source-root",
         name: "zero.txt",
         kind: "file",
         size: 0,
@@ -33,7 +28,7 @@ function fixture(): FakeFileMigrationFixture {
       },
       {
         id: "binary",
-        parentId: "src-root",
+        parentId: "source-root",
         name: "binary.bin",
         kind: "file",
         size: 4,
@@ -43,31 +38,14 @@ function fixture(): FakeFileMigrationFixture {
       },
       {
         id: "empty-folder",
-        parentId: "src-root",
+        parentId: "source-root",
         name: "empty-folder",
         kind: "folder",
         identity: "empty-folder",
       },
-    ],
-    destinationItems: [
-      { id: "dst-root", parentId: null, name: "root", kind: "folder", identity: "dst-root" },
-    ],
-  };
+  ]);
 }
 
-function jobConfig() {
-  return {
-    mappings: [
-      {
-        id: "map-1",
-        sourceDriveId: "src-drive",
-        sourceItemId: "src-root",
-        destDriveId: "dst-drive",
-        destFolderId: "dst-root",
-      },
-    ],
-  };
-}
 
 interface Harness {
   engine: Engine;

@@ -291,8 +291,8 @@ async function privateDirectory(path: string): Promise<void> {
     "$acl=New-Object System.Security.AccessControl.DirectorySecurity; $acl.SetOwner($sid); " +
     "$acl.SetAccessRuleProtection($true,$false); " +
     "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); " +
-    "$acl.AddAccessRule($rule); Set-Acl -LiteralPath $env.MIGMATE_RUN_DIRECTORY -AclObject $acl; " +
-    "$actual=Get-Acl -LiteralPath $env.MIGMATE_RUN_DIRECTORY; " +
+    "$acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:MIGMATE_RUN_DIRECTORY -AclObject $acl; " +
+    "$actual=Get-Acl -LiteralPath $env:MIGMATE_RUN_DIRECTORY; " +
     "if(-not $actual.AreAccessRulesProtected){exit 1}; " +
     "$rules=$actual.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); " +
     "if($rules.Count -ne 1 -or $rules[0].IdentityReference -ne $sid -or $rules[0].AccessControlType -ne 'Allow'){exit 1}; " +

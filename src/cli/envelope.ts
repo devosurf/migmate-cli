@@ -7,7 +7,10 @@ import type {
   RowQuery,
 } from "../engine/types.ts";
 import { CODE_BY_NAME } from "../engine/codes.ts";
-import { VERBS } from "../engine/types.ts";
+import {
+  VERBS, JOB_TYPES, JOB_STATES, WORKER_STATUSES, EVENT_KINDS,
+  EXECUTION_TERMINAL_STATES, CLOSURE_OUTCOMES, VERB_STATES, PROGRESS_UNITS,
+} from "../engine/types.ts";
 import { EXIT_CODE_BY_REFUSAL_CODE, exitCodeForRefusalCode } from "./exit-codes.ts";
 
 export const SCHEMA_VERSION = 1 as const;
@@ -33,53 +36,25 @@ export function terminalEnvelopeForExecute(result: ExecuteResult) {
 const enums: Record<string, readonly unknown[]> = {
   ok: [true, false],
   resumable: [true, false],
-  workerStatus: ["alive", "absent", "unknown"],
-  jobType: ["file_migration", "teams_archive"],
+  workerStatus: WORKER_STATUSES,
+  jobType: JOB_TYPES,
   phase: VERBS,
   verb: VERBS,
   kind: [
     "policy_outcome",
     "planned_omission",
     "finding",
-    "refusal",
-    "phase_started",
-    "phase_completed",
-    "check_result",
-    "unit_committed",
-    "progress",
-    "terminal",
+    ...EVENT_KINDS,
     "cli",
     "web",
     null,
   ],
-  state: [
-    "new",
-    "planned",
-    "approved",
-    "executing",
-    "interrupted",
-    "blocked",
-    "needs_attention",
-    "verified",
-    "closed",
-    "cancelled",
-    "completed",
-    "pending",
-    "done",
-    "current",
-    "checkpoint",
-  ],
-  terminalState: ["completed", "interrupted", "blocked", "cancelled", null],
-  outcome: [
-    "completed",
-    "interrupted",
-    "blocked",
-    "cancelled",
-    "completed_with_accepted_exceptions",
-  ],
+  state: [...JOB_STATES, ...EXECUTION_TERMINAL_STATES, ...VERB_STATES],
+  terminalState: [...EXECUTION_TERMINAL_STATES, null],
+  outcome: [...EXECUTION_TERMINAL_STATES, ...CLOSURE_OUTCOMES],
   mode: ["interactive", "unattended"],
   format: ["json", "jsonl", "html", "csv"],
-  unit: ["bytes", "items", "records", "assets", "conversations"],
+  unit: PROGRESS_UNITS,
   status: ["pass", "fail", "skip"],
 };
 // Inspect only contract-bearing members. Arbitrary provider evidence, prose, and

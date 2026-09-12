@@ -59,7 +59,6 @@ jobs:
     env:
       MIGMATE_EXPECTED_CELL: ${{ inputs.cell }}
       MIGMATE_QUALIFICATION_CONFIG: ${{ vars.MIGMATE_QUALIFICATION_CONFIG }}
-      MIGMATE_QUALIFICATION_OUTPUT: ${{ runner.temp }}/migmate-qualification-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -71,6 +70,10 @@ jobs:
       - run: npm ci
       - name: Build and verify the installed artifact before probing a route
         run: npm run check:package
+      - name: Prepare evidence output path
+        env:
+          MIGMATE_QUALIFICATION_OUTPUT: ${{ runner.temp }}/migmate-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'MIGMATE_QUALIFICATION_OUTPUT=' + process.env.MIGMATE_QUALIFICATION_OUTPUT + '\n')"
       - name: Probe the prepared tenant route and write immutable evidence
         run: >-
           node --input-type=module -e "import { spawnSync } from 'node:child_process';

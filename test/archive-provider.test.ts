@@ -464,7 +464,7 @@ describe("production archive provider effects", () => {
     assert.equal("chatId" in transcript, false);
   });
 
-  it("hard-fails an attachment probe with no real in-scope reference instead of passing consent alone", async () => {
+  it("records a missing in-scope attachment sample without blocking otherwise proven preflight", async () => {
     const options = { ...config, attachmentBytes: true };
     const provider = createArchiveProvider(
       transport(
@@ -486,8 +486,24 @@ describe("production archive provider effects", () => {
       "pass",
     );
     const attachment = checks.find((check) => check.id === "archive_attachment_bytes")!;
-    assert.equal(attachment.status, "fail");
+    assert.equal(attachment.status, "skip");
     assert.equal(attachment.code, "attachment_probe_unavailable");
+    assert.equal(checks.every((check) => check.status !== "fail"), true);
+  });
+
+  it("still fails preflight when an in-scope reference attachment cannot be fetched", async () => {
+    const options = { ...config, attachmentBytes: true };
+    const provider = createArchiveProvider(transport((url) => {
+      if (url.pathname === "/v1.0/users/user-a/chats") return { value: [conversation.raw] };
+      if (url.pathname.endsWith("/getAllMessages")) return { value: [{
+        ...message, attachments: [{ id: "attachment", contentType: "reference", name: "file",
+          contentUrl: "https://tenant.sharepoint.com/:u:/s/site/attachment" }],
+      }] };
+      if (url.pathname.endsWith("/hostedContents")) return { value: [{ id: "image" }] };
+      throw Object.assign(new Error("unavailable"), { status: 403 });
+    }, async function* () { yield new Uint8Array([137, 80, 78, 71]); }));
+    const checks = await collect(provider.preflight(options, plan(options)));
+    assert.equal(checks.find((check) => check.id === "archive_attachment_bytes")?.status, "fail");
   });
 
   it("leaves private-channel retained history unrequested even when the current Graph route would accept it", async () => {

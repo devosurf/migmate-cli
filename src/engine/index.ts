@@ -67,6 +67,7 @@ import {
   inspectLease,
   probeWorker,
   stopOrphanWorker,
+  windowsCommand,
 } from "./store/lease.ts";
 import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
@@ -472,12 +473,8 @@ function localFilesystem(home: string): Outcome<null> {
     }
     if (process.platform === "win32") {
       const script =
-        "$p=$args[0];$d=New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot($p));[Console]::Write([int]$d.DriveType)";
-      const drive = execFileSync(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", script, real],
-        { encoding: "utf8", timeout: 5000 },
-      ).trim();
+        "$d=New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot($env:MIGMATE_LOCAL_PATH));[Console]::Write([int]$d.DriveType)";
+      const drive = windowsCommand(script, { MIGMATE_LOCAL_PATH: real });
       if (drive !== "3")
         return refuse("local_filesystem_required", "The job requires a fixed local volume.");
     }
@@ -984,14 +981,7 @@ function inputFields(
   };
 }
 function findingFacets(store: Store, revision: number): FacetCount[] {
-  const counts = new Map<string, FacetCount>();
-  for (const f of store.readFindings(revision)) {
-    if (!isAcceptable(f.code)) continue;
-    const entry = counts.get(f.code);
-    if (entry) entry.count++;
-    else counts.set(f.code, { code: f.code, kind: f.kind, count: 1 });
-  }
-  return [...counts.values()].sort((a, b) => compareText(a.code, b.code));
+  return store.currentFindingCounts(revision, "verify");
 }
 function currentVerification(store: Store): (VerificationRevision & { planRev: number }) | null {
   const rev = store.readJob()?.verificationRevision;
@@ -1148,6 +1138,9 @@ function makeWriter(
   async function operation<T>(verb: Verb, fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
     let entered = false;
     let finish: (() => void) | undefined;
+    const progressStop = new AbortController();
+    let progressLoop = Promise.resolve();
+    let progressFailure: unknown;
     function record(outcome: Outcome<T>): Outcome<T> {
       if (!outcome.ok && entered)
         store.appendEvent({
@@ -1169,6 +1162,20 @@ function makeWriter(
       settled = new Promise<void>((resolve) => {
         finish = resolve;
       });
+      progressLoop = (async () => {
+        try {
+          while (!progressStop.signal.aborted) {
+            await delay(1000, progressStop.signal);
+            if (!progressStop.signal.aborted) {
+              guard(verb);
+              store.publishProgress();
+            }
+          }
+        } catch (error) {
+          progressFailure = error;
+          executionInterrupt?.abort();
+        }
+      })();
       return record(await fn());
     } catch (error) {
       const failure = expectedFailure<T>(error);
@@ -1176,9 +1183,16 @@ function makeWriter(
       throw error;
     } finally {
       if (entered) {
-        busy = false;
-        executionInterrupt = undefined;
-        finish?.();
+        progressStop.abort();
+        await progressLoop;
+        try {
+          if (active() && store.readLease()?.ownerUuid === ownerUuid) store.finishOperation();
+        } finally {
+          busy = false;
+          executionInterrupt = undefined;
+          finish?.();
+        }
+        if (progressFailure) throw progressFailure;
       }
     }
   }
@@ -1216,7 +1230,11 @@ function makeWriter(
           message: "The operation is not available in the current state.",
           detail: { state: record.state, verb },
         });
-      store.writeJob({ ...record, state: target });
+      store.writeJob({
+        ...record,
+        state: target,
+        verificationRevision: t === "execute" ? null : record.verificationRevision,
+      });
       store.appendEvent({
         verb,
         phase: verb,
@@ -1359,7 +1377,10 @@ function makeWriter(
           const unit = verificationRun === undefined ? yielded : { ...yielded, verificationRun };
           if (unit.rev !== revision || unit.phase !== phase)
             throw new Error("Driver yielded a commit outside its current phase");
-          if (store.commit(unit).applied) committed++;
+          if (store.commit(unit).applied) {
+            committed++;
+            store.publishProgress();
+          }
           lastUnit = unit.unitKey;
           if (signal?.aborted) return { committed, interrupted: true, blocked: false };
         }
@@ -1423,6 +1444,12 @@ function makeWriter(
   ): Promise<Outcome<VerificationRevision & { planRev: number }>> {
     const run = store.nextVerificationRun();
     store.beginVerification(revision, run);
+    store.appendEvent({
+      verb: "verify",
+      phase: "verify",
+      kind: "phase_started",
+      payload: { revision, run },
+    });
     const drained = await drain(p, config, revision, "verify", budget, signal, run);
     if (drained.interrupted)
       return refuse(
@@ -1436,7 +1463,7 @@ function makeWriter(
       });
     const evidenceDigest = digestJson({
       rows: store.readAllRows(revision, "verify"),
-      findings: store.readFindings(revision),
+      findings: store.readCurrentFindings(revision, "verify"),
       archive: store.readResume(revision).archiveManifestDigest ?? null,
     });
     const verificationDigest = digestJson({
@@ -1511,11 +1538,7 @@ function makeWriter(
     return worker;
   }
   async function stopWorker(p: ProviderPort, worker: TransferWorkerHandle): Promise<void> {
-    try {
-      await p.stopTransferWorker({ socketPath: worker.socketPath });
-    } finally {
-      await p.terminateTransferWorker({ socketPath: worker.socketPath });
-    }
+    await p.stopTransferWorker({ socketPath: worker.socketPath });
     const lease = store.readLease();
     if (lease)
       store.writeLease({
@@ -1789,6 +1812,12 @@ function makeWriter(
               budget,
             );
           store.writeJob({ ...job(), executionCompleted: true });
+          store.appendEvent({
+            verb: "execute",
+            phase: "execute",
+            kind: "phase_completed",
+            payload: { revision: plan.revision, committed: drained.committed },
+          });
           const verified = await verifyRun(p, config, plan.revision, budget, signal);
           if (!verified.ok)
             return terminalResult(
@@ -1813,18 +1842,40 @@ function makeWriter(
           return refuse("verification_unaccepted", "Verification requires completed execution.");
         const config = readConfig(paths, job().type),
           p = provider(config),
-          revision = job().planRevision!;
-        const result = await verifyRun(
-          p,
-          config,
-          revision,
-          new RetryBudget(store.readPlanRevision(revision)?.rowCount ?? 1),
-        );
-        if (!result.ok) return result;
-        transition(result.value.clean ? "verify_clean" : "verify_gaps", "verify", {
-          verificationDigest: result.value.verificationDigest,
-        });
-        return result;
+          revision = job().planRevision!,
+          plan = store.readPlanRevision(revision)!;
+        let worker: TransferWorkerHandle | undefined;
+        try {
+          if (job().type === "file_migration") {
+            const bound = readBoundEvidence(plan.evidence);
+            const evidence = await boundEvidence(p, job().type);
+            if (canonicalJson(evidence) !== canonicalJson(bound))
+              return refuse(
+                "plan_revision_required",
+                "The approved application, route, or binary evidence changed.",
+              );
+            if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+            worker = await startWorker(p, evidence.binaryPath);
+            const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
+            if (
+              version !== worker.version ||
+              (bound.binaryVersion && version !== bound.binaryVersion)
+            )
+              return refuse(
+                "plan_revision_required",
+                "The live worker version changed after approval.",
+              );
+            if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+          }
+          const result = await verifyRun(p, config, revision, new RetryBudget(plan.rowCount));
+          if (!result.ok) return result;
+          transition(result.value.clean ? "verify_clean" : "verify_gaps", "verify", {
+            verificationDigest: result.value.verificationDigest,
+          });
+          return result;
+        } finally {
+          if (worker) await stopWorker(p, worker);
+        }
       }),
     accept: (x) =>
       operation("verify", async () => {
@@ -1896,24 +1947,23 @@ function makeWriter(
           verification = currentVerification(store);
         const config = revision > 0 ? readConfig(paths, job().type) : undefined;
         const reportSections = config ? await sections(provider(config), config, revision) : [];
-        const findings = store.readFindings(revision),
+        const phase: RowPhase = verification ? "verify" : store.currentPhase(revision);
+        const findings = store.readCurrentFindings(revision, phase),
           rows = store.readAllRows(revision);
         const accepted = verification
-          ? store
-              .readAcceptances(verification.verificationDigest)
-              .map((a) => ({
-                ...a,
-                evidenceDigest: verification.evidenceDigest ?? verification.verificationDigest,
-                items: findings
-                  .filter((f) => f.code === a.code)
-                  .map((f) => ({
-                    subjectKind: f.subjectKind,
-                    subjectId: f.subjectId,
-                    phase: f.phase,
-                    evidence: f.evidence,
-                    consequence: consequence(f.code),
-                  })),
-              }))
+          ? store.readAcceptances(verification.verificationDigest).map((a) => ({
+              ...a,
+              evidenceDigest: verification.evidenceDigest ?? verification.verificationDigest,
+              items: findings
+                .filter((f) => f.code === a.code)
+                .map((f) => ({
+                  subjectKind: f.subjectKind,
+                  subjectId: f.subjectId,
+                  phase: f.phase,
+                  evidence: f.evidence,
+                  consequence: consequence(f.code),
+                })),
+            }))
           : [];
         const acceptedCodes = new Set(accepted.map((a) => a.code));
         const report = {

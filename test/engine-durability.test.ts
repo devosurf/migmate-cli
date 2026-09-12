@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -21,15 +23,10 @@ import {
   type FakeArchiveFixture,
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
-import type { FileMigrationConfig } from "../src/engine/drivers/file-migration.ts";
+import { fileConfig as config, fileFixture, value, approve } from "./engine-fixture.ts";
 import type { ConversationManifest, PackageManifest } from "../src/engine/archive/package.ts";
 
 const NOW = "2026-09-01T00:00:00.000Z";
-
-function value<T>(outcome: Outcome<T>): T {
-  assert.equal(outcome.ok, true, outcome.ok ? undefined : outcome.refusal.code);
-  return outcome.value;
-}
 
 function refused<T>(outcome: Outcome<T>, code: RefusalCode): void {
   assert.equal(outcome.ok, false);
@@ -42,46 +39,19 @@ function hash(bytes: string | Uint8Array): string {
 }
 
 function fixture(): FakeFileMigrationFixture {
-  return {
-    sourceDriveId: "source-drive",
-    sourceRootId: "source-root",
-    destinationDriveId: "destination-drive",
-    destinationRootId: "destination-root",
-    sourceItems: [
-      { id: "source-root", parentId: null, name: "source", kind: "folder" },
-      {
-        id: "document",
-        parentId: "source-root",
-        name: "document.bin",
-        kind: "file",
-        content: "original",
-        etag: "source-v1",
-        createdAt: NOW,
-        modifiedAt: NOW,
-        mimeType: "application/octet-stream",
-      },
-    ],
-    destinationItems: [
-      { id: "destination-root", parentId: null, name: "destination", kind: "folder" },
-    ],
-  };
-}
-
-function config(
-  exclusions: Array<{ sourceItemId: string; reason: string }> = [],
-): FileMigrationConfig {
-  return {
-    mappings: [
-      {
-        id: "mapping",
-        sourceDriveId: "source-drive",
-        sourceItemId: "source-root",
-        destDriveId: "destination-drive",
-        destFolderId: "destination-root",
-        exclusions,
-      },
-    ],
-  };
+  return fileFixture([
+    {
+      id: "document",
+      parentId: "source-root",
+      name: "document.bin",
+      kind: "file",
+      content: "original",
+      etag: "source-v1",
+      createdAt: NOW,
+      modifiedAt: NOW,
+      mimeType: "application/octet-stream",
+    },
+  ]);
 }
 
 interface Harness {
@@ -125,22 +95,6 @@ async function harness(
 function reopen(h: Harness): void {
   h.engine.close();
   h.engine = openEngine({ home: h.home, provider: h.port, now: () => new Date(h.now) });
-}
-
-async function approve(h: Harness): Promise<string> {
-  return value(
-    await h.engine.withWriter(h.ref, async (writer) => {
-      const plan = value(await writer.plan());
-      value(
-        await writer.approve({
-          approver: "durability-test",
-          mode: "unattended",
-          planDigest: plan.planDigest,
-        }),
-      );
-      return plan.planDigest;
-    }),
-  );
 }
 
 async function execute(h: Harness) {
@@ -199,14 +153,166 @@ async function readerRefusals(engine: Engine, ref: JobRef, code: RefusalCode): P
 }
 
 describe("engine durability seam", () => {
+  it("counts the current 61 omitted items once across verification reruns and a second file pass", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture(
+        Array.from({ length: 61 }, (_, index) => ({
+          id: `package-${index}`,
+          parentId: "source-root",
+          name: `package-${index}`,
+          kind: "package" as const,
+        })),
+      ),
+    );
+    const digest = await approve(h);
+    const expected = [{ code: "source_package_omitted", kind: "planned_omission", count: 61 }];
+    await execute(h);
+    for (let pass = 0; pass < 2; pass++) {
+      for (let verification = 0; verification < 2; verification++) {
+        const result = await verify(h);
+        assert.deepEqual(result.findings, expected);
+        assert.deepEqual(
+          value(await h.engine.reader(h.ref).status()).outstandingFindings,
+          expected,
+        );
+        for (const phase of ["plan", "execute", "verify"] as const)
+          assert.deepEqual(
+            value(
+              await h.engine.reader(h.ref).rows({
+                phase,
+                codes: ["source_package_omitted"],
+                limit: 7,
+              }),
+            ).facets,
+            expected,
+          );
+      }
+      const result = await verify(h);
+      value(
+        await h.engine.withWriterResult(h.ref, (writer) =>
+          writer.accept({
+            verificationDigest: result.verificationDigest,
+            codes: [{ code: "source_package_omitted" }],
+            approver: "operator",
+          }),
+        ),
+      );
+      if (pass === 0) {
+        h.port.mutateSourceItem("package-0", { name: "renamed-package", etag: "next-version" });
+        reopen(h);
+        await execute(h);
+      }
+    }
+    const artifacts = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+    const report = JSON.parse(
+      await readFile(
+        artifacts.artifacts.find((entry) => entry.name === "report.json")!.path,
+        "utf8",
+      ),
+    );
+    assert.equal(report.plan.planDigest, digest);
+    assert.equal(report.findings.length, 61);
+    assert.equal(report.acceptedExceptions[0].items.length, 61);
+    assert.equal(
+      new Set(
+        report.acceptedExceptions[0].items.map((item: { subjectId: string }) => item.subjectId),
+      ).size,
+      61,
+    );
+  });
+
+  it("retains secondary metadata omissions even when the item has a clean primary outcome", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        {
+          id: "metadata-file",
+          parentId: "source-root",
+          name: "metadata-file",
+          kind: "file",
+          content: "bytes",
+          metadata: { versionCount: 3, listItemFields: { Title: "retained evidence" } },
+        },
+      ]),
+    );
+    await approve(h);
+    await execute(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    const counts = new Map(status.outstandingFindings.map((facet) => [facet.code, facet.count]));
+    assert.equal(counts.get("version_history_omitted"), 1);
+    assert.equal(counts.get("source_metadata_export_only"), 1);
+    const revision = value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
+    assert.deepEqual(new Map(revision.findings.map((facet) => [facet.code, facet.count])), counts);
+  });
+
+  it("exposes one verification gate with execution already complete to a live reader", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    const original = h.port.openSourceContent.bind(h.port);
+    let observedVerification = false;
+    t.mock.method(h.port, "openSourceContent", async function* (id: string) {
+      const rail = value(await h.engine.reader(h.ref).status()).rail;
+      if (rail.some((entry) => entry.verb === "verify" && entry.state === "current")) {
+        observedVerification = true;
+        assert.deepEqual(
+          rail.filter((entry) => entry.state === "current").map((entry) => entry.verb),
+          ["verify"],
+        );
+        for (const verb of ["plan", "approve", "execute"])
+          assert.equal(rail.find((entry) => entry.verb === verb)?.state, "done");
+      }
+      yield* original(id);
+    });
+    await execute(h);
+    assert.equal(observedVerification, true);
+  });
+
+  it("publishes coalesced progress only after durable commits and retains unknown totals", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture(
+        Array.from({ length: 8 }, (_, index) => ({
+          id: `file-${index}`,
+          parentId: "source-root",
+          name: `file-${index}`,
+          kind: "file" as const,
+          content: "bytes",
+        })),
+      ),
+    );
+    await approve(h);
+    h.now = "2026-09-02T00:00:00.000Z";
+    const original = h.port.openSourceContent.bind(h.port);
+    t.mock.method(h.port, "openSourceContent", async function* (id: string) {
+      h.now = new Date(Date.parse(h.now) + 400).toISOString();
+      yield* original(id);
+    });
+    await execute(h);
+    const log = await events(h.engine, h.ref);
+    const progress = log.filter((event) => event.kind === "progress");
+    assert.ok(progress.length >= 3);
+    for (const [index, event] of progress.entries()) {
+      if (index > 0) assert.ok(Date.parse(event.at) - Date.parse(progress[index - 1]!.at) >= 1000);
+      const committed = log.findLast(
+        (candidate) => candidate.cursor < event.cursor && candidate.kind === "unit_committed",
+      );
+      assert.ok(committed);
+      assert.deepEqual(event.payload.progress, committed.payload.progress);
+      const counts = event.payload.progress;
+      assert.ok(counts && typeof counts === "object" && "total" in counts);
+      assert.equal(counts.total, null);
+    }
+    assert.equal(log.filter((event) => event.kind === "terminal").length, 1);
+    assert.equal(value(await h.engine.reader(h.ref).status()).ownership.held, false);
+  });
+
   it("binds same-count changed content while unchanged replans ignore observation time and revision", async (t) => {
     const h = await harness(t);
     const first = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     h.now = "2026-09-02T00:00:00.000Z";
     reopen(h);
-    const unchanged = value(
-      await h.engine.withWriterResult(h.ref, (writer) => writer.plan({ force: true })),
-    );
+    const unchanged = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     assert.ok(unchanged.revision > first.revision);
     assert.equal(unchanged.planDigest, first.planDigest);
     assert.equal(unchanged.inputsDigest, first.inputsDigest);
@@ -349,7 +455,9 @@ describe("engine durability seam", () => {
     await approve(h);
     await execute(h);
     const first = await verify(h);
-    assert.ok(first.findings.some((finding) => finding.code === "omitted_by_rule"));
+    assert.deepEqual(first.findings, [
+      { code: "omitted_by_rule", kind: "planned_omission", count: 1 },
+    ]);
     const accepted = value(
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
@@ -366,6 +474,12 @@ describe("engine durability seam", () => {
     assert.notEqual(fresh.verificationDigest, first.verificationDigest);
     assert.ok(fresh.revision > first.revision);
     assert.deepEqual(fresh.acceptedCodes, []);
+    assert.deepEqual(fresh.findings, first.findings);
+    assert.deepEqual(
+      value(await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["omitted_by_rule"] }))
+        .facets,
+      fresh.findings,
+    );
     assert.ok(
       value(await h.engine.reader(h.ref).status()).outstandingFindings.some(
         (finding) => finding.code === "omitted_by_rule",
@@ -430,15 +544,26 @@ describe("engine durability seam", () => {
     assert.equal(report.job.state, "closed");
     assert.equal(report.acceptedExceptions[0].approver, "archive-owner");
     assert.equal(report.acceptedExceptions[0].note, note);
-    assert.ok(
-      report.acceptedExceptions[0].items.some(
-        (item: { subjectId: string }) => item.subjectId === "document",
-      ),
+    assert.deepEqual(
+      report.acceptedExceptions[0].items.map((item: { subjectId: string; phase: string }) => ({
+        subjectId: item.subjectId,
+        phase: item.phase,
+      })),
+      [{ subjectId: "document", phase: "verify" }],
     );
+    assert.equal(report.findings.length, 1);
     const rendered = await readFile(html.path, "utf8");
     assert.equal(rendered.includes(note), false);
     assert.ok(rendered.includes("&lt;script&gt;operator-note()&lt;/script&gt;"));
     reopen(h);
+    const rail = value(await h.engine.reader(h.ref).status()).rail;
+    assert.equal(
+      rail.some(({ state }) => state === "current"),
+      false,
+    );
+    for (const verb of ["plan", "execute", "verify", "close"])
+      assert.equal(rail.find((entry) => entry.verb === verb)?.state, "done");
+    assert.equal(rail.find((entry) => entry.verb === "cancel")?.state, "pending");
     const repeated = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
     assert.deepEqual(repeated, first);
     refused(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()), "job_closed");
@@ -514,14 +639,12 @@ describe("engine durability seam", () => {
     let cursor: string | undefined;
     do {
       const page = value(
-        await h.engine
-          .reader(h.ref)
-          .rows({
-            phase: "verify",
-            sort: "path",
-            limit: 1,
-            ...(cursor === undefined ? {} : { cursor }),
-          }),
+        await h.engine.reader(h.ref).rows({
+          phase: "verify",
+          sort: "path",
+          limit: 1,
+          ...(cursor === undefined ? {} : { cursor }),
+        }),
       );
       assert.equal(page.totalRows, full.totalRows);
       assert.equal(page.rows.length, 1);
@@ -546,7 +669,7 @@ describe("engine durability seam", () => {
       rclone: {
         config: {
           resolver: "file",
-          path: join(tmpdir(), "operator-owned", "rclone.conf"),
+          path: join(await realpath(tmpdir()), "operator-owned", "rclone.conf"),
           mode: "0600",
         },
         sourceRemote: "sp-source",
@@ -638,6 +761,111 @@ describe("engine durability seam", () => {
     );
     assert.deepEqual(h.port.snapshotDestination(), before);
   });
+
+  it("refuses standalone file verification under a changed identity before reading either provider", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    await execute(h);
+    const original = value(await h.engine.reader(h.ref).status());
+    const reads = [...h.port.calls];
+    h.port.setApplicationIdentity("unapproved-application");
+    reopen(h);
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.verify()),
+      "plan_revision_required",
+    );
+    assert.deepEqual(h.port.calls, reads);
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).verificationDigest,
+      original.verificationDigest,
+    );
+  });
+
+  it("refuses changed qualification and binary proofs without replacing approved verification evidence", async (t) => {
+    const h = await harness(t);
+    let qualification = "a".repeat(64),
+      binary = "b".repeat(64);
+    Object.assign(h.port, {
+      async qualificationEvidence() {
+        return { digest: qualification, tuple: { route: "scripted-test" } };
+      },
+      async binaryEvidence() {
+        return { sha256: binary, version: "fake-worker-1.0.0", path: "" };
+      },
+    });
+    await approve(h);
+    await execute(h);
+    const digest = value(await h.engine.reader(h.ref).status()).verificationDigest;
+    const reads = [...h.port.calls];
+    qualification = "c".repeat(64);
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.verify()),
+      "plan_revision_required",
+    );
+    qualification = "a".repeat(64);
+    binary = "d".repeat(64);
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.verify()),
+      "plan_revision_required",
+    );
+    assert.deepEqual(h.port.calls, reads);
+    assert.equal(value(await h.engine.reader(h.ref).status()).verificationDigest, digest);
+  });
+
+  it("opens a literal engine home containing shell metacharacters and a trailing path separator", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "migmate-literal-path-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const home = join(root, "Engine [literal] & 'quoted'");
+    const engine = openEngine({ home: `${home}/` });
+    t.after(() => engine.close());
+    const ref = value(await engine.initJob({ type: "file_migration" }));
+    assert.equal(value(await engine.reader(ref).status()).jobId, ref.id);
+    assert.equal(
+      value(await engine.withWriterResult(ref, (writer) => writer.cancel("path proof"))).state,
+      "cancelled",
+    );
+  });
+
+  it(
+    "waits for a contending SQLite owner when opening a lease-free reader",
+    { timeout: 20_000 },
+    async (t) => {
+      const h = await harness(t);
+      const child = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+    // SQLite's native busy handler blocks this thread; another real process must release the lock.
+      import { DatabaseSync } from "node:sqlite";
+      const db = new DatabaseSync(process.env.READER_LOCK_DB);
+      db.exec("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; UPDATE job SET label='committed by owner'");
+      process.stdout.write("locked");
+      setTimeout(() => { db.exec("COMMIT"); db.close(); }, 500);
+    `,
+        ],
+        {
+          env: { ...process.env, READER_LOCK_DB: join(h.home, "jobs", h.ref.id, "state.db") },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const closed = once(child, "close");
+      t.after(() => {
+        if (child.exitCode === null) child.kill();
+      });
+      await Promise.race([
+        once(child.stdout, "data"),
+        closed.then(() => {
+          throw new Error("The contending process exited before acquiring its lock");
+        }),
+      ]);
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.equal(status.jobId, h.ref.id);
+      assert.equal(status.ownership.held, false);
+      assert.equal((await closed)[0], 0);
+    },
+  );
 
   it("refuses missing reader state without creating an engine home or a missing job folder", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "migmate-reader-missing-"));
@@ -782,6 +1010,69 @@ function archiveFixture(): { fixture: FakeArchiveFixture; cursor: string } {
   };
 }
 
+it("keeps archive scope and modification window frozen across a same-revision planning retry", async (t) => {
+  const archive = archiveFixture();
+  const h = await harness(
+    t,
+    { ...fileFixture(), archive: archive.fixture },
+    {
+      scopes: [{ kind: "user-chats", userId: "user-one" }],
+      window: { from: "2026-01-01T00:00:00Z" },
+      timezone: "UTC",
+    },
+    "teams_archive",
+  );
+  const port = h.port.archive!;
+  const page = port.page.bind(port);
+  let retry = true;
+  port.page = async (input) => {
+    if (retry) {
+      retry = false;
+      h.now = "2026-09-02T00:00:00.000Z";
+      const added = { ...archive.fixture.conversations[0]!, id: "chat:after-checkpoint" };
+      port.setExpansion(
+        archive.fixture.scopes.map((scope) => ({
+          ...scope,
+          conversationIds: [...scope.conversationIds, added.id],
+        })),
+        [...archive.fixture.conversations, added],
+      );
+      throw Object.assign(new Error("Transient page failure"), { status: 503, retryAfterMs: 0 });
+    }
+    return page(input);
+  };
+  const plan = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+  const review = value(
+    await h.engine.reader(h.ref).rows({
+      phase: "plan",
+      codes: ["collected", "empty_conversation"],
+    }),
+  );
+  assert.deepEqual(
+    review.rows.map((row) => row.jobType === "teams_archive" && row.conversationId),
+    ["chat:chat-one", "chat:empty"],
+  );
+  assert.ok(plan.disclosures.some((text) => text.includes(`, ${NOW})`)));
+  value(
+    await h.engine.withWriterResult(h.ref, (writer) =>
+      writer.approve({
+        planDigest: plan.planDigest,
+        approver: "test",
+        mode: "unattended",
+      }),
+    ),
+  );
+  await execute(h);
+  const manifest: PackageManifest = JSON.parse(
+    await readFile(join(h.home, "jobs", h.ref.id, "archive", "manifest.json"), "utf8"),
+  );
+  assert.equal(manifest.plan.window.to, NOW);
+  assert.deepEqual(
+    manifest.conversations.map((entry) => entry.id),
+    ["chat:chat-one", "chat:empty"],
+  );
+});
+
 it("durably resumes archive pages and partial assets, deduplicates current/retained records, and verifies offline", async (t) => {
   const archive = archiveFixture();
   const input = fixture();
@@ -878,6 +1169,7 @@ it("durably resumes archive pages and partial assets, deduplicates current/retai
   assert.deepEqual(await readFile(join(root, storedInline.path)), Buffer.from([1, 2, 3, 4]));
   assert.equal(storedInline.references.length, 2);
   effects.setAvailable(false);
+  h.port.setApplicationIdentity("credentials-no-longer-available");
   reopen(h);
   const verified = await verify(h);
   assert.equal(verified.clean, true);

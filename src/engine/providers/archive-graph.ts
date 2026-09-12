@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { CheckResult } from "../types.ts";
+import { cursorPages, retryableStatus } from "./http.ts";
 import {
   ArchiveEffectError,
   type ArchiveConfig,
@@ -214,11 +215,7 @@ function effect(error: unknown, fallback: string): ArchiveEffectError {
   const rawStatus = fault?.status ?? evidence?.status;
   const status =
     typeof rawStatus === "number" && Number.isInteger(rawStatus) ? rawStatus : undefined;
-  const retry =
-    fault?.transient === true ||
-    status === 408 ||
-    status === 429 ||
-    (status !== undefined && status >= 500);
+  const retry = fault?.transient === true || retryableStatus(status);
   if (retry) {
     const result = new ArchiveEffectError(
       status === 429 ? "provider_throttled" : "provider_transient",
@@ -413,17 +410,12 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
     };
   }
   async function* list(path: string, code: string, signal?: AbortSignal): AsyncIterable<Json> {
-    let cursor: string | null = null;
-    const visited = new Set<string>();
-    do {
-      const result = await readPage(path, cursor, code, signal);
-      for (const record of result.records) yield record;
-      cursor = result.nextLink;
-      if (cursor !== null) {
-        if (visited.has(cursor)) throw new ArchiveEffectError("archive_paging_cycle");
-        visited.add(cursor);
-      }
-    } while (cursor !== null);
+    for await (const records of cursorPages(null, async (cursor) => {
+      const page = await readPage(path, cursor, code, signal);
+      return { value: page.records, next: page.nextLink };
+    }, () => new ArchiveEffectError("archive_paging_cycle"))) {
+      yield* records;
+    }
   }
   async function* stream(
     path: string,
@@ -866,6 +858,9 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
             const identity = messageConversation(record, scope);
             const conversation = identity ? byId.get(identity) : undefined;
             if (!conversation || !scope.conversationIds.includes(conversation.id)) continue;
+            const hasAttachment = config.attachmentBytes && Array.isArray(record.attachments) &&
+              record.attachments.some((entry) => object(entry)?.contentType === "reference");
+            attachmentFound ||= hasAttachment;
             if (hosted.has(conversation.kind) && (!config.attachmentBytes || attachmentProved))
               continue;
             try {
@@ -911,6 +906,7 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
             } catch (error) {
               const failure = effect(error, "message_collection_incomplete");
               if (isRetry(failure)) throw failure;
+              if (hasAttachment) attachmentFailure = failure;
               hostedFailures.set(conversation.kind, failure);
             }
           }
@@ -952,16 +948,18 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
               attachmentBytesAsRetrieved: true,
               sample: attachmentProved,
             })
-          : failed(
-              "archive_attachment_bytes",
-              attachmentFailure ??
-                new ArchiveEffectError(
-                  attachmentFound
-                    ? "attachment_content_unavailable"
-                    : "attachment_probe_unavailable",
-                ),
-              attachmentFound ? "preflight_failed" : "attachment_probe_unavailable",
-            );
+          : attachmentFound
+            ? failed(
+                "archive_attachment_bytes",
+                attachmentFailure ?? new ArchiveEffectError("attachment_content_unavailable"),
+              )
+            : {
+                id: "archive_attachment_bytes",
+                title: "In-scope reference attachment byte probe",
+                status: "skip",
+                code: "attachment_probe_unavailable",
+                evidence: { attachmentFound: false },
+              };
       }
     },
   };

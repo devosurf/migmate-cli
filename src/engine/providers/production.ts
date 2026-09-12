@@ -379,6 +379,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     },
     async stopTransferWorker(value) {
       await (await state()).worker.stopTransferWorker(value);
+      if (current?.socketPath === value.socketPath) current = null;
     },
     async terminateTransferWorker(value) {
       await (await state()).worker.terminateTransferWorker(value);

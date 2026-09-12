@@ -18,6 +18,7 @@ import type {
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { createProtocolHandler, allowedNavigation } from "../src/web/protocol.ts";
 import { WebSession } from "../src/web/session.ts";
+import { fileConfig, fileFixture } from "./engine-fixture.ts";
 
 const JOB = { id: "one-job" };
 type HtmlNode = DefaultTreeAdapterMap["node"];
@@ -329,38 +330,20 @@ describe("windowless native protocol", () => {
 
   it("pages and facets real file evidence without changing approval, then binds an explicit approval to its digest", async () => {
     const home = mkdtempSync(join(tmpdir(), "migmate-web-"));
-    const provider = new FakeFileMigrationPort({
-      sourceDriveId: "source-drive",
-      sourceRootId: "source-root",
-      destinationDriveId: "dest-drive",
-      destinationRootId: "dest-root",
-      sourceItems: [
-        { id: "source-root", parentId: null, name: "root", kind: "folder" },
-        ...Array.from({ length: 61 }, (_, index) => ({
-          id: `package-${index}`,
-          parentId: "source-root",
-          name: `package-${String(index).padStart(2, "0")}`,
-          kind: "package" as const,
-        })),
-      ],
-      destinationItems: [{ id: "dest-root", parentId: null, name: "root", kind: "folder" }],
-    });
+    const provider = new FakeFileMigrationPort(fileFixture(
+      Array.from({ length: 61 }, (_, index) => ({
+        id: `package-${index}`,
+        parentId: "source-root",
+        name: `package-${String(index).padStart(2, "0")}`,
+        kind: "package" as const,
+      })),
+    ));
     const engine = openEngine({ home, provider, adapter: "web" });
     let session: WebSession | undefined;
     try {
       const created = await engine.initJob({
         type: "file_migration",
-        config: {
-          mappings: [
-            {
-              id: "mapping",
-              sourceDriveId: "source-drive",
-              sourceItemId: "source-root",
-              destDriveId: "dest-drive",
-              destFolderId: "dest-root",
-            },
-          ],
-        },
+        config: fileConfig(),
       });
       assert.ok(created.ok);
       session = new WebSession({ engine, job: created.value });

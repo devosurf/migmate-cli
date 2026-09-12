@@ -132,7 +132,7 @@ function isErrnoCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
-function windowsCommand(
+export function windowsCommand(
   script: string,
   extra: NodeJS.ProcessEnv = {},
   cwd?: string,
@@ -169,7 +169,7 @@ function windowsCommand(
 // GetOwnerSid and CreationDate come from the actual process, not an estimate of
 // this coordinator's uptime. CommandLineToArgvW preserves quoted path boundaries.
 const WINDOWS_PROCESS_SCRIPT = `
-$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$env.MIGMATE_INSPECT_PID);
+$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$env:MIGMATE_INSPECT_PID);
 if($null -eq $p){Write-Output 'absent';exit 0};
 $owner=Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid;
 if($owner.ReturnValue -ne 0){throw 'owner unavailable'};
@@ -328,18 +328,18 @@ function windowsPrivate(path: string, create = false): boolean {
   const setup = create
     ? `$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
 $acl=New-Object System.Security.AccessControl.FileSecurity;
-if(Test-Path -LiteralPath $env.MIGMATE_PRIVATE_PATH -PathType Container){$acl=New-Object System.Security.AccessControl.DirectorySecurity};
+if(Test-Path -LiteralPath $env:MIGMATE_PRIVATE_PATH -PathType Container){$acl=New-Object System.Security.AccessControl.DirectorySecurity};
 $acl.SetOwner($sid);$acl.SetAccessRuleProtection($true,$false);
 $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow')));
-Set-Acl -LiteralPath $env.MIGMATE_PRIVATE_PATH -AclObject $acl;`
+Set-Acl -LiteralPath $env:MIGMATE_PRIVATE_PATH -AclObject $acl;`
     : "";
   return (
     windowsCommand(
       `${setup}
 $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
-$item=Get-Item -LiteralPath $env.MIGMATE_PRIVATE_PATH -Force;
+$item=Get-Item -LiteralPath $env:MIGMATE_PRIVATE_PATH -Force;
 if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){exit 1};
-$acl=Get-Acl -LiteralPath $env.MIGMATE_PRIVATE_PATH;
+$acl=Get-Acl -LiteralPath $env:MIGMATE_PRIVATE_PATH;
 if(-not $acl.AreAccessRulesProtected -or $acl.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $sid){exit 1};
 $rules=$acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]);
 if($rules.Count -eq 0){exit 1};
@@ -460,7 +460,7 @@ public static class MigmateSocket {
   } finally {closesocket(s);WSACleanup();}
  }
 }';
-[MigmateSocket]::Probe($env.MIGMATE_INSPECT_SOCKET)
+[MigmateSocket]::Probe($env:MIGMATE_INSPECT_SOCKET)
 `;
 
 /** Any answer proves liveness; only definitive refusal/absence proves silence. */
@@ -543,7 +543,7 @@ public static class MigmateCwd {
   } catch { return null; } finally {CloseHandle(h);}
  }
 }';
-$cwd=[MigmateCwd]::Read([int]$env.MIGMATE_INSPECT_PID); if($null -eq $cwd){exit 1}; ConvertTo-Json -Compress -InputObject $cwd
+$cwd=[MigmateCwd]::Read([int]$env:MIGMATE_INSPECT_PID); if($null -eq $cwd){exit 1}; ConvertTo-Json -Compress -InputObject $cwd
 `;
 
 function readProcessCwd(pid: number): string | null {

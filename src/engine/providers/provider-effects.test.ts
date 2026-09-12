@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -251,7 +251,7 @@ test("a job-contained credential is refused before a token request or secret dis
   const directory = await mkdtemp(join(tmpdir(), "migmate-provider-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, "job"), { mode: 0o700 });
-  const secret = join(directory, "job", "secret");
+  const secret = join(await realpath(directory), "job", "secret");
   await writeFile(secret, "credential-file-sentinel", { mode: 0o600 });
   let contactedProvider = false;
   t.mock.method(globalThis, "fetch", async () => {

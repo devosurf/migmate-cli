@@ -12,7 +12,7 @@ import type {
   ArchivePackageFile,
   ArchiveResumeState,
 } from "../../src/engine/providers/archive.ts";
-import { QualificationBlocked } from "./common.ts";
+import { QualificationBlocked, privatePathOwned } from "./common.ts";
 
 export interface ArchiveFileProof {
   sha256: string;
@@ -43,13 +43,7 @@ async function syncDirectory(path: string): Promise<void> {
 
 async function directory(path: string): Promise<void> {
   const info = await lstat(path);
-  requireFact(info.isDirectory() && !info.isSymbolicLink(), "archive_private_directory_required");
-  if (process.platform !== "win32") {
-    requireFact(
-      (info.mode & 0o077) === 0 && info.uid === process.getuid?.(),
-      "archive_private_directory_required",
-    );
-  }
+  requireFact(privatePathOwned(info, "directory"), "archive_private_directory_required");
 }
 
 async function ensureDirectory(path: string): Promise<void> {

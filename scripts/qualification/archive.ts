@@ -25,6 +25,9 @@ import {
 } from "./archive-journal.ts";
 import {
   QualificationBlocked,
+  same,
+  qualificationAssertion,
+  registeredCodes,
   type QualificationInput,
   type QualificationResult,
 } from "./common.ts";
@@ -49,20 +52,9 @@ function object(value: unknown): value is Record<string, unknown> {
 function hash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
-function same(left: unknown, right: unknown): boolean {
-  return canonicalJson(left) === canonicalJson(right);
-}
-function assertion(id: string, expected: unknown, observed: unknown): Assertion {
-  requireFact(same(expected, observed), `archive_${id}`);
-  return { id, expected, observed };
-}
+const assertion = qualificationAssertion.bind(null, "archive_");
 function codes(values: Iterable<string>): string[] {
-  const observed = new Set<string>();
-  for (const code of values) {
-    requireFact(Object.hasOwn(CODE_BY_NAME, code), "archive_unregistered_observed_code");
-    observed.add(code);
-  }
-  return [...observed].sort();
+  return registeredCodes(values, "archive_unregistered_observed_code");
 }
 function requiredRoutes(plan: ArchivePlan, scope: ArchivePlan["scopes"][number]): ArchiveRoute[] {
   const routes: ArchiveRoute[] = ["messages"];
