@@ -756,12 +756,19 @@ export async function stopOrphanWorker(row: LeaseRow): Promise<boolean> {
       statusOf(readProcess(row.workerPid!), row.workerProcessStartTime ?? Number.NaN) === "alive"
     );
   };
+  // Each signal is authorized by maySignal's full ownership proof. Waiting for
+  // the exit cannot repeat it: a dying process loses its executable, argv and
+  // cwd links before it is reaped, so an unreadable identity would read as
+  // "not ours" and abandon a worker this host has already terminated. The
+  // recorded start time still identifies the pid, so only proven reuse stops
+  // the bounded wait.
   const awaitAbsent = async (timeout: number): Promise<boolean> => {
     const deadline = performance.now() + timeout;
     do {
       const observed = readProcess(row.workerPid!);
       if (observed.status === "absent") return true;
-      if (!workerOwned(row, observed)) return false;
+      if (statusOf(observed, row.workerProcessStartTime ?? Number.NaN) === "mismatched")
+        return false;
       await delay(50);
     } while (performance.now() < deadline);
     return false;
