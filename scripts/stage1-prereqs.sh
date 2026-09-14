@@ -192,7 +192,7 @@ ENV_FILE="${TMPDIR:-/tmp}/migmate-stage1-prereqs.env"
 banner "Migmate stage 1 prerequisites"
 
 stage "Microsoft Entra app registration"
-say "Official docs: register a single-tenant app, add Microsoft Graph application permissions Files.Read.All and Sites.Selected only, then create one client secret."
+say "Official docs: register a single-tenant app, add the Microsoft Graph application permission Sites.Selected, then create one client secret."
 open_url "https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app"
 open_url "https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-credentials"
 open_url "https://learn.microsoft.com/en-us/graph/permissions-reference"
@@ -217,8 +217,8 @@ ENV_FILE="$PREREQ_DIR/.stage1-prereqs.env"
 mkdir -p "$PREREQ_DIR/entra"
 write_env MIGMATE_PREREQ_DIR "$PREREQ_DIR"
 write_env MIGMATE_PREREQ_ENV_FILE "$ENV_FILE"
-say "Create the app in Entra ID > App registrations > New registration."
-step "Use a single-tenant account type and grant Microsoft Graph application permissions Files.Read.All and Sites.Selected only. Do not add Sites.Read.All."
+say "Create the app as Migmate in Entra ID > App registrations > New registration."
+step "Use a single-tenant account type. Under Microsoft Graph application permissions, add Sites.Selected only; do not add tenant-wide Files.Read.All or Sites.Read.All."
 ask MIGMATE_TENANT_ID "Paste the Directory (tenant) ID:"
 ask MIGMATE_CLIENT_ID "Paste the Application (client) ID:"
 MIGMATE_ENTRA_TENANT_ID_FILE="$PREREQ_DIR/entra/tenant-id.txt"
@@ -276,17 +276,23 @@ write_env MIGMATE_MAPPING_ROOT_ITEM_ID_FILE "$MIGMATE_MAPPING_ROOT_ITEM_ID_FILE"
 say "This stage is only for a SharePoint document-library source. My Drive is out of scope."
 
 stage "Admin consent and site grant"
-say "Microsoft docs confirm tenant-wide admin consent in Entra and the site permission API; they do not confirm a single current portal click path for the site grant."
+say "Microsoft docs confirm tenant-wide admin consent from Entra App registrations and the site permission API; the site grant itself is a Graph POST."
 open_url "https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent"
-open_url "https://learn.microsoft.com/en-us/graph/permissions-reference"
+open_url "https://learn.microsoft.com/en-us/graph/permissions-selected-overview?view=graph-rest-1.0"
 open_url "https://learn.microsoft.com/en-us/graph/api/site-post-permissions?view=graph-rest-1.0"
-open_url "https://login.microsoftonline.com/${MIGMATE_TENANT_ID}/adminconsent?client_id=${MIGMATE_CLIENT_ID}"
+open_url "https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/manage-application-permissions"
+open_url "https://entra.microsoft.com"
+note "Do not add a redirect URI just for consent; this client-credentials app does not need one."
 if ! confirm "Grant tenant-wide admin consent and the exact source-site read grant now?"; then
   warn "stopped before consent and site grant."
   exit 1
 fi
-step "On API permissions, grant admin consent for the tenant."
-step "Then use Graph Explorer or another Graph client to POST /sites/${MIGMATE_SOURCE_SITE_ID}/permissions with roles [\"read\"] and grantedToIdentities.application.id = the client id."
+step "In Entra ID > App registrations > All applications, open the app whose Application ID is ${MIGMATE_CLIENT_ID}, then select API permissions. Confirm Sites.Selected is the only Graph application permission, remove Files.Read.All if present, and select Grant admin consent."
+step "In Graph Explorer, consent its delegated Sites.FullControl.All permission while signed in as SharePoint Administrator or higher."
+step "In Graph Explorer, select POST and put only https://graph.microsoft.com/v1.0/sites/${MIGMATE_SOURCE_SITE_ID}/permissions in the query bar."
+step "Under Request Headers, add Content-Type with value application/json. Under Request Body, paste the JSON shown next; require HTTP 201."
+note "{\"roles\":[\"read\"],\"grantedToIdentities\":[{\"application\":{\"id\":\"${MIGMATE_CLIENT_ID}\",\"displayName\":\"Migmate\"}}]}"
+step "After the 201 response, reopen Graph Explorer's permissions panel, search Sites.FullControl.All, and select Unconsent. If unavailable, revoke it in Entra ID > Enterprise apps > Graph Explorer > Permissions."
 pause "Press Enter once the consent and site grant are complete."
 
 stage "Google service account and Shared Drive share"
@@ -450,8 +456,8 @@ if [[ -z "$rclone_source_bin" ]]; then
 fi
 RCLONE_BINARY_FILE="$RCLONE_VENDOR_DIR/rclone"
 install -m 755 "$rclone_source_bin" "$RCLONE_BINARY_FILE"
-version_json=$("$RCLONE_BINARY_FILE" version --json)
-rclone_version=$(printf '%s' "$version_json" | tr -d '\n' | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+version_json=$("$RCLONE_BINARY_FILE" rc --loopback core/version)
+rclone_version=$(printf '%s' "$version_json" | tr -d '\n' | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 rclone_version=${rclone_version#v}
 if [[ "$rclone_version" != "1.75.0" ]]; then
   warn "rclone version must be exactly 1.75.0; got ${rclone_version:-unknown}"
