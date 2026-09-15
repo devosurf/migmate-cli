@@ -184,10 +184,29 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=7
+TOTAL_STAGES=8
 
 umask 077
 ENV_FILE="${TMPDIR:-/tmp}/migmate-stage1-prereqs.env"
+
+# --resume <env-file> skips every browser stage and re-runs only the two config
+# stages, for an operator whose earlier run already captured the values.
+RESUME=0
+if [[ "${1:-}" == "--resume" ]]; then
+  RESUME=1
+  ENV_FILE="${2:-}"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    warn "usage: ${0##*/} --resume /path/to/.stage1-prereqs.env"
+    exit 1
+  fi
+  set -a
+  . "$ENV_FILE"
+  set +a
+  PREREQ_DIR="${MIGMATE_PREREQ_DIR:?the env file must record MIGMATE_PREREQ_DIR}"
+  _STAGE_INDEX=6
+fi
+
+if (( ! RESUME )); then
 
 banner "Migmate stage 1 prerequisites"
 
@@ -469,46 +488,132 @@ write_env MIGMATE_RCLONE_CHECKSUM_FILE "$checksum_file"
 write_env MIGMATE_RCLONE_BINARY_FILE "$RCLONE_BINARY_FILE"
 write_env MIGMATE_RCLONE_SHA256_FILE "$digest_file"
 say "Vendored rclone version verified: 1.75.0"
+fi
 
-stage "job.toml references"
-say "This file stores typed file-backed references only. It does not store secret values; it points at the files created above."
-if ! confirm "Write the job.toml reference file now?"; then
-  warn "stopped before job.toml."
+stage "Operator job config"
+say "This is the config migmate init --config reads. It stores typed file-backed references only, never secret values, and its mapping must name the same drive and root ids the rclone remotes point at."
+if ! confirm "Write the operator job config now?"; then
+  warn "stopped before the job config."
   exit 1
 fi
-ask MIGMATE_JOB_TOML "Choose the job.toml path outside the repo:"
-case "$MIGMATE_JOB_TOML" in
+ask MIGMATE_JOB_CONFIG "Choose the job config path outside the repo (job.toml):"
+case "$MIGMATE_JOB_CONFIG" in
   /*) ;;
   *) warn "Use an absolute path outside the repo."; exit 1 ;;
 esac
-JOB_TOML_DIR=$(dirname "$MIGMATE_JOB_TOML")
-mkdir -p "$JOB_TOML_DIR"
-cat > "$MIGMATE_JOB_TOML" <<EOF
-# File-backed prerequisite references for Migmate stage 1.
-# No secret values live here.
+case "$MIGMATE_JOB_CONFIG" in
+  "$PWD"|"$PWD"/*) warn "Pick a path outside the repo."; exit 1 ;;
+esac
+ask MIGMATE_MAPPING_ID "Name this mapping (letters, digits, _!.,@- only):"
+# No {n,m} interval: BSD regcomp caps repetition at RE_DUP_MAX, so a 512 bound
+# fails to compile and would reject every id.
+if [[ -z "$MIGMATE_MAPPING_ID" || ${#MIGMATE_MAPPING_ID} -gt 512 ]] ||
+  [[ "$MIGMATE_MAPPING_ID" =~ [^A-Za-z0-9_!.,@-] ]]; then
+  warn "mapping id must be 1-512 characters from A-Za-z0-9_!.,@-"
+  exit 1
+fi
+mkdir -p "$(dirname "$MIGMATE_JOB_CONFIG")"
+cat > "$MIGMATE_JOB_CONFIG" <<EOF
+# Migmate file migration job. References only; no secret values live here.
+route = "sharepoint_library_to_shared_drive"
+guarantees = "default"
 
-[microsoft_entra]
-tenant_id = { provider = "file", path = "$MIGMATE_ENTRA_TENANT_ID_FILE" }
-client_id = { provider = "file", path = "$MIGMATE_ENTRA_CLIENT_ID_FILE" }
-client_secret = { provider = "file", path = "$MIGMATE_ENTRA_CLIENT_SECRET_FILE" }
+[[mappings]]
+id = "$MIGMATE_MAPPING_ID"
+sourceSiteId = "$MIGMATE_SOURCE_SITE_ID"
+sourceDriveId = "$MIGMATE_SOURCE_DRIVE_ID"
+sourceItemId = "$MIGMATE_MAPPING_ROOT_ITEM_ID"
+destDriveId = "$MIGMATE_SHARED_DRIVE_ID"
+destFolderId = "$MIGMATE_DESTINATION_FOLDER_ID"
 
-[sharepoint]
-site_id = { provider = "file", path = "$MIGMATE_SOURCE_SITE_ID_FILE" }
-drive_id = { provider = "file", path = "$MIGMATE_SOURCE_DRIVE_ID_FILE" }
-mapping_root_item_id = { provider = "file", path = "$MIGMATE_MAPPING_ROOT_ITEM_ID_FILE" }
-
-[google]
-service_account_email = { provider = "file", path = "$MIGMATE_GOOGLE_SERVICE_ACCOUNT_EMAIL_FILE" }
-service_account_key = { provider = "file", path = "$MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE" }
-shared_drive_id = { provider = "file", path = "$MIGMATE_SHARED_DRIVE_ID_FILE" }
-destination_folder_id = { provider = "file", path = "$MIGMATE_DESTINATION_FOLDER_ID_FILE" }
+[options]
 
 [rclone]
-config = { provider = "file", path = "$MIGMATE_RCLONE_CONF_FILE" }
-binary = { provider = "file", path = "$RCLONE_BINARY_FILE" }
-digest = { provider = "file", path = "$digest_file" }
+sourceRemote = "sharepoint-source"
+destinationRemote = "google-destination"
+config = { resolver = "file", path = "$MIGMATE_RCLONE_CONF_FILE", mode = "0600" }
 EOF
-chmod 600 "$MIGMATE_JOB_TOML"
-write_env MIGMATE_JOB_TOML "$MIGMATE_JOB_TOML"
-note "Secrets living outside the repo: $MIGMATE_ENTRA_CLIENT_SECRET_FILE, $MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE, and $MIGMATE_RCLONE_CONF_FILE."
+chmod 600 "$MIGMATE_JOB_CONFIG"
+write_env MIGMATE_JOB_CONFIG "$MIGMATE_JOB_CONFIG"
+write_env MIGMATE_MAPPING_ID "$MIGMATE_MAPPING_ID"
+note "Onboard it with: migmate init --type file_migration --config $MIGMATE_JOB_CONFIG"
+
+stage "Live qualification probe config"
+say "The release gate qualifies a route with real operations, so it needs disposable roots it may create and delete inside, and a second same-tenant app that may write to the disposable source folder. The normal route credential stays read-only."
+open_url "https://learn.microsoft.com/en-us/graph/api/site-post-permissions?view=graph-rest-1.0"
+if ! confirm "Write the maintainer probe config now?"; then
+  warn "stopped before the probe config. Route qualification stays unrun; the job config above is complete."
+  exit 0
+fi
+say "Create a throwaway folder in the source library and a throwaway folder in the destination Shared Drive. The probe suite creates and deletes items beneath both."
+step "Grant the second app the write role on the source site: POST https://graph.microsoft.com/v1.0/sites/${MIGMATE_SOURCE_SITE_ID}/permissions with roles [\"write\"] and the second app's id, exactly as the read grant was made earlier."
+ask MIGMATE_PROBE_SOURCE_ITEM_ID "Paste the disposable source folder item id:"
+ask MIGMATE_PROBE_DEST_FOLDER_ID "Paste the disposable destination folder id:"
+ask MIGMATE_PROBE_MUTATOR_CLIENT_ID "Paste the second (source-write) app's Application (client) ID:"
+if [[ "$MIGMATE_PROBE_MUTATOR_CLIENT_ID" == "$MIGMATE_CLIENT_ID" ]]; then
+  warn "the probe mutator must be a different app from the read-only route app."
+  exit 1
+fi
+ask_secret MIGMATE_PROBE_MUTATOR_SECRET "Paste the second app's client secret value:"
+mkdir -p "$PREREQ_DIR/entra"
+MIGMATE_PROBE_MUTATOR_SECRET_FILE="$PREREQ_DIR/entra/probe-mutator-client-secret.txt"
+printf '%s' "$MIGMATE_PROBE_MUTATOR_SECRET" > "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
+chmod 600 "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
+unset MIGMATE_PROBE_MUTATOR_SECRET
+ask MIGMATE_PROBE_CONFIG "Choose the probe config path outside the repo (probe-config.json):"
+case "$MIGMATE_PROBE_CONFIG" in
+  /*) ;;
+  *) warn "Use an absolute path outside the repo."; exit 1 ;;
+esac
+case "$MIGMATE_PROBE_CONFIG" in
+  "$PWD"|"$PWD"/*) warn "Pick a path outside the repo."; exit 1 ;;
+esac
+mkdir -p "$(dirname "$MIGMATE_PROBE_CONFIG")"
+cat > "$MIGMATE_PROBE_CONFIG" <<EOF
+{
+  "schemaVersion": 1,
+  "jobType": "file_migration",
+  "acknowledgement": "I authorize disposable live qualification probes",
+  "jobConfig": {
+    "guarantees": "default",
+    "rclone": {
+      "config": { "resolver": "file", "path": "$MIGMATE_RCLONE_CONF_FILE", "mode": "0600" },
+      "sourceRemote": "sharepoint-source",
+      "destinationRemote": "google-destination"
+    },
+    "mappings": [
+      {
+        "id": "$MIGMATE_MAPPING_ID",
+        "sourceSiteId": "$MIGMATE_SOURCE_SITE_ID",
+        "sourceDriveId": "$MIGMATE_SOURCE_DRIVE_ID",
+        "sourceItemId": "$MIGMATE_PROBE_SOURCE_ITEM_ID",
+        "destDriveId": "$MIGMATE_SHARED_DRIVE_ID",
+        "destFolderId": "$MIGMATE_PROBE_DEST_FOLDER_ID"
+      }
+    ]
+  },
+  "fixtures": {
+    "disposableRoots": {
+      "sourceDriveId": "$MIGMATE_SOURCE_DRIVE_ID",
+      "sourceItemId": "$MIGMATE_PROBE_SOURCE_ITEM_ID",
+      "destDriveId": "$MIGMATE_SHARED_DRIVE_ID",
+      "destFolderId": "$MIGMATE_PROBE_DEST_FOLDER_ID",
+      "acknowledged": true
+    },
+    "graphMutation": {
+      "tenantId": "$MIGMATE_TENANT_ID",
+      "clientId": "$MIGMATE_PROBE_MUTATOR_CLIENT_ID",
+      "clientSecret": { "resolver": "file", "path": "$MIGMATE_PROBE_MUTATOR_SECRET_FILE", "mode": "0600" }
+    }
+  }
+}
+EOF
+chmod 600 "$MIGMATE_PROBE_CONFIG"
+write_env MIGMATE_PROBE_CONFIG "$MIGMATE_PROBE_CONFIG"
+write_env MIGMATE_PROBE_SOURCE_ITEM_ID "$MIGMATE_PROBE_SOURCE_ITEM_ID"
+write_env MIGMATE_PROBE_DEST_FOLDER_ID "$MIGMATE_PROBE_DEST_FOLDER_ID"
+write_env MIGMATE_PROBE_MUTATOR_CLIENT_ID "$MIGMATE_PROBE_MUTATOR_CLIENT_ID"
+write_env MIGMATE_PROBE_MUTATOR_SECRET_FILE "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
+note "Qualify with: npm run qualify:route -- --config $MIGMATE_PROBE_CONFIG --output <new-directory>"
+note "Secrets living outside the repo: $MIGMATE_ENTRA_CLIENT_SECRET_FILE, $MIGMATE_PROBE_MUTATOR_SECRET_FILE, $MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE, and $MIGMATE_RCLONE_CONF_FILE."
 finish
