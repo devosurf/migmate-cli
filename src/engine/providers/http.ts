@@ -31,13 +31,22 @@ export class HttpProviderFault extends ProviderFault {
   readonly status: number;
   readonly transient: boolean;
   readonly retryAfterMs?: number;
-  constructor(status: number, retryAfter: string | null = null, providerCode?: string) {
+  constructor(
+    status: number,
+    retryAfter: string | null = null,
+    providerCode?: string,
+    host?: string,
+  ) {
     super(
       status === 412 ? "prior_copy_drift" : "provider_request_failed",
       "The provider request did not succeed.",
       {
         status,
         ...(providerCode ? { providerCode } : {}),
+        // A status of 0 is a network-level failure or a stalled stream, which is
+        // unactionable without knowing which provider went quiet. Host only: no
+        // path, query, or header ever reaches this surface.
+        ...(host ? { host } : {}),
       },
     );
     this.status = status;
@@ -171,7 +180,7 @@ export async function fetchProvider(url: URL, init: RequestInit = {}): Promise<R
   try {
     return await fetch(url, { ...init, redirect: "manual", signal });
   } catch {
-    throw new HttpProviderFault(0);
+    throw new HttpProviderFault(0, null, undefined, url.host);
   } finally {
     clearTimeout(timeout);
   }
@@ -224,20 +233,20 @@ export async function responseJson<T>(response: Response): Promise<T> {
 export async function* responseBytes(response: Response): AsyncIterable<Uint8Array> {
   if (!response.body) return;
   const reader = response.body.getReader();
+  const host = response.url ? new URL(response.url).host : undefined;
   try {
     while (true) {
       let timer: NodeJS.Timeout | undefined;
-      const expired = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          void reader.cancel().catch(() => {});
-          reject(new HttpProviderFault(0));
-        }, 60_000);
-      });
+      const { promise: expired, reject } = Promise.withResolvers<never>();
+      timer = setTimeout(() => {
+        void reader.cancel().catch(() => {});
+        reject(new HttpProviderFault(0, null, undefined, host));
+      }, 60_000);
       let next: ReadableStreamReadResult<Uint8Array>;
       try {
         next = await Promise.race([reader.read(), expired]);
       } catch {
-        throw new HttpProviderFault(0);
+        throw new HttpProviderFault(0, null, undefined, host);
       } finally {
         clearTimeout(timer);
       }
