@@ -569,6 +569,26 @@ else
   unset MIGMATE_PROBE_MUTATOR_SECRET
 fi
 chmod 600 "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
+say "Capability samples are optional, read-only, and must be direct children of the disposable source root. Leave one empty when the tenant has no such item; the gate then records it as unavailable rather than claiming the observation."
+ask MIGMATE_PROBE_PACKAGE_ID "Paste a package item id, e.g. a OneNote notebook (Enter to skip):"
+ask MIGMATE_PROBE_REFERENCE_ID "Paste a reference (remoteItem) id (Enter to skip):"
+ask MIGMATE_PROBE_UNDOWNLOADABLE_ID "Paste an undownloadable item id (Enter to skip):"
+special_sources=""
+for pair in "packageId:$MIGMATE_PROBE_PACKAGE_ID" \
+  "referenceId:$MIGMATE_PROBE_REFERENCE_ID" \
+  "undownloadableId:$MIGMATE_PROBE_UNDOWNLOADABLE_ID"; do
+  key=${pair%%:*}
+  value=${pair#*:}
+  [[ -z "$value" ]] && continue
+  special_sources+="$(printf '\n      "%s": "%s",' "$key" "$value")"
+done
+if [[ -n "$special_sources" ]]; then
+  # Trailing comma removed: this is emitted into strict JSON.
+  special_sources="$(printf ',\n    "specialSources": {%s\n    }' "${special_sources%,}")"
+fi
+write_env MIGMATE_PROBE_PACKAGE_ID "$MIGMATE_PROBE_PACKAGE_ID"
+write_env MIGMATE_PROBE_REFERENCE_ID "$MIGMATE_PROBE_REFERENCE_ID"
+write_env MIGMATE_PROBE_UNDOWNLOADABLE_ID "$MIGMATE_PROBE_UNDOWNLOADABLE_ID"
 ask MIGMATE_PROBE_CONFIG "Choose the probe config path outside the repo (probe-config.json):"
 case "$MIGMATE_PROBE_CONFIG" in
   /*) ;;
@@ -613,7 +633,7 @@ cat > "$MIGMATE_PROBE_CONFIG" <<EOF
       "tenantId": "$MIGMATE_TENANT_ID",
       "clientId": "$MIGMATE_PROBE_MUTATOR_CLIENT_ID",
       "clientSecret": { "resolver": "file", "path": "$MIGMATE_PROBE_MUTATOR_SECRET_FILE", "mode": "0600" }
-    }
+    }$special_sources
   }
 }
 EOF
