@@ -70,8 +70,10 @@ const MAX_TOKEN_BYTES = 128 * 1024;
 const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
 const GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+// ADR-0003: the file route is site-scoped. A granted site's drive answers every
+// call the route makes, so tenant-wide Files.Read.All is refused, not required.
+// https://learn.microsoft.com/en-us/graph/permissions-selected-overview
 const FILE_ROLES: Record<string, true> = {
-  "Files.Read.All": true,
   "Sites.Selected": true,
 };
 const ARCHIVE_ROLES: Record<string, true> = {
@@ -489,7 +491,7 @@ async function loadCredentials(
       setting(source, "expose_onenote_files", "true");
       if (source.has("access_scopes")) {
         const scopes = text(source.get("access_scopes")).split(/ +/).sort();
-        if (scopes.join(" ") !== "Files.Read.All Sites.Selected")
+        if (scopes.join(" ") !== Object.keys(FILE_ROLES).sort().join(" "))
           throw refused("credential_permissions_invalid");
       }
       const sourceDriveId = stableId(source.get("drive_id"));

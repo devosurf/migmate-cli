@@ -121,3 +121,57 @@ test("refuses a client secret that cannot be what rclone sent", async (t) => {
       !JSON.stringify(error).includes(entraSecret),
   );
 });
+
+function graphToken(roles: string[]): Record<string, unknown> {
+  const segment = (claims: Record<string, unknown>): string =>
+    Buffer.from(JSON.stringify(claims)).toString("base64url");
+  const payload = segment({
+    aud: "https://graph.microsoft.com",
+    tid: tenantId,
+    appid: clientId,
+    idtyp: "app",
+    roles,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  return {
+    access_token: `${segment({ alg: "RS256", typ: "JWT" })}.${payload}.signature`,
+    token_type: "Bearer",
+    expires_in: 3600,
+  };
+}
+
+test("accepts the site-scoped grant and refuses a tenant-wide one", async (t) => {
+  // ADR-0003: Sites.Selected answers every call this route makes, so a token
+  // carrying tenant-wide Files.Read.All is more access than the route may hold.
+  for (const [roles, expected] of [
+    [["Sites.Selected"], "accepted"],
+    [["Sites.Selected", "Files.Read.All"], "credential_permissions_invalid"],
+    [["Files.Read.All"], "credential_permissions_invalid"],
+  ] as const) {
+    const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
+    const targets: string[] = [];
+    t.mock.method(globalThis, "fetch", async (target: unknown) => {
+      targets.push(String(target));
+      return new Response(JSON.stringify(graphToken([...roles])), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const session = await createCredentialSession({
+      jobType: "file_migration",
+      config,
+      jobDirectory,
+    });
+    try {
+      await session.graphToken();
+      assert.equal(expected, "accepted", `roles ${roles.join("+")} must be refused`);
+      assert.deepEqual(targets, [
+        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+      ]);
+    } catch (error) {
+      assert.ok(error instanceof ProviderFault, `unexpected error for ${roles.join("+")}`);
+      assert.equal(error.code, expected);
+    } finally {
+      await session.dispose();
+    }
+  }
+});

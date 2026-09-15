@@ -30,7 +30,7 @@ const session: CredentialSession = {
       graph: {
         tenantId: "tenant",
         clientId: "app",
-        grantedPermissions: ["Files.Read.All", "Sites.Selected"],
+        grantedPermissions: ["Sites.Selected"],
       },
     };
   },
