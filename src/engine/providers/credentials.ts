@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createDecipheriv, createHash, createPrivateKey, sign } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { constants } from "node:fs";
 import type { BigIntStats } from "node:fs";
@@ -326,36 +326,16 @@ function parseMappings(value: unknown): MappingIdentity[] {
   });
 }
 
-// Compatibility with the *configured backend field*, not encryption or a secret store.
-// https://github.com/rclone/rclone/blob/v1.75.0/fs/config/obscure/obscure.go
-function revealClientSecret(value: unknown): Buffer {
-  const encoded = text(value);
-  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) throw refused("credential_secret_invalid");
-  const ciphertext = Buffer.from(encoded, "base64url");
-  let plaintext: Buffer | undefined;
-  try {
-    if (ciphertext.length <= 16 || ciphertext.toString("base64url") !== encoded)
-      throw refused("credential_secret_invalid");
-    const key = Buffer.from(
-      "9c935b48730a554d6bfd7c63c886a92bd390198eb8128afbf4de162b8b95f638",
-      "hex",
-    );
-    const decipher = createDecipheriv("aes-256-ctr", key, ciphertext.subarray(0, 16));
-    plaintext = decipher.update(ciphertext.subarray(16));
-    decipher.final();
-    const secret = decodeUtf8(plaintext);
-    if (secret.length === 0 || /[\x00-\x20\x7f]/.test(secret))
-      throw refused("credential_secret_invalid");
-    const result = plaintext;
-    plaintext = undefined;
-    return result;
-  } catch (error) {
-    if (error instanceof ProviderFault) throw error;
+// rclone's onedrive backend is a plain OAuth client: `client_secret` is not one
+// of its password-typed options, so rclone sends the configured bytes verbatim
+// and an obscured value authenticates as invalid_client. The engine therefore
+// reads exactly what rclone reads — the same string, never a decoded one.
+// https://rclone.org/onedrive/#standard-options
+function clientSecret(value: unknown): Buffer {
+  const secret = text(value);
+  if (secret.length > 4096 || /[\x00-\x20\x7f]/.test(secret))
     throw refused("credential_secret_invalid");
-  } finally {
-    ciphertext.fill(0);
-    plaintext?.fill(0);
-  }
+  return Buffer.from(secret, "utf8");
 }
 
 function googleCredential(bytes: Buffer): GoogleCredential {
@@ -495,6 +475,11 @@ async function loadCredentials(
         "region",
         "disable_site_permission",
         "expose_onenote_files",
+        // rclone writes its own client-credentials token cache back into the
+        // operator config the managed worker runs with, so a config that has
+        // ever executed a transfer contains this key. The engine never reads
+        // it: onboarding derives every credential from the explicit settings.
+        "token",
       ]);
       setting(source, "type", "onedrive", true);
       setting(source, "client_credentials", "true", true);
@@ -552,7 +537,7 @@ async function loadCredentials(
       }
       const tenantId = guid(source.get("tenant"));
       const clientId = guid(source.get("client_id"));
-      graph = { tenantId, clientId, secret: revealClientSecret(source.get("client_secret")) };
+      graph = { tenantId, clientId, secret: clientSecret(source.get("client_secret")) };
       const serviceAccount = await readCredentialFile(
         fileReference({ resolver: "file", path: destination.get("service_account_file") }),
         jobDirectory,
