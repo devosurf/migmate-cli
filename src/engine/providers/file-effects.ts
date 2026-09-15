@@ -50,7 +50,6 @@ interface GoogleFile {
   createdTime: string;
   modifiedTime: string;
   sha256Checksum?: string;
-  version?: string;
   headRevisionId?: string;
   appProperties?: Record<string, string>;
   capabilities?: { canAddChildren?: boolean; canEdit?: boolean; canDownload?: boolean };
@@ -67,19 +66,24 @@ export interface SourceWorker {
 }
 
 const FILE_FIELDS =
-  "id,name,driveId,parents,mimeType,size,createdTime,modifiedTime,sha256Checksum,version,headRevisionId,appProperties,capabilities,trashed";
+  "id,name,driveId,parents,mimeType,size,createdTime,modifiedTime,sha256Checksum,headRevisionId,appProperties,capabilities,trashed";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
 /**
  * Drive v3 exposes no ETag and rejects no write on `If-Match`, so concurrency
- * rests on the fields it does publish: `version` advances on every change to
- * the file, and `headRevisionId` changes when a binary file's content does.
- * A null token means Drive told us nothing, which is never treated as a match.
+ * rests on the fields it does publish: `headRevisionId` changes when a binary
+ * file's content changes, and `modifiedTime` when its metadata does.
+ *
+ * `version` is deliberately excluded. Drive documents it as reflecting every
+ * server-side change "even those not visible to the user", and it was observed
+ * advancing from 1 to 2 within four seconds of an upload with no writer
+ * present, which would report drift that never happened. A null token means
+ * Drive told us nothing, which is never treated as a match.
  * https://developers.google.com/workspace/drive/api/reference/rest/v3/files
  */
 function destinationRevision(file: GoogleFile): string | null {
-  if (!file.version) return null;
-  return file.headRevisionId ? `${file.version}:${file.headRevisionId}` : file.version;
+  if (!file.modifiedTime) return null;
+  return `${file.headRevisionId ?? "-"}:${file.modifiedTime}`;
 }
 const MARKER_PREFIX = "mm";
 const MARKER_CHUNKS = 28;

@@ -157,8 +157,9 @@ test("a lost create response can be reconciled by the reserved ID and atomic pri
 });
 
 test("an intervening destination edit refuses a conditional update without replacing its bytes", async (t) => {
-  // Drive publishes no ETag and honours no If-Match, so drift is caught by its
-  // own version/headRevisionId moving under us. See ADR-0004.
+  // Drive publishes no ETag and honours no If-Match, so drift is caught by the
+  // content revision and modified time moving under us. `version` is excluded:
+  // Drive advances it for server-side changes nobody made. See ADR-0004.
   const original = Buffer.from("outside editor's bytes");
   const destination = {
     id: "owned-object",
@@ -169,7 +170,6 @@ test("an intervening destination edit refuses a conditional update without repla
     parents: ["destination-root"],
     createdTime: marker.createdAt,
     modifiedTime: marker.modifiedAt,
-    version: "18",
     headRevisionId: "edited-by-someone-else",
   };
   let uploadAttempted = false;
@@ -205,7 +205,10 @@ test("an intervening destination edit refuses a conditional update without repla
     marker,
   };
   await assert.rejects(
-    provider.uploadDestinationContent({ ...update, expectedRevision: "17:migmate-wrote-this" }),
+    provider.uploadDestinationContent({
+      ...update,
+      expectedRevision: "written-by-migmate:2002-03-04T05:06:07.000Z",
+    }),
     (error: unknown) =>
       error instanceof ProviderFault &&
       error.code === "prior_copy_drift" &&
@@ -224,7 +227,7 @@ test("an intervening destination edit refuses a conditional update without repla
     driveId: "shared-drive",
     objectId: "owned-object",
   });
-  assert.equal(observed?.revision, "18:edited-by-someone-else");
+  assert.equal(observed?.revision, `edited-by-someone-else:${marker.modifiedAt}`);
   await assert.rejects(
     provider.uploadDestinationContent({ ...update, expectedRevision: observed!.revision! }),
     () => uploadAttempted,

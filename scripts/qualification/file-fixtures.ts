@@ -115,14 +115,14 @@ interface GoogleItem {
   mimeType: string;
   appProperties?: Record<string, string>;
   modifiedTime?: string;
-  version?: string;
   headRevisionId?: string;
 }
 
-/** Drive publishes no ETag and honours no If-Match: ADR-0004. */
+/** Drive publishes no ETag and honours no If-Match, and its `version` advances
+ * on server-side changes nobody made: ADR-0004. */
 function destinationRevision(item: GoogleItem): string | null {
-  if (!item.version) return null;
-  return item.headRevisionId ? `${item.version}:${item.headRevisionId}` : item.version;
+  if (!item.modifiedTime) return null;
+  return `${item.headRevisionId ?? "-"}:${item.modifiedTime}`;
 }
 interface OwnedDestination {
   privateOwner: boolean;
@@ -269,7 +269,7 @@ export class FileFixtures {
     cleanup = false,
   ): Promise<{ item: GoogleItem; revision: string | null }> {
     const response = await this.#google(
-      `/drive/v3/files/${encodeURIComponent(identifier(id))}?supportsAllDrives=true&fields=id,name,driveId,parents,mimeType,appProperties,modifiedTime,version,headRevisionId`,
+      `/drive/v3/files/${encodeURIComponent(identifier(id))}?supportsAllDrives=true&fields=id,name,driveId,parents,mimeType,appProperties,modifiedTime,headRevisionId`,
       {},
       cleanup,
     );

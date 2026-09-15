@@ -20,17 +20,16 @@
     },
     {
       "id": "real_tenant_route_matrix",
-      "status": "blocked",
-      "reason": "No live tenant or Shared Drive credentials and no real immutable qualified-route bundles are available. Missing consent, licensing, enabled options, representative in-scope assets, or disposable fixture permissions must refuse without publishing qualification.",
+      "status": "in_progress",
+      "reason": "Live tenant credentials and disposable fixtures are in place, and the full suite now runs against a real SharePoint library and Shared Drive on darwin-arm64. No bundle is claimed until a run completes including teardown. Requires exactly Node 24.",
       "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
       "scope": "Exact source/destination/backend/options/guarantee-set tuple, pinned transfer version, and each desktop cell. No credential or captured-output import can assert successful qualification."
     },
     {
       "id": "file_live_source_path_guard",
-      "status": "blocked",
-      "reason": "SharePoint rejects the source names that would exercise the driver's path-representability guard. The file suite requires an actual live source entry reaching that guard before publishing full qualification. A Graph invalid-name rejection or a separately labelled private-provenance-capacity refusal does not substitute for this proof.",
-      "code": "unqualified_route",
-      "gate": "file_live_path_unrepresentable_fixture_unavailable"
+      "status": "resolved",
+      "reason": "ADR-0005. SharePoint refuses every name the driver's guard refuses, measured live with HTTP 400 for \"\", \".\", \"..\", a name containing \"/\", and a name containing NUL, so no source item can carry one. The finding is proven live through its other cause, a provenance marker beyond Drive's private-property capacity with a valid source name, and the source's own 400 is recorded. A source that does permit such names must still produce the live-source-entry proof.",
+      "code": "unqualified_route"
     }
   ],
   "nativePrerequisites": {

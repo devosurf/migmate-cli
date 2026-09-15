@@ -14,7 +14,9 @@ An `If-Match` header Drive ignores is worse than no header: it reads as a strong
 
 ## Decision
 
-**The destination concurrency token is `version`, plus `headRevisionId` when Drive reports one** — `"<version>"` or `"<version>:<headRevisionId>"`. `version` advances on every change to a file's metadata or content; `headRevisionId` changes when a binary file's content does. `DestinationEntry.revision` replaces `DestinationEntry.etag`, and `expectedRevision` replaces `expectedEtag`.
+**The destination concurrency token is `headRevisionId` and `modifiedTime`** — `"<headRevisionId or ->:<modifiedTime>"`. `headRevisionId` changes when a binary file's content changes; `modifiedTime` covers metadata and the objects Drive gives no head revision, such as folders. `DestinationEntry.revision` replaces `DestinationEntry.etag`, and `expectedRevision` replaces `expectedEtag`.
+
+**`version` is excluded, despite looking like the obvious choice.** Drive documents it as reflecting every server-side change "even those not visible to the user", and it was measured advancing from `1` to `2` within four seconds of an upload with no writer present, while `headRevisionId`, `modifiedTime`, and `size` all held still. A token built on it reports drift that never happened: the first run using it refused its own teardown with `file_fixture_destination_changed_before_mutation`. The same measurement confirmed a real content edit moves `headRevisionId`, `modifiedTime`, and `size` together.
 
 **Writes compare, then write.** Every conditional path re-reads the object, compares the token, and refuses `prior_copy_drift` on any difference before issuing the write. `If-Match` headers are removed rather than left decorative.
 

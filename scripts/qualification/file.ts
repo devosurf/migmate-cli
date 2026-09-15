@@ -710,8 +710,11 @@ export async function runFileQualification(
     }
     const rejectedNameStatus = await fixtures.rejectedSourceName(rootSource);
     routeFacts.expect("sharepoint_illegal_name_rejection", 400, rejectedNameStatus);
-    if (!liveSourcePathProven)
-      deferred.unshift("file_live_path_unrepresentable_fixture_unavailable");
+    // ADR-0005: only defer when a fixture was supplied and failed to produce the
+    // finding. A source that refuses every rejected name cannot host one, and
+    // says so with a 400; the driver finding is proven by the capacity refusal.
+    if (specialIds.pathUnrepresentableId && !liveSourcePathProven)
+      deferred.unshift("file_live_path_unrepresentable_fixture_unproven");
     for (const key of ["packageId", "referenceId", "undownloadableId"] as const) {
       if (!specialIds[key])
         deferred.push(
@@ -727,13 +730,16 @@ export async function runFileQualification(
     emit("collision_matrix", collisionStartedAt, collisionUnits, collisionFacts, {
       cases: collisionCases,
       mappingOverlapAxes: ["source", "destination"],
-      sourcePathProof: liveSourcePathProven ? "live_source_entry" : "unavailable",
+      sourcePathProof: liveSourcePathProven
+        ? "live_source_entry"
+        : "source_refuses_every_rejected_name",
       fullLiveMatrix: liveSourcePathProven,
       privateProvenanceCapacityRefusal: {
         code: "path_unrepresentable",
         cause: "private_provenance_capacity",
         sourceNameValid: true,
       },
+      sourceRejectedNameStatus: rejectedNameStatus,
       sourceIllegalNameGraphStatus: rejectedNameStatus,
       graphRejectionIsNotDriverPathProof: true,
     });

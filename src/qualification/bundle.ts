@@ -274,16 +274,35 @@ export async function validateCapturedBundle(
       const expectedCodes = probe.expectedCodes;
       if (probe.id === "collision_matrix") {
         requireFact(collisionCodes.every((code) => expectedCodes.includes(code)));
-        requireFact(captured.observations.sourcePathProof === "live_source_entry");
-        requireFact(
-          captured.assertions.some(
-            (assertion: unknown) =>
-              record(assertion) &&
-              assertion.id === "live_source_path_refusal" &&
-              assertion.expected === "path_unrepresentable" &&
-              assertion.observed === "path_unrepresentable",
-          ),
-        );
+        const observations = captured.observations as Record<string, unknown>;
+        if (observations.sourcePathProof === "live_source_entry") {
+          requireFact(
+            captured.assertions.some(
+              (assertion: unknown) =>
+                record(assertion) &&
+                assertion.id === "live_source_path_refusal" &&
+                assertion.expected === "path_unrepresentable" &&
+                assertion.observed === "path_unrepresentable",
+            ),
+          );
+        } else {
+          // ADR-0005: a source that refuses every name the guard refuses cannot
+          // hold the fixture, so the finding is proven through the provenance
+          // capacity refusal, whose source name is valid, plus the source's own
+          // recorded rejection. No third value is accepted here.
+          requireFact(observations.sourcePathProof === "source_refuses_every_rejected_name");
+          const capacity = observations.privateProvenanceCapacityRefusal;
+          requireFact(
+            record(capacity) &&
+              capacity.code === "path_unrepresentable" &&
+              capacity.cause === "private_provenance_capacity" &&
+              capacity.sourceNameValid === true,
+          );
+          requireFact(
+            record(observations.sourceRejectedNameStatus) === false &&
+              observations.sourceRejectedNameStatus === 400,
+          );
+        }
       }
       probes.add(probe.id);
       usedArtifacts.add(probe.output);
