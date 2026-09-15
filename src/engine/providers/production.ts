@@ -89,7 +89,10 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
                   if (current) yield* worker.openSource(current.socketPath, item);
                   else
                     yield* graph.stream(
-                      `/v1.0/drives/${encodeURIComponent(item.driveId)}/items/${encodeURIComponent(item.parentId)}:/${encodeURIComponent(item.name)}:/content`,
+                      `/v1.0/drives/${encodeURIComponent(item.driveId)}/root:/${item.path
+                        .split("/")
+                        .map((segment) => encodeURIComponent(segment))
+                        .join("/")}:/content`,
                     );
                 },
               },

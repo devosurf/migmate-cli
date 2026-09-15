@@ -38,12 +38,7 @@ export interface TransferSupervisor {
   openRead(socketPath: string, remotePath: string): AsyncIterable<Uint8Array>;
   openSource(
     socketPath: string,
-    input: {
-      remote: string;
-      parentId: string;
-      name: string;
-      driveId: string;
-    },
+    input: { remote: string; driveId: string; path: string },
   ): AsyncIterable<Uint8Array>;
   close(): Promise<void>;
 }
@@ -791,7 +786,13 @@ export function createTransferSupervisor(options: {
     if (res.statusCode !== 200) {
       const status = res.statusCode ?? 0;
       res.destroy();
-      throw fail("provider_failed", "worker_read_failed", { status });
+      // The remote and object are what makes a 404 actionable; neither is a
+      // credential, and per-item paths already appear in reports.
+      throw fail("provider_failed", "worker_read_failed", {
+        status,
+        remote: fs.split(",")[0],
+        path,
+      });
     }
     const timer = setTimeout(() => res.destroy(), 60 * 60 * 1_000);
     res.setTimeout(REQUEST_TIMEOUT, () => res.destroy());
@@ -849,9 +850,12 @@ export function createTransferSupervisor(options: {
     },
     async *openSource(socketPath, input) {
       remoteName(input.remote);
-      if (input.name.includes("/")) throw fail("preflight_failed", "remote_object_path_invalid");
-      const fs = `${input.remote},root_folder_id=${quoteOption(input.parentId)},drive_id=${quoteOption(input.driveId)},encoding=Slash:`;
-      yield* stream(owned(socketPath), fs, input.name);
+      // rclone's onedrive backend applies root_folder_id to listings but not to
+      // object lookup, which resolves from the drive root: an id-rooted fs
+      // answers 404 for its own children and serves a same-named object at the
+      // root instead. The drive is still pinned by id, never by remote default.
+      const fs = `${input.remote},drive_id=${quoteOption(input.driveId)},encoding=Slash:`;
+      yield* stream(owned(socketPath), fs, input.path);
     },
     async close() {
       closed = true;

@@ -51,8 +51,11 @@ export interface QualificationResult {
 /** Only this explicitly selected gate identifier is safe to emit on failure. */
 export class QualificationBlocked extends Error {
   readonly gate: string;
-  constructor(gate: string) {
+  /** Redacted diagnosis: ids, counts, and statuses only. Never credentials or payloads. */
+  readonly detail: Record<string, unknown> | undefined;
+  constructor(gate: string, detail?: Record<string, unknown>) {
     super("Live qualification prerequisites or observed route guarantees were not satisfied.");
     this.gate = /^[a-z][a-z0-9_]{0,127}$/.test(gate) ? gate : "live_probe_failed";
+    this.detail = detail;
   }
 }

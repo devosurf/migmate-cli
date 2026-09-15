@@ -29,7 +29,7 @@ interface GraphItem {
   cTag?: string;
   createdDateTime?: string;
   lastModifiedDateTime?: string;
-  parentReference?: { id?: string; driveId?: string };
+  parentReference?: { id?: string; driveId?: string; path?: string };
   file?: { mimeType?: string; hashes?: Record<string, string> };
   folder?: { childCount?: number };
   package?: unknown;
@@ -55,12 +55,13 @@ interface GoogleFile {
   trashed?: boolean;
 }
 export interface SourceWorker {
-  read(input: {
-    remote: string;
-    parentId: string;
-    driveId: string;
-    name: string;
-  }): AsyncIterable<Uint8Array>;
+  /**
+   * `path` is the object's path from the drive root, already bound to the exact
+   * item id by the caller: rclone's onedrive object lookup resolves paths from
+   * the drive root and ignores `root_folder_id`, so a parent-id-relative read
+   * silently resolves a same-named object at the root instead.
+   */
+  read(input: { remote: string; driveId: string; path: string }): AsyncIterable<Uint8Array>;
 }
 
 const FILE_FIELDS =
@@ -344,6 +345,51 @@ export class FileEffects {
     }
   }
 
+  /**
+   * Path from the drive root for an item, proven to address that exact item.
+   *
+   * rclone's onedrive backend honours `root_folder_id` when listing but not
+   * when resolving an object, so byte reads must be path-addressed. A path is
+   * only safe to read once Graph confirms it resolves to the same id and etag:
+   * otherwise a same-named object elsewhere in the drive could be served in
+   * place of the intended one.
+   */
+  async #sourcePath(input: { driveId: string; item: SourceEntry }): Promise<string> {
+    const raw = await this.#graph.request<GraphItem>(
+      `/v1.0/drives/${encodeURIComponent(input.driveId)}/items/${encodeURIComponent(input.item.id)}?$select=id,name,eTag,parentReference`,
+    );
+    const reference = raw.parentReference?.path;
+    if (typeof reference !== "string")
+      throw new ProviderFault("source_read_failed", "The source item exposes no drive path.");
+    const marker = "/root:";
+    const start = reference.indexOf(marker);
+    if (start === -1)
+      throw new ProviderFault("source_read_failed", "The source item is outside its drive root.");
+    // Graph reports this path percent-encoded; rclone is given the decoded form.
+    const segments = [
+      ...reference
+        .slice(start + marker.length)
+        .split("/")
+        .filter((segment) => segment.length > 0)
+        .map((segment) => decodeURIComponent(segment)),
+      input.item.name,
+    ];
+    if (segments.some((segment) => segment === "." || segment === ".." || segment.includes("/")))
+      throw new ProviderFault("source_read_failed", "The source path is not addressable.");
+    const path = segments.join("/");
+    const bound = await this.#graph.request<GraphItem>(
+      `/v1.0/drives/${encodeURIComponent(input.driveId)}/root:/${segments
+        .map((segment) => encodeURIComponent(segment))
+        .join("/")}:/?$select=id,eTag`,
+    );
+    if (bound.id !== input.item.id || (bound.eTag ?? null) !== input.item.etag)
+      throw new ProviderFault(
+        "source_read_failed",
+        "The source path does not address the source item.",
+      );
+    return path;
+  }
+
   async resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;
@@ -385,12 +431,8 @@ export class FileEffects {
         "source_read_failed",
         "The source does not expose stable downloadable ordinary file content.",
       );
-    yield* this.#worker.read({
-      remote: this.#session.sourceRemote,
-      driveId,
-      parentId: before.parentId,
-      name: before.name,
-    });
+    const path = await this.#sourcePath({ driveId, item: before });
+    yield* this.#worker.read({ remote: this.#session.sourceRemote, driveId, path });
     const after = await this.readSourceItem({ driveId, itemId: sourceItemId });
     if (
       !after ||

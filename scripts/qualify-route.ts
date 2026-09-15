@@ -323,8 +323,9 @@ try {
     : error instanceof QualificationBlocked
       ? error.gate
       : "live_probe_or_prerequisite_failed";
+  const diagnosis = error instanceof QualificationBlocked ? error.detail : undefined;
   process.stdout.write(
-    `${JSON.stringify({ schemaVersion: 1, command: "qualify-route", commandId, job: null, ok: false, refusal: { code: "unqualified_route", message: "No qualified-route bundle was published; real prerequisites and all observed guarantees are required.", detail: { gate } } })}\n`,
+    `${JSON.stringify({ schemaVersion: 1, command: "qualify-route", commandId, job: null, ok: false, refusal: { code: "unqualified_route", message: "No qualified-route bundle was published; real prerequisites and all observed guarantees are required.", detail: { gate, ...(diagnosis ? { diagnosis } : {}) } } })}\n`,
   );
   process.exitCode = controller.signal.aborted ? 130 : 4;
 } finally {

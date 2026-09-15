@@ -90,7 +90,14 @@ export async function runFileQualification(
       (candidate) => canonicalJson(candidate.marker) === canonicalJson(current.provenance),
     );
     if (!expected || !expected.marker.stateRevision || !current.etag)
-      throw new QualificationBlocked("file_fixture_materialized_intent_ownership_unproven");
+      throw new QualificationBlocked("file_fixture_materialized_intent_ownership_unproven", {
+        objectId: state.output.id,
+        candidates: (intents.get(state.output.id) ?? []).length,
+        provenanceOnObject: current.provenance === null ? "absent" : "present",
+        matchedCandidate: expected !== undefined,
+        hasStateRevision: expected?.marker.stateRevision !== undefined,
+        hasEtag: current.etag !== null,
+      });
     await fixtures.tagDestination(current.id, expected.marker.stateRevision, current.etag);
   }
   async function durable(unit: CommitUnit): Promise<void> {
@@ -170,6 +177,7 @@ export async function runFileQualification(
     }
     return result.sort((a, b) => a.id.localeCompare(b.id));
   }
+  let primary: QualificationBlocked | undefined;
   try {
     input.signal.throwIfAborted();
     await fixtures.initialize();
@@ -734,7 +742,10 @@ export async function runFileQualification(
       worker: {
         async *read(item) {
           yield* graph.stream(
-            `/v1.0/drives/${encodeURIComponent(item.driveId)}/items/${encodeURIComponent(item.parentId)}:/${encodeURIComponent(item.name)}:/content`,
+            `/v1.0/drives/${encodeURIComponent(item.driveId)}/root:/${item.path
+              .split("/")
+              .map((segment) => encodeURIComponent(segment))
+              .join("/")}:/content`,
           );
         },
       },
@@ -830,36 +841,44 @@ export async function runFileQualification(
       binarySha256: binaryProof.sha256,
     };
   } catch (error) {
-    if (error instanceof QualificationBlocked) throw error;
-    if (input.signal.aborted) throw new QualificationBlocked("file_live_qualification_aborted");
-    if (error instanceof ProviderFault) throw new QualificationBlocked(`file_live_${error.code}`);
-    throw new QualificationBlocked("file_live_effect_or_observation_failed");
+    primary =
+      error instanceof QualificationBlocked
+        ? error
+        : input.signal.aborted
+          ? new QualificationBlocked("file_live_qualification_aborted")
+          : error instanceof ProviderFault
+            ? new QualificationBlocked(`file_live_${error.code}`, { evidence: error.evidence })
+            : new QualificationBlocked("file_live_effect_or_observation_failed", {
+                reason: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+              });
+    throw primary;
   } finally {
-    let cleanupFailed = false;
+    let cleanup: unknown;
+    const record = (error: unknown): void => {
+      cleanup ??= error;
+    };
     // A create may have succeeded before a lost response: claim only an exact durable marker at its reserved ID.
     for (const records of intents.values()) {
       try {
         await tagOwned(records.at(-1)!);
-      } catch {
-        cleanupFailed = true;
+      } catch (error) {
+        record(error);
       }
     }
-    try {
-      await provider.close!();
-    } catch {
-      cleanupFailed = true;
-    }
-    try {
-      await readback.close!();
-    } catch {
-      cleanupFailed = true;
-    }
-    try {
-      await fixtures.cleanup();
-    } catch {
-      cleanupFailed = true;
+    for (const close of [provider.close!, readback.close!, () => fixtures.cleanup()]) {
+      try {
+        await close();
+      } catch (error) {
+        record(error);
+      }
     }
     session.dispose();
-    if (cleanupFailed) throw new QualificationBlocked("file_fixture_cleanup_incomplete");
+    // Throwing here would discard the failure that caused the teardown, which
+    // is the one the operator needs. Report cleanup only when nothing else failed.
+    if (cleanup !== undefined && !primary) {
+      throw cleanup instanceof QualificationBlocked
+        ? cleanup
+        : new QualificationBlocked("file_fixture_cleanup_incomplete");
+    }
   }
 }

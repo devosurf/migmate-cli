@@ -277,3 +277,86 @@ test("a job-contained credential is refused before a token request or secret dis
   );
   assert.equal(contactedProvider, false);
 });
+
+/** A nested source item, as every real library has and no fake provider models. */
+function nestedSource(pathFromRoot: string, boundId: string) {
+  const name = pathFromRoot.slice(pathFromRoot.lastIndexOf("/") + 1);
+  const parent = pathFromRoot.slice(0, pathFromRoot.lastIndexOf("/"));
+  const item = {
+    id: "stable-source",
+    name,
+    size: 5,
+    eTag: '"source-etag"',
+    createdDateTime: marker.createdAt,
+    lastModifiedDateTime: marker.modifiedAt,
+    file: { mimeType: "application/octet-stream" },
+    parentReference: {
+      id: "source-parent",
+      driveId: "source-drive",
+      path: `/drives/source-drive/root:/${parent
+        .split("/")
+        .map((segment) => encodeURIComponent(segment))
+        .join("/")}`,
+    },
+  };
+  return {
+    item,
+    transport: {
+      async request<T>(path: string): Promise<T> {
+        if (path.includes("/versions")) return { value: [] } as T;
+        if (path.includes("/retentionLabel")) return {} as T;
+        // Path-addressed lookup: what the drive-root path actually resolves to.
+        if (path.includes("/root:/")) return { ...item, id: boundId } as T;
+        return item as T;
+      },
+      async *stream(): AsyncIterable<Uint8Array> {
+        throw new Error("This scenario must not download Graph content.");
+      },
+      evidence: session.evidence,
+    } satisfies GraphTransport,
+  };
+}
+
+test("source bytes are read by the drive-root path that is bound to the item", async () => {
+  const nested = nestedSource("reports/Q4 2026/summary.txt", "stable-source");
+  const requested: Array<{ driveId: string; path: string }> = [];
+  const effects = new FileEffects({
+    config: { mappings: [mapping] },
+    session,
+    graph: nested.transport,
+    worker: {
+      async *read(input) {
+        requested.push({ driveId: input.driveId, path: input.path });
+        yield Buffer.from("bytes");
+      },
+    },
+  });
+  await effects.listSourceChildren("source-root").catch(() => undefined);
+  await effects.readSourceItem({ driveId: "source-drive", itemId: "stable-source" });
+  assert.equal((await bytes(effects.openSourceContent("stable-source"))).toString(), "bytes");
+  assert.deepEqual(requested, [{ driveId: "source-drive", path: "reports/Q4 2026/summary.txt" }]);
+});
+
+test("a source path that resolves to another item refuses instead of serving its bytes", async () => {
+  // rclone resolves object paths from the drive root, so an unbound path can
+  // name a different object entirely. Reading it would migrate wrong content.
+  const nested = nestedSource("reports/Q4 2026/summary.txt", "some-other-item");
+  let read = false;
+  const effects = new FileEffects({
+    config: { mappings: [mapping] },
+    session,
+    graph: nested.transport,
+    worker: {
+      async *read() {
+        read = true;
+        yield Buffer.from("wrong object");
+      },
+    },
+  });
+  await effects.readSourceItem({ driveId: "source-drive", itemId: "stable-source" });
+  await assert.rejects(
+    bytes(effects.openSourceContent("stable-source")),
+    (error: unknown) => error instanceof ProviderFault && error.code === "source_read_failed",
+  );
+  assert.equal(read, false);
+});

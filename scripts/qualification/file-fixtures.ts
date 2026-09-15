@@ -511,6 +511,20 @@ export class FileFixtures {
   }
   async cleanup(): Promise<void> {
     let failed = false;
+    // A swallowed cleanup error is unactionable at the gate, so keep the first
+    // reason per side: gate identifiers and HTTP statuses only.
+    const reasons: Record<string, unknown> = {};
+    const note = (side: "source" | "destination", id: string, error: unknown): void => {
+      reasons[side] ??= {
+        id,
+        reason:
+          error instanceof QualificationBlocked
+            ? error.gate
+            : error instanceof HttpProviderFault
+              ? `http_${error.status}`
+              : "unknown",
+      };
+    };
     // Reverse creation order alone is insufficient after a source move. Delete only observed-empty folders, in bounded passes.
     for (let pass = 0, limit = this.#sources.size + 1; this.#sources.size && pass < limit; pass++) {
       let progress = false;
@@ -525,8 +539,10 @@ export class FileFixtures {
           } else if (!(
             error instanceof QualificationBlocked &&
             error.gate === "file_fixture_cleanup_source_not_empty"
-          ))
+          )) {
+            note("source", id, error);
             failed = true;
+          }
         }
       }
       if (!progress) break;
@@ -576,13 +592,19 @@ export class FileFixtures {
           if (error instanceof HttpProviderFault && error.status === 404) {
             this.#destinations.delete(id);
             progress = true;
-          } else failed = true;
+          } else {
+            note("destination", id, error);
+            failed = true;
+          }
         }
       }
       if (!progress) break;
     }
     this.#token = undefined;
     if (failed || this.#sources.size || this.#destinations.size)
-      throw new QualificationBlocked("file_fixture_cleanup_incomplete");
+      throw new QualificationBlocked("file_fixture_cleanup_incomplete", {
+        ...reasons,
+        remaining: { sources: this.#sources.size, destinations: this.#destinations.size },
+      });
   }
 }
