@@ -186,7 +186,7 @@ export class PersistentCliPort extends FakeFileMigrationPort {
         content,
         size: metadata.size,
         mimeType: metadata.mimeType,
-        etag: metadata.etag,
+        revision: metadata.revision,
         createdAt: metadata.createdAt,
         modifiedAt: metadata.modifiedAt,
         provenance: row.provenance,

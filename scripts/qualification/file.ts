@@ -89,16 +89,16 @@ export async function runFileQualification(
     const expected = (intents.get(state.output.id) ?? []).find(
       (candidate) => canonicalJson(candidate.marker) === canonicalJson(current.provenance),
     );
-    if (!expected || !expected.marker.stateRevision || !current.etag)
+    if (!expected || !expected.marker.stateRevision || !current.revision)
       throw new QualificationBlocked("file_fixture_materialized_intent_ownership_unproven", {
         objectId: state.output.id,
         candidates: (intents.get(state.output.id) ?? []).length,
         provenanceOnObject: current.provenance === null ? "absent" : "present",
         matchedCandidate: expected !== undefined,
         hasStateRevision: expected?.marker.stateRevision !== undefined,
-        hasEtag: current.etag !== null,
+        hasRevision: current.revision !== null,
       });
-    await fixtures.tagDestination(current.id, expected.marker.stateRevision, current.etag);
+    await fixtures.tagDestination(current.id, expected.marker.stateRevision, current.revision);
   }
   async function durable(unit: CommitUnit): Promise<void> {
     for (const row of unit.rows) {
@@ -149,14 +149,18 @@ export async function runFileQualification(
       observations,
     });
   }
-  async function inventory(
-    parentId: string,
-  ): Promise<
-    Array<{ id: string; etag: string | null; parentId: string | null; name: string; kind: string }>
+  async function inventory(parentId: string): Promise<
+    Array<{
+      id: string;
+      revision: string | null;
+      parentId: string | null;
+      name: string;
+      kind: string;
+    }>
   > {
     const result: Array<{
       id: string;
-      etag: string | null;
+      revision: string | null;
       parentId: string | null;
       name: string;
       kind: string;
@@ -167,7 +171,7 @@ export async function runFileQualification(
         const item = await destination(listed.id);
         result.push({
           id: item.id,
-          etag: item.etag,
+          revision: item.revision,
           parentId: item.parentId,
           name: item.name,
           kind: item.kind,

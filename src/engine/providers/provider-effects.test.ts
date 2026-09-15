@@ -157,6 +157,8 @@ test("a lost create response can be reconciled by the reserved ID and atomic pri
 });
 
 test("an intervening destination edit refuses a conditional update without replacing its bytes", async (t) => {
+  // Drive publishes no ETag and honours no If-Match, so drift is caught by its
+  // own version/headRevisionId moving under us. See ADR-0004.
   const original = Buffer.from("outside editor's bytes");
   const destination = {
     id: "owned-object",
@@ -167,7 +169,10 @@ test("an intervening destination edit refuses a conditional update without repla
     parents: ["destination-root"],
     createdTime: marker.createdAt,
     modifiedTime: marker.modifiedAt,
+    version: "18",
+    headRevisionId: "edited-by-someone-else",
   };
+  let uploadAttempted = false;
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     if (url.pathname.endsWith("/destination-root"))
@@ -176,35 +181,54 @@ test("an intervening destination edit refuses a conditional update without repla
         id: "destination-root",
         mimeType: "application/vnd.google-apps.folder",
       });
-    if (url.pathname.startsWith("/upload/") && init?.method === "PATCH")
+    if (url.pathname.startsWith("/upload/")) {
+      uploadAttempted = true;
       return Response.json(
-        { error: { code: 412, message: "secret-provider-body-canary" } },
-        { status: 412 },
+        { error: { code: 500, message: "secret-provider-body-canary" } },
+        { status: 500 },
       );
+    }
     if (url.searchParams.get("alt") === "media") return new Response(original);
-    return Response.json(destination, { headers: { ETag: '"verified-before-edit"' } });
+    // No ETag header, exactly as the real API answers.
+    return Response.json(destination);
   });
   const provider = effects();
+  const update = {
+    destinationId: "owned-object",
+    create: false as const,
+    parentFolderId: "destination-root",
+    name: "existing.bin",
+    content: Buffer.from("migration bytes"),
+    createdAt: marker.createdAt,
+    modifiedAt: marker.modifiedAt,
+    mimeType: marker.mimeType,
+    marker,
+  };
   await assert.rejects(
-    provider.uploadDestinationContent({
-      destinationId: "owned-object",
-      create: false,
-      expectedEtag: '"verified-before-edit"',
-      parentFolderId: "destination-root",
-      name: "existing.bin",
-      content: Buffer.from("migration bytes"),
-      createdAt: marker.createdAt,
-      modifiedAt: marker.modifiedAt,
-      mimeType: marker.mimeType,
-      marker,
-    }),
+    provider.uploadDestinationContent({ ...update, expectedRevision: "17:migmate-wrote-this" }),
     (error: unknown) =>
-      error instanceof HttpProviderFault &&
+      error instanceof ProviderFault &&
       error.code === "prior_copy_drift" &&
-      error.status === 412 &&
       !JSON.stringify(error).includes("canary"),
   );
+  assert.equal(uploadAttempted, false);
+  // An absent token is never a match: Drive saying nothing is not agreement.
+  await assert.rejects(
+    provider.uploadDestinationContent(update),
+    (error: unknown) => error instanceof ProviderFault && error.code === "prior_copy_drift",
+  );
+  assert.equal(uploadAttempted, false);
   assert.deepEqual(await bytes(provider.streamDestinationContent("owned-object")), original);
+  // The observed token is what a caller must present, and it does proceed.
+  const observed = await provider.readDestinationObject({
+    driveId: "shared-drive",
+    objectId: "owned-object",
+  });
+  assert.equal(observed?.revision, "18:edited-by-someone-else");
+  await assert.rejects(
+    provider.uploadDestinationContent({ ...update, expectedRevision: observed!.revision! }),
+    () => uploadAttempted,
+  );
 });
 
 test("Graph content redirects never forward the app bearer to a preauthenticated URL", async (t) => {

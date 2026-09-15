@@ -42,7 +42,7 @@ export interface FakeDestinationItemFixture {
   name: string;
   kind: DestinationItemKind;
   size?: number | null;
-  etag?: string | null;
+  revision?: string | null;
   createdAt?: string;
   modifiedAt?: string;
   mimeType?: string | null;
@@ -204,7 +204,7 @@ function cloneDestination(entry: MutableDestinationEntry): DestinationEntry {
     name: entry.name,
     kind: entry.kind,
     size: entry.size,
-    etag: entry.etag,
+    revision: entry.revision,
     createdAt: entry.createdAt,
     modifiedAt: entry.modifiedAt,
     mimeType: entry.mimeType,
@@ -280,7 +280,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private workerState: { pid: number; version: string; alive: boolean; socketPath: string } | null;
   private readonly runDirectory: string;
   private idSeed = 0;
-  private etagSeed = 0;
+  private revisionSeed = 0;
 
   constructor(fixture: FakeFileMigrationFixture) {
     this.sourceDriveId = fixture.sourceDriveId;
@@ -471,7 +471,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     if (patch.etag !== undefined) {
       entry.etag = patch.etag;
     } else if (patch.content !== undefined) {
-      entry.etag = `source-${++this.etagSeed}`;
+      entry.etag = `source-${++this.revisionSeed}`;
     }
 
     if (patch.size !== undefined) {
@@ -703,7 +703,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       name: input.name,
       kind: "folder",
       size: null,
-      etag: this.nextEtag(),
+      revision: this.nextRevision(),
       createdAt: input.createdAt,
       modifiedAt: input.modifiedAt,
       mimeType: null,
@@ -730,11 +730,11 @@ export class FakeFileMigrationPort implements ProviderPort {
     if (before?.kind !== undefined && before.kind !== "file") {
       throw destinationFault("destination_type_conflict", 409);
     }
-    this.checkEtag(before, input.expectedEtag);
+    this.checkRevision(before, input.expectedRevision);
     const bytes = await readAll(input.content);
     const existing = this.destinationById[targetId];
     // The condition is evaluated again at commit, after the content stream ran.
-    this.checkEtag(existing, input.expectedEtag);
+    this.checkRevision(existing, input.expectedRevision);
     if (input.create === true && existing) throw destinationFault("destination_id_conflict", 409);
     const entry: MutableDestinationEntry = {
       id: targetId,
@@ -743,7 +743,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       name: input.name,
       kind: "file",
       size: bytes.byteLength,
-      etag: this.nextEtag(),
+      revision: this.nextRevision(),
       createdAt: existing?.createdAt ?? input.createdAt,
       modifiedAt: input.modifiedAt,
       mimeType: input.mimeType,
@@ -775,14 +775,14 @@ export class FakeFileMigrationPort implements ProviderPort {
     const entry = this.destinationById[input.objectId];
     if (!entry) throw destinationFault("destination_write_failed", 404);
     const parent = this.destinationParent(input.parentFolderId);
-    this.checkEtag(entry, input.expectedEtag);
+    this.checkRevision(entry, input.expectedRevision);
     this.relinkDestination(entry, entry.parentId, parent.id);
     entry.parentId = parent.id;
     entry.driveId = parent.driveId;
     entry.name = input.name;
     if (input.modifiedAt !== undefined) entry.modifiedAt = input.modifiedAt;
     if (input.marker) entry.provenance = { ...input.marker };
-    entry.etag = this.nextEtag();
+    entry.revision = this.nextRevision();
     this.afterMutation("moveDestinationObject", entry.id, input.marker);
     return cloneDestination(entry);
   }
@@ -800,9 +800,9 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.throwRetryAfter("writeDestinationMarker", input.objectId);
     const entry = this.destinationById[input.objectId];
     if (!entry) throw destinationFault("destination_write_failed", 404);
-    this.checkEtag(entry, input.expectedEtag);
+    this.checkRevision(entry, input.expectedRevision);
     entry.provenance = input.marker ? { ...input.marker } : null;
-    entry.etag = this.nextEtag();
+    entry.revision = this.nextRevision();
     this.throwEffect("writeDestinationMarker", input.objectId, "after");
   }
 
@@ -918,7 +918,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       name: fixture.name,
       kind: fixture.kind,
       size: fixture.size ?? bytes?.byteLength ?? null,
-      etag: fixture.etag !== undefined ? fixture.etag : this.nextEtag(),
+      revision: fixture.revision !== undefined ? fixture.revision : this.nextRevision(),
       createdAt: fixture.createdAt ?? new Date(0).toISOString(),
       modifiedAt: fixture.modifiedAt ?? new Date(0).toISOString(),
       mimeType: fixture.mimeType ?? null,
@@ -986,8 +986,8 @@ export class FakeFileMigrationPort implements ProviderPort {
     return id;
   }
 
-  private nextEtag(): string {
-    return `"fake-${++this.etagSeed}"`;
+  private nextRevision(): string {
+    return `"fake-${++this.revisionSeed}"`;
   }
 
   private destinationParent(id: string): MutableDestinationEntry {
@@ -996,11 +996,11 @@ export class FakeFileMigrationPort implements ProviderPort {
     return entry;
   }
 
-  private checkEtag(
+  private checkRevision(
     entry: MutableDestinationEntry | undefined,
     expected: string | undefined,
   ): void {
-    if (expected !== undefined && (!expected || entry?.etag !== expected)) {
+    if (expected !== undefined && (!expected || entry?.revision !== expected)) {
       throw destinationFault("prior_copy_drift", 412);
     }
   }

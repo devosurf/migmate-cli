@@ -318,7 +318,7 @@ async function observe(ctx: FileContext, entry: DestinationEntry): Promise<Obser
   const fresh = await readObject(provider, entry.driveId, entry.id);
   if (
     !fresh ||
-    fresh.etag !== entry.etag ||
+    fresh.revision !== entry.revision ||
     fresh.parentId !== entry.parentId ||
     fresh.name !== entry.name ||
     fresh.kind !== entry.kind ||
@@ -894,7 +894,7 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
                       name: source.name,
                       ...(source.kind === "file" ? { modifiedAt: source.modifiedAt } : {}),
                       marker: prepared.marker,
-                      ...(before.entry.etag ? { expectedEtag: before.entry.etag } : {}),
+                      ...(before.entry.revision ? { expectedRevision: before.entry.revision } : {}),
                     })
                   : before.entry;
             } else {
@@ -918,7 +918,7 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
               modifiedAt: source.modifiedAt,
               mimeType: source.mimeType,
               marker: prepared.marker,
-              ...(before?.entry.etag ? { expectedEtag: before.entry.etag } : {}),
+              ...(before?.entry.revision ? { expectedRevision: before.entry.revision } : {}),
             });
           }
           if (prepared.output.id && result.id !== prepared.output.id) {
@@ -953,7 +953,7 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
             await provider.writeDestinationMarker({
               objectId: result.id,
               marker: prepared.marker,
-              ...(current.etag ? { expectedEtag: current.etag } : {}),
+              ...(current.revision ? { expectedRevision: current.revision } : {}),
             });
           }
           const output = await ownedObservation(ctx, prepared);

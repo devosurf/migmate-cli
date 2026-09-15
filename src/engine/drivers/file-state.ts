@@ -111,18 +111,18 @@ export type FileProvider = ProviderPort & {
     input: Parameters<ProviderPort["uploadDestinationContent"]>[0] & {
       create?: boolean;
       marker?: FileMarker;
-      expectedEtag?: string;
+      expectedRevision?: string;
     },
   ): Promise<DestinationEntry>;
   moveDestinationObject(
     input: Parameters<ProviderPort["moveDestinationObject"]>[0] & {
-      expectedEtag?: string;
+      expectedRevision?: string;
       marker?: FileMarker;
     },
   ): Promise<DestinationEntry>;
   writeDestinationMarker(
     input: Parameters<ProviderPort["writeDestinationMarker"]>[0] & {
-      expectedEtag?: string;
+      expectedRevision?: string;
     },
   ): Promise<void>;
 };

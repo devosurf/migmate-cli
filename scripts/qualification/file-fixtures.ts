@@ -115,6 +115,14 @@ interface GoogleItem {
   mimeType: string;
   appProperties?: Record<string, string>;
   modifiedTime?: string;
+  version?: string;
+  headRevisionId?: string;
+}
+
+/** Drive publishes no ETag and honours no If-Match: ADR-0004. */
+function destinationRevision(item: GoogleItem): string | null {
+  if (!item.version) return null;
+  return item.headRevisionId ? `${item.version}:${item.headRevisionId}` : item.version;
 }
 interface OwnedDestination {
   privateOwner: boolean;
@@ -259,13 +267,14 @@ export class FileFixtures {
   async #destination(
     id: string,
     cleanup = false,
-  ): Promise<{ item: GoogleItem; etag: string | null }> {
+  ): Promise<{ item: GoogleItem; revision: string | null }> {
     const response = await this.#google(
-      `/drive/v3/files/${encodeURIComponent(identifier(id))}?supportsAllDrives=true&fields=id,name,driveId,parents,mimeType,appProperties,modifiedTime`,
+      `/drive/v3/files/${encodeURIComponent(identifier(id))}?supportsAllDrives=true&fields=id,name,driveId,parents,mimeType,appProperties,modifiedTime,version,headRevisionId`,
       {},
       cleanup,
     );
-    return { item: await responseJson<GoogleItem>(response), etag: response.headers.get("etag") };
+    const item = await responseJson<GoogleItem>(response);
+    return { item, revision: destinationRevision(item) };
   }
   async #sourceParent(id: string, cleanup = false): Promise<void> {
     const seen = new Set<string>();
@@ -435,14 +444,14 @@ export class FileFixtures {
     if (state.marker.stateRevision) owned.revisions.add(state.marker.stateRevision);
     this.#destinations.set(state.output.id, owned);
   }
-  async tagDestination(id: string, stateRevision: string, expectedEtag: string): Promise<void> {
+  async tagDestination(id: string, stateRevision: string, expectedRevision: string): Promise<void> {
     const owned = this.#destinations.get(id);
     if (!owned || !owned.revisions.has(stateRevision))
       throw new QualificationBlocked("file_fixture_destination_not_owned");
     const current = await this.#destination(id);
     if (
       current.item.driveId !== this.#config.disposableRoots.destDriveId ||
-      current.etag !== expectedEtag
+      current.revision !== expectedRevision
     ) {
       throw new QualificationBlocked("file_fixture_destination_changed_before_tag");
     }
@@ -455,26 +464,25 @@ export class FileFixtures {
     await this.#patchDestination(
       id,
       { appProperties: { qowner: this.owner }, modifiedTime: current.item.modifiedTime },
-      current.etag,
+      current.revision,
     );
     owned.privateOwner = true;
   }
   async #patchDestination(
     id: string,
     patch: Record<string, unknown>,
-    etag: string | null,
+    revision: string | null,
   ): Promise<void> {
-    if (!this.#destinations.has(id) || !etag)
-      throw new QualificationBlocked("file_fixture_destination_ownership_or_etag_missing");
+    if (!this.#destinations.has(id) || !revision)
+      throw new QualificationBlocked("file_fixture_destination_ownership_or_revision_missing");
     const current = await this.#destination(id);
-    if (current.etag !== etag || current.item.parents?.length !== 1)
+    if (current.revision !== revision || current.item.parents?.length !== 1)
       throw new QualificationBlocked("file_fixture_destination_changed_before_mutation");
     await this.#destinationParent(current.item.parents[0]!);
     const response = await this.#google(
       `/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true&fields=id`,
       {
         method: "PATCH",
-        headers: { "If-Match": etag },
         body: JSON.stringify(patch),
       },
     );
@@ -486,7 +494,7 @@ export class FileFixtures {
     await this.#patchDestination(
       id,
       { name, modifiedTime: current.item.modifiedTime },
-      current.etag,
+      current.revision,
     );
   }
   async destinationChildren(parent: string, cleanup = false): Promise<string[]> {
@@ -574,14 +582,11 @@ export class FileFixtures {
             (await this.destinationChildren(id, true)).length
           )
             continue;
-          if (!current.etag)
-            throw new QualificationBlocked("file_fixture_destination_etag_required");
+          if (!current.revision)
+            throw new QualificationBlocked("file_fixture_destination_revision_required");
           const response = await this.#google(
             `/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`,
-            {
-              method: "DELETE",
-              headers: { "If-Match": current.etag },
-            },
+            { method: "DELETE" },
             true,
           );
           await requireSuccess(response);

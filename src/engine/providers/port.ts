@@ -42,7 +42,13 @@ export interface DestinationEntry {
   name: string;
   kind: DestinationItemKind;
   size: number | null;
-  etag: string | null;
+  /**
+   * Google Drive v3 publishes no ETag and honours no `If-Match`, so the
+   * destination's concurrency token is its monotonic `version`, plus
+   * `headRevisionId` for a binary file. Comparing it before a write is a
+   * compare-then-write, not an atomic conditional update: see ADR-0004.
+   */
+  revision: string | null;
   createdAt: string;
   modifiedAt: string;
   mimeType: string | null;
@@ -126,7 +132,7 @@ export interface ProviderPort {
     destinationId?: string;
     create?: boolean;
     marker?: ProvenanceRecord;
-    expectedEtag?: string;
+    expectedRevision?: string;
     parentFolderId: string;
     name: string;
     content: Uint8Array | AsyncIterable<Uint8Array>;
@@ -139,14 +145,14 @@ export interface ProviderPort {
     parentFolderId: string;
     name: string;
     modifiedAt?: string;
-    expectedEtag?: string;
+    expectedRevision?: string;
     marker?: ProvenanceRecord;
   }): Promise<DestinationEntry>;
   readDestinationMarker(objectId: string): Promise<ProvenanceRecord | null>;
   writeDestinationMarker(input: {
     objectId: string;
     marker: ProvenanceRecord | null;
-    expectedEtag?: string;
+    expectedRevision?: string;
   }): Promise<void>;
   streamDestinationContent(objectId: string): AsyncIterable<Uint8Array>;
 

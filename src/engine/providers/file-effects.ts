@@ -50,6 +50,8 @@ interface GoogleFile {
   createdTime: string;
   modifiedTime: string;
   sha256Checksum?: string;
+  version?: string;
+  headRevisionId?: string;
   appProperties?: Record<string, string>;
   capabilities?: { canAddChildren?: boolean; canEdit?: boolean; canDownload?: boolean };
   trashed?: boolean;
@@ -65,8 +67,20 @@ export interface SourceWorker {
 }
 
 const FILE_FIELDS =
-  "id,name,driveId,parents,mimeType,size,createdTime,modifiedTime,sha256Checksum,appProperties,capabilities,trashed";
+  "id,name,driveId,parents,mimeType,size,createdTime,modifiedTime,sha256Checksum,version,headRevisionId,appProperties,capabilities,trashed";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
+
+/**
+ * Drive v3 exposes no ETag and rejects no write on `If-Match`, so concurrency
+ * rests on the fields it does publish: `version` advances on every change to
+ * the file, and `headRevisionId` changes when a binary file's content does.
+ * A null token means Drive told us nothing, which is never treated as a match.
+ * https://developers.google.com/workspace/drive/api/reference/rest/v3/files
+ */
+function destinationRevision(file: GoogleFile): string | null {
+  if (!file.version) return null;
+  return file.headRevisionId ? `${file.version}:${file.headRevisionId}` : file.version;
+}
 const MARKER_PREFIX = "mm";
 const MARKER_CHUNKS = 28;
 const MARKER_PART_BYTES = 118;
@@ -256,7 +270,7 @@ export class FileEffects {
     };
   }
 
-  #destination(raw: GoogleFile, etag: string | null = null): DestinationEntry {
+  #destination(raw: GoogleFile): DestinationEntry {
     const driveId = raw.driveId ?? this.#destDrive.get(raw.id);
     if (!driveId)
       throw new ProviderFault("unqualified_route", "The destination is not a Shared Drive object.");
@@ -275,7 +289,7 @@ export class FileEffects {
               ? "document"
               : "file",
       size: raw.size === undefined ? null : Number(raw.size),
-      etag,
+      revision: destinationRevision(raw),
       createdAt: raw.createdTime,
       modifiedAt: raw.modifiedTime,
       mimeType: raw.mimeType,
@@ -291,13 +305,13 @@ export class FileEffects {
     return fetchProvider(googleUrl(path), { ...init, headers });
   }
 
-  async #getRaw(objectId: string): Promise<{ file: GoogleFile; etag: string | null }> {
+  async #getRaw(objectId: string): Promise<{ file: GoogleFile }> {
     const response = await this.#google(
       `/drive/v3/files/${encodeURIComponent(objectId)}?supportsAllDrives=true&fields=${FILE_FIELDS}`,
     );
     const file = await responseJson<GoogleFile>(response);
     if (file.trashed) throw new HttpProviderFault(404);
-    return { file, etag: response.headers.get("etag") };
+    return { file };
   }
 
   async #sourceMetadata(entry: SourceEntry): Promise<SourceEntry> {
@@ -458,13 +472,13 @@ export class FileEffects {
         "The destination drive is outside the explicit mappings.",
       );
     try {
-      const { file, etag } = await this.#getRaw(input.objectId);
+      const { file } = await this.#getRaw(input.objectId);
       if (file.driveId !== input.driveId)
         throw new ProviderFault(
           "unqualified_route",
           "The destination object does not belong to the exact Shared Drive.",
         );
-      return this.#destination(file, etag);
+      return this.#destination(file);
     } catch (error) {
       if (error instanceof HttpProviderFault && error.status === 404) return null;
       throw error;
@@ -563,10 +577,7 @@ export class FileEffects {
         }),
       },
     );
-    return this.#destination(
-      await responseJson<GoogleFile>(response),
-      response.headers.get("etag"),
-    );
+    return this.#destination(await responseJson<GoogleFile>(response));
   }
 
   async uploadDestinationContent(
@@ -601,7 +612,7 @@ export class FileEffects {
           "destination_type_conflict",
           "Only an ordinary binary destination file can be updated.",
         );
-      if (!input.expectedEtag || prior.etag !== input.expectedEtag)
+      if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
         throw new ProviderFault(
           "prior_copy_drift",
           "The destination changed before its conditional content update.",
@@ -623,7 +634,6 @@ export class FileEffects {
     };
     const headers: Record<string, string> = {
       "X-Upload-Content-Type": mimeType,
-      ...(input.expectedEtag ? { "If-Match": input.expectedEtag } : {}),
     };
     const start = await this.#google(path, {
       method: create ? "POST" : "PATCH",
@@ -654,10 +664,7 @@ export class FileEffects {
           },
           body: new Uint8Array(0),
         });
-        return this.#destination(
-          await responseJson<GoogleFile>(response),
-          response.headers.get("etag"),
-        );
+        return this.#destination(await responseJson<GoogleFile>(response));
       }
       while (!current.done) {
         const next = await chunks.next();
@@ -671,11 +678,7 @@ export class FileEffects {
           },
           body: current.value,
         });
-        if (next.done)
-          return this.#destination(
-            await responseJson<GoogleFile>(response),
-            response.headers.get("etag"),
-          );
+        if (next.done) return this.#destination(await responseJson<GoogleFile>(response));
         if (response.status !== 308 || response.headers.get("range") !== `bytes=0-${end}`) {
           await requireSuccess(response);
           throw new ProviderFault(
@@ -699,7 +702,7 @@ export class FileEffects {
     requireName(input.name);
     await this.#assertParent(input.parentFolderId);
     const prior = await this.#getRaw(input.objectId);
-    if (!input.expectedEtag || prior.etag !== input.expectedEtag)
+    if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
       throw new ProviderFault(
         "prior_copy_drift",
         "The destination changed before its conditional move.",
@@ -713,7 +716,6 @@ export class FileEffects {
       `/drive/v3/files/${encodeURIComponent(input.objectId)}?${query}`,
       {
         method: "PATCH",
-        headers: { "If-Match": input.expectedEtag },
         body: JSON.stringify({
           name: input.name,
           ...(input.modifiedAt ? { modifiedTime: input.modifiedAt } : {}),
@@ -721,10 +723,7 @@ export class FileEffects {
         }),
       },
     );
-    return this.#destination(
-      await responseJson<GoogleFile>(response),
-      response.headers.get("etag"),
-    );
+    return this.#destination(await responseJson<GoogleFile>(response));
   }
 
   async readDestinationMarker(objectId: string): Promise<ProvenanceRecord | null> {
@@ -735,7 +734,7 @@ export class FileEffects {
     input: Parameters<ProviderPort["writeDestinationMarker"]>[0],
   ): Promise<void> {
     const prior = await this.#getRaw(input.objectId);
-    if (!input.expectedEtag || prior.etag !== input.expectedEtag)
+    if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
       throw new ProviderFault(
         "prior_copy_drift",
         "The destination changed before its conditional marker update.",
@@ -744,7 +743,6 @@ export class FileEffects {
       `/drive/v3/files/${encodeURIComponent(input.objectId)}?supportsAllDrives=true&fields=id`,
       {
         method: "PATCH",
-        headers: { "If-Match": input.expectedEtag },
         body: JSON.stringify({ appProperties: markerProperties(input.marker) }),
       },
     );
@@ -826,7 +824,7 @@ export class FileEffects {
             "preflight_failed",
             "The exact destination Shared Drive root is not writable.",
           );
-        this.#destination(destination.file, destination.etag);
+        this.#destination(destination.file);
         yield {
           id: `provider.roots.${mapping.sourceDriveId}.${mapping.sourceItemId}`,
           title: "Exact source and destination access",
@@ -959,7 +957,7 @@ export class FileEffects {
         ),
       );
       const observed = await this.#getRaw(fileId);
-      const entry = this.#destination(observed.file, observed.etag);
+      const entry = this.#destination(observed.file);
       const expectedHash = createHash("sha256").update(bytes).digest("hex");
       const streamHash = createHash("sha256");
       for await (const chunk of this.streamDestinationContent(fileId)) streamHash.update(chunk);
@@ -1012,10 +1010,7 @@ export class FileEffects {
           }
           const response = await this.#google(
             `/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`,
-            {
-              method: "DELETE",
-              ...(current.etag ? { headers: { "If-Match": current.etag } } : {}),
-            },
+            { method: "DELETE" },
           );
           await requireSuccess(response);
           await response.body?.cancel();
