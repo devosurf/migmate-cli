@@ -545,8 +545,9 @@ if ! confirm "Write the maintainer probe config now?"; then
   warn "stopped before the probe config. Route qualification stays unrun; the job config above is complete."
   exit 0
 fi
-say "Create a throwaway folder in the source library and a throwaway folder in the destination Shared Drive. The probe suite creates and deletes items beneath both."
-step "Grant the second app the write role on the source site: POST https://graph.microsoft.com/v1.0/sites/${MIGMATE_SOURCE_SITE_ID}/permissions with roles [\"write\"] and the second app's id, exactly as the read grant was made earlier."
+say "Create a throwaway folder in the source library and a throwaway folder in the destination Shared Drive. The probe suite creates and deletes items beneath both, and deletes only ids it created itself."
+step "Register the second app, then grant it the write role on the source site. This prints the exact request and proves the grant afterwards:"
+note "  node scripts/probe-mutator-app.ts --env $ENV_FILE --client-id <app-id> --grant-instructions"
 ask MIGMATE_PROBE_SOURCE_ITEM_ID "Paste the disposable source folder item id:"
 ask MIGMATE_PROBE_DEST_FOLDER_ID "Paste the disposable destination folder id:"
 ask MIGMATE_PROBE_MUTATOR_CLIENT_ID "Paste the second (source-write) app's Application (client) ID:"
@@ -554,12 +555,20 @@ if [[ "$MIGMATE_PROBE_MUTATOR_CLIENT_ID" == "$MIGMATE_CLIENT_ID" ]]; then
   warn "the probe mutator must be a different app from the read-only route app."
   exit 1
 fi
-ask_secret MIGMATE_PROBE_MUTATOR_SECRET "Paste the second app's client secret value:"
 mkdir -p "$PREREQ_DIR/entra"
-MIGMATE_PROBE_MUTATOR_SECRET_FILE="$PREREQ_DIR/entra/probe-mutator-client-secret.txt"
-printf '%s' "$MIGMATE_PROBE_MUTATOR_SECRET" > "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
+MIGMATE_PROBE_MUTATOR_SECRET_FILE="${MIGMATE_PROBE_MUTATOR_SECRET_FILE:-$PREREQ_DIR/entra/probe-mutator-client-secret.txt}"
+if [[ -s "$MIGMATE_PROBE_MUTATOR_SECRET_FILE" ]]; then
+  say "Reusing the client secret already stored at $MIGMATE_PROBE_MUTATOR_SECRET_FILE."
+else
+  ask_secret MIGMATE_PROBE_MUTATOR_SECRET "Paste the second app's client secret value:"
+  if [[ -z "$MIGMATE_PROBE_MUTATOR_SECRET" ]]; then
+    warn "no client secret was supplied."
+    exit 1
+  fi
+  printf '%s' "$MIGMATE_PROBE_MUTATOR_SECRET" > "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
+  unset MIGMATE_PROBE_MUTATOR_SECRET
+fi
 chmod 600 "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
-unset MIGMATE_PROBE_MUTATOR_SECRET
 ask MIGMATE_PROBE_CONFIG "Choose the probe config path outside the repo (probe-config.json):"
 case "$MIGMATE_PROBE_CONFIG" in
   /*) ;;
