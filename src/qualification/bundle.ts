@@ -104,8 +104,16 @@ async function regularFile(root: string, path: string): Promise<Buffer> {
     requireFact(!(await lstat(current)).isSymbolicLink());
   }
   const stat = await lstat(absolute);
+  // Compare resolved against resolved. `root` is the caller's path, which on a real
+  // publish reaches the bundle through a symlinked ancestor — macOS resolves /tmp to
+  // /private/tmp and $TMPDIR to /private/var/folders/... — so confining a realpath
+  // beneath an unresolved root refused every bundle written under one. The guard is
+  // unchanged in substance: no component of `path` may be a symlink (checked above),
+  // and the file must still resolve inside the bundle root.
   requireFact(
-    stat.isFile() && stat.size <= 16 * 1024 * 1024 && confined(root, await realpath(absolute)),
+    stat.isFile() &&
+      stat.size <= 16 * 1024 * 1024 &&
+      confined(await realpath(root), await realpath(absolute)),
   );
   return readFile(absolute);
 }

@@ -1,6 +1,18 @@
 {
   "schemaVersion": 1,
-  "qualifiedRoutes": [],
+  "qualifiedRoutes": [
+    {
+      "jobType": "teams_archive",
+      "route": "teams_global_archive",
+      "tupleDigest": "6aa55648a2a150d62bd7f7abbf1d2599c93b5c069d905b1df82ab14a95e1f103",
+      "bundleDigest": "e6a5d2d8fa14fc6e5c65b119105fa27555594831abf3c97476c553f3508e71a9",
+      "desktopCell": "darwin-arm64",
+      "guaranteeSetId": "default",
+      "options": { "retainedHistory": false, "transcripts": false, "attachmentBytes": false },
+      "capturedAt": "2026-09-16",
+      "scope": "Graph v1.0 Global, application-only, channel and user-chats scope kinds, hosted content in the base contract. The three options are off, so each is a separate tuple that owes its own bundle."
+    }
+  ],
   "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
   "transferVersion": "v1.75.0",
   "macosMinimumVersion": "13.5",
@@ -24,6 +36,13 @@
       "reason": "Live tenant credentials and disposable fixtures are in place, and the full suite now runs against a real SharePoint library and Shared Drive on darwin-arm64. No bundle is claimed until a run completes including teardown. Requires exactly Node 24.",
       "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
       "scope": "Exact source/destination/backend/options/guarantee-set tuple, pinned transfer version, and each desktop cell. No credential or captured-output import can assert successful qualification."
+    },
+    {
+      "id": "real_tenant_archive_route_matrix",
+      "status": "resolved",
+      "reason": "ADR-0007. The full archive suite ran against a live Global tenant on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes: route matrix, hosted-content bytes for both scope kinds including a channel reply, durable restart, and byte-deterministic package regeneration. Two live-only defects had to be fixed first: every export request used an inclusive lower bound the routes refuse with HTTP 400, and the bundle validator confined a realpath beneath an unresolved root, refusing any bundle published under a symlinked ancestor. Options remain unproven by design.",
+      "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
+      "scope": "Exact Graph route/permission/option tuple, pinned transfer version, and each desktop cell. retainedHistory, transcripts and attachmentBytes are separate tuples and none is claimed."
     },
     {
       "id": "file_live_source_path_guard",

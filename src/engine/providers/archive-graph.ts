@@ -284,6 +284,25 @@ function transcriptPath(record: Json): string {
   const organizer = object(object(record.meetingOrganizer)?.user);
   return `/v1.0/users/${segment(organizer?.id, "transcript_unavailable")}/onlineMeetings/${segment(record.meetingId, "transcript_unavailable")}/transcripts/${segment(record.id, "transcript_unavailable")}/content`;
 }
+/**
+ * The only modification-window comparison the Teams export routes accept.
+ *
+ * Measured live 2026-09-16 against both export roots: `ge` and `le` return HTTP 400
+ * "The entity property 'lastModifiedDateTime' and operationKind 'GreaterThanOrEqual' is
+ * not allowed in $filter query", and a one-sided filter returns HTTP 400 "Missing
+ * 'lastModifiedDateTime' value". Only `gt ... and lt ...` is accepted, so a plan's
+ * inclusive `from` is sent as the largest instant below it. Graph timestamps carry
+ * millisecond precision, and inWindow() re-tests the authoritative half-open
+ * `[from, to)` on every record, so this wider prefilter cannot admit a record outside
+ * the window the plan promised. Do not "simplify" the offset away: without it every
+ * collection call and every archive_current preflight check fails.
+ *
+ * Exported so the prerequisite prober asks exactly what the collector asks.
+ */
+export function exportWindowFilter(window: { from: string; to: string }): string {
+  const after = new Date(Date.parse(window.from) - 1).toISOString();
+  return `lastModifiedDateTime gt ${after} and lastModifiedDateTime lt ${window.to}`;
+}
 function collectionPath(
   scope: ArchiveScopeBinding,
   route: ArchiveRoute,
@@ -307,7 +326,7 @@ function collectionPath(
       ? `/v1.0/teams/${segment(scope.teamId)}/channels`
       : `/v1.0/users/${segment(scope.userId)}/chats`;
   const name = route === "retained" ? "getAllRetainedMessages" : "getAllMessages";
-  return `${root}/${name}?$top=250&$filter=${encodeURIComponent(`lastModifiedDateTime ge ${window.from} and lastModifiedDateTime lt ${window.to}`)}`;
+  return `${root}/${name}?$top=250&$filter=${encodeURIComponent(exportWindowFilter(window))}`;
 }
 function hostedFailure(record: Json, route: ArchiveRoute): string {
   if (route === "retained") return "hosted_content_unavailable_retained_message";

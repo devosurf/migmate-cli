@@ -172,7 +172,7 @@ describe("production archive provider effects", () => {
         if (url.searchParams.has("$skiptoken")) return { value: [message] };
         assert.equal(
           url.searchParams.get("$filter"),
-          `lastModifiedDateTime ge ${window.from} and lastModifiedDateTime lt ${window.to}`,
+          `lastModifiedDateTime gt 2025-12-31T23:59:59.999Z and lastModifiedDateTime lt ${window.to}`,
         );
         return {
           value: [],
@@ -187,6 +187,44 @@ describe("production archive provider effects", () => {
     const last = await provider.page({ scope, route: "messages", window, cursor: first.nextLink });
     assert.deepEqual(last.records, [message]);
     assert.equal(last.nextLink, null);
+  });
+
+  it("asks the export routes for the only comparison they accept without widening the window", async () => {
+    // Measured live 2026-09-16: both export roots answer HTTP 400 to `ge`/`le`
+    // ("operationKind 'GreaterThanOrEqual' is not allowed in $filter query") and to a
+    // one-sided filter ("Missing 'lastModifiedDateTime' value"). `gt` cannot express the
+    // plan's inclusive `from`, so the request carries the largest instant below it.
+    const channelScope: ArchiveScopeBinding = {
+      id: "channel:t:c",
+      kind: "channel",
+      teamId: "t",
+      channelId: "c",
+      conversationIds: ["channel:t:c"],
+    };
+    for (const [subject, binding] of [
+      ["chat", scope],
+      ["channel", channelScope],
+    ] as const) {
+      for (const route of ["messages", "retained"] as const) {
+        let filter: string | null = null;
+        const provider = createArchiveProvider(
+          transport((url) => {
+            filter = url.searchParams.get("$filter");
+            return { value: [] };
+          }),
+        );
+        await provider.page({ scope: binding, route, window, cursor: null });
+        const where = `${subject}/${route}`;
+        assert.equal(
+          filter,
+          `lastModifiedDateTime gt 2025-12-31T23:59:59.999Z and lastModifiedDateTime lt ${window.to}`,
+          where,
+        );
+        const [, lower, upper] = /^\S+ gt (\S+) and \S+ lt (\S+)$/.exec(filter!) ?? [];
+        assert.equal(Date.parse(lower!), Date.parse(window.from) - 1, `${where} lower bound`);
+        assert.equal(Date.parse(upper!), Date.parse(window.to), `${where} upper bound`);
+      }
+    }
   });
 
   it("rejects foreign, credential-bearing, beta, changed-filter and changed-scope continuation URLs before following them", async () => {

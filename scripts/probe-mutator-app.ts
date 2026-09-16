@@ -22,115 +22,22 @@
 // https://learn.microsoft.com/en-us/graph/permissions-selected-overview
 
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import {
+  applicationToken,
+  argument,
+  Blocked,
+  envFile,
+  graphRequest,
+  say,
+  sleep,
+  storedSecret,
+  tokenClaims,
+  writeEnv,
+} from "./prereq-lib.ts";
 
 const DISPLAY_NAME = "Migmate probe mutator";
 const SECRET_NAME = "probe-mutator-client-secret.txt";
-
-class Blocked extends Error {}
-
-function say(text = ""): void {
-  process.stdout.write(`${text}\n`);
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, milliseconds);
-  return promise;
-}
-
-function argument(name: string): string | undefined {
-  const index = process.argv.indexOf(`--${name}`);
-  return index === -1 ? undefined : process.argv[index + 1];
-}
-
-async function envFile(path: string): Promise<Record<string, string>> {
-  const values: Record<string, string> = {};
-  for (const line of (await readFile(path, "utf8")).split("\n")) {
-    const separator = line.indexOf("=");
-    if (separator > 0) values[line.slice(0, separator)] = line.slice(separator + 1);
-  }
-  return values;
-}
-
-async function writeEnv(path: string, updates: Record<string, string>): Promise<void> {
-  const lines = (await readFile(path, "utf8"))
-    .split("\n")
-    .filter((line) => line.length > 0 && !Object.hasOwn(updates, line.slice(0, line.indexOf("="))));
-  for (const [key, value] of Object.entries(updates)) lines.push(`${key}=${value}`);
-  const staging = `${path}.${randomUUID()}`;
-  await writeFile(staging, `${lines.join("\n")}\n`, { mode: 0o600 });
-  await rename(staging, path);
-}
-
-/** Reads one line without echoing it, so the secret never reaches the scrollback. */
-async function askSecret(prompt: string): Promise<string> {
-  const { promise, resolve } = Promise.withResolvers<string>();
-  const input = process.stdin;
-  const reader = createInterface({ input, output: process.stdout, terminal: true });
-  process.stdout.write(prompt);
-  const muted = input.isTTY === true;
-  if (muted) {
-    // @ts-expect-error -- readline's output muting is not in the public types.
-    reader.output.write = () => true;
-  }
-  reader.question("", (answer) => {
-    if (muted) process.stdout.write("\n");
-    reader.close();
-    resolve(answer.trim());
-  });
-  return promise;
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  const body = response.status === 204 ? {} : ((await response.json()) as Record<string, unknown>);
-  if (!response.ok) {
-    const error = body.error as Record<string, unknown> | string | undefined;
-    const message =
-      typeof error === "string"
-        ? `${error}: ${String(body.error_description).split("\n")[0]}`
-        : String((error as Record<string, unknown>)?.message ?? response.statusText);
-    throw new Blocked(`${response.status}: ${message}`);
-  }
-  return body;
-}
-
-async function applicationToken(
-  tenantId: string,
-  clientId: string,
-  secret: string,
-): Promise<string> {
-  const body = await json(
-    await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: clientId,
-        client_secret: secret,
-        scope: "https://graph.microsoft.com/.default",
-      }),
-    }),
-  );
-  return String(body.access_token);
-}
-
-const graphRequest =
-  (token: string) =>
-  async (path: string, init: RequestInit = {}): Promise<Record<string, unknown>> =>
-    json(
-      await fetch(`https://graph.microsoft.com${path}`, {
-        ...init,
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/json",
-          ...(init.body === undefined ? {} : { "content-type": "application/json" }),
-          ...init.headers,
-        },
-      }),
-    );
 
 function grantInstructions(siteId: string, clientId: string): void {
   const body = JSON.stringify(
@@ -189,34 +96,16 @@ try {
     process.exit(0);
   }
 
-  const secretPath = argument("secret-file") ?? join(prerequisiteDirectory, "entra", SECRET_NAME);
-  let secret = await readFile(secretPath, "utf8").then(
-    (contents) => contents.replace(/\r?\n$/, ""),
-    () => "",
+  const { secret, secretPath } = await storedSecret(
+    argument("secret-file") ?? join(prerequisiteDirectory, "entra", SECRET_NAME),
+    `  Paste the ${DISPLAY_NAME} client secret value: `,
   );
-  if (secret) {
-    say(`  reusing the client secret already stored at ${secretPath}`);
-  } else {
-    secret = await askSecret(`  Paste the ${DISPLAY_NAME} client secret value: `);
-    if (!secret) throw new Blocked("no client secret was supplied");
-    await mkdir(dirname(secretPath), { recursive: true, mode: 0o700 });
-    await writeFile(secretPath, secret, { mode: 0o600 });
-    await chmod(secretPath, 0o600);
-    say(`  stored the client secret at ${secretPath}`);
-  }
-  if (((await stat(secretPath)).mode & 0o177) !== 0) {
-    throw new Blocked(`${secretPath} must be owner-readable only (0600)`);
-  }
-
   const token = await applicationToken(tenantId, clientId, secret).catch((error: unknown) => {
     throw new Blocked(
       `the app could not authenticate, so the secret or client id is wrong: ${String(error instanceof Error ? error.message : error)}`,
     );
   });
-  const claims = JSON.parse(
-    Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
-  ) as Record<string, unknown>;
-  const roles = (claims.roles as string[] | undefined) ?? [];
+  const { roles } = tokenClaims(token);
   say(`  authenticated; granted roles: ${roles.join(", ") || "none"}`);
   if (!roles.includes("Sites.Selected")) {
     throw new Blocked(

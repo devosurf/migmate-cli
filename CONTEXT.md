@@ -20,6 +20,10 @@ _Avoid_: Teams migration, chat backup
 A source-and-destination combination whose supported behavior and fidelity have been tested and documented. Qualification of one route does not imply support for every compatible backend.
 _Avoid_: Universal remote support, all-remotes support
 
+**Capability sample**:
+Real source content whose observation a route's qualification evidence rests on, such as an item kind a driver must omit or a message carrying inline bytes. A sample that cannot exist is recorded with a named reason, never assumed away.
+_Avoid_: Fixture, test data, seed
+
 **Operator**:
 A human, agent, or CI process that controls a job through a supported interaction surface.
 _Avoid_: End user
@@ -31,6 +35,10 @@ _Avoid_: Inventory, run, batch, dry run
 **Preflight**:
 The set of checks that must pass before a job may be planned, covering prerequisites only an administrator can satisfy. Preflight failures are refusals, never retries.
 _Avoid_: Health check, validation
+
+**Tenant prerequisite**:
+A condition of a source tenant that no credential satisfies and no retry survives, such as an administrator-held toggle or a retention policy. Preflight proves it and refuses when it is absent.
+_Avoid_: Setting, environment config, dependency
 
 **Exception**:
 A known gap between what a job planned and what is verifiably present, explicitly acknowledged by an operator. An exception is a recorded outcome, not a failure, and it never disappears from a report.

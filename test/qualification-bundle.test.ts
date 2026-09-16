@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
@@ -118,6 +126,23 @@ describe("captured bundle validation", () => {
   it("accepts a route probe whose capability proofs each carry their evidence", async (t) => {
     const { root, input } = published(t, capture("desktop_runtime"), routeCapture());
     assert.deepEqual(await validateCapturedBundle(root, input), {
+      digest: input.digest,
+      tuple: input.tuple,
+      bundle: input.bundle,
+    });
+  });
+
+  it("accepts a bundle reached through a symlinked ancestor, as every real publish is", async (t) => {
+    // A maintainer publishes with --output under a temporary directory, and on macOS
+    // /tmp resolves to /private/tmp and $TMPDIR to /private/var/folders/..., so the
+    // package directory the runner hands the validator is almost never its own
+    // realpath. published() calls realpathSync, which hid this from every other case.
+    const { root, input } = published(t, capture("desktop_runtime"), routeCapture());
+    const parent = mkdtempSync(join(tmpdir(), "migmate-symlinked-"));
+    t.after(() => rmSync(parent, { recursive: true, force: true }));
+    const link = join(parent, "link");
+    symlinkSync(root, link);
+    assert.deepEqual(await validateCapturedBundle(link, input), {
       digest: input.digest,
       tuple: input.tuple,
       bundle: input.bundle,

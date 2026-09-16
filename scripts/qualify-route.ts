@@ -30,6 +30,30 @@ const commandId = randomUUID();
 const run = promisify(execFile);
 const controller = new AbortController();
 const interrupted = () => controller.abort(new QualificationBlocked("operator_interrupted"));
+
+/**
+ * A defect is a maintainer's bug, not an operator's missing prerequisite, and the
+ * refusal carried nothing at all for one: every non-gate throw published the bare
+ * gate `live_probe_or_prerequisite_failed`, which is indistinguishable from any
+ * other. Emit only what locates it — the error's own kind, the assertion operator
+ * when `node:assert` raised it, a provider status, and the first stack frame inside
+ * this repository. Never the message: on a provider fault it can carry a URL or a
+ * header value, and this document is archived in CI logs.
+ */
+function defectDiagnosis(error: unknown): Record<string, unknown> {
+  const fault = error as Partial<Error> & { operator?: unknown; status?: unknown };
+  const frame = String(fault.stack ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.includes(`${root}/`) && !line.includes("node_modules"));
+  const origin = frame?.slice(frame.indexOf(`${root}/`) + root.length + 1).replace(/\)$/, "");
+  return {
+    defect: typeof fault.name === "string" ? fault.name : typeof error,
+    ...(typeof fault.operator === "string" ? { assertion: fault.operator } : {}),
+    ...(typeof fault.status === "number" ? { status: fault.status } : {}),
+    ...(origin ? { origin } : {}),
+  };
+}
 process.once("SIGINT", interrupted);
 process.once("SIGTERM", interrupted);
 let temporary: string | undefined;
@@ -323,7 +347,12 @@ try {
     : error instanceof QualificationBlocked
       ? error.gate
       : "live_probe_or_prerequisite_failed";
-  const diagnosis = error instanceof QualificationBlocked ? error.detail : undefined;
+  const diagnosis =
+    error instanceof QualificationBlocked
+      ? error.detail
+      : controller.signal.aborted
+        ? undefined
+        : defectDiagnosis(error);
   process.stdout.write(
     `${JSON.stringify({ schemaVersion: 1, command: "qualify-route", commandId, job: null, ok: false, refusal: { code: "unqualified_route", message: "No qualified-route bundle was published; real prerequisites and all observed guarantees are required.", detail: { gate, ...(diagnosis ? { diagnosis } : {}) } } })}\n`,
   );
