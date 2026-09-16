@@ -48,7 +48,7 @@ interface MappingIdentity {
 interface GraphCredential {
   tenantId: string;
   clientId: string;
-  secret: Buffer;
+  secret: Buffer | null;
 }
 
 interface GoogleCredential {
@@ -401,8 +401,11 @@ async function loadCredentials(
   jobType: JobType,
   config: unknown,
   jobDirectory: string,
+  mode?: "archive_verification",
 ): Promise<CredentialState> {
   const input = record(config);
+  if (mode && (jobType !== "teams_archive" || input.destination === undefined))
+    throw refused("credential_config_unsupported");
   let graph: GraphCredential | undefined;
   try {
     if (jobType === "teams_archive") {
@@ -423,18 +426,24 @@ async function loadCredentials(
       }
       const tenantId = guid(fields.tenantId);
       const clientId = guid(fields.clientId);
-      const loaded = await readCredentialFile(
-        fileReference(secrets.teams_graph_client_secret),
-        jobDirectory,
-      );
-      try {
-        // A single conventional trailing newline is not part of an Entra secret.
-        const secret = decodeUtf8(loaded.bytes).replace(/\r?\n$/, "");
-        if (!secret || secret.length > 4096 || /[\x00-\x20\x7f]/.test(secret))
-          throw refused("credential_secret_invalid");
-        graph = { tenantId, clientId, secret: Buffer.from(secret, "utf8") };
-      } finally {
-        loaded.bytes.fill(0);
+      if (mode === "archive_verification") {
+        // Retention outlives the source tenant. Bind its configured identity,
+        // but neither open its secret nor authenticate it to read Drive copies.
+        graph = { tenantId, clientId, secret: null };
+      } else {
+        const loaded = await readCredentialFile(
+          fileReference(secrets.teams_graph_client_secret),
+          jobDirectory,
+        );
+        try {
+          // A single conventional trailing newline is not part of an Entra secret.
+          const secret = decodeUtf8(loaded.bytes).replace(/\r?\n$/, "");
+          if (!secret || secret.length > 4096 || /[\x00-\x20\x7f]/.test(secret))
+            throw refused("credential_secret_invalid");
+          graph = { tenantId, clientId, secret: Buffer.from(secret, "utf8") };
+        } finally {
+          loaded.bytes.fill(0);
+        }
       }
       let google: GoogleCredential | undefined;
       if (input.destination !== undefined) {
@@ -587,7 +596,7 @@ async function loadCredentials(
       sections.clear();
     }
   } catch (error) {
-    graph?.secret.fill(0);
+    graph?.secret?.fill(0);
     if (error instanceof ProviderFault) throw error;
     throw refused("credential_config_invalid");
   }
@@ -732,11 +741,13 @@ export async function createCredentialSession(input: {
   jobType: JobType;
   config: unknown;
   jobDirectory: string;
+  mode?: "archive_verification";
 }): Promise<CredentialSession> {
   let state: CredentialState | undefined = await loadCredentials(
     input.jobType,
     input.config,
     input.jobDirectory,
+    input.mode,
   );
   let graphCache: Token | undefined;
   let googleCache: Token | undefined;
@@ -756,6 +767,7 @@ export async function createCredentialSession(input: {
     graphCache = undefined;
     graphPending = (async () => {
       const current = active();
+      if (!current.graph.secret) throw refused("credential_graph_unavailable");
       const requestedAt = Date.now();
       const response = await tokenResponse(
         `https://login.microsoftonline.com/${current.graph.tenantId}/oauth2/v2.0/token`,
@@ -849,7 +861,9 @@ export async function createCredentialSession(input: {
     graphToken,
     googleToken,
     async identity() {
-      const current = await authenticate();
+      if (input.mode === "archive_verification") await googleToken();
+      else await authenticate();
+      const current = active();
       // Key/secret rotation changes no identity. SA principal/client drift does.
       const identity = {
         graph: { tenantId: current.graph.tenantId, clientId: current.graph.clientId },
@@ -900,7 +914,7 @@ export async function createCredentialSession(input: {
     },
     dispose() {
       controller.abort();
-      state?.graph.secret.fill(0);
+      state?.graph.secret?.fill(0);
       state = undefined;
       graphCache = undefined;
       googleCache = undefined;

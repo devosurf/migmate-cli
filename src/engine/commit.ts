@@ -11,6 +11,7 @@
 
 import type { CodeKind, ProgressUnit, RowPhase } from "./types.ts";
 import type { FileState, FileSourceEvidence, FileScope } from "./drivers/file-state.ts";
+import type { ArchiveDestinationState } from "./archive/destination.ts";
 import type {
   ArchivePlan,
   ArchiveRecord,
@@ -54,6 +55,8 @@ export interface ConversationCommitRow extends CommitRowBase {
   records: number;
   assets: number;
   watermark?: string | null;
+  archiveDestination?: ArchiveDestinationState;
+  archiveObjectPath?: string;
 }
 
 export type CommitRow = FileCommitRow | ConversationCommitRow;

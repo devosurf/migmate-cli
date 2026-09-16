@@ -14,11 +14,13 @@ import {
 import type { CheckResult } from "../types.ts";
 import type { DestinationEntry, ProvenanceRecord, ProviderPort, SourceEntry } from "./port.ts";
 
-interface Mapping {
-  sourceDriveId: string;
-  sourceItemId: string;
+interface DestinationRoot {
   destDriveId: string;
   destFolderId: string;
+}
+interface Mapping extends DestinationRoot {
+  sourceDriveId: string;
+  sourceItemId: string;
   sourceSiteId?: string;
 }
 interface GraphItem {
@@ -212,6 +214,7 @@ function readMappings(config: unknown): Mapping[] {
 /** Stable IDs drive every mutation. Names are never used to select an overwrite target. */
 export class FileEffects {
   readonly mappings: Mapping[];
+  readonly #destinationRoots: (DestinationRoot | Mapping)[];
   readonly #session: CredentialSession;
   readonly #graph: GraphTransport;
   readonly #worker: SourceWorker;
@@ -220,17 +223,21 @@ export class FileEffects {
 
   constructor(input: {
     config: unknown;
+    destination?: DestinationRoot;
     session: CredentialSession;
     graph: GraphTransport;
     worker: SourceWorker;
   }) {
-    this.mappings = readMappings(input.config);
+    this.mappings = input.destination ? [] : readMappings(input.config);
+    this.#destinationRoots = input.destination ? [input.destination] : this.mappings;
     this.#session = input.session;
     this.#graph = input.graph;
     this.#worker = input.worker;
     for (const mapping of this.mappings) {
       this.#sourceDrive.set(mapping.sourceItemId, mapping.sourceDriveId);
-      this.#destDrive.set(mapping.destFolderId, mapping.destDriveId);
+    }
+    for (const root of this.#destinationRoots) {
+      this.#destDrive.set(root.destFolderId, root.destDriveId);
     }
   }
 
@@ -470,10 +477,10 @@ export class FileEffects {
     driveId: string;
     objectId: string;
   }): Promise<DestinationEntry | null> {
-    if (!this.mappings.some((mapping) => mapping.destDriveId === input.driveId))
+    if (!this.#destinationRoots.some((root) => root.destDriveId === input.driveId))
       throw new ProviderFault(
         "preflight_failed",
-        "The destination drive is outside the explicit mappings.",
+        "The destination drive is outside the configured roots.",
       );
     try {
       const { file } = await this.#getRaw(input.objectId);
@@ -502,10 +509,10 @@ export class FileEffects {
       const parent = await this.#getRaw(destFolderId);
       driveId = parent.file.driveId;
     }
-    if (!driveId || !this.mappings.some((mapping) => mapping.destDriveId === driveId))
+    if (!driveId || !this.#destinationRoots.some((root) => root.destDriveId === driveId))
       throw new ProviderFault(
         "unqualified_route",
-        "The destination parent is not in an explicitly mapped Shared Drive.",
+        "The destination parent is not in a configured Shared Drive.",
       );
     const items: DestinationEntry[] = [];
     for await (const files of cursorPages(
@@ -554,11 +561,11 @@ export class FileEffects {
     if (
       file.mimeType !== FOLDER_MIME ||
       !file.driveId ||
-      !this.mappings.some((mapping) => mapping.destDriveId === file.driveId)
+      !this.#destinationRoots.some((root) => root.destDriveId === file.driveId)
     )
       throw new ProviderFault(
         "destination_type_conflict",
-        "The destination parent is not a mapped Shared Drive folder.",
+        "The destination parent is not a configured Shared Drive folder.",
       );
     this.#destination(file);
   }
@@ -768,59 +775,75 @@ export class FileEffects {
   }
 
   async *preflight(): AsyncIterable<CheckResult> {
-    for (const mapping of this.mappings) {
+    for (const root of this.#destinationRoots) {
+      const mapping = "sourceDriveId" in root ? root : undefined;
       const evidence = {
-        sourceDriveId: mapping.sourceDriveId,
-        sourceItemId: mapping.sourceItemId,
-        destDriveId: mapping.destDriveId,
-        destFolderId: mapping.destFolderId,
+        ...(mapping
+          ? { sourceDriveId: mapping.sourceDriveId, sourceItemId: mapping.sourceItemId }
+          : {}),
+        destDriveId: root.destDriveId,
+        destFolderId: root.destFolderId,
         probedAt: new Date().toISOString(),
       };
+      const checkId = mapping
+        ? `provider.roots.${mapping.sourceDriveId}.${mapping.sourceItemId}`
+        : `provider.roots.${root.destDriveId}.${root.destFolderId}`;
+      const title = mapping ? "Exact source and destination access" : "Exact destination access";
       try {
-        const drive = await this.#graph.request<{
-          id: string;
-          driveType: string;
-          sharepointIds?: { siteId?: string };
-          webUrl?: string;
-        }>(`/v1.0/drives/${encodeURIComponent(mapping.sourceDriveId)}`);
-        if (drive.id !== mapping.sourceDriveId || drive.driveType !== "documentLibrary")
-          throw new ProviderFault(
-            "unqualified_route",
-            "The source is not the exact SharePoint document library.",
-          );
-        const source = await this.resolveSourceRoot(mapping);
-        if (!source || source.kind !== "folder")
-          throw new ProviderFault(
-            "preflight_failed",
-            "The source root is not an enumerable folder.",
-          );
-        await this.listSourceChildren(source.id);
-        if (mapping.sourceSiteId) {
-          const initial = `/v1.0/sites/${encodeURIComponent(mapping.sourceSiteId)}/drives?$select=id`;
-          let found = false;
-          for await (const items of cursorPages(
-            initial,
-            async (cursor) => {
-              const page = await this.#graph.request<{
-                value: { id: string }[];
-                "@odata.nextLink"?: string;
-              }>(cursor!);
-              return { value: page.value, next: page["@odata.nextLink"] };
-            },
-            () =>
-              new ProviderFault("provider_request_failed", "Site drive paging repeated a cursor."),
-          )) {
-            found ||= items.some((item) => item.id === mapping.sourceDriveId);
-          }
-          if (!found)
+        let sourceEvidence = {};
+        if (mapping) {
+          const drive = await this.#graph.request<{
+            id: string;
+            driveType: string;
+            sharepointIds?: { siteId?: string };
+            webUrl?: string;
+          }>(`/v1.0/drives/${encodeURIComponent(mapping.sourceDriveId)}`);
+          if (drive.id !== mapping.sourceDriveId || drive.driveType !== "documentLibrary")
+            throw new ProviderFault(
+              "unqualified_route",
+              "The source is not the exact SharePoint document library.",
+            );
+          const source = await this.resolveSourceRoot(mapping);
+          if (!source || source.kind !== "folder")
             throw new ProviderFault(
               "preflight_failed",
-              "The source drive does not belong to the configured SharePoint site.",
+              "The source root is not an enumerable folder.",
             );
+          await this.listSourceChildren(source.id);
+          if (mapping.sourceSiteId) {
+            const initial = `/v1.0/sites/${encodeURIComponent(mapping.sourceSiteId)}/drives?$select=id`;
+            let found = false;
+            for await (const items of cursorPages(
+              initial,
+              async (cursor) => {
+                const page = await this.#graph.request<{
+                  value: { id: string }[];
+                  "@odata.nextLink"?: string;
+                }>(cursor!);
+                return { value: page.value, next: page["@odata.nextLink"] };
+              },
+              () =>
+                new ProviderFault(
+                  "provider_request_failed",
+                  "Site drive paging repeated a cursor.",
+                ),
+            )) {
+              found ||= items.some((item) => item.id === mapping.sourceDriveId);
+            }
+            if (!found)
+              throw new ProviderFault(
+                "preflight_failed",
+                "The source drive does not belong to the configured SharePoint site.",
+              );
+          }
+          sourceEvidence = {
+            sourceSiteId: mapping.sourceSiteId ?? drive.sharepointIds?.siteId ?? null,
+            sourceDriveType: drive.driveType,
+          };
         }
-        const destination = await this.#getRaw(mapping.destFolderId);
+        const destination = await this.#getRaw(root.destFolderId);
         if (
-          destination.file.driveId !== mapping.destDriveId ||
+          destination.file.driveId !== root.destDriveId ||
           destination.file.mimeType !== FOLDER_MIME ||
           destination.file.capabilities?.canAddChildren !== true
         )
@@ -830,35 +853,26 @@ export class FileEffects {
           );
         this.#destination(destination.file);
         yield {
-          id: `provider.roots.${mapping.sourceDriveId}.${mapping.sourceItemId}`,
-          title: "Exact source and destination access",
+          id: checkId,
+          title,
           status: "pass",
-          evidence: {
-            ...evidence,
-            sourceSiteId: mapping.sourceSiteId ?? drive.sharepointIds?.siteId ?? null,
-            sourceDriveType: drive.driveType,
-          },
+          evidence: { ...evidence, ...sourceEvidence },
         };
       } catch (error) {
-        yield failedCheck(
-          `provider.roots.${mapping.sourceDriveId}.${mapping.sourceItemId}`,
-          "Exact source and destination access",
-          error,
-          evidence,
-        );
+        yield failedCheck(checkId, title, error, evidence);
         continue;
       }
       try {
-        const result = await this.#probeDestination(mapping);
+        const result = await this.#probeDestination(root, mapping);
         yield {
-          id: `provider.probe.${mapping.destFolderId}`,
+          id: `provider.probe.${root.destFolderId}`,
           title: "Disposable destination capability probe",
           status: "pass",
           evidence: { ...evidence, ...result },
         };
       } catch (error) {
         yield failedCheck(
-          `provider.probe.${mapping.destFolderId}`,
+          `provider.probe.${root.destFolderId}`,
           "Disposable destination capability probe",
           error,
           evidence,
@@ -878,7 +892,10 @@ export class FileEffects {
     };
   }
 
-  async #probeDestination(mapping: Mapping): Promise<Record<string, unknown>> {
+  async #probeDestination(
+    root: DestinationRoot,
+    mapping?: Mapping,
+  ): Promise<Record<string, unknown>> {
     const marker = randomUUID();
     const ids: string[] = [];
     const probeName = `.migmate-probe-${marker}`;
@@ -887,19 +904,19 @@ export class FileEffects {
     try {
       const rootId = await this.reserveDestinationId();
       ids.push(rootId);
-      const root = await responseJson<GoogleFile>(
+      const probeRoot = await responseJson<GoogleFile>(
         await this.#google(`/drive/v3/files?supportsAllDrives=true&fields=${FILE_FIELDS}`, {
           method: "POST",
           body: JSON.stringify({
             id: rootId,
             name: probeName,
-            parents: [mapping.destFolderId],
+            parents: [root.destFolderId],
             mimeType: FOLDER_MIME,
             appProperties: { migmateProbe: marker },
           }),
         }),
       );
-      this.#destination(root);
+      this.#destination(probeRoot);
       const childId = await this.reserveDestinationId();
       ids.push(childId);
       await responseJson(
@@ -929,8 +946,8 @@ export class FileEffects {
           migmateProbe: marker,
           ...markerProperties({
             mappingId: "probe",
-            sourceDriveId: mapping.sourceDriveId,
-            sourceItemId: mapping.sourceItemId,
+            sourceDriveId: mapping?.sourceDriveId ?? root.destDriveId,
+            sourceItemId: mapping?.sourceItemId ?? root.destFolderId,
             sourceIdentity: "probe",
             sourceKind: "file",
             sourceRelativePath: "probe.bin",

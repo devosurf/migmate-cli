@@ -1044,7 +1044,9 @@ class StoreImpl implements Store {
           : ["plan", "execute", "verify"]
       : [phase];
     return {
-      sql: `SELECT MAX(id) FROM finding WHERE rev=? AND phase IN (${phases.map(() => "?").join(",")}) GROUP BY code,subject_kind,subject_id`,
+      // Collection evidence is permanent; destination observations are reassessed
+      // by each verification, just like the file route's destination findings.
+      sql: `SELECT MAX(id) FROM finding WHERE rev=? AND phase IN (${phases.map(() => "?").join(",")})${archive && phase === "verify" ? " AND NOT (phase='execute' AND subject_kind='archive_object')" : ""} GROUP BY code,subject_kind,subject_id`,
       params: [revision, ...phases],
     };
   }

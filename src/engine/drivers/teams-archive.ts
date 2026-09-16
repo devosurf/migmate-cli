@@ -33,6 +33,7 @@ import {
   verifyArchivePackage,
 } from "../archive/package.ts";
 import { canonicalJson } from "../store/digest.ts";
+import { uploadArchiveDestination, verifyArchiveDestination } from "../archive/destination.ts";
 
 export { parseArchiveConfig } from "../archive/config.ts";
 export type { ArchiveConfig } from "../providers/archive.ts";
@@ -147,7 +148,10 @@ function findingRowProjection(plan: ArchivePlan) {
 function priorFindingRows(ctx: ArchiveDriverContext): ConversationCommitRow[] {
   return (ctx.resume.rows ?? []).filter(
     (row): row is ConversationCommitRow =>
-      row.jobType === "teams_archive" && row.kind !== "policy_outcome" && row.phase !== "verify",
+      row.jobType === "teams_archive" &&
+      row.kind !== "policy_outcome" &&
+      row.phase !== "verify" &&
+      row.archiveObjectPath === undefined,
   );
 }
 
@@ -682,6 +686,24 @@ export const teamsArchiveDriver = {
       total: plan.conversations.length,
     };
     yield withFindingRows(packageUnit, allRecords, priorFindingRows(ctx));
+    if (plan.config.destination) {
+      checkAbort(ctx);
+      const results = await verifyArchivePackage(join(directory(ctx), "archive"), {
+        plan,
+        records: allRecords,
+        evidence,
+        manifestDigest: ctx.resume.archiveManifestDigest ?? result.manifestDigest,
+      });
+      if (results.length) {
+        const rejected = commit(ctx, "execute", "destination-package-verification");
+        rejected.findings = results.map((gap) =>
+          finding(ctx, "execute", gap.code, gap.subjectId, gap.evidence),
+        );
+        yield withFindingRows(rejected, allRecords);
+        return;
+      }
+      yield* uploadArchiveDestination(ctx, plan, result.manifestDigest);
+    }
   },
   async *verify(ctx: ArchiveDriverContext): AsyncGenerator<ArchiveCommit> {
     const plan = approvedPlan(ctx);
@@ -717,6 +739,8 @@ export const teamsArchiveDriver = {
       ),
     );
     yield withFindingRows(unit, records, priorFindingRows(ctx));
+    if (plan.config.destination && ctx.resume.archiveManifestDigest)
+      yield* verifyArchiveDestination(ctx, plan, ctx.resume.archiveManifestDigest);
   },
   async *reportSections(ctx: ArchiveDriverContext): AsyncGenerator<ReportSection> {
     const plan = approvedPlan(ctx);
@@ -732,6 +756,12 @@ export const teamsArchiveDriver = {
       "Verification proves package self-consistency at a point in time, not a live tenant comparison. No Graph requests are made during verification.",
       "Incomplete collections and accepted exceptions retain their codes, items, evidence, and consequences. Host protection of local archive content is the operator's responsibility.",
     ];
+    if (plan.config.destination)
+      statements.push(
+        "The locally self-verified package is the authority. Shared Drive cold storage holds the three root indexes and manifest plus one ZIP per conversation; retrieve a ZIP using the exposed index.csv.",
+        "Destination objects are byte-verified against durable package fingerprints and private provenance markers. Verification reads the destination, never Graph. Copies are additive; unproven objects are never overwritten or deleted.",
+        "Drive does not preserve local read-only modes. Destination permissions and retention are the operator's responsibility; permissions and ownership were neither assessed nor migrated.",
+      );
     if (plan.config.lineage)
       statements.push(
         `Sibling lineage: ${canonicalJson(plan.config.lineage)}. Window overlap: ${plan.window.from < plan.config.lineage.to ? "yes" : "no"}. No assets or state reused from the sibling job.`,

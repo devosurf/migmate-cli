@@ -67,18 +67,24 @@ Scope: the two qualified routes — the file migration route from a SharePoint d
 
 **Other desktop architectures are not qualified.** `darwin-x64`, `linux-arm64` and `linux-x64` have no captured bundle. The tuple includes the architecture, so running on one of them refuses rather than assuming the observation transfers.
 
-**Any other source or destination is not qualified, and not implemented.** A generic rclone remote to another generic rclone remote is not a supported route: the credential loader accepts only an `onedrive` document-library source and a `drive` service-account destination, so any other backend refuses `credential_backend_unsupported`, and the route name itself refuses `unqualified_route`. Google My Drive as a destination is likewise neither qualified nor implemented. This is a statement about what was built, not a temporary gap in evidence.
+**Generic remotes and My Drive are not qualified or implemented.** A generic rclone remote to another generic rclone remote is not a supported route: the credential loader accepts only an `onedrive` document-library source and a `drive` service-account destination, so any other backend refuses `credential_backend_unsupported`, and the route name itself refuses `unqualified_route`. Google My Drive as a destination is likewise neither qualified nor implemented. This is a statement about what was built, not a temporary gap in evidence.
 
 **The three Teams archive options are not qualified.** `retainedHistory`, `transcripts` and `attachmentBytes` each change the route tuple, so each needs its own evidence bundle and none has one. Enabling any of them refuses `unqualified_route`. Their prerequisites are also not merely credentials: retained history needs a retention policy, transcripts need a tenant toggle plus an application access policy and a meeting organised by an explicitly scoped user, and attachment bytes need a tenant-wide file-read grant.
 
-**An optional Shared Drive archive destination is accepted as configuration, not qualified.**
+**An optional Shared Drive archive destination is implemented, not qualified.**
 `destination.destDriveId` and `destination.destFolderId` bind stable IDs, with a separate
 `secrets.google_service_account` file reference beside the existing Graph credential.
-Configuring it changes the route tuple and refuses `unqualified_route`; the published local
-archive bundle cannot qualify it. Uploads and live destination qualification are not
-implemented by this configuration change. With no destination,
-the existing local archive tuple and bundle remain valid. The six-role Graph allowlist
-is unchanged, and an extra Graph role still refuses `credential_permissions_invalid`.
+The existing archive driver self-verifies its local package, containerizes each conversation
+as a deterministic ZIP, and uploads the three root files plus one ZIP per conversation.
+Durable reserved IDs, private provenance markers, revision tokens, and byte verification
+govern replay and retention. Copies are create-only; collisions and drift are findings,
+never permission to overwrite. The local package remains authoritative, and Drive
+permissions are the operator's responsibility because Drive does not preserve POSIX modes.
+Configuring the destination changes the route tuple and still refuses `unqualified_route`
+until live destination qualification (#41) publishes its own bundle; the published local
+archive bundle cannot qualify it. With no destination, the existing local archive tuple,
+package behavior, and bundle remain unchanged. The six-role Graph allowlist is unchanged,
+and an extra Graph role still refuses `credential_permissions_invalid`.
 
 **Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records both published bundles and every gate still unrun.
 

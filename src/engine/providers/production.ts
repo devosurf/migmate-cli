@@ -18,6 +18,7 @@ export interface ProductionProviderInput {
   jobType: JobType;
   config: unknown;
   jobDirectory: string;
+  mode?: "archive_verification";
 }
 export interface ProductionProvider extends ProviderPort {
   archive?: ArchiveProvider;
@@ -43,6 +44,8 @@ function object(value: unknown): Record<string, unknown> {
 /** Construction is effect-free. The engine gates every real mutation with preflight and approval. */
 export function createProductionProvider(input: ProductionProviderInput): ProductionProvider {
   const config = object(input.config);
+  const needsTransferWorker =
+    input.jobType === "file_migration" || config.destination !== undefined;
   let pending: Promise<ProviderState> | undefined;
   let current: TransferWorkerHandle | null = null;
   let closed = false;
@@ -80,9 +83,12 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
           const graph = createGraphTransport(session);
           const worker = supervisor(session.rcloneConfigPath);
           const result: ProviderState = { session, graph, worker };
-          if (input.jobType === "file_migration") {
+          if (needsTransferWorker) {
             result.files = new FileEffects({
               config: input.config,
+              ...(input.jobType === "teams_archive"
+                ? { destination: parseArchiveConfig(input.config).destination! }
+                : {}),
               session,
               graph,
               worker: {
@@ -260,7 +266,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
       } catch (error) {
         yield failedCheck("provider.credentials", "File-backed application credentials", error, {});
       }
-      if (input.jobType === "file_migration") {
+      if (needsTransferWorker) {
         try {
           const proof = await binaryProof();
           yield {
@@ -315,7 +321,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
           "plan_revision_required",
           "The route evidence differs from the approved evidence.",
         );
-      if (input.jobType === "file_migration") {
+      if (needsTransferWorker) {
         const proof = await binaryProof();
         if (proof.sha256 !== expected.binarySha256 || proof.version !== expected.binaryVersion)
           throw new ProviderFault(
@@ -375,10 +381,10 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
       yield* (await files()).streamDestinationContent(id);
     },
     async startTransferWorker(value) {
-      if (input.jobType !== "file_migration" || current)
+      if (!needsTransferWorker || current)
         throw new ProviderFault(
           "preflight_failed",
-          "Only a file run without an existing worker can start a transfer worker.",
+          "Only a remote-destination run without an existing worker can start a transfer worker.",
         );
       current = await (await state()).worker.startTransferWorker(value);
       return current;

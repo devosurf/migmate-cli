@@ -553,9 +553,18 @@ function providerFor(
   paths: JobPaths,
   type: JobType,
   config: JobConfig,
+  archiveVerification = false,
 ): ProviderPort {
   return (
-    deps.provider ?? createProductionProvider({ jobType: type, config, jobDirectory: paths.dir })
+    deps.provider ??
+    createProductionProvider({
+      jobType: type,
+      config,
+      jobDirectory: paths.dir,
+      ...(archiveVerification && type === "teams_archive" && needsTransferWorker(config)
+        ? { mode: "archive_verification" as const }
+        : {}),
+    })
   );
 }
 
@@ -897,13 +906,16 @@ function readBoundEvidence(value: unknown): BoundEvidence {
   const checked = binding as unknown as BoundEvidence;
   return { ...checked, qualificationTuple: tuple };
 }
-async function boundEvidence(provider: ProviderPort, type: JobType): Promise<BoundEvidence> {
+function needsTransferWorker(config: JobConfig): boolean {
+  return "mappings" in config || config.destination !== undefined;
+}
+async function boundEvidence(provider: ProviderPort, config: JobConfig): Promise<BoundEvidence> {
   const identity = provider.applicationIdentity ? await provider.applicationIdentity() : "";
   const qualification = provider.qualificationEvidence
     ? await provider.qualificationEvidence()
     : undefined;
   const binary: Record<string, unknown> =
-    type === "file_migration" && provider.binaryEvidence ? await provider.binaryEvidence() : {};
+    needsTransferWorker(config) && provider.binaryEvidence ? await provider.binaryEvidence() : {};
   return {
     applicationIdentity: identity,
     binarySha256: typeof binary.sha256 === "string" ? binary.sha256 : "",
@@ -966,6 +978,7 @@ function inputFields(
           transcripts: config.transcripts,
           attachmentBytes: config.attachmentBytes,
           lineage: config.lineage,
+          ...(config.destination ? { destination: config.destination } : {}),
           route: config.route,
           guarantees: config.guarantees,
         };
@@ -1203,8 +1216,8 @@ function makeWriter(
       }
     }
   }
-  function provider(config: JobConfig): ProviderPort {
-    const p = providerFor(deps, paths, job().type, config);
+  function provider(config: JobConfig, archiveVerification = false): ProviderPort {
+    const p = providerFor(deps, paths, job().type, config, archiveVerification);
     providers.add(p);
     return p;
   }
@@ -1285,7 +1298,7 @@ function makeWriter(
         context(p, config, job().planRevision ?? 0),
       ))
         recordCheck(c);
-      if (job().type === "file_migration") {
+      if (needsTransferWorker(config)) {
         if (checks.some((check) => check.status === "fail"))
           recordCheck({
             id: "provider.transfer_worker",
@@ -1592,7 +1605,7 @@ function makeWriter(
         const plan =
           job().planRevision === null ? null : store.readPlanRevision(job().planRevision!);
         if (plan) {
-          const fresh = await boundEvidence(p, job().type),
+          const fresh = await boundEvidence(p, config),
             old = JSON.parse(plan.inputs.identity ?? "{}") as BoundEvidence;
           if (fresh.applicationIdentity !== old.applicationIdentity)
             return refuse(
@@ -1641,7 +1654,7 @@ function makeWriter(
           return refuse("retry_budget_exhausted", "Plan collection exhausted its retry budget.");
         const rows = store.readAllRows(revision, "plan"),
           resume = store.readResume(revision),
-          evidence = await boundEvidence(p, job().type);
+          evidence = await boundEvidence(p, config);
         if (!("mappings" in config) && !config.window.to && resume.archivePlan)
           config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
         const inputs = inputFields(config, evidence, rows, resume.archivePlan),
@@ -1763,8 +1776,8 @@ function makeWriter(
         const resume = store.readResume(plan.revision);
         if (!("mappings" in config) && !config.window.to && resume.archivePlan)
           config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
-        const p = provider(config),
-          evidence = await boundEvidence(p, job().type);
+        const p = provider(config, archiveVerificationResume),
+          evidence = await boundEvidence(p, config);
         const currentInputs = inputFields(
           config,
           evidence,
@@ -1796,7 +1809,7 @@ function makeWriter(
         if (signal.aborted) return terminalResult("interrupted", 0, budget);
         let worker: TransferWorkerHandle | undefined;
         try {
-          if (job().type === "file_migration") {
+          if (needsTransferWorker(config)) {
             worker = await startWorker(p, evidence.binaryPath);
             const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
             if (
@@ -1848,14 +1861,14 @@ function makeWriter(
         if (!["verified", "needs_attention"].includes(job().state) || job().planRevision === null)
           return refuse("verification_unaccepted", "Verification requires completed execution.");
         const config = readConfig(paths, job().type),
-          p = provider(config),
+          p = provider(config, true),
           revision = job().planRevision!,
           plan = store.readPlanRevision(revision)!;
         let worker: TransferWorkerHandle | undefined;
         try {
-          if (job().type === "file_migration") {
+          if (needsTransferWorker(config)) {
             const bound = readBoundEvidence(plan.evidence);
-            const evidence = await boundEvidence(p, job().type);
+            const evidence = await boundEvidence(p, config);
             if (canonicalJson(evidence) !== canonicalJson(bound))
               return refuse(
                 "plan_revision_required",

@@ -288,3 +288,98 @@ export async function stageSource(
     throw error;
   }
 }
+export interface Observation {
+  entry: DestinationEntry;
+  sha256: string | null;
+}
+export async function readObject(
+  provider: FileProvider,
+  driveId: string,
+  objectId: string,
+): Promise<DestinationEntry | null> {
+  return provider.readDestinationObject
+    ? provider.readDestinationObject({ driveId, objectId })
+    : provider.resolveDestinationFolder({ destDriveId: driveId, destFolderId: objectId });
+}
+export function terminalUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const detail = error as Error & { status?: number; statusCode?: number; code?: string };
+  return (
+    [401, 403, 404].includes(detail.status ?? detail.statusCode ?? 0) ||
+    detail.code === "content_verification_degraded"
+  );
+}
+export async function observe(
+  ctx: Pick<DriverContext<unknown>, "provider" | "signal">,
+  entry: DestinationEntry,
+): Promise<Observation> {
+  const provider: FileProvider = ctx.provider;
+  let sha256 = entry.reportedChecksum;
+  if (entry.kind === "file" && !sha256) {
+    try {
+      sha256 = (await hashStream(provider.streamDestinationContent(entry.id), ctx.signal)).sha256;
+    } catch (error) {
+      if (!terminalUnavailable(error)) throw error;
+    }
+  }
+  const fresh = await readObject(provider, entry.driveId, entry.id);
+  if (
+    !fresh ||
+    fresh.revision !== entry.revision ||
+    fresh.parentId !== entry.parentId ||
+    fresh.name !== entry.name ||
+    fresh.kind !== entry.kind ||
+    fresh.size !== entry.size ||
+    fresh.createdAt !== entry.createdAt ||
+    fresh.modifiedAt !== entry.modifiedAt ||
+    fresh.mimeType !== entry.mimeType ||
+    fresh.reportedChecksum !== entry.reportedChecksum
+  ) {
+    throw Object.assign(new Error("Destination changed during its fingerprint read"), {
+      code: "prior_copy_drift",
+    });
+  }
+  return { entry: fresh, sha256: entry.kind === "file" ? sha256 : null };
+}
+export function markerMatches(actual: FileMarker | null, expected: FileMarker): boolean {
+  return (
+    actual !== null &&
+    actual.mappingId === expected.mappingId &&
+    actual.sourceDriveId === expected.sourceDriveId &&
+    actual.sourceItemId === expected.sourceItemId &&
+    actual.sourceIdentity === expected.sourceIdentity &&
+    actual.sourceKind === expected.sourceKind &&
+    actual.sourceRelativePath === expected.sourceRelativePath &&
+    actual.sourceFingerprint === expected.sourceFingerprint &&
+    actual.verifiedFingerprint === expected.verifiedFingerprint &&
+    actual.createdAt === expected.createdAt &&
+    actual.modifiedAt === expected.modifiedAt &&
+    actual.mimeType === expected.mimeType &&
+    actual.stateRevision === expected.stateRevision
+  );
+}
+export function outputFindings(actual: Observation, expected: FileOutput): string[] {
+  const codes: string[] = [];
+  const entry = actual.entry;
+  if (
+    entry.id !== expected.id ||
+    entry.driveId !== expected.driveId ||
+    entry.parentId !== expected.parentId ||
+    entry.name !== expected.name
+  )
+    codes.push("destination_path_mismatch");
+  if (entry.kind !== expected.kind) codes.push("destination_type_conflict");
+  if (expected.kind === "file") {
+    if (entry.size !== expected.size) codes.push("size_mismatch");
+    if (actual.sha256 === null) codes.push("content_verification_degraded");
+    else if (expected.sha256 !== actual.sha256) codes.push("content_mismatch");
+    if (
+      Date.parse(entry.createdAt) !== Date.parse(expected.createdAt) ||
+      second(entry.modifiedAt) !== second(expected.modifiedAt) ||
+      entry.mimeType !== expected.mimeType
+    ) {
+      codes.push("metadata_mismatch");
+    }
+  }
+  return codes;
+}

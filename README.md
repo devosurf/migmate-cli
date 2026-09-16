@@ -96,10 +96,22 @@ it is a separate credential, not an extra Graph role. A configured destination r
 this reference when onboarding credentials. Omit both tables for the existing local-only
 archive.
 
-**This destination is not qualified and uploads are not implemented.** It produces a
-different route tuple and refuses `unqualified_route`, including when supplied the local
-archive's published bundle. The destination-free archive and its bundle are unchanged.
-See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
+The archive driver self-verifies the local package before building deterministic ZIPs
+and uploading anything from the package. The destination folder receives `index.html`,
+`index.csv`, and `manifest.json` as ordinary files, plus `<conversation-directory>.zip`
+for each conversation. Use the exposed `index.csv` to find a conversation, download its
+ZIP, and extract it locally. The local package remains the authority.
+
+Uploads are create-only, with durable reserved IDs and private provenance markers.
+Interrupted execution resumes without duplicating completed objects. Same-name unproven
+objects are retained and reported, never overwritten. Verification checks destination
+bytes and revision tokens without querying Graph; Drive permissions, not local read-only
+modes, protect the retained copy.
+
+**This destination is implemented but not qualified.** It produces a different route
+tuple and still refuses `unqualified_route` until its own captured evidence bundle exists
+(#41); the local archive's published bundle cannot qualify it. Destination-free behavior
+and its bundle are unchanged. See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
 
 ## Driving it from an agent or CI
 
