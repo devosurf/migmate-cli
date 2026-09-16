@@ -11,6 +11,17 @@
       "options": { "retainedHistory": false, "transcripts": false, "attachmentBytes": false },
       "capturedAt": "2026-09-16",
       "scope": "Graph v1.0 Global, application-only, channel and user-chats scope kinds, hosted content in the base contract. The three options are off, so each is a separate tuple that owes its own bundle."
+    },
+    {
+      "jobType": "file_migration",
+      "route": "sharepoint_library_to_shared_drive",
+      "tupleDigest": "bc7b3ea1afd1f3cf832b55ec7de32e4e0b0555e5096b20b2a1220f03d4266463",
+      "bundleDigest": "44f71ddc6d772a2c67f7a0a0b7aad118e6995af2794d385521d80cb0c2d20d93",
+      "desktopCell": "darwin-arm64",
+      "guaranteeSetId": "default",
+      "fullLiveMatrix": false,
+      "capturedAt": "2026-09-16",
+      "scope": "SharePoint document-library root to a pre-existing Google Shared Drive folder, rclone onedrive client-credentials source and drive service-account destination, transfer v1.75.0. fullLiveMatrix is false: the package capability rests on live_source_entry, reference on source_refuses_creation, undownloadable on absent_from_source_scope, per ADR-0006."
     }
   ],
   "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
@@ -32,10 +43,10 @@
     },
     {
       "id": "real_tenant_route_matrix",
-      "status": "in_progress",
-      "reason": "Live tenant credentials and disposable fixtures are in place, and the full suite now runs against a real SharePoint library and Shared Drive on darwin-arm64. No bundle is claimed until a run completes including teardown. Requires exactly Node 24.",
+      "status": "resolved",
+      "reason": "ADR-0005 and ADR-0006. The full file suite ran against a real SharePoint library and Shared Drive on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes, carrying all seven file probes. fullLiveMatrix is false and every capability records its proof value with matching evidence: package live_source_entry from a real OneNote notebook the driver omitted, reference source_refuses_creation with the live HTTP 400, undownloadable absent_from_source_scope with a census of 12 scanned children and no item of that kind. Publication additionally required the bundle-validator realpath fix from the archive route's run, which had refused every bundle written under a symlinked ancestor.",
       "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
-      "scope": "Exact source/destination/backend/options/guarantee-set tuple, pinned transfer version, and each desktop cell. No credential or captured-output import can assert successful qualification."
+      "scope": "Exact source/destination/backend/options/guarantee-set tuple, pinned transfer version, and each desktop cell. Only darwin-arm64 is captured; no credential or captured-output import can assert successful qualification."
     },
     {
       "id": "real_tenant_archive_route_matrix",
