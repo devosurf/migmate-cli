@@ -175,3 +175,133 @@ test("accepts the site-scoped grant and refuses a tenant-wide one", async (t) =>
     }
   }
 });
+
+async function archiveFiles(t: { after: (fn: () => Promise<unknown>) => void }) {
+  const directory = await mkdtemp(join(tmpdir(), "migmate-archive-credentials-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const graphPath = join(directory, "graph-secret");
+  const googlePath = join(directory, "service-account.json");
+  const googleSecret = serviceAccount();
+  await writeFile(graphPath, entraSecret, { mode: 0o600 });
+  await writeFile(googlePath, googleSecret, { mode: 0o600 });
+  const jobDirectory = await mkdtemp(join(directory, "job-"));
+  return {
+    jobDirectory,
+    googleSecret,
+    config: {
+      destination: { destDriveId: mapping.destDriveId, destFolderId: mapping.destFolderId },
+      graph: { tenantId, clientId },
+      secrets: {
+        teams_graph_client_secret: { resolver: "file", path: graphPath },
+        google_service_account: { resolver: "file", path: googlePath },
+      },
+    },
+  };
+}
+
+test("an archive authenticates its separate Google service account without exposing secret bytes", async (t) => {
+  const { config, jobDirectory, googleSecret } = await archiveFiles(t);
+  const googleToken = "google-access-token-canary";
+  const graphResponse = graphToken(["Chat.Read.All"]);
+  t.mock.method(globalThis, "fetch", async (target: string | URL | Request, init?: RequestInit) => {
+    if (String(target) === `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`)
+      return Response.json(graphResponse);
+    assert.equal(String(target), "https://oauth2.googleapis.com/token");
+    const body = new URLSearchParams(String(init?.body));
+    const assertion = body.get("assertion")!;
+    const claims = JSON.parse(Buffer.from(assertion.split(".")[1]!, "base64url").toString());
+    assert.equal(claims.iss, "migmate@migmate-test.iam.gserviceaccount.com");
+    assert.equal(claims.scope, "https://www.googleapis.com/auth/drive");
+    assert.equal(claims.sub, undefined);
+    return Response.json({ access_token: googleToken, token_type: "Bearer", expires_in: 3600 });
+  });
+  const session = await createCredentialSession({ jobType: "teams_archive", config, jobDirectory });
+  t.after(() => session.dispose());
+  assert.equal(await session.googleToken(), googleToken);
+  const evidence = await session.evidence();
+  const google = evidence.google as Record<string, unknown>;
+  assert.equal(google.subject, "migmate@migmate-test.iam.gserviceaccount.com");
+  assert.deepEqual(google.grantedScopes, ["https://www.googleapis.com/auth/drive"]);
+  const localSession = await createCredentialSession({
+    jobType: "teams_archive",
+    jobDirectory,
+    config: {
+      graph: config.graph,
+      secrets: { teams_graph_client_secret: config.secrets.teams_graph_client_secret },
+    },
+  });
+  t.after(() => localSession.dispose());
+  await assert.rejects(localSession.googleToken(), { code: "credential_google_unavailable" });
+  assert.notEqual(await session.identity(), await localSession.identity());
+  const visible = JSON.stringify({ session, evidence, identity: await session.identity() });
+  for (const secret of [
+    entraSecret,
+    googleToken,
+    graphResponse.access_token,
+    JSON.parse(googleSecret).private_key.split("\n")[1],
+  ]) {
+    assert.equal(visible.includes(secret), false);
+  }
+});
+
+test("archive Graph roles remain an exclusive six-role allowlist with or without a destination", async (t) => {
+  const { config, jobDirectory } = await archiveFiles(t);
+  const permitted = [
+    "Channel.ReadBasic.All",
+    "ChannelMessage.Read.All",
+    "Chat.Read.All",
+    "OnlineMeetings.Read.All",
+    "OnlineMeetingTranscript.Read.All",
+    "Files.Read.All",
+  ];
+  for (const destination of [false, true]) {
+    for (const extraRole of [false, true]) {
+      const token = graphToken(extraRole ? [...permitted, "Sites.Read.All"] : permitted);
+      t.mock.method(globalThis, "fetch", async () => Response.json(token));
+      const session = await createCredentialSession({
+        jobType: "teams_archive",
+        jobDirectory,
+        config: destination
+          ? config
+          : {
+              graph: config.graph,
+              secrets: { teams_graph_client_secret: config.secrets.teams_graph_client_secret },
+            },
+      });
+      try {
+        if (extraRole)
+          await assert.rejects(session.graphToken(), { code: "credential_permissions_invalid" });
+        else assert.equal(await session.graphToken(), token.access_token);
+      } finally {
+        session.dispose();
+      }
+    }
+  }
+});
+
+test("archive destination credentials must be external file references, not inline secrets", async (t) => {
+  const { config, jobDirectory, googleSecret } = await archiveFiles(t);
+  const insidePath = join(jobDirectory, "service-account.json");
+  await writeFile(insidePath, googleSecret, { mode: 0o600 });
+  for (const [reference, code] of [
+    [undefined, "credential_config_invalid"],
+    [JSON.parse(googleSecret), "credential_config_unsupported"],
+    [{ resolver: "file", path: insidePath }, "credential_inside_job"],
+  ] as const) {
+    await assert.rejects(
+      createCredentialSession({
+        jobType: "teams_archive",
+        jobDirectory,
+        config: {
+          ...config,
+          secrets: { ...config.secrets, google_service_account: reference },
+        },
+      }),
+      (error: unknown) =>
+        error instanceof ProviderFault &&
+        error.code === code &&
+        !JSON.stringify(error).includes(entraSecret) &&
+        !JSON.stringify(error).includes("PRIVATE KEY"),
+    );
+  }
+});

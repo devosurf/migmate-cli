@@ -156,7 +156,10 @@ type FileConfig = CommonConfig & {
 type TeamsConfig = CommonConfig &
   ArchiveConfig & {
     graph?: { tenantId: string; clientId: string };
-    secrets?: { teams_graph_client_secret: FileReference };
+    secrets?: {
+      teams_graph_client_secret: FileReference;
+      google_service_account?: FileReference;
+    };
   };
 export type JobConfig = FileConfig | TeamsConfig;
 
@@ -228,6 +231,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           "timezone",
           "window",
           "lineage",
+          "destination",
           "graph",
           "secrets",
         ],
@@ -350,6 +354,8 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
   if (input.window !== undefined) keys(object(input.window, "window"), ["from", "to"], "window");
   if (input.lineage !== undefined)
     keys(object(input.lineage, "lineage"), ["jobId", "reportDigest", "to"], "lineage");
+  if (input.destination !== undefined)
+    keys(object(input.destination, "destination"), ["destDriveId", "destFolderId"], "destination");
   let archive: ArchiveConfig;
   try {
     archive = parseArchiveConfig(input);
@@ -361,7 +367,13 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     const g = object(input.graph, "graph"),
       s = object(input.secrets, "secrets");
     keys(g, ["tenantId", "clientId"], "graph");
-    keys(s, ["teams_graph_client_secret"], "secrets");
+    keys(
+      s,
+      archive.destination
+        ? ["teams_graph_client_secret", "google_service_account"]
+        : ["teams_graph_client_secret"],
+      "secrets",
+    );
     const tenantId = text(g.tenantId, "graph.tenantId"),
       clientId = text(g.clientId, "graph.clientId");
     if (
@@ -376,6 +388,12 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         paths.dir,
       ),
     };
+    if (archive.destination)
+      config.secrets.google_service_account = fileReference(
+        s.google_service_account,
+        "secrets.google_service_account",
+        paths.dir,
+      );
   }
   return config;
 }

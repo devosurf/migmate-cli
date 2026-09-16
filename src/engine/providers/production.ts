@@ -175,7 +175,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
         "route_limits_and_version_gate",
       ];
     } else {
-      const requirements = archiveQualificationRequirements(parseArchiveConfig(input.config));
+      const archive = parseArchiveConfig(input.config);
+      const requirements = archiveQualificationRequirements(archive);
       tuple = {
         ...common,
         source: {
@@ -188,7 +189,12 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
             options: requirements.options,
           },
         },
-        destination: { system: "local_archive_package" },
+        destination: archive.destination
+          ? {
+              system: "google_shared_drive",
+              backend: { type: "drive", authentication: "service_account" },
+            }
+          : { system: "local_archive_package" },
       };
       requiredProbes = [
         "graph_route_matrix",

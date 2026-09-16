@@ -75,6 +75,32 @@ Operator config carries **credential references** — typed pointers to operator
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
 
+Teams archive config can also name an optional Google Shared Drive destination. Add these
+tables alongside the existing archive scopes, `graph` settings, and
+`secrets.teams_graph_client_secret` reference:
+
+```toml
+[destination]
+destDriveId = "0ABCsharedDrive"
+destFolderId = "1XYZarchiveFolder"
+
+[secrets.google_service_account]
+resolver = "file"
+path = "/absolute/path/to/service-account.json"
+mode = "0600"
+```
+
+Both destination fields are stable IDs, not display names, paths, or the `root` alias.
+The Google service-account JSON stays in an operator-owned file outside the job folder;
+it is a separate credential, not an extra Graph role. A configured destination requires
+this reference when onboarding credentials. Omit both tables for the existing local-only
+archive.
+
+**This destination is not qualified and uploads are not implemented.** It produces a
+different route tuple and refuses `unqualified_route`, including when supplied the local
+archive's published bundle. The destination-free archive and its bundle are unchanged.
+See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
+
 ## Driving it from an agent or CI
 
 Every command takes `--output text|json|jsonl` and answers with a versioned envelope, so nothing needs screen-scraping:

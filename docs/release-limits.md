@@ -71,6 +71,15 @@ Scope: the two qualified routes — the file migration route from a SharePoint d
 
 **The three Teams archive options are not qualified.** `retainedHistory`, `transcripts` and `attachmentBytes` each change the route tuple, so each needs its own evidence bundle and none has one. Enabling any of them refuses `unqualified_route`. Their prerequisites are also not merely credentials: retained history needs a retention policy, transcripts need a tenant toggle plus an application access policy and a meeting organised by an explicitly scoped user, and attachment bytes need a tenant-wide file-read grant.
 
+**An optional Shared Drive archive destination is accepted as configuration, not qualified.**
+`destination.destDriveId` and `destination.destFolderId` bind stable IDs, with a separate
+`secrets.google_service_account` file reference beside the existing Graph credential.
+Configuring it changes the route tuple and refuses `unqualified_route`; the published local
+archive bundle cannot qualify it. Uploads and live destination qualification are not
+implemented by this configuration change. With no destination,
+the existing local archive tuple and bundle remain valid. The six-role Graph allowlist
+is unchanged, and an extra Graph role still refuses `credential_permissions_invalid`.
+
 **Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records both published bundles and every gate still unrun.
 
 ## Related records

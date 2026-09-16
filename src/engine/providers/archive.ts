@@ -8,6 +8,7 @@ export type ArchiveScope =
   | { kind: "user-chats"; userId: string };
 export interface ArchiveConfig {
   scopes: ArchiveScope[];
+  destination?: { destDriveId: string; destFolderId: string };
   cloud: "Global";
   retainedHistory: boolean;
   transcripts: boolean;

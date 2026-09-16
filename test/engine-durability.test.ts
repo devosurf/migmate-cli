@@ -708,6 +708,76 @@ describe("engine durability seam", () => {
     assert.equal(JSON.stringify(await events(h.engine, h.ref)).includes(secret), false);
   });
 
+  it("round-trips an archive destination and separate credential references without persisting secrets", async (t) => {
+    const directory = join(await realpath(tmpdir()), "operator-owned");
+    const selected = {
+      scopes: [{ kind: "user-chats", userId: "user-one" }],
+      destination: { destDriveId: "0ABCsharedDrive", destFolderId: "1XYZarchiveFolder" },
+      graph: {
+        tenantId: "11111111-1111-1111-1111-111111111111",
+        clientId: "22222222-2222-2222-2222-222222222222",
+      },
+      secrets: {
+        teams_graph_client_secret: {
+          resolver: "file",
+          path: join(directory, "graph-secret"),
+          mode: "0600",
+        },
+        google_service_account: {
+          resolver: "file",
+          path: join(directory, "service-account.json"),
+          mode: "0600",
+        },
+      },
+    };
+    const h = await harness(
+      t,
+      { ...fileFixture(), archive: archiveFixture().fixture },
+      selected,
+      "teams_archive",
+    );
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const original = await readFile(path, "utf8");
+    const parsed = parseToml(original);
+    assert.deepEqual(parsed.destination, selected.destination);
+    assert.deepEqual(parsed.secrets, selected.secrets);
+    reopen(h);
+    value(await h.engine.withWriterResult(h.ref, (writer) => writer.onboard(parsed)));
+    const secret = "ARCHIVE-GOOGLE-SECRET-MUST-NOT-PERSIST-9c5b";
+    for (const invalid of [
+      { ...selected, destination: { destDriveId: "0ABCsharedDrive" } },
+      { ...selected, destination: { ...selected.destination, destFolderId: "root" } },
+      { ...selected, destination: { ...selected.destination, destDriveId: "Shared Drive name" } },
+      { ...selected, destination: { ...selected.destination, private_key: secret } },
+      {
+        ...selected,
+        secrets: {
+          ...selected.secrets,
+          google_service_account: { ...selected.secrets.google_service_account, value: secret },
+        },
+      },
+      {
+        ...selected,
+        secrets: {
+          ...selected.secrets,
+          google_service_account: {
+            resolver: "file",
+            path: join(h.home, "jobs", h.ref.id, "service-account.json"),
+          },
+        },
+      },
+    ]) {
+      refused(
+        await h.engine.withWriterResult(h.ref, (writer) => writer.onboard(invalid)),
+        "configuration_invalid",
+      );
+      assert.equal(await readFile(path, "utf8"), original);
+    }
+    for (const file of await diskSnapshot(h.home)) {
+      assert.equal(file.bytes?.includes(Buffer.from(secret)) ?? false, false, file.path);
+    }
+  });
+
   it("does not silently discard malformed mappings or string exclusions with an injected provider", async (t) => {
     const h = await harness(t);
     const path = join(h.home, "jobs", h.ref.id, "job.toml");

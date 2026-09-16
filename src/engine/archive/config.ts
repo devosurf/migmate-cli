@@ -85,6 +85,16 @@ export function parseArchiveConfig(value: unknown): ArchiveConfig {
     transcripts: flag(input.transcripts, "transcripts"),
     attachmentBytes: flag(input.attachmentBytes, "attachmentBytes"),
   };
+  if (input.destination !== undefined) {
+    const destination = object(input.destination, "destination");
+    const destDriveId = id(destination.destDriveId, "destination.destDriveId");
+    const destFolderId = id(destination.destFolderId, "destination.destFolderId");
+    for (const value of [destDriveId, destFolderId]) {
+      if (!/^[A-Za-z0-9_!.,@-]{1,512}$/u.test(value) || [".", "..", "root"].includes(value))
+        throw new TypeError("destination must name a drive and folder by stable identifier");
+    }
+    config.destination = { destDriveId, destFolderId };
+  }
   if (config.transcripts && !scopes.some((scope) => scope.kind === "user-chats"))
     throw new TypeError("transcripts require at least one explicitly scoped organizer user");
   if (input.lineage !== undefined) {

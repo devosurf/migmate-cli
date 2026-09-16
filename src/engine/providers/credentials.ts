@@ -409,7 +409,18 @@ async function loadCredentials(
       const fields = record(input.graph);
       allowedKeys(fields, ["tenantId", "clientId"]);
       const secrets = record(input.secrets);
-      allowedKeys(secrets, ["teams_graph_client_secret"]);
+      allowedKeys(
+        secrets,
+        input.destination === undefined
+          ? ["teams_graph_client_secret"]
+          : ["teams_graph_client_secret", "google_service_account"],
+      );
+      if (input.destination !== undefined) {
+        const destination = record(input.destination);
+        allowedKeys(destination, ["destDriveId", "destFolderId"]);
+        stableId(destination.destDriveId);
+        stableId(destination.destFolderId);
+      }
       const tenantId = guid(fields.tenantId);
       const clientId = guid(fields.clientId);
       const loaded = await readCredentialFile(
@@ -425,10 +436,22 @@ async function loadCredentials(
       } finally {
         loaded.bytes.fill(0);
       }
+      let google: GoogleCredential | undefined;
+      if (input.destination !== undefined) {
+        const serviceAccount = await readCredentialFile(
+          fileReference(secrets.google_service_account),
+          jobDirectory,
+        );
+        try {
+          google = googleCredential(serviceAccount.bytes);
+        } finally {
+          serviceAccount.bytes.fill(0);
+        }
+      }
       return {
         jobType,
         graph,
-        google: undefined,
+        google,
         mappings: [],
         configPath: null,
         sourceRemote: null,
