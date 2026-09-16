@@ -255,6 +255,7 @@ try {
             "graph_route_matrix",
             "hosted_content_bytes",
             "package_self_consistency",
+            ...(config.jobConfig.destination !== undefined ? ["archive_destination"] : []),
             ...(config.jobConfig.retainedHistory === true ? ["retained_history"] : []),
             ...(config.jobConfig.transcripts === true ? ["transcripts"] : []),
             ...(config.jobConfig.attachmentBytes === true ? ["attachment_bytes"] : []),

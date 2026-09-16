@@ -5,7 +5,7 @@ Finite, one-way movement or preservation of organizational content. The authorit
 Two job types:
 
 - **File migration** — SharePoint document library to a Google Shared Drive folder.
-- **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package.
+- **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package, optionally retained as conversation ZIPs in a Google Shared Drive folder.
 
 `CONTEXT.md` is the glossary. It is the authority on what each term means; this README assumes it.
 
@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release, and **not published to any registry** — there is no publish workflow, so merging to `main` does not release. Install from source.
 
-Only **two exact routes are qualified**, both on `darwin-arm64`. A route is a full tuple: source system, backend, permissions, options, destination, transfer binary version, and desktop cell. Change any element — including turning on an archive option — and it becomes a different tuple with no evidence, which the engine refuses with `unqualified_route` (exit 4). This is a deliberate gate, not a bug. `docs/release-limits.md` states what is and is not claimed; `qualification/gates.json` is the gate register.
+Only **three exact routes are qualified**, all on `darwin-arm64`: file migration, local Teams archive, and Teams archive with a Shared Drive destination. A route is a full tuple: source system, backend, permissions, options, destination, transfer binary version, and desktop cell. Change an element outside those tuples — including turning on an archive option — and it has no evidence, which the engine refuses with `unqualified_route` (exit 4). This is a deliberate gate, not a bug. `docs/release-limits.md` states what is and is not claimed; `qualification/gates.json` is the gate register.
 
 ## Requirements
 
@@ -108,10 +108,11 @@ objects are retained and reported, never overwritten. Verification checks destin
 bytes and revision tokens without querying Graph; Drive permissions, not local read-only
 modes, protect the retained copy.
 
-**This destination is implemented but not qualified.** It produces a different route
-tuple and still refuses `unqualified_route` until its own captured evidence bundle exists
-(#41); the local archive's published bundle cannot qualify it. Destination-free behavior
-and its bundle are unchanged. See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
+**This destination is qualified on `darwin-arm64`, with all three archive options off.**
+Its own live evidence bundle proves download byte verification, lost-acknowledgement
+recovery, unchanged replay, and deterministic containers regenerated from the live package.
+The destination-free tuple and its published bundle remain unchanged.
+See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
 
 ## Driving it from an agent or CI
 

@@ -4,7 +4,7 @@ Four properties of the first release are **measured, not guaranteed**. Two of th
 
 Each limit says what was measured, what Migmate does about it, and the refusal code or report line that names it while you are running a job. Everything here is already enforced in code; nothing on this page is a future intention.
 
-Scope: the two qualified routes — the file migration route from a SharePoint document-library root to a Google Shared Drive folder, and the Teams archive route from Graph v1.0 Global to a local archive package — both measured on `darwin-arm64` against a live tenant on 2026-09-15/16 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 are properties of the file route. Limit 5 states what is **not** qualified.
+Scope: three qualified tuples — the file migration route from a SharePoint document-library root to a Google Shared Drive folder, and the Teams archive route from Graph v1.0 Global to a local archive package with or without a Shared Drive destination — all measured on `darwin-arm64` against a live tenant on 2026-09-15/16 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 describe the file route; the archive destination reuses its Drive concurrency and provenance stack. Limit 5 states what is qualified.
 
 ## 1. The destination concurrency token is measured, not promised
 
@@ -54,16 +54,17 @@ Scope: the two qualified routes — the file migration route from a SharePoint d
 
 **Where you see it.** The `provider.credentials` preflight check and its recorded evidence — tenant id, client id, granted roles — and the `credential_permissions_invalid` refusal.
 
-## 5. Only two exact routes are qualified, on one machine architecture
+## 5. Only three exact routes are qualified, on one machine architecture
 
 **What a qualified route is.** The whole tuple: job type, source system and backend configuration, destination system and backend configuration, pinned transfer-binary version, guarantee-set id, and desktop architecture. A job whose tuple does not match a stored evidence bundle refuses `unqualified_route` before it does any work. There is no "probably compatible", no best-effort flag, and no degrade toggle.
 
-**What is qualified.** Exactly two tuples, both captured on `darwin-arm64`:
+**What is qualified.** Exactly three tuples, all captured on `darwin-arm64`:
 
-| Job type         | Route                                                    | Guarantees                 |
-| ---------------- | -------------------------------------------------------- | -------------------------- |
-| `file_migration` | SharePoint document library → Google Shared Drive folder | `default`                  |
-| `teams_archive`  | Graph v1.0 Global → local archive package                | `default`, all options off |
+| Job type         | Route                                                              | Guarantees                 |
+| ---------------- | ------------------------------------------------------------------ | -------------------------- |
+| `file_migration` | SharePoint document library → Google Shared Drive folder           | `default`                  |
+| `teams_archive`  | Graph v1.0 Global → local archive package                          | `default`, all options off |
+| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive containers | `default`, all options off |
 
 **Other desktop architectures are not qualified.** `darwin-x64`, `linux-arm64` and `linux-x64` have no captured bundle. The tuple includes the architecture, so running on one of them refuses rather than assuming the observation transfers.
 
@@ -71,7 +72,7 @@ Scope: the two qualified routes — the file migration route from a SharePoint d
 
 **The three Teams archive options are not qualified.** `retainedHistory`, `transcripts` and `attachmentBytes` each change the route tuple, so each needs its own evidence bundle and none has one. Enabling any of them refuses `unqualified_route`. Their prerequisites are also not merely credentials: retained history needs a retention policy, transcripts need a tenant toggle plus an application access policy and a meeting organised by an explicitly scoped user, and attachment bytes need a tenant-wide file-read grant.
 
-**An optional Shared Drive archive destination is implemented, not qualified.**
+**The optional Shared Drive archive destination has its own live qualification.**
 `destination.destDriveId` and `destination.destFolderId` bind stable IDs, with a separate
 `secrets.google_service_account` file reference beside the existing Graph credential.
 The existing archive driver self-verifies its local package, containerizes each conversation
@@ -80,13 +81,20 @@ Durable reserved IDs, private provenance markers, revision tokens, and byte veri
 govern replay and retention. Copies are create-only; collisions and drift are findings,
 never permission to overwrite. The local package remains authoritative, and Drive
 permissions are the operator's responsibility because Drive does not preserve POSIX modes.
-Configuring the destination changes the route tuple and still refuses `unqualified_route`
-until live destination qualification (#41) publishes its own bundle; the published local
-archive bundle cannot qualify it. With no destination, the existing local archive tuple,
-package behavior, and bundle remain unchanged. The six-role Graph allowlist is unchanged,
-and an extra Graph role still refuses `credential_permissions_invalid`.
+Configuring the destination changes the route tuple: `8f413512…` owns the separate
+bundle captured for #41; the published local archive bundle cannot qualify it.
+The live probe uploaded three root files and two conversation ZIPs, downloaded every
+object to compare SHA-256 and size, and checked private provenance markers and revision
+tokens. It lost an upload acknowledgement before the verified commit, reopened the durable
+journal, and recovered the same reserved object ID. A subsequent rerun left the destination
+inventory unchanged. Both ZIPs were regenerated from the live package after changing
+filesystem timestamps, with identical bytes. Final verification used destination-only
+credentials, not Graph.
+With no destination, tuple `6aa55648…`, package behavior, and its bundle remain unchanged.
+The six-role Graph allowlist is unchanged, and an extra Graph role still refuses
+`credential_permissions_invalid`.
 
-**Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records both published bundles and every gate still unrun.
+**Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records all three published bundles and every gate still unrun.
 
 ## Related records
 

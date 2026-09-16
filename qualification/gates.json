@@ -22,6 +22,17 @@
       "fullLiveMatrix": false,
       "capturedAt": "2026-09-16",
       "scope": "SharePoint document-library root to a pre-existing Google Shared Drive folder, rclone onedrive client-credentials source and drive service-account destination, transfer v1.75.0. fullLiveMatrix is false: the package capability rests on live_source_entry, reference on source_refuses_creation, undownloadable on absent_from_source_scope, per ADR-0006."
+    },
+    {
+      "jobType": "teams_archive",
+      "route": "teams_global_archive_to_shared_drive",
+      "tupleDigest": "8f413512e1d5f04cd4f102745a9bd958e16713e582002b04ca82b1cc6779621c",
+      "bundleDigest": "ab8c13259eba61eb7740b6b278e544cf6a73cdcd0c0b55cc82e1434a1f2bf5fd",
+      "desktopCell": "darwin-arm64",
+      "guaranteeSetId": "default",
+      "options": { "retainedHistory": false, "transcripts": false, "attachmentBytes": false },
+      "capturedAt": "2026-09-16",
+      "scope": "Graph v1.0 Global to a disposable Google Shared Drive folder using a separate service-account credential. Three exposed root objects and two conversation ZIPs, downloaded and SHA-256 verified. Live container regeneration ignores changed filesystem timestamps; a lost upload acknowledgement recovers the reserved ID, and replay preserves object IDs, revision tokens and markers. The local-only archive tuple remains independently qualified."
     }
   ],
   "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
@@ -56,6 +67,13 @@
       "reason": "ADR-0007. The full archive suite ran against a live Global tenant on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes: route matrix, hosted-content bytes for both scope kinds including a channel reply, durable restart, and byte-deterministic package regeneration. Two live-only defects had to be fixed first: every export request used an inclusive lower bound the routes refuse with HTTP 400, and the bundle validator confined a realpath beneath an unresolved root, refusing any bundle published under a symlinked ancestor. Options remain unproven by design.",
       "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
       "scope": "Exact Graph route/permission/option tuple, pinned transfer version, and each desktop cell. retainedHistory, transcripts and attachmentBytes are separate tuples and none is claimed."
+    },
+    {
+      "id": "real_tenant_archive_destination_route_matrix",
+      "status": "resolved",
+      "reason": "ADR-0008 and issue #41. Live darwin-arm64 capture on Node 24.21.0 includes the archive probes plus archive_destination: five real Drive objects, private provenance, full download byte verification, lost-acknowledgement restart, unchanged rerun, and destination verification without Graph credentials. Both live conversation containers reproduce their uploaded bytes after filesystem timestamps change. Evidence audited against live identifiers, names, email addresses and protected credential references; only counts, codes, public root filenames and digests are published.",
+      "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
+      "scope": "Exact archive-with-destination tuple, all three archive options off, transfer v1.75.0, darwin-arm64 only. Neither the local archive bundle nor the file-route bundle substitutes for this evidence."
     },
     {
       "id": "file_live_source_path_guard",

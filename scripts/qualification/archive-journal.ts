@@ -161,6 +161,7 @@ export class ArchiveJournal {
       archiveRecords: [],
       archiveEvidence: [],
       committedUnits: [],
+      rows: [],
     };
     const records = new Map<string, NonNullable<ArchiveResumeState["archiveRecords"]>[number]>();
     for (const unit of units) {
@@ -174,6 +175,7 @@ export class ArchiveJournal {
         if (!prior) records.set(record.key, record);
       }
       if (unit.archiveEvidence) state.archiveEvidence!.push(unit.archiveEvidence);
+      state.rows!.push(...unit.rows);
       if (unit.archiveManifestDigest) state.archiveManifestDigest = unit.archiveManifestDigest;
       if (unit.watermark) state.watermarks[unit.watermark.unitKey] = unit.watermark.value;
       state.committedUnits!.push(unit.unitKey);
@@ -289,15 +291,15 @@ export class ArchiveJournal {
   }
 
   async run(
-    phase: "plan" | "execute",
+    phase: "plan" | "execute" | "verify",
     config: ArchiveConfig,
     provider: ArchiveDriverContext["provider"],
-    stopAfterPage = false,
+    stopAfter?: "page" | "destination_upload",
   ): Promise<boolean> {
     // Every invocation, especially restart, reconstructs the approved plan,
     // records, page evidence and watermarks from the actual fsynced journal.
     const resume = await this.resume();
-    const committed = new Set(resume.committedUnits);
+    const committed = new Map((await this.units()).map((unit) => [unit.unitKey, unit]));
     const context: ArchiveDriverContext = {
       config,
       provider,
@@ -308,18 +310,46 @@ export class ArchiveJournal {
       now: () => new Date(),
     };
     const iterator =
-      phase === "plan" ? teamsArchiveDriver.collect(context) : teamsArchiveDriver.execute(context);
+      phase === "plan"
+        ? teamsArchiveDriver.collect(context)
+        : phase === "execute"
+          ? teamsArchiveDriver.execute(context)
+          : teamsArchiveDriver.verify(context);
     try {
       for (;;) {
         this.#signal.throwIfAborted();
         const next = await iterator.next();
         if (next.done) return false;
-        requireFact(!committed.has(next.value.unitKey), "archive_driver_replayed_committed_unit");
-        await this.#commit(next.value);
-        committed.add(next.value.unitKey);
+        const unit = next.value;
+        // Lose the acknowledgement only after the real upload and byte check,
+        // leaving its prepared identity as the last durable destination state.
+        if (
+          stopAfter === "destination_upload" &&
+          unit.rows.some(
+            (row) =>
+              row.jobType === "teams_archive" && row.archiveDestination?.status === "verified",
+          )
+        )
+          return true;
+        const prior = committed.get(unit.unitKey);
+        if (prior) {
+          // Like the engine store, a replay cannot replace committed resources.
+          for (const file of prior.archiveFileProofs ?? []) {
+            const incoming = unit.archiveFiles?.find((candidate) => candidate.path === file.path);
+            requireFact(
+              incoming?.sha256 === file.sha256 &&
+                createHash("sha256").update(incoming.content).digest("hex") === file.sha256 &&
+                (await archiveFileProof(join(this.archiveRoot, file.path))).sha256 === file.sha256,
+              "archive_replayed_package_changed",
+            );
+          }
+          continue;
+        }
+        await this.#commit(unit);
+        committed.set(unit.unitKey, unit);
         // No generator.next() is reachable until assets, package files and the
         // complete yielded unit have all crossed the durability boundary.
-        if (stopAfterPage && next.value.archiveEvidence) return true;
+        if (stopAfter === "page" && unit.archiveEvidence) return true;
       }
     } finally {
       await iterator.return(undefined);

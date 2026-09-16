@@ -32,6 +32,7 @@ import {
   type QualificationInput,
   type QualificationResult,
 } from "./common.ts";
+import { qualifyArchiveDestination } from "./archive-destination.ts";
 
 type ScopeKind = "channel" | "chat";
 type Assertion = ProbeCapture["assertions"][number];
@@ -215,8 +216,8 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
       config.scopes.map((scope): ScopeKind => (scope.kind === "user-chats" ? "chat" : "channel")),
     ),
   ].sort();
-  // Archive does not launch a transfer worker. The tuple still pins the actual
-  // shipped binary; proveBinary uses that executable's local core/version API.
+  // Pin the shipped binary for both tuples. Destination probes also start the
+  // managed worker; the local-only route needs only its core/version proof.
   const supervisor = createTransferSupervisor({
     configPath: null,
     jobDirectory: input.jobDirectory,
@@ -305,7 +306,7 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
     // Stop after the first actual page has become durable, even when that page
     // exhausts its route. Continuations are reported only when Graph emits one.
     requireFact(
-      await journal.run("execute", config, provider, true),
+      await journal.run("execute", config, provider, "page"),
       "archive_restart_page_unavailable",
     );
     const checkpoint = await journal.resume();
@@ -326,12 +327,16 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
         (await archiveFileProof(journal.path)).sha256 === restartJournalDigest,
       "archive_restart_durable_state_changed",
     );
-    provider = createProductionProvider({
-      jobType: "teams_archive",
-      config: jobConfig,
-      jobDirectory: input.jobDirectory,
-    });
-    await journal.run("execute", config, provider);
+    if (config.destination) {
+      input.capture(await qualifyArchiveDestination(input, config));
+    } else {
+      provider = createProductionProvider({
+        jobType: "teams_archive",
+        config: jobConfig,
+        jobDirectory: input.jobDirectory,
+      });
+      await journal.run("execute", config, provider);
+    }
     resumedEvidenceCount = (await journal.resume()).archiveEvidence!.length - restartEvidenceCount;
   } finally {
     requireFact(provider.close, "archive_provider_close_required");
@@ -516,7 +521,12 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
         options: requirements.options,
       },
     },
-    destination: { system: "local_archive_package" },
+    destination: config.destination
+      ? {
+          system: "google_shared_drive",
+          backend: { type: "drive", authentication: "service_account" },
+        }
+      : { system: "local_archive_package" },
     transferVersion: binary.version,
     guaranteeSetId: jobConfig.guarantees ?? "default",
     desktopCell: `${process.platform}-${process.arch}`,
@@ -636,6 +646,7 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
   );
 
   const requiredProbes = ["graph_route_matrix", "hosted_content_bytes", "package_self_consistency"];
+  if (config.destination) requiredProbes.push("archive_destination");
   if (config.retainedHistory) {
     const retained = paging.filter((page) => page.route === "retained");
     capture(

@@ -95,7 +95,19 @@
           "properties": {
             "teams_graph_client_secret": {
               "$ref": "#/$defs/fileReference"
+            },
+            "google_service_account": {
+              "$ref": "#/$defs/fileReference"
             }
+          },
+          "additionalProperties": false
+        },
+        "destination": {
+          "type": "object",
+          "required": ["destDriveId", "destFolderId"],
+          "properties": {
+            "destDriveId": { "type": "string", "minLength": 1 },
+            "destFolderId": { "type": "string", "minLength": 1 }
           },
           "additionalProperties": false
         },
@@ -306,7 +318,17 @@
       "then": {
         "properties": {
           "jobConfig": {
-            "required": ["graph", "secrets", "scopes", "window", "cloud", "timezone"]
+            "required": ["graph", "secrets", "scopes", "window", "cloud", "timezone"],
+            "allOf": [
+              {
+                "if": { "required": ["destination"] },
+                "then": {
+                  "properties": {
+                    "secrets": { "required": ["google_service_account"] }
+                  }
+                }
+              }
+            ]
           }
         }
       }

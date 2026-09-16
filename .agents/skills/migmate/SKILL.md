@@ -42,7 +42,7 @@ Match the exit status first, then the code.
 
 Codes worth recognising:
 
-- **`unqualified_route`** — the requested route tuple has no captured evidence. A tuple covers source system, backend, permissions, options, destination, transfer version, and desktop cell, so flipping one archive option produces a different tuple that owns its own bundle. Two tuples are qualified, both on `darwin-arm64`; `docs/release-limits.md` says what is claimed. Report this and stop: qualifying a route is a live tenant run, not a code change.
+- **`unqualified_route`** — the requested route tuple has no captured evidence. A tuple covers source system, backend, permissions, options, destination, transfer version, and desktop cell, so flipping one archive option produces a different tuple that owns its own bundle. `docs/release-limits.md` states the qualified tuples and desktop cells. Report this and stop: qualifying a route requires live tenant evidence.
 - **`credential_permissions_invalid`** — the credential's roles do not match the route's allowlist, which is exclusive. One extra role refuses the whole credential, which is why each route needs its own app registration.
 - **`lease_held` / `lease_stale_worker_alive`** — a writer owns the job. Read with `--review`. Clear a genuinely stale lease with `reclaim --job ID --confirm`, and reach for that only once the owning process is known to be gone; removing files by hand corrupts the job.
 - **`verification_unaccepted`** — `close` reached an unaccepted finding. Surface the findings and let a human decide each.
@@ -59,4 +59,4 @@ Operator config holds **credential references**: typed pointers to operator-owne
 
 `npm run typecheck` and `npm test` are hermetic and fast. `npm run check:package` packs, installs globally into a temporary prefix, and smoke-tests the artifact — run it when packaging, the vendored binaries, or the shipped qualification bundles are in scope.
 
-Those bundles under `qualification/<tupleDigest>/<bundleDigest>/` are runtime data: `readQualifiedBundle` is confined to the installed artifact, so dropping them from the package unqualifies both routes. Published bundles are `0444`/`0555`; `chmod -R u+w` before removing an evidence directory.
+Those bundles under `qualification/<tupleDigest>/<bundleDigest>/` are runtime data: `readQualifiedBundle` is confined to the installed artifact, so dropping a bundle from the package unqualifies its route. Published bundles are `0444`/`0555`; `chmod -R u+w` before removing an evidence directory.

@@ -206,6 +206,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
         "graph_route_matrix",
         "hosted_content_bytes",
         "package_self_consistency",
+        ...(archive.destination ? ["archive_destination"] : []),
         ...(requirements.options.retainedHistory ? ["retained_history"] : []),
         ...(requirements.options.transcripts ? ["transcripts"] : []),
         ...(requirements.options.attachmentBytes ? ["attachment_bytes"] : []),

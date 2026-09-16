@@ -1,0 +1,1 @@
+{"assertions":[{"expected":true,"id":"native_custom_protocol_roundtrip","observed":true}],"codes":[],"completedAt":"2026-09-16T22:37:55.808Z","observations":{"desktopCell":"darwin-arm64","fullLifecycleParity":"separate_required_gate","runtime":"@webviewjs/webview","version":"0.4.5"},"probeId":"desktop_runtime","schemaVersion":1,"startedAt":"2026-09-16T22:37:55.412Z"}
