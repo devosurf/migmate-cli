@@ -1,10 +1,10 @@
 # Release limits
 
-Four properties of the first release are **measured, not guaranteed**. Two of them are permanent properties of the providers Migmate talks to, so no amount of work in Migmate removes them; two rest on observations of a live tenant whose sample size is stated below.
+Four properties of the first release are **measured, not guaranteed**. Two of them are permanent properties of the providers Migmate talks to, so no amount of work in Migmate removes them; two rest on observations of a live tenant whose sample size is stated below. A fifth section states the exact routes and architectures that are qualified at all, because everything outside them refuses rather than degrades.
 
 Each limit says what was measured, what Migmate does about it, and the refusal code or report line that names it while you are running a job. Everything here is already enforced in code; nothing on this page is a future intention.
 
-Scope: the qualified file migration route — SharePoint document-library root to Google Shared Drive folder — measured on `darwin-arm64` against a live tenant on 2026-09-15/16 with the pinned transfer binary `v1.75.0`. The Teams archive route has no live observation yet; it claims none.
+Scope: the two qualified routes — the file migration route from a SharePoint document-library root to a Google Shared Drive folder, and the Teams archive route from Graph v1.0 Global to a local archive package — both measured on `darwin-arm64` against a live tenant on 2026-09-15/16 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 are properties of the file route. Limit 5 states what is **not** qualified.
 
 ## 1. The destination concurrency token is measured, not promised
 
@@ -54,6 +54,25 @@ Scope: the qualified file migration route — SharePoint document-library root t
 
 **Where you see it.** The `provider.credentials` preflight check and its recorded evidence — tenant id, client id, granted roles — and the `credential_permissions_invalid` refusal.
 
+## 5. Only two exact routes are qualified, on one machine architecture
+
+**What a qualified route is.** The whole tuple: job type, source system and backend configuration, destination system and backend configuration, pinned transfer-binary version, guarantee-set id, and desktop architecture. A job whose tuple does not match a stored evidence bundle refuses `unqualified_route` before it does any work. There is no "probably compatible", no best-effort flag, and no degrade toggle.
+
+**What is qualified.** Exactly two tuples, both captured on `darwin-arm64`:
+
+| Job type         | Route                                                    | Guarantees                 |
+| ---------------- | -------------------------------------------------------- | -------------------------- |
+| `file_migration` | SharePoint document library → Google Shared Drive folder | `default`                  |
+| `teams_archive`  | Graph v1.0 Global → local archive package                | `default`, all options off |
+
+**Other desktop architectures are not qualified.** `darwin-x64`, `linux-arm64` and `linux-x64` have no captured bundle. The tuple includes the architecture, so running on one of them refuses rather than assuming the observation transfers.
+
+**Any other source or destination is not qualified, and not implemented.** A generic rclone remote to another generic rclone remote is not a supported route: the credential loader accepts only an `onedrive` document-library source and a `drive` service-account destination, so any other backend refuses `credential_backend_unsupported`, and the route name itself refuses `unqualified_route`. Google My Drive as a destination is likewise neither qualified nor implemented. This is a statement about what was built, not a temporary gap in evidence.
+
+**The three Teams archive options are not qualified.** `retainedHistory`, `transcripts` and `attachmentBytes` each change the route tuple, so each needs its own evidence bundle and none has one. Enabling any of them refuses `unqualified_route`. Their prerequisites are also not merely credentials: retained history needs a retention policy, transcripts need a tenant toggle plus an application access policy and a meeting organised by an explicitly scoped user, and attachment bytes need a tenant-wide file-read grant.
+
+**Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records both published bundles and every gate still unrun.
+
 ## Related records
 
 These limits are operator-facing statements of decisions recorded elsewhere. The records are not required reading; they are the longer form.
@@ -61,4 +80,5 @@ These limits are operator-facing statements of decisions recorded elsewhere. The
 - [ADR-0003](adr/0003-site-scoped-file-route.md) — the file route is site-scoped, not tenant-wide.
 - [ADR-0004](adr/0004-drive-revision-concurrency.md) — destination concurrency rests on Drive's revision, not an ETag.
 - [ADR-0005](adr/0005-unrepresentable-path-proof.md) and [ADR-0006](adr/0006-capability-sample-proofs.md) — what the qualification bundle may claim when the source cannot hold a sample.
+- [ADR-0007](adr/0007-archive-scope-reads-and-window-filter.md) — what a Teams archive scope reads, and how its window survives an exclusive-only filter.
 - `qualification/gates.json` — the release-prerequisite register, including which gates remain unrun.
