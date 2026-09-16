@@ -20,11 +20,11 @@ A boolean present/absent treatment cannot tell these apart, so the bundle either
 
 **Each capability records one of three proof values, and the bundle validator requires the matching evidence for each.**
 
-| Value | Means | Required evidence |
-| --- | --- | --- |
-| `live_source_entry` | A real item existed and the driver omitted it | the `<kind>_omission` assertion, expected and observed `true` |
-| `source_refuses_creation` | The platform refused a real create attempt in this run | the live HTTP status of that attempt, which must be 400 |
-| `absent_from_source_scope` | No such item in the scanned scope and no API creates one | a kind census with items scanned > 0 and that kind's count 0 |
+| Value                      | Means                                                    | Required evidence                                             |
+| -------------------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
+| `live_source_entry`        | A real item existed and the driver omitted it            | the `<kind>_omission` assertion, expected and observed `true` |
+| `source_refuses_creation`  | The platform refused a real create attempt in this run   | the live HTTP status of that attempt, which must be 400       |
+| `absent_from_source_scope` | No such item in the scanned scope and no API creates one | a kind census with items scanned > 0 and that kind's count 0  |
 
 The values live in `src/qualification/bundle.ts` beside `weakerProofByKind`, the one table naming the weaker proof each kind may rest on. The suite decides a value from it and the validator enforces it from the same table, so the two cannot drift; the validator refuses any fourth value. The `route_limits_and_version_gate` probe carries `capabilityProofs`, `sourceKindCensus`, and `sourceRefusedReferenceStatus`.
 

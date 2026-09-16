@@ -44,7 +44,9 @@ function capture(probeId: string, overrides: Partial<ProbeCapture> = {}): ProbeC
 /** The proven route probe: a supplied package sample, a refused reference create, and an absent undownloadable kind. */
 function routeCapture(
   observations: Record<string, unknown> = {},
-  assertions: ProbeCapture["assertions"] = [{ id: "package_omission", expected: true, observed: true }],
+  assertions: ProbeCapture["assertions"] = [
+    { id: "package_omission", expected: true, observed: true },
+  ],
 ): ProbeCapture {
   return capture("route_limits_and_version_gate", {
     assertions: [{ id: "probe_ran", expected: true, observed: true }, ...assertions],

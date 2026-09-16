@@ -27,9 +27,7 @@ export const collisionCodes = [
 export const sourceCapabilityKinds = ["package", "reference", "undownloadable"] as const;
 export type SourceCapabilityKind = (typeof sourceCapabilityKinds)[number];
 export type SourceCapabilityProof =
-  | "live_source_entry"
-  | "source_refuses_creation"
-  | "absent_from_source_scope";
+  "live_source_entry" | "source_refuses_creation" | "absent_from_source_scope";
 /** ADR-0006: the one weaker proof each kind may rest on, if any. `live_source_entry` is
  * open to every kind. A package is obtainable on demand, so it has no weaker form. */
 export const weakerProofByKind = {
