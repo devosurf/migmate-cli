@@ -407,6 +407,39 @@ export class FileFixtures {
       throw error;
     }
   }
+  /** A reference is a `remoteItem`, which a document library refuses to hold: ADR-0006. */
+  async rejectedReferenceItem(parent: string): Promise<number> {
+    if (!this.#sources.has(parent))
+      throw new QualificationBlocked("file_fixture_reference_requires_owned_parent");
+    await this.#sourceParent(parent);
+    let created: string;
+    try {
+      // A real create attempt naming a real item of this same drive, not a fabricated facet.
+      const item = await this.#graph<GraphItem>(`${this.#sourcePath(parent)}/children`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: `reference-${this.owner}`,
+          remoteItem: {
+            id: parent,
+            parentReference: { driveId: this.#config.disposableRoots.sourceDriveId },
+          },
+          "@microsoft.graph.conflictBehavior": "fail",
+        }),
+      });
+      created = identifier(item.id);
+      this.#sources.set(created, false);
+    } catch (error) {
+      if (error instanceof HttpProviderFault && error.status === 400) return error.status;
+      throw error;
+    }
+    try {
+      await this.deleteSource(created);
+    } catch {
+      // A leftover stays in the cleanup set and is reported there. The creatable
+      // reference is the finding the operator must act on, so it wins here.
+    }
+    throw new QualificationBlocked("file_live_reference_fixture_creatable");
+  }
   async destinationObject(
     parent: string,
     name: string,

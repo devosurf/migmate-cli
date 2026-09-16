@@ -22,8 +22,17 @@ import {
   type FileState,
 } from "../../src/engine/drivers/file-state.ts";
 import type { CommitUnit } from "../../src/engine/drivers/types.ts";
-import { collisionCodes, fileProbeIds } from "../../src/qualification/bundle.ts";
-import type { ProbeCapture } from "../../src/qualification/bundle.ts";
+import {
+  collisionCodes,
+  fileProbeIds,
+  sourceCapabilityKinds,
+  weakerProofByKind,
+} from "../../src/qualification/bundle.ts";
+import type {
+  ProbeCapture,
+  SourceCapabilityKind,
+  SourceCapabilityProof,
+} from "../../src/qualification/bundle.ts";
 import { canonicalJson, digestJson } from "../../src/engine/store/digest.ts";
 import {
   QualificationBlocked,
@@ -40,6 +49,64 @@ class Facts {
   expect(id: string, expected: unknown, observed: unknown): void {
     this.assertions.push(qualificationAssertion("file_probe_", id, expected, observed));
   }
+}
+
+export interface SourceKindCensus {
+  scope: string;
+  itemsScanned: number;
+  kinds: Record<string, number>;
+}
+
+/** The scanned scope is the mapping source root's children: the only place a supplied sample is accepted. */
+export function kindCensus(children: readonly SourceEntry[]): SourceKindCensus {
+  const kinds: Record<string, number> = {
+    file: 0,
+    folder: 0,
+    package: 0,
+    reference: 0,
+    undownloadable: 0,
+  };
+  for (const child of children) {
+    // The driver omits a file it cannot download as content-unavailable, so count it there.
+    const kind = child.kind === "file" && !child.downloadable ? "undownloadable" : child.kind;
+    kinds[kind] = (kinds[kind] ?? 0) + 1;
+  }
+  return { scope: "mapping_source_root_children", itemsScanned: children.length, kinds };
+}
+
+/** One capability's recorded proof value, or the gate that refuses the run without it. */
+export interface CapabilityProofResolution {
+  proof: SourceCapabilityProof | null;
+  gate: string | null;
+}
+
+/** ADR-0006: a source that can hold the sample still owes the live source entry, and a
+ * kind's weaker proof is admissible only where the bundle validator accepts it. */
+export function capabilityProof(input: {
+  kind: SourceCapabilityKind;
+  supplied: boolean;
+  liveSourceEntry: boolean;
+  refusedCreationStatus: number | null;
+  census: SourceKindCensus;
+}): CapabilityProofResolution {
+  const { kind, census } = input;
+  if (input.supplied) {
+    return input.liveSourceEntry
+      ? { proof: "live_source_entry", gate: null }
+      : { proof: null, gate: `file_live_${kind}_fixture_unproven` };
+  }
+  const owed: CapabilityProofResolution = {
+    proof: null,
+    gate: `file_live_${kind}_fixture_unavailable`,
+  };
+  // A sample the scanned scope does hold is the operator's to supply.
+  if ((census.kinds[kind] ?? 0) !== 0) return owed;
+  const weaker = weakerProofByKind[kind];
+  if (weaker === "source_refuses_creation" && input.refusedCreationStatus === 400)
+    return { proof: weaker, gate: null };
+  if (weaker === "absent_from_source_scope" && census.itemsScanned > 0)
+    return { proof: weaker, gate: null };
+  return owed;
 }
 
 /** Maintainer-only: real effects under separately acknowledged disposable roots, never a qualification bypass in production. */
@@ -655,8 +722,11 @@ export async function runFileQualification(
     const specialIds = configured.specialSources;
     let liveSourcePathProven = false;
     const selected = Object.values(specialIds);
+    // One listing serves both the read-only route mapping and the kind census.
+    const liveChildren = await provider.listSourceChildren(rootMapping.sourceItemId);
+    const sourceKindCensus = kindCensus(liveChildren);
+    const liveSourceEntries = new Set<SourceCapabilityKind>();
     if (selected.length) {
-      const liveChildren = await provider.listSourceChildren(rootMapping.sourceItemId);
       const specialMapping = {
         ...rootMapping,
         id: `qualification-${fixtures.owner}-source-limits`,
@@ -671,20 +741,21 @@ export async function runFileQualification(
       const log = await journal("source-limits");
       const observed = await log.run("plan", { mappings: [specialMapping] }, provider);
       routeUnits.push(...observed.units);
-      for (const [key, kind, expectedCode] of [
-        ["packageId", "package", "source_package_omitted"],
-        ["referenceId", "reference", "source_reference_omitted"],
-        ["undownloadableId", "undownloadable", "source_content_unavailable"],
+      for (const [kind, expectedCode] of [
+        ["package", "source_package_omitted"],
+        ["reference", "source_reference_omitted"],
+        ["undownloadable", "source_content_unavailable"],
       ] as const) {
-        const id = specialIds[key];
+        const id = specialIds[`${kind}Id`];
         if (!id) continue;
         const actual = await source(id);
+        const codes = observedCodes(observed.units, id);
+        // A supplied sample that produced no omission refuses below under the
+        // `_unproven` gate, which names the failure the operator can act on.
+        if (actual.kind !== kind || !codes.includes(expectedCode)) continue;
         routeFacts.expect(`${kind}_source_kind`, kind, actual.kind);
-        routeFacts.expect(
-          `${kind}_omission`,
-          true,
-          observedCodes(observed.units, id).includes(expectedCode),
-        );
+        routeFacts.expect(`${kind}_omission`, true, codes.includes(expectedCode));
+        liveSourceEntries.add(kind);
         omissionCases.push({ kind, code: expectedCode });
       }
       if (specialIds.pathUnrepresentableId) {
@@ -710,16 +781,34 @@ export async function runFileQualification(
     }
     const rejectedNameStatus = await fixtures.rejectedSourceName(rootSource);
     routeFacts.expect("sharepoint_illegal_name_rejection", 400, rejectedNameStatus);
+    // ADR-0006: the create attempt is evidence only where no reference sample was
+    // supplied. A creatable reference retires the weaker proof and raises its own gate.
+    const refusedReferenceStatus = specialIds.referenceId
+      ? null
+      : await fixtures.rejectedReferenceItem(rootSource);
+    if (refusedReferenceStatus !== null)
+      routeFacts.expect("source_reference_creation_refused", 400, refusedReferenceStatus);
     // ADR-0005: only defer when a fixture was supplied and failed to produce the
     // finding. A source that refuses every rejected name cannot host one, and
     // says so with a 400; the driver finding is proven by the capacity refusal.
     if (specialIds.pathUnrepresentableId && !liveSourcePathProven)
       deferred.unshift("file_live_path_unrepresentable_fixture_unproven");
-    for (const key of ["packageId", "referenceId", "undownloadableId"] as const) {
-      if (!specialIds[key])
-        deferred.push(
-          `file_live_${key === "packageId" ? "package" : key === "referenceId" ? "reference" : "undownloadable"}_fixture_unavailable`,
-        );
+    const capabilityProofs: Record<string, SourceCapabilityProof | null> = {};
+    for (const kind of sourceCapabilityKinds) {
+      const supplied = specialIds[`${kind}Id`] !== undefined;
+      const resolved = capabilityProof({
+        kind,
+        supplied,
+        liveSourceEntry: liveSourceEntries.has(kind),
+        refusedCreationStatus: refusedReferenceStatus,
+        census: sourceKindCensus,
+      });
+      capabilityProofs[kind] = resolved.proof;
+      // A supplied sample that failed is a real failure, so it outranks a missing proof.
+      if (resolved.gate) {
+        if (supplied) deferred.unshift(resolved.gate);
+        else deferred.push(resolved.gate);
+      }
     }
     const allCollisionCodes = observedCodes(collisionUnits);
     collisionFacts.expect(
@@ -812,6 +901,12 @@ export async function runFileQualification(
       {
         providerChecks,
         omissions: omissionCases,
+        capabilityProofs,
+        sourceKindCensus,
+        sourceRefusedReferenceStatus: refusedReferenceStatus,
+        fullLiveMatrix: sourceCapabilityKinds.every(
+          (kind) => capabilityProofs[kind] === "live_source_entry",
+        ),
         sourceIllegalNameStatus: rejectedNameStatus,
         sourceMutationIdentitySeparate: true,
         routeSourceApplicationReadOnly: true,

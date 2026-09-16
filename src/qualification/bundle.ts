@@ -23,6 +23,20 @@ export const collisionCodes = [
   "path_unrepresentable",
   "mapping_overlap",
 ] as const;
+/** Unusual source kinds the route matrix must account for, each with a proof value: ADR-0006. */
+export const sourceCapabilityKinds = ["package", "reference", "undownloadable"] as const;
+export type SourceCapabilityKind = (typeof sourceCapabilityKinds)[number];
+export type SourceCapabilityProof =
+  | "live_source_entry"
+  | "source_refuses_creation"
+  | "absent_from_source_scope";
+/** ADR-0006: the one weaker proof each kind may rest on, if any. `live_source_entry` is
+ * open to every kind. A package is obtainable on demand, so it has no weaker form. */
+export const weakerProofByKind = {
+  package: null,
+  reference: "source_refuses_creation",
+  undownloadable: "absent_from_source_scope",
+} as const satisfies Record<SourceCapabilityKind, SourceCapabilityProof | null>;
 
 export interface ProbeCapture {
   schemaVersion: 1;
@@ -302,6 +316,44 @@ export async function validateCapturedBundle(
             record(observations.sourceRejectedNameStatus) === false &&
               observations.sourceRejectedNameStatus === 400,
           );
+        }
+      }
+      if (probe.id === "route_limits_and_version_gate") {
+        const observations = captured.observations as Record<string, unknown>;
+        const proofs = observations.capabilityProofs;
+        requireFact(record(proofs));
+        for (const kind of sourceCapabilityKinds) {
+          const proof = proofs[kind];
+          if (proof === "live_source_entry") {
+            // A real item of that kind existed and the driver omitted it.
+            requireFact(
+              captured.assertions.some(
+                (assertion: unknown) =>
+                  record(assertion) &&
+                  assertion.id === `${kind}_omission` &&
+                  assertion.expected === true &&
+                  assertion.observed === true,
+              ),
+            );
+            continue;
+          }
+          // Each kind rests on at most one weaker proof, and only with its evidence.
+          const weaker = weakerProofByKind[kind];
+          requireFact(weaker !== null && proof === weaker);
+          if (weaker === "source_refuses_creation") {
+            // Only the reference create is attempted live, so its status is the proof.
+            requireFact(observations.sourceRefusedReferenceStatus === 400);
+          } else {
+            // Absence is only a proof when something was actually scanned.
+            const census = observations.sourceKindCensus;
+            requireFact(record(census) && record(census.kinds));
+            requireFact(
+              typeof census.itemsScanned === "number" &&
+                Number.isSafeInteger(census.itemsScanned) &&
+                census.itemsScanned > 0,
+            );
+            requireFact((census.kinds as Record<string, unknown>)[kind] === 0);
+          }
         }
       }
       probes.add(probe.id);

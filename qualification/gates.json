@@ -30,6 +30,24 @@
       "status": "resolved",
       "reason": "ADR-0005. SharePoint refuses every name the driver's guard refuses, measured live with HTTP 400 for \"\", \".\", \"..\", a name containing \"/\", and a name containing NUL, so no source item can carry one. The finding is proven live through its other cause, a provenance marker beyond Drive's private-property capacity with a valid source name, and the source's own 400 is recorded. A source that does permit such names must still produce the live-source-entry proof.",
       "code": "unqualified_route"
+    },
+    {
+      "id": "file_live_source_package_sample",
+      "status": "resolved",
+      "reason": "ADR-0006. A OneNote notebook is a real package:oneNote item. Supplied as fixtures.specialSources.packageId and measured live on 2026-09-15/16, the driver omitted it with source_package_omitted, so the bundle records the live_source_entry proof with that omission assertion.",
+      "code": "unqualified_route"
+    },
+    {
+      "id": "file_live_source_reference_sample",
+      "status": "resolved",
+      "reason": "ADR-0006. Graph refuses to create a remoteItem in a document library, measured live on 2026-09-15/16 with HTTP 400 invalidRequest for a remoteItem facet naming an item in the same drive and HTTP 400 \"The provided sharepointIds is invalid\" for the sharepointIds form. The bundle records the source_refuses_creation proof with that live 400. A source that does hold a reference still owes live_source_entry.",
+      "code": "unqualified_route"
+    },
+    {
+      "id": "file_live_source_undownloadable_sample",
+      "status": "resolved",
+      "reason": "ADR-0006. No API creates a malware-flagged or content-less item on demand, and the kind census of the mapping source root's children found none in the scanned scope, measured live on 2026-09-15/16. The bundle records the absent_from_source_scope proof with that census. A source that does hold one still owes live_source_entry.",
+      "code": "unqualified_route"
     }
   ],
   "nativePrerequisites": {
