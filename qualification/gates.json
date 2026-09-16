@@ -31,13 +31,15 @@
   "gates": [
     {
       "id": "installed_artifact_matrix",
-      "status": "not_run",
+      "status": "resolved",
+      "reason": "CI run 35099461034 on 4ad8222c passed npm run check:package on all four cells: macos-15, macos-15-intel, ubuntu-24.04-arm and ubuntu-24.04. Each job asserts process.platform + '-' + process.arch equals its expected cell before installing, so the artifact was packed, installed and smoked on the exact native architecture rather than an emulated one. Typecheck, the behavioural suite and the real managed-worker check pass in the same job.",
       "command": "npm run check:package",
-      "scope": "Run on every exact native desktop architecture; hosted CLI success does not prove native GUI behavior."
+      "scope": "Run on every exact native desktop architecture; hosted CLI success does not prove native GUI behavior, which is the separate native_desktop_lifecycle_matrix gate."
     },
     {
       "id": "native_desktop_lifecycle_matrix",
-      "status": "not_run",
+      "status": "partial",
+      "reason": "darwin-arm64 only, recorded on PR #26 by operator inspection of the installed WKWebView. darwin-x64, linux-arm64 and linux-x64 remain unrun: the gate needs an interactive logged-in desktop session with macOS WebKit or Linux WebKitGTK 4.1 plus libxdo, which no hosted runner provides, so the workflow targets self-hosted runners carrying the cell label. Tracked as issue #32, ready-for-human.",
       "command": "npm run check:package -- --desktop",
       "scope": "Inspect the actual installed native window on all four cells. Native custom-protocol readiness alone does not prove ten-verb lifecycle parity or the absence of listeners; retain the separate per-cell launch/interaction evidence."
     },
