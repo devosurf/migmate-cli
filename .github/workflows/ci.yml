@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Installed CLI / ${{ matrix.cell }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell: darwin-arm64
+            runner: macos-15
+            architecture: arm64
+          - cell: darwin-x64
+            runner: macos-15-intel
+            architecture: x64
+          - cell: linux-arm64
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+          - cell: linux-x64
+            runner: ubuntu-24.04
+            architecture: x64
+    env:
+      MIGMATE_EXPECTED_CELL: ${{ matrix.cell }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          architecture: ${{ matrix.architecture }}
+          cache: npm
+      - name: Confirm native runtime cell
+        run: node -e "if (process.platform + '-' + process.arch !== process.env.MIGMATE_EXPECTED_CELL) throw new Error('Wrong native runner cell')"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Prove native managed worker authentication and lifecycle
+        run: npm run check:worker
+      # check:package runs npm pack's prepack (build + check:vendor), then installs the tarball.
+      # Hosted jobs verify the CLI artifact, not native GUI behavior or a live tenant route.
+      - name: Build, pack, install, and smoke the CLI artifact
+        run: npm run check:package

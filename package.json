@@ -1,0 +1,50 @@
+{
+  "name": "@devosurf/migmate",
+  "version": "0.1.0-dev",
+  "description": "Finite, one-way movement or preservation of organizational content",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "bin": {
+    "migmate": "dist/cli/main.js"
+  },
+  "exports": {},
+  "files": [
+    "dist",
+    "vendor",
+    "qualification",
+    "!qualification/**/*.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\" \"src/**/*.test.ts\"",
+    "build": "node scripts/build-package.ts",
+    "check:vendor": "node scripts/check-vendor.ts",
+    "check:worker": "node scripts/check-worker.ts",
+    "check:package": "node scripts/check-package.ts",
+    "qualify:route": "node scripts/qualify-route.ts",
+    "prepack": "npm run build && npm run check:vendor",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@webviewjs/webview": "0.4.5",
+    "parse5": "8.0.0",
+    "smol-toml": "1.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.9.2"
+  }
+}

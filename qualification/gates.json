@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "qualifiedRoutes": [
+    {
+      "jobType": "teams_archive",
+      "route": "teams_global_archive",
+      "tupleDigest": "6aa55648a2a150d62bd7f7abbf1d2599c93b5c069d905b1df82ab14a95e1f103",
+      "bundleDigest": "e6a5d2d8fa14fc6e5c65b119105fa27555594831abf3c97476c553f3508e71a9",
+      "desktopCell": "darwin-arm64",
+      "guaranteeSetId": "default",
+      "options": { "retainedHistory": false, "transcripts": false, "attachmentBytes": false },
+      "capturedAt": "2026-09-16",
+      "scope": "Graph v1.0 Global, application-only, channel and user-chats scope kinds, hosted content in the base contract. The three options are off, so each is a separate tuple that owes its own bundle."
+    },
+    {
+      "jobType": "file_migration",
+      "route": "sharepoint_library_to_shared_drive",
+      "tupleDigest": "bc7b3ea1afd1f3cf832b55ec7de32e4e0b0555e5096b20b2a1220f03d4266463",
+      "bundleDigest": "44f71ddc6d772a2c67f7a0a0b7aad118e6995af2794d385521d80cb0c2d20d93",
+      "desktopCell": "darwin-arm64",
+      "guaranteeSetId": "default",
+      "fullLiveMatrix": false,
+      "capturedAt": "2026-09-16",
+      "scope": "SharePoint document-library root to a pre-existing Google Shared Drive folder, rclone onedrive client-credentials source and drive service-account destination, transfer v1.75.0. fullLiveMatrix is false: the package capability rests on live_source_entry, reference on source_refuses_creation, undownloadable on absent_from_source_scope, per ADR-0006."
+    }
+  ],
+  "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
+  "transferVersion": "v1.75.0",
+  "macosMinimumVersion": "13.5",
+  "desktopCells": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
+  "gates": [
+    {
+      "id": "installed_artifact_matrix",
+      "status": "resolved",
+      "reason": "CI run 35099461034 on 4ad8222c passed npm run check:package on all four cells: macos-15, macos-15-intel, ubuntu-24.04-arm and ubuntu-24.04. Each job asserts process.platform + '-' + process.arch equals its expected cell before installing, so the artifact was packed, installed and smoked on the exact native architecture rather than an emulated one. Typecheck, the behavioural suite and the real managed-worker check pass in the same job.",
+      "command": "npm run check:package",
+      "scope": "Run on every exact native desktop architecture; hosted CLI success does not prove native GUI behavior, which is the separate native_desktop_lifecycle_matrix gate."
+    },
+    {
+      "id": "native_desktop_lifecycle_matrix",
+      "status": "partial",
+      "reason": "darwin-arm64 only, recorded on PR #26 by operator inspection of the installed WKWebView. darwin-x64, linux-arm64 and linux-x64 remain unrun: the gate needs an interactive logged-in desktop session with macOS WebKit or Linux WebKitGTK 4.1 plus libxdo, which no hosted runner provides, so the workflow targets self-hosted runners carrying the cell label. Tracked as issue #32, ready-for-human.",
+      "command": "npm run check:package -- --desktop",
+      "scope": "Inspect the actual installed native window on all four cells. Native custom-protocol readiness alone does not prove ten-verb lifecycle parity or the absence of listeners; retain the separate per-cell launch/interaction evidence."
+    },
+    {
+      "id": "real_tenant_route_matrix",
+      "status": "resolved",
+      "reason": "ADR-0005 and ADR-0006. The full file suite ran against a real SharePoint library and Shared Drive on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes, carrying all seven file probes. fullLiveMatrix is false and every capability records its proof value with matching evidence: package live_source_entry from a real OneNote notebook the driver omitted, reference source_refuses_creation with the live HTTP 400, undownloadable absent_from_source_scope with a census of 12 scanned children and no item of that kind. Publication additionally required the bundle-validator realpath fix from the archive route's run, which had refused every bundle written under a symlinked ancestor.",
+      "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
+      "scope": "Exact source/destination/backend/options/guarantee-set tuple, pinned transfer version, and each desktop cell. Only darwin-arm64 is captured; no credential or captured-output import can assert successful qualification."
+    },
+    {
+      "id": "real_tenant_archive_route_matrix",
+      "status": "resolved",
+      "reason": "ADR-0007. The full archive suite ran against a live Global tenant on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes: route matrix, hosted-content bytes for both scope kinds including a channel reply, durable restart, and byte-deterministic package regeneration. Two live-only defects had to be fixed first: every export request used an inclusive lower bound the routes refuse with HTTP 400, and the bundle validator confined a realpath beneath an unresolved root, refusing any bundle published under a symlinked ancestor. Options remain unproven by design.",
+      "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
+      "scope": "Exact Graph route/permission/option tuple, pinned transfer version, and each desktop cell. retainedHistory, transcripts and attachmentBytes are separate tuples and none is claimed."
+    },
+    {
+      "id": "file_live_source_path_guard",
+      "status": "resolved",
+      "reason": "ADR-0005. SharePoint refuses every name the driver's guard refuses, measured live with HTTP 400 for \"\", \".\", \"..\", a name containing \"/\", and a name containing NUL, so no source item can carry one. The finding is proven live through its other cause, a provenance marker beyond Drive's private-property capacity with a valid source name, and the source's own 400 is recorded. A source that does permit such names must still produce the live-source-entry proof.",
+      "code": "unqualified_route"
+    },
+    {
+      "id": "file_live_source_package_sample",
+      "status": "resolved",
+      "reason": "ADR-0006. A OneNote notebook is a real package:oneNote item. Supplied as fixtures.specialSources.packageId and measured live on 2026-09-15/16, the driver omitted it with source_package_omitted, so the bundle records the live_source_entry proof with that omission assertion.",
+      "code": "unqualified_route"
+    },
+    {
+      "id": "file_live_source_reference_sample",
+      "status": "resolved",
+      "reason": "ADR-0006. Graph refuses to create a remoteItem in a document library, measured live on 2026-09-15/16 with HTTP 400 invalidRequest for a remoteItem facet naming an item in the same drive and HTTP 400 \"The provided sharepointIds is invalid\" for the sharepointIds form. The bundle records the source_refuses_creation proof with that live 400. A source that does hold a reference still owes live_source_entry.",
+      "code": "unqualified_route"
+    },
+    {
+      "id": "file_live_source_undownloadable_sample",
+      "status": "resolved",
+      "reason": "ADR-0006. No API creates a malware-flagged or content-less item on demand, and the kind census of the mapping source root's children found none in the scanned scope, measured live on 2026-09-15/16. The bundle records the absent_from_source_scope proof with that census. A source that does hold one still owes live_source_entry.",
+      "code": "unqualified_route"
+    }
+  ],
+  "nativePrerequisites": {
+    "darwin": "macOS 13.5 or newer with system WebKit and Node 24, on x64 or arm64. The user explicitly raised the floor to match the retained Node baseline.",
+    "linux": "A real X11 or Wayland desktop, WebKitGTK 4.1 and libxdo. Missing these blocks web only; there is no listener or external-browser fallback. Official Node GNU/Linux binaries require kernel 4.18+ and glibc 2.28+."
+  }
+}

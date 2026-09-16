@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/devosurf/migmate-cli/qualification/bundle.schema.json",
+  "title": "Immutable exact-route evidence bundle, schema version 1",
+  "type": "object",
+  "required": ["schemaVersion", "tuple", "capture", "probes", "artifacts"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "tuple": {
+      "$ref": "#/$defs/tuple"
+    },
+    "capture": {
+      "type": "object",
+      "required": [
+        "suiteVersion",
+        "capturedAt",
+        "nodeVersion",
+        "osRelease",
+        "desktopCell",
+        "toolSha256",
+        "binarySha256"
+      ],
+      "properties": {
+        "suiteVersion": {
+          "const": 1
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "nodeVersion": {
+          "type": "string",
+          "pattern": "^v24\\."
+        },
+        "osRelease": {
+          "type": "string",
+          "minLength": 1
+        },
+        "desktopCell": {
+          "$ref": "#/$defs/cell"
+        },
+        "toolSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "binarySha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "probes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "expectedCodes", "observedCodes", "output"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id"
+          },
+          "expectedCodes": {
+            "$ref": "#/$defs/codes"
+          },
+          "observedCodes": {
+            "$ref": "#/$defs/codes"
+          },
+          "output": {
+            "$ref": "#/$defs/capturePath"
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "size"],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/capturePath"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16777216
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "cell": {
+      "enum": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,127}$"
+    },
+    "codes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "capturePath": {
+      "type": "string",
+      "pattern": "^captures/[a-z][a-z0-9_]*\\.json$"
+    },
+    "tuple": {
+      "type": "object",
+      "required": [
+        "jobType",
+        "source",
+        "destination",
+        "transferVersion",
+        "guaranteeSetId",
+        "desktopCell"
+      ],
+      "properties": {
+        "jobType": {
+          "enum": ["file_migration", "teams_archive"]
+        },
+        "source": {
+          "type": "object"
+        },
+        "destination": {
+          "type": "object"
+        },
+        "transferVersion": {
+          "const": "v1.75.0"
+        },
+        "guaranteeSetId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "desktopCell": {
+          "$ref": "#/$defs/cell"
+        }
+      },
+      "description": "Runtime constructs the exact source/destination/backend/options tuple; equality is canonical and exhaustive, never a subset or operator-selected tuple."
+    },
+    "probeCapture": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "probeId",
+        "startedAt",
+        "completedAt",
+        "codes",
+        "assertions",
+        "observations"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "probeId": {
+          "$ref": "#/$defs/id"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "codes": {
+          "$ref": "#/$defs/codes"
+        },
+        "assertions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "expected", "observed"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "expected": {},
+              "observed": {}
+            }
+          }
+        },
+        "observations": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "description": "Storage path qualification/<SHA256(canonical tuple)>/<SHA256(canonical bundle)>/. Every capture byte hash and length is verified, extra/missing files and symlinks rejected, required probe IDs/expected codes/actual observations checked, desktop roundtrip required, binary hash matched to the installed manifest. This schema describes shape; src/qualification/bundle.ts additionally enforces those semantic and filesystem constraints. There are no successful evidence bundles until real tenant and desktop probes pass."
+}
