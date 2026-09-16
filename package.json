@@ -23,7 +23,11 @@
     "dist",
     "vendor",
     "qualification",
-    "!qualification/**/*.ts"
+    "!qualification/**/*.ts",
+    "!qualification/gates.json",
+    "!vendor/**/*.zip",
+    "!vendor/**/SHA256SUMS",
+    "!vendor/**/*.sha256"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",

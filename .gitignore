@@ -3,6 +3,9 @@ dist/
 *.log
 .DS_Store
 
+# agent harness config, not product
+.omp/
+
 # stage 1 wizard downloads these next to the committed vendor binary
 vendor/rclone/*/SHA256SUMS
 vendor/rclone/*/*.sha256

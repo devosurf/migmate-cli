@@ -1,7 +1,0 @@
-modelRoles:
-  task: openai-codex/gpt-6-astra
-task:
-  agentModelOverrides:
-    task: openai-codex/gpt-6-astra
-    reviewer: openai-codex/gpt-6-astra
-    scout: openai-codex/gpt-6-astra
