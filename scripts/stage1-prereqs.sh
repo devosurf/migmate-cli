@@ -413,7 +413,10 @@ arch_name=$(uname -m)
 case "$os_name" in
   Darwin) os_arch_prefix="osx" ;;
   Linux) os_arch_prefix="linux" ;;
-  MINGW*|MSYS*|CYGWIN*) os_arch_prefix="windows" ;;
+  MINGW*|MSYS*|CYGWIN*)
+    warn "Windows is not a supported platform; see docs/adr/0002-drop-windows.md"
+    exit 1
+    ;;
   *)
     warn "unsupported OS for the vendored rclone archive: $os_name"
     exit 1
@@ -427,17 +430,6 @@ case "$arch_name" in
   *)
     warn "unsupported architecture for the vendored rclone archive: $arch_name"
     exit 1
-    ;;
-esac
-case "$os_arch_prefix" in
-  windows)
-    case "$os_arch_suffix" in
-      arm64|amd64|386) ;;
-      *)
-        warn "unsupported Windows architecture for the vendored rclone archive: $arch_name"
-        exit 1
-        ;;
-    esac
     ;;
 esac
 platform="$os_arch_prefix-$os_arch_suffix"

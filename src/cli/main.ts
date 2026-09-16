@@ -55,8 +55,8 @@ migmate reclaim --job ID --confirm [--stop-worker]
 migmate web --job ID
 
 All commands: --home PATH, --output text|json|jsonl, --schema-version 1, --help
-Home defaults: macOS ~/Library/Application Support/Migmate; Windows
-%LOCALAPPDATA%/Migmate; Linux \${XDG_STATE_HOME:-~/.local/state}/migmate.
+Home defaults: macOS ~/Library/Application Support/Migmate;
+Linux \${XDG_STATE_HOME:-~/.local/state}/migmate. Any other platform is refused.
 MIGMATE_HOME overrides the default. --home overrides MIGMATE_HOME.
 Config input is TOML or JSON containing typed file credential references, never secrets.
 Only the engine writes job.toml and probes credentials. Init without config creates

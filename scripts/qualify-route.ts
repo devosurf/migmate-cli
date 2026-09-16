@@ -78,8 +78,8 @@ async function credentialReferences(value: unknown): Promise<number> {
     if (
       !stat.isFile() ||
       stat.isSymbolicLink() ||
-      (process.platform !== "win32" &&
-        ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))
+      (stat.mode & 0o077) !== 0 ||
+      stat.uid !== process.getuid?.()
     ) {
       throw new QualificationBlocked("credential_file_protection_required");
     }
