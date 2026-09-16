@@ -44,9 +44,11 @@ export interface DestinationEntry {
   size: number | null;
   /**
    * Google Drive v3 publishes no ETag and honours no `If-Match`, so the
-   * destination's concurrency token is its monotonic `version`, plus
-   * `headRevisionId` for a binary file. Comparing it before a write is a
-   * compare-then-write, not an atomic conditional update: see ADR-0004.
+   * destination's concurrency token is `headRevisionId` for a binary file's
+   * content plus `modifiedTime`. Drive's own `version` is excluded: it was
+   * measured advancing with no writer present. Comparing the token before a
+   * write is a compare-then-write, not an atomic conditional update — see
+   * ADR-0004 and `docs/release-limits.md`.
    */
   revision: string | null;
   createdAt: string;

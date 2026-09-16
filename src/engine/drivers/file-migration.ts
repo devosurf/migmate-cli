@@ -1172,6 +1172,16 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       "Verification is a timestamped point-in-time statement, not a source freeze, cutover, settled delta, or future-drift guarantee.",
     ].join("\n"),
   };
+  yield {
+    title: "Measured release limits",
+    format: "text",
+    body: [
+      "Destination change detection is a compare-then-write, never an atomic conditional update: Drive publishes no ETag and honours no update precondition, so an edit landing between the comparison and the write is detected by the next verification pass rather than prevented.",
+      "The destination concurrency token is the revision and modified time Drive does publish, measured holding still on one file across one window while Drive's own version field advanced with no writer present; Google promises no such stability, so a server-side move refuses prior_copy_drift instead of overwriting.",
+      "Transfer-binary behaviour is qualified at one exact version, recorded with its path and digest in the preflight evidence; any other version refuses rather than running unqualified.",
+      "The source grant is proven sufficient for the Graph calls this release makes, not promised for wider use: a call needing more permission refuses rather than degrading to a partial result.",
+    ].join("\n"),
+  };
   for (const mapping of ctx.config.mappings) {
     yield {
       title: `Mapping ${mapping.id}`,

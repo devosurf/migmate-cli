@@ -619,7 +619,7 @@ export class FileEffects {
       if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
         throw new ProviderFault(
           "prior_copy_drift",
-          "The destination changed before its conditional content update.",
+          "The destination changed since the revision Migmate recorded, so its compare-then-write content update refuses.",
         );
       if (!prior.file.parents?.includes(input.parentFolderId)) {
         query.set("addParents", input.parentFolderId);
@@ -709,7 +709,7 @@ export class FileEffects {
     if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
       throw new ProviderFault(
         "prior_copy_drift",
-        "The destination changed before its conditional move.",
+        "The destination changed since the revision Migmate recorded, so its compare-then-write move refuses.",
       );
     const query = new URLSearchParams({ supportsAllDrives: "true", fields: FILE_FIELDS });
     if (!prior.file.parents?.includes(input.parentFolderId)) {
@@ -741,7 +741,7 @@ export class FileEffects {
     if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
       throw new ProviderFault(
         "prior_copy_drift",
-        "The destination changed before its conditional marker update.",
+        "The destination changed since the revision Migmate recorded, so its compare-then-write marker update refuses.",
       );
     const response = await this.#google(
       `/drive/v3/files/${encodeURIComponent(input.objectId)}?supportsAllDrives=true&fields=id`,
