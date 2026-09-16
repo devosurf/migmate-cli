@@ -12,6 +12,7 @@ import { createArchiveProvider, archiveQualificationRequirements } from "./archi
 import type { ArchiveProvider } from "./archive.ts";
 import { parseArchiveConfig } from "../archive/config.ts";
 import { readQualifiedBundle } from "../../qualification/bundle.ts";
+import { TRANSFER_VERSION } from "../../versions.ts";
 
 export interface ProductionProviderInput {
   jobType: JobType;
@@ -134,7 +135,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
       );
     const common = {
       jobType: input.jobType,
-      transferVersion: "v1.75.0",
+      transferVersion: TRANSFER_VERSION,
       guaranteeSetId: typeof config.guarantees === "string" ? config.guarantees : "default",
       desktopCell: `${process.platform}-${process.arch}`,
     };

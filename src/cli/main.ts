@@ -39,6 +39,7 @@ import {
 } from "./envelope.ts";
 import { errorCode, processIo, type Io } from "./io.ts";
 import { redact } from "./redact.ts";
+import { unsupportedNode } from "../versions.ts";
 
 export type { Io, IoInput, IoStream } from "./io.ts";
 
@@ -468,6 +469,11 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     if (invocation.jobId) output.job = { id: invocation.jobId, type: null };
     if (invocation.help) result = { ok: true, value: { help: HELP } };
     else {
+      // The durable store is node:sqlite, a release-candidate API. An untested
+      // runtime refuses here rather than reaching the store, and --help still
+      // answers so an operator can read the requirement off the tool itself.
+      const untested = unsupportedNode();
+      if (untested !== null) throw new UsageFailure(untested);
       engine ??= openEngine({ home: invocation.home, adapter: "cli" });
       result = await executeCommand(invocation, output, engine);
     }

@@ -7,8 +7,8 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { TRANSFER_VERSION as VERSION } from "../src/versions.ts";
 
-const VERSION = "v1.75.0";
 const RELEASES = {
   "darwin-arm64": "osx-arm64",
   "darwin-x64": "osx-amd64",

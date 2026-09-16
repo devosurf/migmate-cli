@@ -8,6 +8,7 @@ import {
   type BinaryProof,
 } from "../../src/engine/providers/transfer-worker.ts";
 import type { ProbeCapture } from "../../src/qualification/bundle.ts";
+import { TRANSFER_VERSION } from "../../src/versions.ts";
 import { QualificationBlocked } from "./common.ts";
 
 async function unauthenticatedStatus(socketPath: string): Promise<number> {
@@ -59,7 +60,7 @@ export async function fileWorkerQualification(input: {
   let closeSucceeded = false;
   try {
     const proof = await supervisor.proveBinary();
-    expect("exact_binary_version", "v1.75.0", proof.version);
+    expect("exact_binary_version", TRANSFER_VERSION, proof.version);
     expect("binary_rehash", input.binary.sha256, proof.sha256);
     const handle = await supervisor.startTransferWorker({
       runDirectory: join(input.jobDirectory, "w"),
@@ -81,7 +82,7 @@ export async function fileWorkerQualification(input: {
     expect("owned_child_identity", true, identity.pid === handle.pid);
     expect(
       "authenticated_liveness",
-      { alive: true, version: "v1.75.0" },
+      { alive: true, version: TRANSFER_VERSION },
       await supervisor.probeTransferWorker(handle),
     );
     const asynchronous = await supervisor.call<{ jobid?: number }>(handle.socketPath, "rc/noop", {

@@ -20,6 +20,7 @@ import { promisify } from "node:util";
 import { fileProbeIds, validateCapturedBundle } from "../src/qualification/bundle.ts";
 import { canonicalJson, digestJson } from "../src/engine/store/digest.ts";
 import type { EvidenceBundle, ProbeCapture } from "../src/qualification/bundle.ts";
+import { TRANSFER_VERSION, unsupportedNode } from "../src/versions.ts";
 import { QualificationBlocked } from "./qualification/common.ts";
 import { runFileQualification } from "./qualification/file.ts";
 import { runArchiveQualification } from "./qualification/archive.ts";
@@ -166,8 +167,7 @@ try {
     }
     if (!options["--config"] || !options["--output"])
       throw new QualificationBlocked("live_configuration_required");
-    if (Number(process.versions.node.split(".")[0]) !== 24)
-      throw new QualificationBlocked("node_24_required");
+    if (unsupportedNode() !== null) throw new QualificationBlocked("node_runtime_unsupported");
     let platform;
     try {
       platform = distributionPlatform();
@@ -245,7 +245,7 @@ try {
     });
     controller.signal.throwIfAborted();
     assert.equal(result.tuple.jobType, config.jobType);
-    assert.equal(result.tuple.transferVersion, "v1.75.0");
+    assert.equal(result.tuple.transferVersion, TRANSFER_VERSION);
     assert.equal(result.tuple.desktopCell, desktopCell);
     assert.equal(result.tuple.guaranteeSetId, config.jobConfig.guarantees ?? "default");
     const requiredProbes =

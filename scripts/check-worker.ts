@@ -2,6 +2,7 @@ import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTransferSupervisor } from "../src/engine/providers/transfer-worker.ts";
+import { unsupportedNode } from "../src/versions.ts";
 import { fileWorkerQualification } from "./qualification/file-worker.ts";
 import { distributionPlatform } from "./platform.ts";
 
@@ -11,7 +12,8 @@ process.once("SIGINT", interrupt);
 process.once("SIGTERM", interrupt);
 let directory: string | undefined;
 try {
-  if (process.versions.node.split(".")[0] !== "24") throw new Error("Node 24 is required.");
+  const untested = unsupportedNode();
+  if (untested !== null) throw new Error(untested);
   const platform = distributionPlatform();
   directory = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "mmw-"));
   await chmod(directory, 0o700);

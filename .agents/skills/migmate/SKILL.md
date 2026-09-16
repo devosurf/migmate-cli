@@ -10,7 +10,7 @@ The governing idea: Migmate is built to **refuse**. A refusal is a decision the 
 ## Always
 
 - Pass `--output json`. Parse the envelope; branch on `refusal.code` and the exit status, never on message text. Refusal envelopes arrive on stderr.
-- Use Node 24. `qualify:route` requires major exactly 24.
+- Run on Node 24.15.0 or later. Any other runtime refuses with `usage` at exit 2 before touching the store, because the durable store is the release-candidate `node:sqlite`. `src/versions.ts` is the one place that decides this.
 - Read with `--review` (`plan --review`, `verify --review`) when you only need evidence. It takes no writer lease, so it cannot collide with a running job.
 
 ## Driving a job
@@ -47,7 +47,7 @@ Codes worth recognising:
 - **`lease_held` / `lease_stale_worker_alive`** — a writer owns the job. Read with `--review`. Clear a genuinely stale lease with `reclaim --job ID --confirm`, and reach for that only once the owning process is known to be gone; removing files by hand corrupts the job.
 - **`verification_unaccepted`** — `close` reached an unaccepted finding. Surface the findings and let a human decide each.
 
-`npm run qualify:route` is a separate surface with its own block codes, so they never appear in a CLI envelope: `live_configuration_required` (operator prerequisites absent), `node_24_required`, `file_credentials_required`, and `credential_file_protection_required` (a reference file looser than `0600`, or not owned by the invoking user).
+`npm run qualify:route` is a separate surface with its own block codes, so they never appear in a CLI envelope: `live_configuration_required` (operator prerequisites absent), `node_runtime_unsupported`, `file_credentials_required`, and `credential_file_protection_required` (a reference file looser than `0600`, or not owned by the invoking user).
 
 ## Credentials
 

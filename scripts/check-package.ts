@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { distributionPlatform } from "./platform.ts";
+import { unsupportedNode } from "../src/versions.ts";
 
 interface PackageManifest {
   name: string;
@@ -21,7 +22,7 @@ assert.ok(
   process.argv.slice(2).every((argument) => argument === "--desktop"),
   "Unknown option",
 );
-assert.equal(process.versions.node.split(".")[0], "24", "Package smoke requires Node 24");
+assert.equal(unsupportedNode(), null, "Package smoke requires a supported Node runtime");
 distributionPlatform();
 const npmCli =
   process.env.npm_execpath ??

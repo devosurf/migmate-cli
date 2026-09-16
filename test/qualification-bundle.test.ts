@@ -91,7 +91,7 @@ function published(t: TestContext, ...captures: ProbeCapture[]) {
     capture: {
       suiteVersion: 1,
       capturedAt: "2026-09-16T10:06:00.000Z",
-      nodeVersion: "v24.8.0",
+      nodeVersion: "v24.21.0",
       osRelease: "6.8.0",
       desktopCell,
       toolSha256: createHash("sha256").update("tool").digest("hex"),

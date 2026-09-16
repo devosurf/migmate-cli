@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-09-01
-- Amended: 2026-09-09 for the installed distribution; 2026-09-12 for the platform matrix ([ADR-0002](0002-drop-windows.md))
+- Amended: 2026-09-09 for the installed distribution; 2026-09-12 for the platform matrix ([ADR-0002](0002-drop-windows.md)); 2026-09-16 for the runtime version policy below
 - Context: [spec #17](https://github.com/devosurf/migmate-cli/issues/17), [distribution decision #12](https://github.com/devosurf/migmate-cli/issues/12), [distribution implementation #22](https://github.com/devosurf/migmate-cli/issues/22), [engine seam #9](https://github.com/devosurf/migmate-cli/issues/9)
 
 ## Context
@@ -31,8 +31,18 @@ The original source-only decision was disproven by an actual Node 24 installed-p
 
 - Three dev dependencies remain: `typescript`, `prettier`, and `@types/node`; the three runtime dependencies above are shipped through normal npm dependency resolution.
 - The source language remains erasable TypeScript for direct development execution; installed users execute emitted JavaScript instead of depending on type stripping inside `node_modules`.
-- `node:sqlite` remains a pre-stable Node 24 runtime dependency. The rejected source-only package format is not retained as a fallback.
+- `node:sqlite` remains a pre-stable Node runtime dependency. The rejected source-only package format is not retained as a fallback.
 - The package allowlist contains `dist`, managed `vendor` files, and qualification evidence; repository scripts, tests, and TypeScript tooling are not shipped. Embedded resources stay package-local rather than being downloaded or served over a loopback listener.
 - An explicit empty `exports` map blocks both the package root and deep package imports. There is no public engine SDK: the installed interaction surface is the single `migmate` command, including its `web` subcommand.
 - The four-cell workflow and manual gates are executable checks, not recorded qualification results. Native desktop access, Linux WebKitGTK 4.1 and libxdo, prepared tenant credentials, and actual route evidence remain external prerequisites.
 - The user explicitly raised the supported macOS floor to **13.5+** on x64 and arm64, retaining Node 24. This resolves the earlier 10.15+ incompatibility with [official Node 24.20.0](https://raw.githubusercontent.com/nodejs/node/v24.20.0/BUILDING.md); it is not an outstanding gate. Distribution checks use the host's actual macOS product version, and no alternate runtime fallback is shipped.
+
+## Amendment 2026-09-16: the runtime requirement is a tested set with a floor
+
+"Node 24" was expressed as a bare major, written as five separate literals in three forms — `!== 24`, `=== "24"`, and `/^v24\./` in the evidence validator — while `engines` asked only for `>=24.0.0` with no `.npmrc`, making it advisory, and the shipped code carried no runtime check at all. The strictness therefore landed on maintainer scripts, where it only cost friction, and not on the consumer runtime, where the risk actually sits. Node 24 also enters maintenance on 2026-10-20, eight days before Node 26 becomes LTS, so widening was about to be archaeology across those literals.
+
+**The requirement is now data, in `src/versions.ts`, as a map of tested major to its minimum version.** `TESTED_NODE` holds `{ "24": "24.15.0" }`. The floor is not cosmetic: `node:sqlite` reached stability 1.2 (release candidate) in 24.15.0, and earlier 24.x releases carry 1.1, so the previous `>=24.0.0` admitted a weaker tier than any evidence covers. `engines` matches the floor. The transfer binary version gets the same treatment in the same file, replacing eight `"v1.75.0"` literals, one of which sat in the bundle validator.
+
+**An unsupported runtime refuses in the CLI**, as a `usage` refusal at exit 2, raised before the engine opens so it never reaches the store. `--help` still answers on any runtime, because an operator on the wrong Node needs to be able to read the requirement off the tool. The evidence validator now asks the same question of a bundle's recorded `nodeVersion` instead of matching `v24.` by prefix; both published bundles were captured on v24.21.0 and remain valid.
+
+Widening to Node 26 after its LTS promotion is now one entry in `TESTED_NODE` plus CI cells, and it stays a decision with evidence attached rather than a dependency bump. Tests assert the version literals independently, so a wrong constant fails rather than agreeing with itself.

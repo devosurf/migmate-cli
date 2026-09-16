@@ -3,6 +3,7 @@ import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, digestJson } from "../engine/store/digest.ts";
+import { TESTED_TRANSFER_VERSIONS, unsupportedNode } from "../versions.ts";
 
 export const desktopCells = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"] as const;
 export const fileProbeIds = [
@@ -169,7 +170,7 @@ export async function validateCapturedBundle(
     requireFact(canonicalJson(bundle.tuple) === canonicalJson(input.tuple));
     const tuple = bundle.tuple;
     requireFact(
-      tuple.transferVersion === "v1.75.0" &&
+      TESTED_TRANSFER_VERSIONS[String(tuple.transferVersion)] === true &&
         desktopCells.some((cell) => cell === tuple.desktopCell),
     );
     requireFact(typeof tuple.guaranteeSetId === "string" && tuple.guaranteeSetId.length > 0);
@@ -181,7 +182,7 @@ export async function validateCapturedBundle(
     requireFact(
       bundle.capture.desktopCell === bundle.tuple.desktopCell &&
         typeof bundle.capture.nodeVersion === "string" &&
-        /^v24\./.test(bundle.capture.nodeVersion),
+        unsupportedNode(bundle.capture.nodeVersion) === null,
     );
     const vendor: unknown = JSON.parse(
       await readFile(join(packageRoot, "vendor/rclone/manifest.json"), "utf8"),

@@ -6,11 +6,11 @@ import { request, type IncomingMessage } from "node:http";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { TESTED_TRANSFER_VERSIONS, TRANSFER_VERSION } from "../../versions.ts";
 import { ProviderFault } from "./credentials.ts";
 import type { ProviderPort, TransferWorkerHandle, TransferWorkerProbe } from "./port.ts";
 import { withSocketPath } from "./socket-path.ts";
 
-const TESTED_VERSIONS: Readonly<Record<string, true>> = { "v1.75.0": true };
 const VERSION_FLOOR = [1, 69, 0] as const;
 const READY_TIMEOUT = 15_000;
 const REQUEST_TIMEOUT = 30_000;
@@ -245,7 +245,11 @@ function version(value: unknown): string {
       if (parts[i]! > VERSION_FLOOR[i]!) break;
     }
   }
-  if (TESTED_VERSIONS[value.version] !== true || value.isGit !== false || value.isBeta !== false) {
+  if (
+    TESTED_TRANSFER_VERSIONS[value.version] !== true ||
+    value.isGit !== false ||
+    value.isBeta !== false
+  ) {
     throw fail("preflight_failed", "version_untested");
   }
   return value.version;
@@ -387,7 +391,7 @@ export function createTransferSupervisor(options: {
         if (
           !record(manifest) ||
           manifest.schemaVersion !== 1 ||
-          manifest.version !== "v1.75.0" ||
+          manifest.version !== TRANSFER_VERSION ||
           !record(manifest.binaries)
         ) {
           throw fail("preflight_failed", "binary_manifest_invalid");

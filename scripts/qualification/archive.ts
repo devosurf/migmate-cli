@@ -17,6 +17,7 @@ import type {
 import type { CheckResult } from "../../src/engine/types.ts";
 import { canonicalJson } from "../../src/engine/store/digest.ts";
 import type { ProbeCapture } from "../../src/qualification/bundle.ts";
+import { TRANSFER_VERSION } from "../../src/versions.ts";
 import {
   ArchiveJournal,
   archiveFileProof,
@@ -227,7 +228,7 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
     await supervisor.close();
   }
   requireFact(
-    binary.version === "v1.75.0" && /^[a-f0-9]{64}$/.test(binary.sha256),
+    binary.version === TRANSFER_VERSION && /^[a-f0-9]{64}$/.test(binary.sha256),
     "archive_managed_binary_unqualified",
   );
 
