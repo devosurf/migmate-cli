@@ -75,6 +75,8 @@ Operator config carries **credential references** — typed pointers to operator
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
 
+### Teams archive destination
+
 Teams archive config can also name an optional Google Shared Drive destination. Add these
 tables alongside the existing archive scopes, `graph` settings, and
 `secrets.teams_graph_client_secret` reference:
@@ -99,14 +101,23 @@ archive.
 The archive driver self-verifies the local package before building deterministic ZIPs
 and uploading anything from the package. The destination folder receives `index.html`,
 `index.csv`, and `manifest.json` as ordinary files, plus `<conversation-directory>.zip`
-for each conversation. Use the exposed `index.csv` to find a conversation, download its
-ZIP, and extract it locally. The local package remains the authority.
+for each conversation. This is **cold storage, not a reading surface**: Drive's web UI
+cannot render the HTML archive. Use the exposed `index.csv` to find a conversation,
+download its ZIP, and extract it locally to open its `index.html`. The local package
+remains the authority and the complete offline reading surface.
 
 Uploads are create-only, with durable reserved IDs and private provenance markers.
 Interrupted execution resumes without duplicating completed objects. Same-name unproven
 objects are retained and reported, never overwritten. Verification checks destination
-bytes and revision tokens without querying Graph; Drive permissions, not local read-only
-modes, protect the retained copy.
+bytes and revision tokens without querying Graph. Drive has no POSIX modes: the ZIP's
+`0444`/`0555` entry modes do not protect the uploaded objects. Immutability at rest
+depends on operator-managed Drive permissions.
+
+One ZIP per conversation keeps the payload to `N + 3` objects for `N` conversations
+and permits targeted retrieval without downloading the entire archive. The
+500,000-item budget applies across the shared drive, including folders and trash,
+not separately to each job. See [archive destination limits](docs/release-limits.md#6-the-archive-destination-is-cold-storage-not-a-reading-surface)
+for the capacity accounting and protection boundary.
 
 **This destination is qualified on `darwin-arm64`, with all three archive options off.**
 Its own live evidence bundle proves download byte verification, lost-acknowledgement

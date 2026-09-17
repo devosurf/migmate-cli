@@ -1,10 +1,10 @@
 # Release limits
 
-Four properties of the first release are **measured, not guaranteed**. Two of them are permanent properties of the providers Migmate talks to, so no amount of work in Migmate removes them; two rest on observations of a live tenant whose sample size is stated below. A fifth section states the exact routes and architectures that are qualified at all, because everything outside them refuses rather than degrades.
+Four properties of the first release are **measured, not guaranteed**. Two of them are permanent properties of the providers Migmate talks to, so no amount of work in Migmate removes them; two rest on observations of a live tenant whose sample size is stated below. A fifth section states the exact routes and architectures that are qualified at all, because everything outside them refuses rather than degrades. A sixth states the archive destination's cold-storage limits.
 
 Each limit says what was measured, what Migmate does about it, and the refusal code or report line that names it while you are running a job. Everything here is already enforced in code; nothing on this page is a future intention.
 
-Scope: three qualified tuples — the file migration route from a SharePoint document-library root to a Google Shared Drive folder, and the Teams archive route from Graph v1.0 Global to a local archive package with or without a Shared Drive destination — all measured on `darwin-arm64` against a live tenant on 2026-09-15/16 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 describe the file route; the archive destination reuses its Drive concurrency and provenance stack. Limit 5 states what is qualified.
+Scope: three qualified tuples — the file migration route from a SharePoint document-library root to a Google Shared Drive folder, and the Teams archive route from Graph v1.0 Global to a local archive package with or without a Shared Drive destination — all measured on `darwin-arm64` against a live tenant on 2026-09-15/16 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 describe the file route; the archive destination reuses its Drive concurrency and provenance stack. Limit 5 states what is qualified; limit 6 bounds what the Drive archive copy provides.
 
 ## 1. The destination concurrency token is measured, not promised
 
@@ -60,11 +60,11 @@ Scope: three qualified tuples — the file migration route from a SharePoint doc
 
 **What is qualified.** Exactly three tuples, all captured on `darwin-arm64`:
 
-| Job type         | Route                                                              | Guarantees                 |
-| ---------------- | ------------------------------------------------------------------ | -------------------------- |
-| `file_migration` | SharePoint document library → Google Shared Drive folder           | `default`                  |
-| `teams_archive`  | Graph v1.0 Global → local archive package                          | `default`, all options off |
-| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive containers | `default`, all options off |
+| Job type         | Route                                                                     | Guarantees                 |
+| ---------------- | ------------------------------------------------------------------------- | -------------------------- |
+| `file_migration` | SharePoint document library → Google Shared Drive folder                  | `default`                  |
+| `teams_archive`  | Graph v1.0 Global → local archive package                                 | `default`, all options off |
+| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs | `default`, all options off |
 
 **Other desktop architectures are not qualified.** `darwin-x64`, `linux-arm64` and `linux-x64` have no captured bundle. The tuple includes the architecture, so running on one of them refuses rather than assuming the observation transfers.
 
@@ -79,10 +79,10 @@ The existing archive driver self-verifies its local package, containerizes each 
 as a deterministic ZIP, and uploads the three root files plus one ZIP per conversation.
 Durable reserved IDs, private provenance markers, revision tokens, and byte verification
 govern replay and retention. Copies are create-only; collisions and drift are findings,
-never permission to overwrite. The local package remains authoritative, and Drive
-permissions are the operator's responsibility because Drive does not preserve POSIX modes.
+never permission to overwrite.
 Configuring the destination changes the route tuple: `8f413512…` owns the separate
-bundle captured for #41; the published local archive bundle cannot qualify it.
+[published bundle](../qualification/8f413512e1d5f04cd4f102745a9bd958e16713e582002b04ca82b1cc6779621c/ab8c13259eba61eb7740b6b278e544cf6a73cdcd0c0b55cc82e1434a1f2bf5fd/bundle.json)
+captured on 2026-09-16; the published local archive bundle cannot qualify it.
 The live probe uploaded three root files and two conversation ZIPs, downloaded every
 object to compare SHA-256 and size, and checked private provenance markers and revision
 tokens. It lost an upload acknowledgement before the verified commit, reopened the durable
@@ -96,6 +96,18 @@ The six-role Graph allowlist is unchanged, and an extra Graph role still refuses
 
 **Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records all three published bundles and every gate still unrun.
 
+## 6. The archive destination is cold storage, not a reading surface
+
+**What the copy is.** The Google Shared Drive destination retains the three root files — `index.html`, `index.csv`, and `manifest.json` — plus one deterministic ZIP per conversation. The local package remains the authority: it is built and self-verified before containerization and upload. Destination verification checks the retained bytes and provenance, not a new export from Teams.
+
+**What it is not.** Drive's web UI cannot render the HTML archive as a working site. The exposed root `index.html` does not turn Drive into a reading surface, and conversation contents inside ZIPs are opaque to Drive search. Use the exposed `index.csv` to identify a conversation's path, download the ZIP named for that conversation directory, and extract it locally to open its `index.html`. The retained local package is the complete offline reading surface.
+
+**Read-only modes do not make Drive immutable.** Drive has no POSIX modes. The container writer records canonical `0444` file and `0555` directory modes inside each ZIP, but upload discards their protection as filesystem access controls: ZIP metadata does not become Drive object permissions. Immutability at rest is a **Drive permission concern for the operator**, not a guarantee of Migmate's read-only archive modes or create-only uploads. Migmate neither assesses nor migrates destination permissions or ownership.
+
+**The budget is shared-drive-wide.** Google's [500,000-item cap](https://support.google.com/a/users/answer/7338880?hl=en) counts files, folders, shortcuts, and items in trash across the entire shared drive, not just this job's destination folder. The payload therefore uses **one container per conversation**, rather than expanding every HTML part, JSONL record file, asset, and asset directory into separate Drive items. For `N` conversations, the upload shape is `N + 3` objects in the pre-existing destination folder: 20,000 conversations means 20,003 objects, about 4% of the cap, before counting that folder, other content, trash, or other jobs. This is payload arithmetic, not a tenant-scale qualification or a reservation of available capacity. A single whole-archive container would cost one item but require downloading every conversation to retrieve one.
+
+**Where you see it.** The "Teams archive scope and fidelity" report section states the local authority, cold-storage payload, verification boundary, and operator-owned permissions. The [destination payload code](../src/engine/archive/destination.ts) fixes the object count; the [container writer](../src/engine/archive/container.ts) fixes the ZIP entry modes. The [published destination capture](../qualification/8f413512e1d5f04cd4f102745a9bd958e16713e582002b04ca82b1cc6779621c/ab8c13259eba61eb7740b6b278e544cf6a73cdcd0c0b55cc82e1434a1f2bf5fd/captures/archive_destination.json) measured three root objects and two conversation ZIPs, not tenant scale. The decision is [ADR-0008](adr/0008-archive-cold-storage-destination.md).
+
 ## Related records
 
 These limits are operator-facing statements of decisions recorded elsewhere. The records are not required reading; they are the longer form.
@@ -104,4 +116,5 @@ These limits are operator-facing statements of decisions recorded elsewhere. The
 - [ADR-0004](adr/0004-drive-revision-concurrency.md) — destination concurrency rests on Drive's revision, not an ETag.
 - [ADR-0005](adr/0005-unrepresentable-path-proof.md) and [ADR-0006](adr/0006-capability-sample-proofs.md) — what the qualification bundle may claim when the source cannot hold a sample.
 - [ADR-0007](adr/0007-archive-scope-reads-and-window-filter.md) — what a Teams archive scope reads, and how its window survives an exclusive-only filter.
+- [ADR-0008](adr/0008-archive-cold-storage-destination.md) — the archive destination is a cold-storage copy, with one container per conversation.
 - `qualification/gates.json` — the release-prerequisite register, including which gates remain unrun.

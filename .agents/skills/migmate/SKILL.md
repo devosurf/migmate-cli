@@ -55,6 +55,16 @@ Operator config holds **credential references**: typed pointers to operator-owne
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) walk a human through tenant setup and write those files. Both accept `--resume <env-file>`. These are human steps; hand them over rather than attempting the tenant work.
 
+## Teams archive destination
+
+When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Both routes are qualified only on `darwin-arm64`, with `retainedHistory`, `transcripts`, and `attachmentBytes` off; each route owns a separate evidence bundle. Use `docs/release-limits.md` limit 5 for the qualification boundary.
+
+For a Drive copy, follow `README.md`'s "Teams archive destination" config: stable `destination.destDriveId` and `destination.destFolderId` plus a separate `secrets.google_service_account` file reference. Keep the existing Graph credential unchanged. Omit the destination and Google reference for a local-only archive; this remains the same Teams archive job type and lifecycle.
+
+The local package self-verifies before upload and remains the authority. Drive receives three exposed root files and one ZIP per conversation. For retrieval, use `index.csv` to identify the conversation, download its ZIP, and extract it locally to read it; Drive's web UI is not an archive reading surface.
+
+Before retaining a copy, read `docs/release-limits.md` limit 6 for the shared-drive-wide 500,000-item budget and permission boundary. Surface that capacity and immutability at rest are operator concerns: Drive does not enforce the ZIP's `0444`/`0555` entry modes as object permissions, and create-only uploads do not prevent outside edits.
+
 ## Verifying a change to this repo
 
 `npm run typecheck` and `npm test` are hermetic and fast. `npm run check:package` packs, installs globally into a temporary prefix, and smoke-tests the artifact — run it when packaging, the vendored binaries, or the shipped qualification bundles are in scope.
