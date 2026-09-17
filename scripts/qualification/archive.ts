@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CODE_BY_NAME } from "../../src/engine/codes.ts";
 import { parseArchiveConfig } from "../../src/engine/archive/config.ts";
 import { buildArchivePackage, verifyArchivePackage } from "../../src/engine/archive/package.ts";
 import { archiveQualificationRequirements } from "../../src/engine/providers/archive-graph.ts";
@@ -60,7 +59,13 @@ function codes(values: Iterable<string>): string[] {
 }
 function requiredRoutes(plan: ArchivePlan, scope: ArchivePlan["scopes"][number]): ArchiveRoute[] {
   const routes: ArchiveRoute[] = ["messages"];
-  if (plan.config.retainedHistory) routes.push("retained");
+  const privateChannel =
+    scope.kind === "channel" &&
+    plan.conversations.some(
+      (conversation) =>
+        conversation.scopeEntryId === scope.id && conversation.membershipType === "private",
+    );
+  if (plan.config.retainedHistory && !privateChannel) routes.push("retained");
   if (plan.config.transcripts && scope.kind === "user-chats") routes.push("transcripts");
   return routes;
 }
@@ -256,11 +261,6 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
       "archive_scope_sample_unavailable",
     );
     const plan = planned.archivePlan;
-    requireFact(
-      !config.retainedHistory ||
-        !plan.conversations.some((conversation) => conversation.membershipType === "private"),
-      "archive_retained_private_channel_unsupported",
-    );
     // Only production preflight's immutable-route gate is intentionally not
     // called: this maintainer tool is collecting the first real route evidence.
     // The archive capability performs all real app-role, license, scope, toggle,
@@ -362,6 +362,25 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
   };
   const units = await journal.units();
   const fidelityCodes = sourceFindings(units, packageInput.records);
+  const privateChannels = config.retainedHistory
+    ? packageInput.plan.conversations
+        .filter((conversation) =>
+          conversation.kind === "channel" && conversation.membershipType === "private")
+        .map((conversation) => hash(conversation.id))
+        .sort()
+    : [];
+  const privateChannelOmissions = units.flatMap((unit) =>
+    unit.findings.filter((finding) =>
+      finding.code === "retained_history_unsupported_private_channel" &&
+      finding.phase === "plan" &&
+      finding.kind === "planned_omission" &&
+      finding.subjectKind === "conversation"),
+  );
+  const omissionCoverage = assertion(
+    "private_channel_omission_coverage",
+    privateChannels,
+    privateChannelOmissions.map((finding) => hash(finding.subjectId)).sort(),
+  );
   const paging = pagingFacts(packageInput.plan, packageInput.evidence);
   const collected = samples(packageInput.plan, packageInput.records);
   const allCodes = codes(
@@ -651,12 +670,14 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
     const retained = paging.filter((page) => page.route === "retained");
     capture(
       "retained_history",
-      codes(
-        packageInput.records
+      codes([
+        ...privateChannelOmissions.map((finding) => finding.code),
+        ...packageInput.records
           .filter((record) => record.route === "retained")
           .flatMap((record) => record.findings.map((finding) => finding.code)),
-      ),
+      ]),
       [
+        omissionCoverage,
         assertion(
           "retained_scope_kind_coverage",
           kinds,
@@ -672,6 +693,8 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
       ],
       {
         paging: retained,
+        privateChannels,
+        privateChannelOmissions: omissionCoverage.observed,
         records: packageInput.records.filter((record) => record.route === "retained").length,
         collectionDigest: hash(
           packageInput.records.filter((record) => record.route === "retained"),

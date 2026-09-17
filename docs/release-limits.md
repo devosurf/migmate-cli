@@ -72,6 +72,25 @@ Scope: three qualified tuples — the file migration route from a SharePoint doc
 
 **The three Teams archive options are not qualified.** `retainedHistory`, `transcripts` and `attachmentBytes` each change the route tuple, so each needs its own evidence bundle and none has one. Enabling any of them refuses `unqualified_route`. Their prerequisites are also not merely credentials: retained history needs a retention policy, transcripts need a tenant toggle plus an application access policy and a meeting organised by an explicitly scoped user, and attachment bytes need a tenant-wide file-read grant.
 
+**Private channels remain in scope when retained history is requested.** As required by
+[spec #17 §11 and story 33](https://github.com/devosurf/migmate-cli/issues/17), the driver
+records `retained_history_unsupported_private_channel` as a plan-time `planned_omission`
+for each private channel, including empty ones. Current messages are still collected;
+only that channel's retained route is skipped. Qualification must observe those omissions
+in the durable plan findings, not refuse the whole scope or infer an omission from channel
+metadata. The `retained_history` capture records the omission code and matching SHA-256
+subject lists for frozen private channels and observed omissions, without publishing raw
+conversation identifiers. Missing or mismatched evidence refuses
+`archive_private_channel_omission_coverage`.
+
+This does not qualify retained history by absence: the exact tuple still needs non-empty
+retained records and exhausted paging for every scope kind present. A channel tuple therefore
+needs a non-private channel sample as well as any private channels being represented;
+a private-only channel scope cannot prove the retained export route. No retained sample
+refuses `archive_retained_history_sample_unavailable`. This resolves
+[issue #33](https://github.com/devosurf/migmate-cli/issues/33) in favour of the existing
+omission contract; it does not widen the published base bundles.
+
 **The optional Shared Drive archive destination has its own live qualification.**
 `destination.destDriveId` and `destination.destFolderId` bind stable IDs, with a separate
 `secrets.google_service_account` file reference beside the existing Graph credential.
