@@ -765,15 +765,7 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
           routesAccepted = false;
           yield failed(`archive_current:${scope.id}`, error);
         }
-        const privateChannel =
-          scope.kind === "channel" &&
-          plan.conversations.some(
-            (conversation) =>
-              conversation.scopeEntryId === scope.id && conversation.membershipType === "private",
-          );
-        // Decision #7 deliberately excludes private retained history, even where
-        // newer Graph tenants/docs have acquired partial support.
-        if (config.retainedHistory && !privateChannel) {
+        if (config.retainedHistory) {
           try {
             await provider.page({
               scope,

@@ -157,15 +157,7 @@ function priorFindingRows(ctx: ArchiveDriverContext): ConversationCommitRow[] {
 
 function routes(plan: ArchivePlan, scope: ArchiveScopeBinding): ArchiveRoute[] {
   const result: ArchiveRoute[] = ["messages"];
-  const privateChannel =
-    scope.kind === "channel" &&
-    plan.conversations.some(
-      (conversation) =>
-        conversation.channelId === scope.channelId &&
-        conversation.teamId === scope.teamId &&
-        conversation.membershipType === "private",
-    );
-  if (plan.config.retainedHistory && !privateChannel) result.push("retained");
+  if (plan.config.retainedHistory) result.push("retained");
   if (plan.config.transcripts && scope.kind === "user-chats") result.push("transcripts");
   return result;
 }
@@ -199,8 +191,6 @@ function approvedPlan(ctx: ArchiveDriverContext): ArchivePlan {
 function omissions(plan: ArchivePlan, conversation: ArchiveConversation): string[] {
   const result: string[] = [];
   if (!plan.config.retainedHistory) result.push("retained_history_not_requested");
-  else if (conversation.membershipType === "private")
-    result.push("retained_history_unsupported_private_channel");
   if (!plan.config.attachmentBytes) result.push("attachment_metadata_only");
   if (plan.config.transcripts && conversation.kind === "channel")
     result.push("transcript_unsupported_channel_meeting");
@@ -747,9 +737,11 @@ export const teamsArchiveDriver = {
     const statements = [
       `Modification window [${plan.window.from}, ${plan.window.to}); partitions UTC, displayed timezone ${plan.timezone}.`,
       plan.config.retainedHistory
-        ? "Retained history requested; collection evidence and private-channel omissions delimit retrievable history."
+        ? "Retained history requested; completeness and route gaps are recorded in collection evidence and findings. Private-channel retained coverage is limited to edits and deletions after completed tenant storage migration that an applicable retention policy captured. Pre-migration edits and deletions are unavailable through the API. Successful or empty routes do not establish historical coverage or a migration cutoff; no migration completion timestamp is known."
         : "Current message state only; retained_history_not_requested: edit and deletion history is not preserved.",
-      "Messages deleted beyond 21 days, teams or channels deleted beyond 30 days, and users deleted or inactive beyond roughly 30 days are unrecoverable.",
+      plan.config.retainedHistory
+        ? "Current-message routes do not recover messages deleted beyond 21 days. Teams or channels deleted beyond 30 days, and users deleted or inactive beyond roughly 30 days are unrecoverable."
+        : "Messages deleted beyond 21 days, teams or channels deleted beyond 30 days, and users deleted or inactive beyond roughly 30 days are unrecoverable.",
       "Meeting recordings and beta targeted messages are not collected. Meeting control-message fidelity is limited to what the supported export routes return.",
       "Attachment bytes are as-retrieved with a retrieval timestamp, never as-sent; no message-time version is claimed.",
       "Identities are preserved verbatim, never translated. This local archive is an admin and legal reference, not chain of custody.",

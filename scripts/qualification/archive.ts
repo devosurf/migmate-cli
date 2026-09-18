@@ -59,13 +59,7 @@ function codes(values: Iterable<string>): string[] {
 }
 function requiredRoutes(plan: ArchivePlan, scope: ArchivePlan["scopes"][number]): ArchiveRoute[] {
   const routes: ArchiveRoute[] = ["messages"];
-  const privateChannel =
-    scope.kind === "channel" &&
-    plan.conversations.some(
-      (conversation) =>
-        conversation.scopeEntryId === scope.id && conversation.membershipType === "private",
-    );
-  if (plan.config.retainedHistory && !privateChannel) routes.push("retained");
+  if (plan.config.retainedHistory) routes.push("retained");
   if (plan.config.transcripts && scope.kind === "user-chats") routes.push("transcripts");
   return routes;
 }
@@ -96,6 +90,10 @@ function pagingFacts(plan: ArchivePlan, evidence: ArchiveCollectionEvidence[]) {
       requireFact(exhausted && visited.size === pages.length, "archive_paging_not_exhausted");
       return {
         scopeKind: scope.kind === "channel" ? "channel" : "chat",
+        conversationSubjects: plan.conversations
+          .filter((conversation) => conversation.scopeEntryId === scope.id)
+          .map((conversation) => hash(conversation.id))
+          .sort(),
         route,
         pages: pages.length,
         continuationPages: pages.filter((page) => page.cursor !== null).length,
@@ -362,25 +360,23 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
   };
   const units = await journal.units();
   const fidelityCodes = sourceFindings(units, packageInput.records);
-  const privateChannels = config.retainedHistory
-    ? packageInput.plan.conversations
-        .filter((conversation) =>
-          conversation.kind === "channel" && conversation.membershipType === "private")
-        .map((conversation) => hash(conversation.id))
-        .sort()
-    : [];
-  const privateChannelOmissions = units.flatMap((unit) =>
-    unit.findings.filter((finding) =>
-      finding.code === "retained_history_unsupported_private_channel" &&
-      finding.phase === "plan" &&
-      finding.kind === "planned_omission" &&
-      finding.subjectKind === "conversation"),
+  const privateConversationIds = new Set(
+    packageInput.plan.conversations
+      .filter((conversation) =>
+        conversation.kind === "channel" && conversation.membershipType === "private")
+      .map((conversation) => conversation.id),
   );
-  const omissionCoverage = assertion(
-    "private_channel_omission_coverage",
-    privateChannels,
-    privateChannelOmissions.map((finding) => hash(finding.subjectId)).sort(),
-  );
+  const privateChannels = [...privateConversationIds].map(hash).sort();
+  const retainedRecords = packageInput.records.filter((record) => record.route === "retained");
+  const privateRecordCounts = new Map<string, number>();
+  for (const record of retainedRecords) {
+    if (!privateConversationIds.has(record.conversationId)) continue;
+    const subject = hash(record.conversationId);
+    privateRecordCounts.set(subject, (privateRecordCounts.get(subject) ?? 0) + 1);
+  }
+  const privateRetainedSamples = [...privateRecordCounts]
+    .sort(([left], [right]) => left.localeCompare(right, "en"))
+    .map(([subject, records]) => ({ subject, records }));
   const paging = pagingFacts(packageInput.plan, packageInput.evidence);
   const collected = samples(packageInput.plan, packageInput.records);
   const allCodes = codes(
@@ -422,6 +418,11 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
           (page) => page.scopeKind === kind && page.route === "retained" && page.records > 0,
         ),
         "archive_retained_history_sample_unavailable",
+      );
+    if (kinds.includes("channel"))
+      requireFact(
+        privateRetainedSamples.length > 0,
+        "archive_private_retained_history_sample_unavailable",
       );
   }
   if (config.transcripts) {
@@ -670,14 +671,8 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
     const retained = paging.filter((page) => page.route === "retained");
     capture(
       "retained_history",
-      codes([
-        ...privateChannelOmissions.map((finding) => finding.code),
-        ...packageInput.records
-          .filter((record) => record.route === "retained")
-          .flatMap((record) => record.findings.map((finding) => finding.code)),
-      ]),
+      codes(retainedRecords.flatMap((record) => record.findings.map((finding) => finding.code))),
       [
-        omissionCoverage,
         assertion(
           "retained_scope_kind_coverage",
           kinds,
@@ -690,15 +685,16 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
           true,
           retained.every((page) => page.exhausted),
         ),
+        ...(kinds.includes("channel")
+          ? [assertion("private_retained_sample_collected", true, privateRetainedSamples.length > 0)]
+          : []),
       ],
       {
         paging: retained,
         privateChannels,
-        privateChannelOmissions: omissionCoverage.observed,
-        records: packageInput.records.filter((record) => record.route === "retained").length,
-        collectionDigest: hash(
-          packageInput.records.filter((record) => record.route === "retained"),
-        ),
+        privateRetainedSamples,
+        records: retainedRecords.length,
+        collectionDigest: hash(retainedRecords),
         fidelityCodes,
       },
     );

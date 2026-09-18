@@ -10,7 +10,7 @@
       "guaranteeSetId": "default",
       "options": { "retainedHistory": false, "transcripts": false, "attachmentBytes": false },
       "capturedAt": "2026-09-16",
-      "scope": "Graph v1.0 Global, application-only, channel and user-chats scope kinds, hosted content in the base contract. The three options are off, so each is a separate tuple that owes its own bundle."
+      "scope": "Graph v1.0 Global, application-only, channel and user-chats scope kinds, hosted content in the base contract. All three options are off; option tuples own separate bundles."
     },
     {
       "jobType": "file_migration",
@@ -33,6 +33,21 @@
       "options": { "retainedHistory": false, "transcripts": false, "attachmentBytes": false },
       "capturedAt": "2026-09-16",
       "scope": "Graph v1.0 Global to a disposable Google Shared Drive folder using a separate service-account credential. Three exposed root objects and two conversation ZIPs, downloaded and SHA-256 verified. Live container regeneration ignores changed filesystem timestamps; a lost upload acknowledgement recovers the reserved ID, and replay preserves object IDs, revision tokens and markers. The local-only archive tuple remains independently qualified."
+    },
+    {
+      "jobType": "teams_archive",
+      "route": "teams_global_archive",
+      "tupleDigest": "f92d02ba93d671b31e0e268ad4c1fad3c37123f0fc72a6e97d6224ee7e1a20af",
+      "bundleDigest": "cc7064ad1b1075fd455d7054cada11ce8ab104ca18b3d9558a14e7a9d45417c8",
+      "desktopCell": "darwin-arm64",
+      "guaranteeSetId": "default",
+      "options": {
+        "retainedHistory": true,
+        "transcripts": false,
+        "attachmentBytes": false
+      },
+      "capturedAt": "2026-09-17",
+      "scope": "Graph v1.0 Global to a local archive package, channel and user-chats scopes. Three conversations and 16 records include three retained versions: standard channel, private channel, and chat. Three hosted assets, exhausted retained paging, durable restart, and deterministic package regeneration. Private retained capability rests on a real collected version, not an omission. The sample covers edited text after tenant migration, not pre-migration coverage, deleted-message recovery, or retained hosted content; no migration completion timestamp was available. No Shared Drive destination or other option combination is qualified."
     }
   ],
   "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
@@ -64,9 +79,16 @@
     {
       "id": "real_tenant_archive_route_matrix",
       "status": "resolved",
-      "reason": "ADR-0007. The full archive suite ran against a live Global tenant on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes: route matrix, hosted-content bytes for both scope kinds including a channel reply, durable restart, and byte-deterministic package regeneration. Two live-only defects had to be fixed first: every export request used an inclusive lower bound the routes refuse with HTTP 400, and the bundle validator confined a realpath beneath an unresolved root, refusing any bundle published under a symlinked ancestor. Options remain unproven by design.",
+      "reason": "ADR-0007. The full archive suite ran against a live Global tenant on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes: route matrix, hosted-content bytes for both scope kinds including a channel reply, durable restart, and byte-deterministic package regeneration. Two live-only defects had to be fixed first: every export request used an inclusive lower bound the routes refuse with HTTP 400, and the bundle validator confined a realpath beneath an unresolved root, refusing any bundle published under a symlinked ancestor. The base capture has all options off; retained history now owns a separate gate.",
       "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
-      "scope": "Exact Graph route/permission/option tuple, pinned transfer version, and each desktop cell. retainedHistory, transcripts and attachmentBytes are separate tuples and none is claimed."
+      "scope": "Exact Graph route/permission/option tuple, pinned transfer version, and each desktop cell. The base tuple proves no options; retained history has separate local-only evidence, while transcripts and attachmentBytes remain unqualified."
+    },
+    {
+      "id": "real_tenant_archive_retained_route_matrix",
+      "status": "resolved",
+      "reason": "Issue #33 and updated spec #17 story 33/section 11. On 2026-09-17 the complete live runner passed on Node 24.21.0 and darwin-arm64, capturing desktop runtime, Graph route matrix, hosted-content bytes, package self-consistency, and retained history. Three retained records include an actual private-channel version; all scoped retained paging is exhausted. A separate real archive smoke matched current v2 and original retained v1 for standard/private/chat messages against a pre-edit baseline, and both private versions were inspected in rendered HTML. The earlier categorical private-channel omission is removed. Existing fidelity findings remain recorded. Tenant migration was Completed, but its completion timestamp was unavailable.",
+      "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
+      "scope": "Only the local Graph v1.0 Global channel+user-chats tuple with retainedHistory=true, transcripts=false, attachmentBytes=false, default guarantees, transfer v1.75.0, darwin-arm64. Edited-text samples do not prove pre-migration coverage, deleted-message recovery, retained hosted-content availability, or full native ten-verb lifecycle parity."
     },
     {
       "id": "real_tenant_archive_destination_route_matrix",

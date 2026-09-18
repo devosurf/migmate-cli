@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { it } from "node:test";
+import { it, type TestContext } from "node:test";
 import { runArchiveQualification } from "../scripts/qualification/archive.ts";
 import type { ProbeCapture } from "../src/qualification/bundle.ts";
 
-it("qualifies retained history while proving each private channel's plan-time omission", async (t) => {
+async function qualify(
+  t: TestContext,
+  channels: { id: string; membershipType: "standard" | "private" }[],
+  retainedChannels: string[],
+  includeChats = true,
+) {
   const directory = await mkdtemp(join(tmpdir(), "migmate-archive-qualification-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const secretPath = join(directory, "client-secret");
@@ -16,11 +20,6 @@ it("qualifies retained history while proving each private channel's plan-time om
   await writeFile(secretPath, "qualification-test-secret", { mode: 0o600 });
   const tenantId = "11111111-1111-1111-1111-111111111111";
   const clientId = "22222222-2222-2222-2222-222222222222";
-  const channels = [
-    { id: "general", membershipType: "standard" },
-    { id: "private-a", membershipType: "private" },
-    { id: "private-empty", membershipType: "private" },
-  ];
   const message = (id: string, channelId?: string) => ({
     id,
     ...(channelId ? { channelIdentity: { teamId: "team", channelId } } : { chatId: "chat" }),
@@ -54,15 +53,14 @@ it("qualifies retained history while proving each private channel's plan-time om
     if (path === "/v1.0/teams/team/channels/getAllMessages")
       return Response.json({
         value: [
-          message("root", "general"),
-          { ...message("reply", "general"), replyToId: "root" },
-          message("private-current", "private-a"),
+          message("root", channels[0]!.id),
+          { ...message("reply", channels[0]!.id), replyToId: "root" },
         ],
       });
     if (path === "/v1.0/users/user/chats/getAllMessages")
       return Response.json({ value: [message("chat-current")] });
     if (path === "/v1.0/teams/team/channels/getAllRetainedMessages")
-      return Response.json({ value: [message("retained", "general")] });
+      return Response.json({ value: retainedChannels.map((id) => message("retained", id)) });
     if (path === "/v1.0/users/user/chats/getAllRetainedMessages")
       return Response.json({ value: [message("retained")] });
     if (path.endsWith("/hostedContents"))
@@ -77,7 +75,10 @@ it("qualifies retained history while proving each private channel's plan-time om
       jobType: "teams_archive",
       acknowledgement: "I authorize disposable live qualification probes",
       jobConfig: {
-        scopes: [{ kind: "team", teamId: "team" }, { kind: "user-chats", userId: "user" }],
+        scopes: [
+          ...(channels.length > 0 ? [{ kind: "team", teamId: "team" }] : []),
+          ...(includeChats ? [{ kind: "user-chats", userId: "user" }] : []),
+        ],
         retainedHistory: true,
         window: { from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z" },
         graph: { tenantId, clientId },
@@ -88,21 +89,47 @@ it("qualifies retained history while proving each private channel's plan-time om
     signal: new AbortController().signal,
     capture: (capture) => captures.push(capture),
   });
+  return { result, captures };
+}
+
+it("qualifies collected private retained history alongside empty private conversations", async (t) => {
+  const { result, captures } = await qualify(t, [
+    { id: "general", membershipType: "standard" },
+    { id: "private-a", membershipType: "private" },
+    { id: "private-empty", membershipType: "private" },
+  ], ["general", "private-a"]);
   assert.ok(result.requiredProbes.includes("retained_history"));
   const retained = captures.find((capture) => capture.probeId === "retained_history");
   assert.ok(retained);
-  assert.ok(retained.codes.includes("retained_history_unsupported_private_channel"));
-  const expectedSubjects = ["channel:team:private-a", "channel:team:private-empty"]
-    .map((id) => createHash("sha256").update(JSON.stringify(id)).digest("hex"))
-    .sort();
-  assert.deepEqual(retained.observations.privateChannelOmissions, expectedSubjects);
-  assert.deepEqual(
-    retained.assertions.find((assertion) => assertion.id === "private_channel_omission_coverage"),
-    { id: "private_channel_omission_coverage", expected: expectedSubjects, observed: expectedSubjects },
-  );
   assert.deepEqual(
     retained.assertions.find((assertion) => assertion.id === "retained_scope_kind_coverage")?.observed,
     ["channel", "chat"],
   );
-  assert.equal(retained.observations.records, 2);
+  assert.equal(retained.observations.records, 3);
+  assert.doesNotMatch(JSON.stringify(captures), /private-a|private-empty|Qualification sample/);
+});
+
+it("refuses empty private retained history even with standard and chat samples", async (t) => {
+  await assert.rejects(qualify(t, [
+    { id: "general", membershipType: "standard" },
+    { id: "private-empty", membershipType: "private" },
+  ], ["general"]), { gate: "archive_private_retained_history_sample_unavailable" });
+});
+
+it("refuses standard-only samples for the universal retained channel tuple", async (t) => {
+  await assert.rejects(qualify(t, [
+    { id: "general", membershipType: "standard" },
+  ], ["general"]), { gate: "archive_private_retained_history_sample_unavailable" });
+});
+
+it("qualifies a private-only channel scope with a retained sample", async (t) => {
+  const { result } = await qualify(t, [
+    { id: "private-a", membershipType: "private" },
+  ], ["private-a"], false);
+  assert.ok(result.requiredProbes.includes("retained_history"));
+});
+
+it("qualifies chat-only retained history without a private channel sample", async (t) => {
+  const { result } = await qualify(t, [], []);
+  assert.ok(result.requiredProbes.includes("retained_history"));
 });

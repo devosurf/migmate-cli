@@ -566,7 +566,7 @@ describe("production archive provider effects", () => {
     assert.equal(checks.find((check) => check.id === "archive_attachment_bytes")?.status, "fail");
   });
 
-  it("leaves private-channel retained history unrequested even when the current Graph route would accept it", async () => {
+  it("requires private-channel retained route acceptance and fails preflight on refusal", async () => {
     const privateConversation: ArchiveConversation = {
       id: "channel:t:c",
       kind: "channel",
@@ -590,26 +590,32 @@ describe("production archive provider effects", () => {
       scopes: [{ kind: "channel", teamId: "t", channelId: "c" }],
       retainedHistory: true,
     };
-    let retainedRequests = 0;
-    const provider = createArchiveProvider(
-      transport((url) => {
-        if (url.pathname.endsWith("/getAllRetainedMessages")) retainedRequests += 1;
-        if (url.pathname.endsWith("/channels")) return { value: [privateConversation.raw] };
-        return { value: [] };
-      }),
-    );
-    const checks = await collect(
-      provider.preflight(options, {
-        ...plan(options),
-        scopes: [privateScope],
-        conversations: [privateConversation],
-      }),
-    );
-    assert.equal(retainedRequests, 0);
-    assert.equal(
-      checks.find((check) => check.id === "archive_hosted_content:channel")?.status,
-      "fail",
-    );
+    for (const status of [200, 403]) {
+      const provider = createArchiveProvider(
+        transport((url) => {
+          if (url.pathname.endsWith("/getAllRetainedMessages") && status === 403)
+            throw Object.assign(new Error("retained route refused"), { status });
+          if (url.pathname.endsWith("/channels")) return { value: [privateConversation.raw] };
+          return { value: [] };
+        }),
+      );
+      const checks = await collect(
+        provider.preflight(options, {
+          ...plan(options),
+          scopes: [privateScope],
+          conversations: [privateConversation],
+        }),
+      );
+      const expected = status === 200 ? "pass" : "fail";
+      assert.equal(
+        checks.find((check) => check.id === `archive_retention:${privateScope.id}`)?.status,
+        expected,
+      );
+      assert.equal(
+        checks.find((check) => check.id === "archive_route_licensing")?.status,
+        expected,
+      );
+    }
   });
 
   it("accepts Microsoft's transcript continuation spelling without widening the frozen window", async () => {

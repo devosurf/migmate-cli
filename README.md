@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release, and **not published to any registry** — there is no publish workflow, so merging to `main` does not release. Install from source.
 
-Only **three exact routes are qualified**, all on `darwin-arm64`: file migration, local Teams archive, and Teams archive with a Shared Drive destination. A route is a full tuple: source system, backend, permissions, options, destination, transfer binary version, and desktop cell. Change an element outside those tuples — including turning on an archive option — and it has no evidence, which the engine refuses with `unqualified_route` (exit 4). This is a deliberate gate, not a bug. `docs/release-limits.md` states what is and is not claimed; `qualification/gates.json` is the gate register.
+Only **four exact routes are qualified**, all on `darwin-arm64`: file migration, local Teams archive with all options off, local Teams archive with only retained history enabled, and Teams archive with a Shared Drive destination and all options off. A route is a full tuple: source system, backend, permissions, options, destination, transfer binary version, and desktop cell. Change an element outside those tuples and it has no evidence, which the engine refuses with `unqualified_route` (exit 4). Retained history with a Shared Drive destination, transcripts, and attachment bytes remain unqualified. This is a deliberate gate, not a bug. `docs/release-limits.md` states what is and is not claimed; `qualification/gates.json` is the gate register.
 
 ## Requirements
 
@@ -74,6 +74,24 @@ Read `plan` and `verify` evidence without taking a writer lease by adding `--rev
 Operator config carries **credential references** — typed pointers to operator-owned files — never secret values. Migmate resolves a reference just in time and never copies the bytes into durable state. Reference files must be `0600` and owned by the invoking user, outside the repository; the qualification runner refuses anything looser.
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
+
+### Teams retained history
+
+The qualified local retained-history tuple uses channel and user-chats scopes with
+`retainedHistory = true`, `transcripts = false`, `attachmentBytes = false`, and no destination.
+Bind its immutable evidence in the operator config:
+
+```toml
+[qualification]
+bundle = "qualification/f92d02ba93d671b31e0e268ad4c1fad3c37123f0fc72a6e97d6224ee7e1a20af/cc7064ad1b1075fd455d7054cada11ce8ab104ca18b3d9558a14e7a9d45417c8"
+digest = "cc7064ad1b1075fd455d7054cada11ce8ab104ca18b3d9558a14e7a9d45417c8"
+```
+
+Private channels are collected too. Their retained versions are available only for
+edits/deletions after tenant storage migration completed and when an applicable retention
+policy captured them. An empty response is not proof of full historical coverage, and a
+missing migration completion timestamp remains unknown. See [release limits](docs/release-limits.md#5-only-four-exact-routes-are-qualified-on-one-machine-architecture)
+for the live sample and unqualified option combinations.
 
 ### Teams archive destination
 

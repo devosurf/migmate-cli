@@ -173,6 +173,13 @@ export async function validateCapturedBundle(
       TESTED_TRANSFER_VERSIONS[String(tuple.transferVersion)] === true &&
         desktopCells.some((cell) => cell === tuple.desktopCell),
     );
+    const source = tuple.source;
+    const backend = record(source) ? source.backend : undefined;
+    const routes = record(backend) ? backend.routes : undefined;
+    const privateRetainedRequired =
+      tuple.jobType === "teams_archive" &&
+      Array.isArray(routes) &&
+      routes.includes("/v1.0/teams/{teamId}/channels/getAllRetainedMessages");
     requireFact(typeof tuple.guaranteeSetId === "string" && tuple.guaranteeSetId.length > 0);
     requireFact(
       record(bundle.capture) &&
@@ -293,6 +300,64 @@ export async function validateCapturedBundle(
         assertions.add(assertion.id);
       }
       const expectedCodes = probe.expectedCodes;
+      if (probe.id === "retained_history" && privateRetainedRequired) {
+        const observations = captured.observations;
+        const subjects = observations.privateChannels;
+        const samples = observations.privateRetainedSamples;
+        const paging = observations.paging;
+        requireFact(
+          strings(subjects) && subjects.length > 0 &&
+            subjects.every((subject) => hashPattern.test(subject)),
+        );
+        requireFact(Array.isArray(samples) && samples.length > 0);
+        requireFact(Array.isArray(paging) && paging.length > 0);
+        requireFact(
+          typeof observations.records === "number" &&
+            Number.isSafeInteger(observations.records) && observations.records > 0 &&
+            typeof observations.collectionDigest === "string" &&
+            hashPattern.test(observations.collectionDigest),
+        );
+        for (const page of paging) {
+          requireFact(
+            record(page) && page.route === "retained" &&
+              (page.scopeKind === "channel" || page.scopeKind === "chat") &&
+              page.exhausted === true &&
+              typeof page.pages === "number" && Number.isSafeInteger(page.pages) && page.pages > 0 &&
+              page.continuationPages === page.pages - 1 &&
+              typeof page.records === "number" && Number.isSafeInteger(page.records) &&
+              page.records >= 0 &&
+              strings(page.conversationSubjects) &&
+              page.conversationSubjects.every((subject) => hashPattern.test(subject)),
+          );
+        }
+        requireFact(subjects.every((subject) =>
+          paging.some((page) =>
+            page.scopeKind === "channel" && page.conversationSubjects.includes(subject))));
+        const sampleSubjects = new Set<string>();
+        let privateRecords = 0;
+        for (const sample of samples) {
+          requireFact(
+            record(sample) && typeof sample.subject === "string" &&
+              subjects.includes(sample.subject) && !sampleSubjects.has(sample.subject) &&
+              typeof sample.records === "number" && Number.isSafeInteger(sample.records) &&
+              sample.records > 0,
+          );
+          sampleSubjects.add(sample.subject);
+          privateRecords += sample.records;
+        }
+        requireFact(privateRecords <= observations.records);
+        for (const page of paging) {
+          const collected = samples
+            .filter((sample) => page.conversationSubjects.includes(sample.subject))
+            .reduce((count, sample) => count + sample.records, 0);
+          requireFact(collected <= page.records);
+        }
+        for (const kind of ["channel", "chat"]) {
+          if (kind === "channel" ||
+            routes.includes("/v1.0/users/{userId}/chats/getAllRetainedMessages"))
+            requireFact(paging.some((page) => page.scopeKind === kind && page.records > 0));
+        }
+      }
       if (probe.id === "collision_matrix") {
         requireFact(collisionCodes.every((code) => expectedCodes.includes(code)));
         const observations = captured.observations as Record<string, unknown>;
@@ -372,6 +437,7 @@ export async function validateCapturedBundle(
         input.requiredProbes.length > 0 &&
         input.requiredProbes.every((id) => probes.has(id)),
     );
+    requireFact(!privateRetainedRequired || probes.has("retained_history"));
     requireFact(digestJson(bundle) === input.digest);
     return { digest: input.digest, tuple: input.tuple, bundle: input.bundle };
   } catch {

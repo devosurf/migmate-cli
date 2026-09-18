@@ -79,7 +79,6 @@ export const CODES: readonly CodeEntry[] = [
 
   // ---- teams archive: planned omissions ------------------------------------
   entry("retained_history_not_requested", "planned_omission", "plan", TEAMS),
-  entry("retained_history_unsupported_private_channel", "planned_omission", "plan", TEAMS),
   entry("transcript_unsupported_channel_meeting", "planned_omission", "plan", TEAMS),
   entry("attachment_metadata_only", "planned_omission", "plan", TEAMS),
 

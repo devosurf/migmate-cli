@@ -10,7 +10,7 @@ import type {
   ArchiveProvider,
   ArchiveScopeBinding,
 } from "../src/engine/providers/archive.ts";
-import type { PackageManifest } from "../src/engine/archive/package.ts";
+import type { ConversationManifest, PackageManifest } from "../src/engine/archive/package.ts";
 import { ArchiveEffectError } from "../src/engine/providers/archive.ts";
 
 // The fake sits at the same provider-effects seam as production. No driver or
@@ -332,4 +332,140 @@ test("archive approval freezes empty conversations and offline verification surv
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("private current and retained versions survive collection and packaging with empty private routes", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "migmate-archive-private-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const conversations: ArchiveConversation[] = ["populated", "empty"].map((channelId) => ({
+    id: `channel:team:${channelId}`,
+    kind: "channel",
+    title: channelId,
+    scopeEntryId: `channel:team:${channelId}`,
+    participantScopeIds: [`channel:team:${channelId}`],
+    teamId: "team",
+    channelId,
+    membershipType: "private",
+    raw: { id: channelId, membershipType: "private" },
+  }));
+  const scopes: ArchiveScopeBinding[] = conversations.map((conversation) => ({
+    id: conversation.scopeEntryId,
+    kind: "channel",
+    teamId: "team",
+    channelId: conversation.channelId!,
+    conversationIds: [conversation.id],
+  }));
+  const message = {
+    id: "same-message",
+    channelIdentity: { teamId: "team", channelId: "populated" },
+    createdDateTime: "2020-01-01T00:00:00Z",
+    lastModifiedDateTime: "2026-08-01T00:00:00Z",
+    from: { user: { id: "author", displayName: "Original author" } },
+    attachments: [],
+    mentions: [],
+  };
+  const current = {
+    ...message,
+    body: { contentType: "html", content: "<p>Current version</p>" },
+  };
+  const retained = {
+    ...message,
+    body: { contentType: "html", content: "<p>Retained version</p>" },
+  };
+  const archive: ArchiveProvider = {
+    async expand() {
+      return { conversations, scopes };
+    },
+    async *preflight() {
+      yield { id: "archive_effects", title: "Scripted fixture", status: "pass", evidence: {} };
+    },
+    async page({ scope, route }) {
+      return {
+        records: scope.channelId === "empty" ? [] : [route === "retained" ? retained : current],
+        nextLink: null,
+      };
+    },
+    async transcriptConversationId() {
+      throw new Error("transcripts not requested");
+    },
+    async *assetRequests() {},
+    async *openAsset() {
+      throw new Error("no assets requested");
+    },
+  };
+  const provider = Object.assign(
+    new FakeFileMigrationPort({
+      sourceDriveId: "unused",
+      sourceRootId: "unused",
+      destinationDriveId: "unused",
+      destinationRootId: "unused",
+      sourceItems: [],
+      destinationItems: [],
+    }),
+    { archive },
+  );
+  const engine = openEngine({
+    home,
+    now: () => new Date("2026-09-01T00:00:00Z"),
+    provider,
+  });
+  t.after(() => engine.close());
+  const initialized = await engine.initJob({
+    type: "teams_archive",
+    config: {
+      scopes: [{ kind: "team", teamId: "team" }],
+      window: { from: "2026-01-01T00:00:00Z" },
+      retainedHistory: true,
+    },
+  });
+  assert.ok(initialized.ok);
+  const ref = initialized.value;
+  const run = await engine.withWriter(ref, async (writer) => {
+    const planned = await writer.plan();
+    assert.ok(planned.ok);
+    assert.ok(
+      (await writer.approve({
+        planDigest: planned.value.planDigest,
+        approver: "test",
+        mode: "unattended",
+      })).ok,
+    );
+    const execution = await writer.execute();
+    assert.ok(execution.ok);
+    assert.equal(execution.value.outcome, "completed");
+  });
+  assert.ok(run.ok);
+  const root = join(home, "jobs", ref.id, "archive");
+  const manifest: PackageManifest = JSON.parse(
+    await readFile(join(root, "manifest.json"), "utf8"),
+  );
+  assert.deepEqual(
+    manifest.conversations.map(({ id, recordCount }) => ({ id, recordCount })),
+    [
+      { id: "channel:team:empty", recordCount: 0 },
+      { id: "channel:team:populated", recordCount: 2 },
+    ],
+  );
+  assert.deepEqual(manifest.findings, []);
+  assert.deepEqual(manifest.omissions, [
+    { code: "attachment_metadata_only", subjectId: "archive" },
+  ]);
+  assert.deepEqual(
+    manifest.collection
+      .filter((page) => page.scopeEntryId === "channel:team:empty")
+      .map(({ route, complete, recordKeys }) => ({ route, complete, recordKeys })),
+    [
+      { route: "messages", complete: true, recordKeys: [] },
+      { route: "retained", complete: true, recordKeys: [] },
+    ],
+  );
+  const populated = manifest.conversations.find((entry) => entry.id === "channel:team:populated")!;
+  const conversationManifest: ConversationManifest = JSON.parse(
+    await readFile(join(root, populated.manifest.path), "utf8"),
+  );
+  const jsonl = await readFile(join(root, conversationManifest.parts[0]!.jsonl.path), "utf8");
+  assert.deepEqual(
+    new Set(jsonl.trim().split("\n").map((line) => JSON.parse(line))),
+    new Set([current, retained]),
+  );
 });

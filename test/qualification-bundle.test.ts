@@ -72,6 +72,15 @@ function routeCapture(
 }
 
 function published(t: TestContext, ...captures: ProbeCapture[]) {
+  return publishedForTuple(t, tuple, ["route_limits_and_version_gate"], ...captures);
+}
+
+function publishedForTuple(
+  t: TestContext,
+  tuple: Record<string, unknown>,
+  requiredProbes: string[],
+  ...captures: ProbeCapture[]
+) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "migmate-bundle-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const artifacts = captures
@@ -117,7 +126,7 @@ function published(t: TestContext, ...captures: ProbeCapture[]) {
       bundle: path,
       digest,
       tuple,
-      requiredProbes: ["route_limits_and_version_gate"],
+      requiredProbes,
     },
   };
 }
@@ -240,5 +249,167 @@ describe("captured bundle validation", () => {
       }),
     );
     await assert.rejects(validateCapturedBundle(root, input), Error);
+  });
+});
+
+const privateSubject = digestJson("private-conversation");
+const emptyPrivateSubject = digestJson("empty-private-conversation");
+const retainedChannelRoute = "/v1.0/teams/{teamId}/channels/getAllRetainedMessages";
+const retainedChatRoute = "/v1.0/users/{userId}/chats/getAllRetainedMessages";
+
+function archiveTuple(routes: string[], retainedHistory = true) {
+  return {
+    ...tuple,
+    jobType: "teams_archive",
+    source: {
+      system: "microsoft_teams",
+      backend: { routes, options: { retainedHistory, transcripts: false, attachmentBytes: false } },
+    },
+    destination: { system: "local_archive_package" },
+  };
+}
+
+function retainedCapture(observations: Record<string, unknown> = {}): ProbeCapture {
+  return capture("retained_history", {
+    observations: {
+      privateChannels: [privateSubject, emptyPrivateSubject].sort(),
+      privateRetainedSamples: [{ subject: privateSubject, records: 1 }],
+      records: 1,
+      collectionDigest: digestJson(["retained-record"]),
+      paging: [
+        {
+          scopeKind: "channel",
+          conversationSubjects: [privateSubject],
+          route: "retained",
+          pages: 2,
+          continuationPages: 1,
+          records: 1,
+          exhausted: true,
+        },
+        {
+          scopeKind: "channel",
+          conversationSubjects: [emptyPrivateSubject],
+          route: "retained",
+          pages: 1,
+          continuationPages: 0,
+          records: 0,
+          exhausted: true,
+        },
+      ],
+      ...observations,
+    },
+  });
+}
+
+describe("retained channel bundle proof", () => {
+  it("accepts a collected private sample alongside an exhaustively paged empty private scope", async (t) => {
+    const { root, input } = publishedForTuple(
+      t, archiveTuple([retainedChannelRoute]), ["retained_history"],
+      capture("desktop_runtime"), retainedCapture(),
+    );
+    assert.deepEqual(await validateCapturedBundle(root, input), {
+      digest: input.digest, tuple: input.tuple, bundle: input.bundle,
+    });
+  });
+
+  it("refuses old omission-only captures", async (t) => {
+    const { root, input } = publishedForTuple(
+      t, archiveTuple([retainedChannelRoute]), ["retained_history"],
+      capture("desktop_runtime"),
+      capture("retained_history", {
+        codes: ["retained_history_unsupported_private_channel"],
+        assertions: [{
+          id: "private_channel_omission_coverage",
+          expected: [privateSubject],
+          observed: [privateSubject],
+        }],
+        observations: {
+          privateChannels: [privateSubject],
+          privateChannelOmissions: [privateSubject],
+          records: 1,
+        },
+      }),
+    );
+    await assert.rejects(validateCapturedBundle(root, input), Error);
+  });
+
+  for (const [name, observations] of [
+    ["no collected private samples", { privateRetainedSamples: [] }],
+    ["only empty private samples", {
+      privateRetainedSamples: [{ subject: privateSubject, records: 0 }],
+    }],
+    ["standard-only scope metadata", { privateChannels: [] }],
+    ["samples outside the frozen private subjects", {
+      privateRetainedSamples: [{ subject: digestJson("other-conversation"), records: 1 }],
+    }],
+    ["raw private identifiers", {
+      privateChannels: ["private-conversation"],
+      privateRetainedSamples: [{ subject: "private-conversation", records: 1 }],
+    }],
+    ["a collected count larger than the retained collection", {
+      privateRetainedSamples: [{ subject: privateSubject, records: 2 }],
+    }],
+    ["no paging for the empty private conversation", {
+      paging: [{
+        scopeKind: "channel", conversationSubjects: [privateSubject], route: "retained",
+        pages: 1, continuationPages: 0, records: 1, exhausted: true,
+      }],
+    }],
+    ["unexhausted retained paging", {
+      paging: [{
+        scopeKind: "channel", conversationSubjects: [privateSubject, emptyPrivateSubject],
+        route: "retained", pages: 1, continuationPages: 0, records: 1, exhausted: false,
+      }],
+    }],
+    ["no retained records in the private sample's paging", {
+      paging: [{
+        scopeKind: "channel", conversationSubjects: [privateSubject, emptyPrivateSubject],
+        route: "retained", pages: 1, continuationPages: 0, records: 0, exhausted: true,
+      }],
+    }],
+  ] satisfies [string, Record<string, unknown>][]) {
+    it(`refuses ${name}`, async (t) => {
+      const { root, input } = publishedForTuple(
+        t, archiveTuple([retainedChannelRoute]), ["retained_history"],
+        capture("desktop_runtime"), retainedCapture(observations),
+      );
+      await assert.rejects(validateCapturedBundle(root, input), Error);
+    });
+  }
+
+  it("still requires a chat sample for a combined channel/chat retained tuple", async (t) => {
+    const { root, input } = publishedForTuple(
+      t, archiveTuple([retainedChannelRoute, retainedChatRoute]), ["retained_history"],
+      capture("desktop_runtime"), retainedCapture(),
+    );
+    await assert.rejects(validateCapturedBundle(root, input), Error);
+  });
+
+  it("requires the retained probe even if the caller omits it from required probes", async (t) => {
+    const { root, input } = publishedForTuple(
+      t, archiveTuple([retainedChannelRoute]), ["graph_route_matrix"],
+      capture("desktop_runtime"), capture("graph_route_matrix"),
+    );
+    await assert.rejects(validateCapturedBundle(root, input), Error);
+  });
+
+  it("preserves chat-only retained bundles without private channel proof", async (t) => {
+    const { root, input } = publishedForTuple(
+      t, archiveTuple([retainedChatRoute]), ["retained_history"],
+      capture("desktop_runtime"), capture("retained_history", { observations: { records: 1 } }),
+    );
+    assert.deepEqual(await validateCapturedBundle(root, input), {
+      digest: input.digest, tuple: input.tuple, bundle: input.bundle,
+    });
+  });
+
+  it("preserves base bundles without retained proof", async (t) => {
+    const { root, input } = publishedForTuple(
+      t, archiveTuple(["/v1.0/teams/{teamId}/channels/getAllMessages"], false), ["graph_route_matrix"],
+      capture("desktop_runtime"), capture("graph_route_matrix"),
+    );
+    assert.deepEqual(await validateCapturedBundle(root, input), {
+      digest: input.digest, tuple: input.tuple, bundle: input.bundle,
+    });
   });
 });

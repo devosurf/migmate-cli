@@ -177,6 +177,44 @@ function conversationManifest(
 }
 
 describe("archive whole-artifact contract", () => {
+  it("requires exhausted retained paging for an empty private conversation", () => {
+    const input = fixture([]);
+    input.plan.config.retainedHistory = true;
+    input.plan.conversations = [{ ...conversation, membershipType: "private" }, emptyConversation];
+    input.evidence.push({
+      scopeEntryId: "user-scope",
+      route: "retained",
+      cursor: null,
+      nextLink: null,
+      complete: true,
+      recordKeys: [],
+      findingCodes: [],
+    });
+    assert.deepEqual(buildArchivePackage(input).findings, [
+      {
+        code: "message_collection_incomplete",
+        subjectId: "channel-scope",
+        evidence: {
+          route: "retained",
+          reason: "paging_not_exhausted",
+          pages: 0,
+          reachablePages: 0,
+          terminalPage: false,
+        },
+      },
+    ]);
+    input.evidence.push({
+      scopeEntryId: "channel-scope",
+      route: "retained",
+      cursor: null,
+      nextLink: null,
+      complete: true,
+      recordKeys: [],
+      findingCodes: [],
+    });
+    assert.deepEqual(buildArchivePackage(input).findings, []);
+  });
+
   it("regenerates deterministic raw JSONL and reconciles UTC months, identities, indices and an empty conversation", async (t) => {
     const records = [
       record("b", "2026-02-01T00:00:00Z"),
