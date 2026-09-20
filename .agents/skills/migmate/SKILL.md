@@ -57,7 +57,7 @@ Operator config holds **credential references**: typed pointers to operator-owne
 
 ## Teams archive destination
 
-When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Both routes are qualified only on `darwin-arm64`, with `retainedHistory`, `transcripts`, and `attachmentBytes` off; each route owns a separate evidence bundle. Use `docs/release-limits.md` limit 5 for the qualification boundary.
+When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Use `docs/release-limits.md` limit 5 to select the exact qualified option/destination tuple and its independent evidence bundle; local-only evidence cannot qualify a Drive copy.
 
 For a Drive copy, follow `README.md`'s "Teams archive destination" config: stable `destination.destDriveId` and `destination.destFolderId` plus a separate `secrets.google_service_account` file reference. Keep the existing Graph credential unchanged. Omit the destination and Google reference for a local-only archive; this remains the same Teams archive job type and lifecycle.
 

@@ -32,6 +32,7 @@ import {
   type QualificationResult,
 } from "./common.ts";
 import { qualifyArchiveDestination } from "./archive-destination.ts";
+import { qualifyArchiveDestinationSafety } from "./archive-destination-safety.ts";
 
 type ScopeKind = "channel" | "chat";
 type Assertion = ProbeCapture["assertions"][number];
@@ -326,7 +327,20 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
       "archive_restart_durable_state_changed",
     );
     if (config.destination) {
-      input.capture(await qualifyArchiveDestination(input, config));
+      const destinationCapture = await qualifyArchiveDestination(input, config);
+      if (config.retainedHistory) {
+        const safety = await qualifyArchiveDestinationSafety(input, config);
+        destinationCapture.assertions.push(
+          ...safety.assertions.map((assertion) => ({
+            ...assertion,
+            id: `safety_${assertion.id}`,
+          })),
+        );
+        destinationCapture.codes = codes([...destinationCapture.codes, ...safety.codes]);
+        destinationCapture.observations.safety = safety.observations;
+        destinationCapture.completedAt = safety.completedAt;
+      }
+      input.capture(destinationCapture);
     } else {
       provider = createProductionProvider({
         jobType: "teams_archive",
@@ -362,8 +376,10 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
   const fidelityCodes = sourceFindings(units, packageInput.records);
   const privateConversationIds = new Set(
     packageInput.plan.conversations
-      .filter((conversation) =>
-        conversation.kind === "channel" && conversation.membershipType === "private")
+      .filter(
+        (conversation) =>
+          conversation.kind === "channel" && conversation.membershipType === "private",
+      )
       .map((conversation) => conversation.id),
   );
   const privateChannels = [...privateConversationIds].map(hash).sort();
@@ -686,7 +702,13 @@ async function run(input: QualificationInput): Promise<QualificationResult> {
           retained.every((page) => page.exhausted),
         ),
         ...(kinds.includes("channel")
-          ? [assertion("private_retained_sample_collected", true, privateRetainedSamples.length > 0)]
+          ? [
+              assertion(
+                "private_retained_sample_collected",
+                true,
+                privateRetainedSamples.length > 0,
+              ),
+            ]
           : []),
       ],
       {

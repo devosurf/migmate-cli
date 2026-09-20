@@ -4,7 +4,7 @@ Four properties of the first release are **measured, not guaranteed**. Two of th
 
 Each limit says what was measured, what Migmate does about it, and the refusal code or report line that names it while you are running a job. Everything here is already enforced in code; nothing on this page is a future intention.
 
-Scope: four qualified tuples — the file migration route from a SharePoint document-library root to a Google Shared Drive folder, the Teams archive route from Graph v1.0 Global to a local archive package with or without a Shared Drive destination, and the local archive with retained history enabled — all measured on `darwin-arm64` against a live tenant on 2026-09-15–17 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 describe the file route; the archive destination reuses its Drive concurrency and provenance stack. Limit 5 states what is qualified; limit 6 bounds what the Drive archive copy provides.
+Scope: five qualified tuples — file migration from a SharePoint document-library root to a Google Shared Drive folder, and Teams archive from Graph v1.0 Global to a local archive package with or without a Shared Drive destination, each with either all options off or only retained history enabled — all measured on `darwin-arm64` against a live tenant on 2026-09-15–20 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 describe the file route; the archive destination reuses its Drive concurrency and provenance stack. Limit 5 states what is qualified; limit 6 bounds what the Drive archive copy provides.
 
 ## 1. The destination concurrency token is measured, not promised
 
@@ -54,24 +54,25 @@ Scope: four qualified tuples — the file migration route from a SharePoint docu
 
 **Where you see it.** The `provider.credentials` preflight check and its recorded evidence — tenant id, client id, granted roles — and the `credential_permissions_invalid` refusal.
 
-## 5. Only four exact routes are qualified, on one machine architecture
+## 5. Only five exact routes are qualified, on one machine architecture
 
 **What a qualified route is.** The whole tuple: job type, source system and backend configuration, destination system and backend configuration, pinned transfer-binary version, guarantee-set id, and desktop architecture. A job whose tuple does not match a stored evidence bundle refuses `unqualified_route` before it does any work. There is no "probably compatible", no best-effort flag, and no degrade toggle.
 
-**What is qualified.** Exactly four tuples, all captured on `darwin-arm64`:
+**What is qualified.** Exactly five tuples, all captured on `darwin-arm64`:
 
-| Job type         | Route                                                                     | Guarantees                 |
-| ---------------- | ------------------------------------------------------------------------- | -------------------------- |
-| `file_migration` | SharePoint document library → Google Shared Drive folder                  | `default`                  |
-| `teams_archive`  | Graph v1.0 Global → local archive package                                 | `default`, all options off |
-| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs | `default`, all options off |
-| `teams_archive`  | Graph v1.0 Global → local archive package with retained history          | `default`, only `retainedHistory` on |
+| Job type         | Route                                                                                           | Guarantees                           |
+| ---------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `file_migration` | SharePoint document library → Google Shared Drive folder                                        | `default`                            |
+| `teams_archive`  | Graph v1.0 Global → local archive package                                                       | `default`, all options off           |
+| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs                       | `default`, all options off           |
+| `teams_archive`  | Graph v1.0 Global → local archive package with retained history                                 | `default`, only `retainedHistory` on |
+| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs with retained history | `default`, only `retainedHistory` on |
 
 **Other desktop architectures are not qualified.** `darwin-x64`, `linux-arm64` and `linux-x64` have no captured bundle. The tuple includes the architecture, so running on one of them refuses rather than assuming the observation transfers.
 
 **Generic remotes and My Drive are not qualified or implemented.** A generic rclone remote to another generic rclone remote is not a supported route: the credential loader accepts only an `onedrive` document-library source and a `drive` service-account destination, so any other backend refuses `credential_backend_unsupported`, and the route name itself refuses `unqualified_route`. Google My Drive as a destination is likewise neither qualified nor implemented. This is a statement about what was built, not a temporary gap in evidence.
 
-**Only the local retained-history option tuple is qualified.** `retainedHistory=true`,
+**The local retained-history tuple is independently qualified.** `retainedHistory=true`,
 `transcripts=false`, `attachmentBytes=false`, channel and user-chats scopes, and no Shared
 Drive destination have their own [published bundle](../qualification/f92d02ba93d671b31e0e268ad4c1fad3c37123f0fc72a6e97d6224ee7e1a20af/cc7064ad1b1075fd455d7054cada11ce8ab104ca18b3d9558a14e7a9d45417c8/bundle.json),
 captured on 2026-09-17 with Node 24.21.0. It proves 16 records in three conversations,
@@ -83,11 +84,47 @@ The live sample proves edited text history, not deleted-message recovery or reta
 hosted-content availability. The tenant reported migration `Completed` without returning
 a completion timestamp, so this capture establishes no historical cutoff.
 
-Other option tuples still refuse `unqualified_route`: in particular retained history with
-a Shared Drive destination, transcripts, and attachment bytes. Prerequisites are not merely
-credentials: retained history needs an applicable retention policy, transcripts need a
-tenant toggle plus an application access policy and an in-scope organizer's meeting, and
-attachment bytes need a tenant-wide file-read grant.
+**Retained history with a Shared Drive destination owns a fifth tuple.** The complete
+live run for [#43](https://github.com/devosurf/migmate-cli/issues/43), captured on 2026-09-20
+with Node 24.21.0, macOS 26.6.2 and `darwin-arm64`, published
+[tuple `2be46b0c…`, bundle `5087860e…`](../qualification/2be46b0c84231a54b9f1e5418bbe44a1db675c2f79932d1b2ef9386da123f04d/5087860e601a4a7095d376b6163585d949a6fceaa0a24d8586a1eb8e9d3841ed/bundle.json).
+The exact combination is application-only Graph v1.0 Global, channel and user-chats scopes,
+`retainedHistory=true`, `transcripts=false`, `attachmentBytes=false`, a separate Google
+service-account credential, `default` guarantees and transfer `v1.75.0`.
+
+The existing standard-channel, private-channel and chat samples were reused without source
+mutation, in the closed modification window `[2026-09-16T00:00:00Z, 2026-09-17T19:36:28.566Z)`.
+All three retained bindings exhausted paging. Six Drive objects — three exposed root files
+and three conversation ZIPs — preserve 16 records and three hosted assets. Each original
+sample's current v2 and retained v1 share their message identity and retain their content.
+The local package self-verified before upload; every downloaded object matched durable
+size/SHA-256 and provenance. Stock `unzip` reconstructed the complete package, whose
+canonical records, HTML, counts, manifests, links and assets passed production verification.
+Independent destination-only retrieval matched all six versions to live source observations;
+offline browser inspection rendered both versions for every sample, with all three hosted
+images loaded and no remote resources.
+
+ZIPs regenerated from that live package after filesystem timestamp changes were identical.
+A lost upload acknowledgement recovered the same reserved object after reopening durable
+state; replay preserved object IDs, revision tokens and provenance. A separate disposable
+child proved `unowned_path_collision` and real content/revision drift refusal without
+overwriting or deleting those bytes during execution or verification. Ownership-checked
+fixture teardown removed only its eight tool-created objects; the primary archive was
+unchanged. Destination proof removed the Graph secret reference and used Google-only
+verification sessions; nonsecret source identity fields remain bound in configuration.
+The seven immutable evidence files were audited against live identifiers, names, message
+bodies, credential references and secrets, plus raw identifier and URL patterns.
+
+This edited-text sample still proves neither deleted-message recovery nor retained
+hosted-content availability. The tenant previously reported migration `Completed` without
+a completion timestamp; this run invents neither a timestamp nor a historical cutoff.
+The four earlier bundles are unchanged. No qualification transfers to another option
+combination, architecture, or full native ten-verb lifecycle.
+
+Other option tuples still refuse `unqualified_route`, including transcripts and attachment
+bytes. Prerequisites are not merely credentials: retained history needs an applicable
+retention policy, transcripts need a tenant toggle plus an application access policy and
+an in-scope organizer's meeting, and attachment bytes need a tenant-wide file-read grant.
 
 **Private channels are collected, not categorically omitted, when retained history is requested.**
 [Spec #17 §11 and story 33](https://github.com/devosurf/migmate-cli/issues/17) now follow
@@ -132,7 +169,38 @@ With no destination and all options off, tuple `6aa55648…`, package behavior, 
 The six-role Graph allowlist is unchanged, and an extra Graph role still refuses
 `credential_permissions_invalid`.
 
-**Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records all four published bundles and every gate still unrun.
+**Reproducing the combined qualification.** Use supported Node 24 on `darwin-arm64`.
+`PROBE_CONFIG` names an operator-owned configuration with protected external Graph and
+Google file references, the explicit sample scope/window, and an empty disposable Drive
+destination; `EVIDENCE_OUTPUT` names a new directory outside the repository:
+
+```sh
+node --version
+node --test test/archive-qualification.test.ts
+node --test test/archive-destination.test.ts
+node --test test/archive-container.test.ts test/archive-package.test.ts test/qualification-bundle.test.ts
+npm run typecheck
+npm run qualify:route -- --config "$PROBE_CONFIG" --output "$EVIDENCE_OUTPUT"
+npm test
+npm run check:package
+```
+
+Recorded local results on the runtime/platform above: 49 targeted behavioral regressions
+passed; typecheck passed; the full behavioral suite ran once with 195 passing tests and
+zero failures. The actual package smoke built, packed, globally installed into a temporary
+prefix, exercised the installed CLI and embedded assets, and accepted all five bundles
+through the installed production evidence loader. All 26 files in the four earlier bundles
+remained byte-identical. Production tuple binding also accepted the new combination and
+refused attempts to enable transcripts or attachment bytes with its evidence.
+
+The qualification command publishes nothing unless every real probe succeeds. Its
+[`archive_destination` capture](../qualification/2be46b0c84231a54b9f1e5418bbe44a1db675c2f79932d1b2ef9386da123f04d/5087860e601a4a7095d376b6163585d949a6fceaa0a24d8586a1eb8e9d3841ed/captures/archive_destination.json)
+records reconstruction, per-kind version counts/digests, recovery, determinism and safety;
+the companion captures record retained paging, hosted bytes, package fidelity and native
+runtime readiness. Private configuration, downloaded content and browser screenshots are
+not published with the evidence. Paid CI availability is not part of this local proof.
+
+**Where you see it.** The `provider.qualified_route` preflight check and the `unqualified_route` refusal; `qualification/gates.json`, which records all five published bundles and every gate still unrun.
 
 ## 6. The archive destination is cold storage, not a reading surface
 

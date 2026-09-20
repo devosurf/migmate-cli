@@ -1,14 +1,105 @@
-import { mkdtemp, readdir, rm, utimes } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { copyFile, mkdir, mkdtemp, readdir, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import { writeConversationContainer } from "../../src/engine/archive/container.ts";
 import type { ArchiveDestinationState } from "../../src/engine/archive/destination.ts";
-import { hashStream, markerMatches } from "../../src/engine/drivers/file-state.ts";
-import type { ArchiveConfig } from "../../src/engine/providers/archive.ts";
+import { conversationPath, verifyArchivePackage } from "../../src/engine/archive/package.ts";
+import { markerMatches } from "../../src/engine/drivers/file-state.ts";
+import type {
+  ArchiveConfig,
+  ArchivePackageInput,
+  ArchiveRecord,
+} from "../../src/engine/providers/archive.ts";
 import { createProductionProvider } from "../../src/engine/providers/production.ts";
 import { digestJson } from "../../src/engine/store/digest.ts";
 import type { ProbeCapture } from "../../src/qualification/bundle.ts";
 import { ArchiveJournal, archiveFileProof } from "./archive-journal.ts";
 import { QualificationBlocked, qualificationAssertion, type QualificationInput } from "./common.ts";
+
+const exec = promisify(execFile);
+
+interface RetainedVersionProof {
+  kind: "standard" | "private" | "chat";
+  matchedMessages: number;
+  currentVersions: number;
+  retainedVersions: number;
+  versionsDigest: string;
+}
+
+/** Match changed text bodies, not merely route metadata differences, within one message identity. */
+function changedRetainedVersions(input: ArchivePackageInput) {
+  const classes = ["standard", "private", "chat"] as const;
+  const conversations = new Map(
+    input.plan.conversations.map((conversation) => [conversation.id, conversation]),
+  );
+  const groups = new Map<
+    string,
+    { kind: RetainedVersionProof["kind"]; current: ArchiveRecord[]; retained: ArchiveRecord[] }
+  >();
+  const bodyDigest = (record: ArchiveRecord): string | null => {
+    const body = record.raw.body;
+    if (!body || typeof body !== "object" || !("content" in body)) return null;
+    if (typeof body.content !== "string" || !body.content.trim()) return null;
+    return digestJson(body.content);
+  };
+  for (const record of input.records) {
+    if (record.route !== "messages" && record.route !== "retained") continue;
+    const conversation = conversations.get(record.conversationId);
+    if (!conversation) continue;
+    const kind =
+      conversation.kind === "chat"
+        ? "chat"
+        : conversation.membershipType === "private"
+          ? "private"
+          : conversation.membershipType === "standard"
+            ? "standard"
+            : null;
+    if (!kind) continue;
+    const identity = digestJson([record.conversationId, record.messageId]);
+    let group = groups.get(identity);
+    if (!group) {
+      group = { kind, current: [], retained: [] };
+      groups.set(identity, group);
+    }
+    group[record.route === "messages" ? "current" : "retained"].push(record);
+  }
+  return classes.map((kind) => {
+    let matchedMessages = 0;
+    const current = new Map<string, ArchiveRecord>();
+    const retained = new Map<string, ArchiveRecord>();
+    for (const group of groups.values()) {
+      if (group.kind !== kind) continue;
+      let matched = false;
+      for (const present of group.current) {
+        const presentBody = bodyDigest(present);
+        if (presentBody === null) continue;
+        for (const prior of group.retained) {
+          const priorBody = bodyDigest(prior);
+          if (priorBody === null || presentBody === priorBody) continue;
+          current.set(present.key, present);
+          retained.set(prior.key, prior);
+          matched = true;
+        }
+      }
+      if (matched) matchedMessages++;
+    }
+    return {
+      kind,
+      matchedMessages,
+      currentVersions: current.size,
+      retainedVersions: retained.size,
+      versionsDigest: digestJson(
+        [...current.values(), ...retained.values()]
+          .map((record) => digestJson([record.route, record.raw]))
+          .sort(),
+      ),
+    };
+  });
+}
 
 /** Real driver, durable restart and live Drive reads; captures contain no object identities. */
 export async function qualifyArchiveDestination(
@@ -34,6 +125,11 @@ export async function qualifyArchiveDestination(
   let recoveredIdentityDigest = "";
   let inventoryDigest = "";
   let containerCount = 0;
+  let restoredManifestDigest = "";
+  let restoredCollectionDigest = "";
+  let restoredRecords = 0;
+  let restoredAssets = 0;
+  let retainedVersions: RetainedVersionProof[] = [];
   try {
     expect(
       "empty_disposable_destination",
@@ -113,6 +209,61 @@ export async function qualifyArchiveDestination(
       ["index.csv", "index.html", "manifest.json"],
       [...states.keys()].filter((path) => !path.startsWith("conversations/")).sort(),
     );
+    await journal.run("execute", config, provider);
+    inventoryDigest = digestJson(before);
+    expect(
+      "rerun_preserves_object_ids_revisions_and_markers",
+      inventoryDigest,
+      digestJson(await inventory()),
+    );
+    await provider.close!();
+    const verificationConfig = structuredClone(input.config.jobConfig) as Record<string, unknown>;
+    const secrets = { ...(verificationConfig.secrets as Record<string, unknown>) };
+    delete secrets.teams_graph_client_secret;
+    verificationConfig.secrets = secrets;
+    provider = createProductionProvider({
+      jobType: "teams_archive",
+      config: verificationConfig,
+      jobDirectory: input.jobDirectory,
+      mode: "archive_verification",
+    });
+    expect(
+      "verification_graph_credential_reference_absent",
+      false,
+      "teams_graph_client_secret" in secrets,
+    );
+    journal = await ArchiveJournal.reopen(input.jobDirectory, input.signal);
+    const collection = await journal.resume();
+    if (
+      !collection.archivePlan ||
+      !collection.archiveRecords ||
+      !collection.archiveEvidence ||
+      !collection.archiveManifestDigest
+    )
+      throw new QualificationBlocked("archive_destination_completed_collection_missing");
+    const packageInput = {
+      plan: collection.archivePlan,
+      records: collection.archiveRecords,
+      evidence: collection.archiveEvidence,
+      manifestDigest: collection.archiveManifestDigest,
+    };
+    const proofDirectory = join(input.jobDirectory, "restored-archive");
+    const restoredRoot = join(proofDirectory, "package");
+    const downloads = join(proofDirectory, "downloads");
+    await mkdir(proofDirectory, { mode: 0o700 });
+    await mkdir(restoredRoot, { mode: 0o700 });
+    await mkdir(downloads, { mode: 0o700 });
+    const expectedPaths = [
+      "index.csv",
+      "index.html",
+      "manifest.json",
+      ...packageInput.plan.conversations.map(conversationPath),
+    ].sort();
+    expect(
+      "downloaded_archive_path_inventory",
+      digestJson(expectedPaths),
+      digestJson([...states.keys()].sort()),
+    );
     const temporary = await mkdtemp(join(input.jobDirectory, "container-proof-"));
     try {
       for (const state of states.values()) {
@@ -121,17 +272,29 @@ export async function qualifyArchiveDestination(
           driveId: destination.destDriveId,
           objectId: state.output.id,
         });
-        if (!entry || !entry.revision || !markerMatches(entry.provenance, state.marker))
+        if (
+          !entry ||
+          entry.id !== state.output.id ||
+          !entry.revision ||
+          entry.revision !== state.revision ||
+          !markerMatches(entry.provenance, state.marker)
+        )
           throw new QualificationBlocked("archive_destination_live_identity_or_marker_mismatch");
-        const downloaded = await hashStream(
-          provider.streamDestinationContent(entry.id),
-          input.signal,
+        const download = join(downloads, `${digestJson(state.path)}.download`);
+        await pipeline(
+          Readable.from(provider.streamDestinationContent(entry.id)),
+          createWriteStream(download, { mode: 0o600, flags: "wx" }),
+          { signal: input.signal },
         );
+        const downloaded = await archiveFileProof(download);
         if (downloaded.sha256 !== state.output.sha256 || downloaded.size !== state.output.size)
           throw new QualificationBlocked("archive_destination_downloaded_bytes_mismatch");
         const container = state.path.startsWith("conversations/");
         outputs.push({ kind: container ? "container" : "root", ...downloaded });
-        if (!container) continue;
+        if (!container) {
+          await copyFile(download, join(restoredRoot, state.path));
+          continue;
+        }
         const directory = join(journal.archiveRoot, state.path);
         const first = join(temporary, "first.zip");
         const second = join(temporary, "second.zip");
@@ -151,6 +314,14 @@ export async function qualifyArchiveDestination(
           digestJson(firstProof) !== digestJson(secondProof)
         )
           throw new QualificationBlocked("archive_destination_live_container_not_deterministic");
+        const extracted = join(restoredRoot, state.path);
+        await mkdir(extracted, { recursive: true, mode: 0o700 });
+        try {
+          await exec("unzip", ["-q", download, "-d", extracted], { signal: input.signal });
+        } catch {
+          input.signal.throwIfAborted();
+          throw new QualificationBlocked("archive_destination_container_extraction_failed");
+        }
         await rm(first);
         await rm(second);
       }
@@ -162,21 +333,24 @@ export async function qualifyArchiveDestination(
       containerCount,
       outputs.filter((output) => output.kind === "container").length,
     );
-    await journal.run("execute", config, provider);
-    inventoryDigest = digestJson(before);
+    const restoredFindings = await verifyArchivePackage(restoredRoot, packageInput);
     expect(
-      "rerun_preserves_object_ids_revisions_and_markers",
-      inventoryDigest,
-      digestJson(await inventory()),
+      "restored_package_verification_findings",
+      [],
+      restoredFindings.map((finding) => finding.code),
     );
-    await provider.close!();
-    provider = createProductionProvider({
-      jobType: "teams_archive",
-      config: input.config.jobConfig,
-      jobDirectory: input.jobDirectory,
-      mode: "archive_verification",
-    });
-    journal = await ArchiveJournal.reopen(input.jobDirectory, input.signal);
+    restoredManifestDigest = packageInput.manifestDigest;
+    restoredCollectionDigest = digestJson(packageInput);
+    restoredRecords = packageInput.records.length;
+    restoredAssets = new Set(
+      packageInput.records.flatMap((record) => record.assets.map((asset) => asset.path)),
+    ).size;
+    expect("all_downloads_restored_from_verified_bytes", states.size, outputs.length);
+    if (config.retainedHistory) {
+      retainedVersions = changedRetainedVersions(packageInput);
+      for (const versions of retainedVersions)
+        expect(`${versions.kind}_changed_retained_versions`, true, versions.matchedMessages > 0);
+    }
     await journal.run("verify", config, provider);
     const findings = (await journal.units())
       .filter((unit) => unit.phase === "verify")
@@ -206,6 +380,16 @@ export async function qualifyArchiveDestination(
       containerDeterminism: "live_package_regenerated_with_changed_filesystem_timestamps",
       restart: "live_upload_before_verified_commit",
       verification: "local_package_and_drive_without_graph_credentials",
+      sourceSessionClosedBeforeRetrieval: true,
+      graphCredentialReferenceRemoved: true,
+      reconstruction: "downloaded_roots_and_stock_unzip_at_exact_archive_relative_paths",
+      restoredVerificationApi: "verifyArchivePackage(root, reopenedDurableCollection)",
+      restoredVerificationFindings: 0,
+      restoredManifestDigest,
+      restoredCollectionDigest,
+      restoredRecords,
+      restoredAssets,
+      retainedVersions,
     },
   };
 }

@@ -47,7 +47,22 @@
         "attachmentBytes": false
       },
       "capturedAt": "2026-09-17",
-      "scope": "Graph v1.0 Global to a local archive package, channel and user-chats scopes. Three conversations and 16 records include three retained versions: standard channel, private channel, and chat. Three hosted assets, exhausted retained paging, durable restart, and deterministic package regeneration. Private retained capability rests on a real collected version, not an omission. The sample covers edited text after tenant migration, not pre-migration coverage, deleted-message recovery, or retained hosted content; no migration completion timestamp was available. No Shared Drive destination or other option combination is qualified."
+      "scope": "Graph v1.0 Global to a local archive package, channel and user-chats scopes. Three conversations and 16 records include three retained versions: standard channel, private channel, and chat. Three hosted assets, exhausted retained paging, durable restart, and deterministic package regeneration. Private retained capability rests on a real collected version, not an omission. The sample covers edited text after tenant migration, not pre-migration coverage, deleted-message recovery, or retained hosted content; no migration completion timestamp was available. This local-only bundle qualifies no destination or other option combination."
+    },
+    {
+      "jobType": "teams_archive",
+      "route": "teams_global_archive_to_shared_drive",
+      "tupleDigest": "2be46b0c84231a54b9f1e5418bbe44a1db675c2f79932d1b2ef9386da123f04d",
+      "bundleDigest": "5087860e601a4a7095d376b6163585d949a6fceaa0a24d8586a1eb8e9d3841ed",
+      "desktopCell": "darwin-arm64",
+      "guaranteeSetId": "default",
+      "options": {
+        "retainedHistory": true,
+        "transcripts": false,
+        "attachmentBytes": false
+      },
+      "capturedAt": "2026-09-20",
+      "scope": "Graph v1.0 Global, application-only, explicit standard/private channel and user-chats scopes to Google Shared Drive using a separate service-account credential. Three root objects and three conversation ZIPs preserve 16 records, three hosted assets, and current v2 plus original retained v1 for each existing standard/private/chat sample. All retained paging exhausted. Downloaded bytes, extracted canonical records and offline HTML verified without Graph credentials; live ZIP determinism, lost-acknowledgement restart, unchanged replay, unowned collision and content/revision drift refusal proven. Only edited-text retained history is qualified: no deleted-message recovery, retained hosted-content, pre-migration coverage or migration completion timestamp is claimed."
     }
   ],
   "meaning": "This is a release-prerequisite register, not a successful evidence bundle or route record.",
@@ -81,7 +96,7 @@
       "status": "resolved",
       "reason": "ADR-0007. The full archive suite ran against a live Global tenant on darwin-arm64 with Node 24.21.0 and published the bundle recorded in qualifiedRoutes: route matrix, hosted-content bytes for both scope kinds including a channel reply, durable restart, and byte-deterministic package regeneration. Two live-only defects had to be fixed first: every export request used an inclusive lower bound the routes refuse with HTTP 400, and the bundle validator confined a realpath beneath an unresolved root, refusing any bundle published under a symlinked ancestor. The base capture has all options off; retained history now owns a separate gate.",
       "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
-      "scope": "Exact Graph route/permission/option tuple, pinned transfer version, and each desktop cell. The base tuple proves no options; retained history has separate local-only evidence, while transcripts and attachmentBytes remain unqualified."
+      "scope": "Exact Graph route/permission/option tuple, pinned transfer version, and each desktop cell. The base tuple proves no options; retained history has independent local-only and Shared Drive evidence, while transcripts and attachmentBytes remain unqualified."
     },
     {
       "id": "real_tenant_archive_retained_route_matrix",
@@ -96,6 +111,13 @@
       "reason": "ADR-0008 and issue #41. Live darwin-arm64 capture on Node 24.21.0 includes the archive probes plus archive_destination: five real Drive objects, private provenance, full download byte verification, lost-acknowledgement restart, unchanged rerun, and destination verification without Graph credentials. Both live conversation containers reproduce their uploaded bytes after filesystem timestamps change. Evidence audited against live identifiers, names, email addresses and protected credential references; only counts, codes, public root filenames and digests are published.",
       "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
       "scope": "Exact archive-with-destination tuple, all three archive options off, transfer v1.75.0, darwin-arm64 only. Neither the local archive bundle nor the file-route bundle substitutes for this evidence."
+    },
+    {
+      "id": "real_tenant_archive_retained_destination_route_matrix",
+      "status": "resolved",
+      "reason": "Issue #43. Complete live runner passed on 2026-09-20 with Node 24.21.0, macOS 26.6.2 and darwin-arm64. Six probes combine retained history with downloaded-byte, stock-unzip reconstruction, production package verification, deterministic ZIP regeneration after timestamp changes, lost-upload-acknowledgement recovery and unchanged replay. A separate tool-created child proved real unowned collision and content/revision drift refusal without modifying the primary archive; all eight secondary fixture objects were ownership-checked and removed. Independent destination-only retrieval matched all six sample versions to the live source observations; offline browser inspection rendered both versions in all three conversations and loaded all three hosted assets without remote resources. The seven immutable bundle files were audited against live identifiers, display names, bodies, credential references and secrets, plus raw identifier/URL patterns; no private values were found.",
+      "command": "npm run qualify:route -- --config <protected-reference-config> --output <new-directory>",
+      "scope": "Only retainedHistory=true, transcripts=false, attachmentBytes=false, channel and user-chats, Google Shared Drive service account, default guarantees, transfer v1.75.0 and darwin-arm64. Four prior immutable bundles remain independent. No other architecture, full native lifecycle parity, deleted-message recovery, retained hosted-content availability or historical migration cutoff is claimed."
     },
     {
       "id": "file_live_source_path_guard",

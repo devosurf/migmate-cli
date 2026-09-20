@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release, and **not published to any registry** — there is no publish workflow, so merging to `main` does not release. Install from source.
 
-Only **four exact routes are qualified**, all on `darwin-arm64`: file migration, local Teams archive with all options off, local Teams archive with only retained history enabled, and Teams archive with a Shared Drive destination and all options off. A route is a full tuple: source system, backend, permissions, options, destination, transfer binary version, and desktop cell. Change an element outside those tuples and it has no evidence, which the engine refuses with `unqualified_route` (exit 4). Retained history with a Shared Drive destination, transcripts, and attachment bytes remain unqualified. This is a deliberate gate, not a bug. `docs/release-limits.md` states what is and is not claimed; `qualification/gates.json` is the gate register.
+Only **five exact routes are qualified**, all on `darwin-arm64`: file migration, and Teams archive with or without a Shared Drive destination, each with either all options off or only retained history enabled. A route is a full tuple: source system, backend, permissions, options, destination, transfer binary version, and desktop cell. Change an element outside those tuples and it has no evidence, which the engine refuses with `unqualified_route` (exit 4). Transcripts and attachment bytes remain unqualified. This is a deliberate gate, not a bug. `docs/release-limits.md` states what is and is not claimed; `qualification/gates.json` is the gate register.
 
 ## Requirements
 
@@ -90,7 +90,7 @@ digest = "cc7064ad1b1075fd455d7054cada11ce8ab104ca18b3d9558a14e7a9d45417c8"
 Private channels are collected too. Their retained versions are available only for
 edits/deletions after tenant storage migration completed and when an applicable retention
 policy captured them. An empty response is not proof of full historical coverage, and a
-missing migration completion timestamp remains unknown. See [release limits](docs/release-limits.md#5-only-four-exact-routes-are-qualified-on-one-machine-architecture)
+missing migration completion timestamp remains unknown. See [release limits](docs/release-limits.md#5-only-five-exact-routes-are-qualified-on-one-machine-architecture)
 for the live sample and unqualified option combinations.
 
 ### Teams archive destination
@@ -137,10 +137,23 @@ and permits targeted retrieval without downloading the entire archive. The
 not separately to each job. See [archive destination limits](docs/release-limits.md#6-the-archive-destination-is-cold-storage-not-a-reading-surface)
 for the capacity accounting and protection boundary.
 
-**This destination is qualified on `darwin-arm64`, with all three archive options off.**
-Its own live evidence bundle proves download byte verification, lost-acknowledgement
-recovery, unchanged replay, and deterministic containers regenerated from the live package.
-The destination-free tuple and its published bundle remain unchanged.
+**This destination is qualified on `darwin-arm64`, either with all options off or with only
+`retainedHistory` enabled.** Each combination owns independent evidence; the local-only
+bundles cannot qualify a destination. For the retained-history destination combination,
+use the destination tables above, channel and user-chats scopes, and
+`retainedHistory = true`, `transcripts = false`, `attachmentBytes = false`:
+
+```toml
+[qualification]
+bundle = "qualification/2be46b0c84231a54b9f1e5418bbe44a1db675c2f79932d1b2ef9386da123f04d/5087860e601a4a7095d376b6163585d949a6fceaa0a24d8586a1eb8e9d3841ed"
+digest = "5087860e601a4a7095d376b6163585d949a6fceaa0a24d8586a1eb8e9d3841ed"
+```
+
+The retained destination capture proves current and retained edited-text versions survive
+download and extraction into canonical records and offline HTML. It also proves download
+byte verification, lost-acknowledgement recovery, unchanged replay, timestamp-independent
+ZIPs, and refusal to overwrite unowned or drifted content. The private-history limits above
+still apply; this does not prove deleted-message recovery or retained hosted-content availability.
 See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
 
 ## Driving it from an agent or CI
