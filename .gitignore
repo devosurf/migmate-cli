@@ -3,6 +3,9 @@ dist/
 *.log
 .DS_Store
 
+# private folder-local job state, reports and archives
+.migmate/
+
 # agent harness config, not product
 .omp/
 

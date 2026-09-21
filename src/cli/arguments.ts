@@ -1,5 +1,6 @@
+import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, posix, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { VERBS, type JobType, type RowQuery, type Verb } from "../engine/types.ts";
 
 export type OutputMode = "text" | "json" | "jsonl";
@@ -32,21 +33,39 @@ export function defaultHome(
   platform: NodeJS.Platform = process.platform,
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
+  cwd = process.cwd(),
 ): string {
-  if (environment.MIGMATE_HOME) return resolve(environment.MIGMATE_HOME);
-  switch (platform) {
-    case "darwin":
-      return posix.join(home, "Library", "Application Support", "Migmate");
-    case "linux":
-      return posix.join(
+  if (environment.MIGMATE_HOME) return resolve(cwd, environment.MIGMATE_HOME);
+  if (platform !== "darwin" && platform !== "linux")
+    throw new UsageFailure("Unsupported platform.");
+  let directory = resolve(cwd);
+  for (;;) {
+    const candidate = join(directory, ".migmate");
+    let entry;
+    try {
+      entry = lstatSync(candidate, { throwIfNoEntry: false });
+    } catch {
+      throw new UsageFailure(`Cannot inspect workspace ${candidate}; use --home explicitly.`);
+    }
+    if (entry !== undefined) {
+      if (!entry.isDirectory())
+        throw new UsageFailure(
+          `Workspace ${candidate} must be a directory, not a file or symlink.`,
+        );
+      return candidate;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return platform === "darwin"
+    ? posix.join(home, "Library", "Application Support", "Migmate")
+    : posix.join(
         environment.XDG_STATE_HOME && posix.isAbsolute(environment.XDG_STATE_HOME)
           ? environment.XDG_STATE_HOME
           : posix.join(home, ".local", "state"),
         "migmate",
       );
-    default:
-      throw new UsageFailure("Unsupported platform.");
-  }
 }
 
 // Output must be initialized even when another argument is malformed.
@@ -177,7 +196,8 @@ export function parseInvocation(argv: string[]): Invocation {
   const invocation: Invocation = {
     command: (command || "status") as CommandName,
     output: output as OutputMode,
-    home: resolve(get("--home") ?? defaultHome()),
+    // Help never opens a store and must remain available with a broken workspace.
+    home: resolve(get("--home") ?? (help ? "." : defaultHome())),
     codes,
     notes: values.get("--note") ?? [],
     confirm: switches.has("--confirm"),

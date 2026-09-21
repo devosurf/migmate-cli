@@ -40,6 +40,42 @@ migmate --help
 
 To work in the repo without installing globally, `node dist/cli/main.js` after `npm run build` is equivalent to the `migmate` bin.
 
+## Folder-local workspaces
+
+A workspace is an ordinary project folder with a private `.migmate/` job store inside it.
+Initialize that store and its first job once:
+
+```sh
+mkdir -p -m 700 "$HOME/Migrations/essense"
+cd "$HOME/Migrations/essense"
+migmate init --type file_migration --home .migmate --output json
+```
+
+Keep the returned job ID. Subsequent commands find the nearest `.migmate/` directory in
+the current folder or its parents, including from subfolders and new terminal sessions:
+
+```sh
+migmate status --job "$ID" --output json
+```
+
+You still select a job with `--job`; a workspace can contain multiple file-migration
+and Teams-archive jobs. The first job above is unconfigured: onboard its credentials
+before `doctor` or `plan`, as described below.
+
+Home selection is **`--home` → `MIGMATE_HOME` → nearest `.migmate/` → OS default**.
+An explicit relative home is relative to the current working directory. If you previously
+exported `MIGMATE_HOME`, unset it before relying on folder discovery. Outside a workspace,
+existing global defaults are unchanged; no existing job data is moved and merely entering
+a folder creates nothing.
+
+A file or symlink named `.migmate`, or an error inspecting it, refuses rather than silently
+using a parent workspace or the global store. Use `--home` to select a different store
+explicitly; `--help` remains available.
+
+The `.migmate/` directory holds durable plans, checkpoints, reports and archive content.
+Keep it and customer inputs out of source control; this repository ignores `.migmate/`.
+Credential files remain protected outside the repository and job directories.
+
 ## The lifecycle
 
 Ten verbs on one rail, in this order:

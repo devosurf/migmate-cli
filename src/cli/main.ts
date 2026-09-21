@@ -56,9 +56,13 @@ migmate reclaim --job ID --confirm [--stop-worker]
 migmate web --job ID
 
 All commands: --home PATH, --output text|json|jsonl, --schema-version 1, --help
-Home defaults: macOS ~/Library/Application Support/Migmate;
+Home selection: --home > MIGMATE_HOME > nearest .migmate directory in the current
+folder or its parents > OS default. A workspace marker must not be a file or symlink.
+Create a local workspace and its first job once:
+  migmate init --type file_migration --home .migmate --output json
+Later commands find it automatically, including from subfolders and new sessions.
+Without a workspace, defaults remain macOS ~/Library/Application Support/Migmate;
 Linux \${XDG_STATE_HOME:-~/.local/state}/migmate. Any other platform is refused.
-MIGMATE_HOME overrides the default. --home overrides MIGMATE_HOME.
 Config input is TOML or JSON containing typed file credential references, never secrets.
 Only the engine writes job.toml and probes credentials. Init without config creates
 an unconfigured job: onboard with creds init before doctor/plan.

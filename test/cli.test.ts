@@ -1,15 +1,19 @@
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
 import { tmpdir, userInfo, hostname } from "node:os";
 import { join } from "node:path";
 import { it, type TestContext } from "node:test";
+import { fileURLToPath } from "node:url";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { run, type Io } from "../src/cli/main.ts";
 import { defaultHome } from "../src/cli/arguments.ts";
@@ -88,6 +92,21 @@ async function invoke(
   };
   const code = await run(argv, io, engine);
   return { code, stdout, stderr, prompts };
+}
+function invokeProcess(argv: string[], cwd: string, environment: NodeJS.ProcessEnv = {}): Capture {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("../src/cli/main.ts", import.meta.url)), ...argv, "--output", "json"],
+    {
+      cwd,
+      env: { ...process.env, ...environment, MIGMATE_HOME: environment.MIGMATE_HOME },
+      encoding: "utf8",
+      timeout: 10_000,
+    },
+  );
+  assert.equal(result.error, undefined);
+  assert.notEqual(result.status, null);
+  return { code: result.status!, stdout: result.stdout, stderr: result.stderr, prompts: 0 };
 }
 function harness(t: TestContext) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "migmate-cli-contract-")));
@@ -494,14 +513,98 @@ it("waits for asynchronous stdout completion and never emits a second error afte
   assert.equal(broken.stderr, "");
 });
 
-it("uses OS-specific persistent engine homes", () => {
+it("keeps jobs across fresh processes and isolates nested workspaces unless overridden", (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "migmate-workspace-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const nested = join(root, "nested");
+  const child = join(nested, "inputs");
+  mkdirSync(child, { recursive: true });
+  const parent = document<{ id: string }>(
+    invokeProcess(["init", "--type", "file_migration", "--home", ".migmate"], root),
+  );
+  assert.equal(parent.ok, true);
   assert.equal(
-    defaultHome("darwin", {}, "/Users/operator"),
+    document<{ state: string }>(
+      invokeProcess(["cancel", "--job", parent.value.id, "--reason", "Workspace check"], child),
+    ).value.state,
+    "cancelled",
+  );
+  assert.equal(
+    document<JobStatus>(invokeProcess(["status", "--job", parent.value.id], root)).value.state,
+    "cancelled",
+  );
+  const inner = document<{ id: string }>(
+    invokeProcess(["init", "--type", "teams_archive", "--home", ".migmate"], nested),
+  );
+  assert.equal(inner.ok, true);
+  assert.equal(
+    document<JobStatus>(invokeProcess(["status", "--job", inner.value.id], child)).value.jobId,
+    inner.value.id,
+  );
+  const isolated = invokeProcess(["status", "--job", parent.value.id], child);
+  assert.equal(isolated.code, 2);
+  assert.equal(document(isolated).refusal.code, "job_not_found");
+  const environment = { MIGMATE_HOME: join(root, ".migmate") };
+  assert.equal(
+    document<JobStatus>(invokeProcess(["status", "--job", parent.value.id], child, environment))
+      .value.state,
+    "cancelled",
+  );
+  assert.equal(
+    document<JobStatus>(
+      invokeProcess(
+        ["status", "--job", inner.value.id, "--home", join(nested, ".migmate")],
+        child,
+        environment,
+      ),
+    ).value.jobId,
+    inner.value.id,
+  );
+});
+
+it("refuses invalid workspace markers without falling back, while explicit homes and help work", (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "migmate-workspace-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const child = join(root, "inputs");
+  mkdirSync(child);
+  const parent = document<{ id: string }>(
+    invokeProcess(["init", "--type", "file_migration", "--home", ".migmate"], root),
+  );
+  assert.equal(parent.ok, true);
+  const marker = join(child, ".migmate");
+  for (const kind of ["file", "symlink"]) {
+    if (kind === "file") writeFileSync(marker, "");
+    else symlinkSync(join(root, ".migmate"), marker);
+    const refused = invokeProcess(["status", "--job", parent.value.id], child);
+    assert.equal(refused.code, 2);
+    assert.equal(document(refused).refusal.code, "usage");
+    assert.equal(invokeProcess(["--help"], child).code, 0);
+    assert.equal(
+      document<JobStatus>(
+        invokeProcess(
+          ["status", "--job", parent.value.id, "--home", join(root, ".migmate")],
+          child,
+        ),
+      ).value.jobId,
+      parent.value.id,
+    );
+    rmSync(marker);
+  }
+});
+
+it("uses OS-specific persistent engine homes outside a workspace", (t) => {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "migmate-no-workspace-")));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  assert.equal(
+    defaultHome("darwin", {}, "/Users/operator", cwd),
     "/Users/operator/Library/Application Support/Migmate",
   );
-  assert.equal(defaultHome("linux", {}, "/home/operator"), "/home/operator/.local/state/migmate");
   assert.equal(
-    defaultHome("linux", { XDG_STATE_HOME: "/local/state" }, "/home/operator"),
+    defaultHome("linux", {}, "/home/operator", cwd),
+    "/home/operator/.local/state/migmate",
+  );
+  assert.equal(
+    defaultHome("linux", { XDG_STATE_HOME: "/local/state" }, "/home/operator", cwd),
     "/local/state/migmate",
   );
 });
