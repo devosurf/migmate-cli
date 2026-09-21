@@ -100,14 +100,6 @@ export const CLIENT = `"use strict";
       enqueue(refresh);
     } else if (button.hasAttribute("data-first-page")) { query.delete("cursor"); enqueue(refresh); }
     else if (button.dataset.nextCursor) { query.set("cursor",button.dataset.nextCursor); enqueue(refresh); }
-    else if (button.hasAttribute("data-quit")) {
-      if (!window.confirm("Quit the owning process? An active run will be interrupted safely at a checkpoint. Closing only the window would let it continue.")) return;
-      enqueue(async () => {
-        const response = await fetch("/quit", {method:"POST",headers:{"Content-Type":"application/json","X-Migmate-Action":"1"},body:"{}"});
-        if (!response.ok) throw new Error("Quit request refused");
-        stopped = true;
-      });
-    }
   });
 
   document.addEventListener("submit", event => {
@@ -134,7 +126,12 @@ export const CLIENT = `"use strict";
     else if (action === "close") input = {confirm:data.has("confirm")};
     else if (action === "reclaim") input = {confirm:data.has("confirm"),stopWorker:data.has("stopWorker")};
     form.querySelector("fieldset").disabled = true;
-    enqueue(() => command(action,input));
+    enqueue(async () => {
+      if (action !== "quit") return command(action,input);
+      const response = await fetch("/quit", {method:"POST",headers:{"Content-Type":"application/json","X-Migmate-Action":"1"},body:"{}"});
+      if (!response.ok) throw new Error("Quit request refused");
+      stopped = true;
+    });
   });
 
   document.addEventListener("change", event => {

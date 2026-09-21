@@ -69,6 +69,8 @@ migmate close   --job "$ID" --output json
 
 Read `plan` and `verify` evidence without taking a writer lease by adding `--review`. Only one writer holds a job at a time; a stale lease is cleared with `reclaim --confirm`, never by deleting files.
 
+In `migmate web`, tick the confirmation checkbox beside **Quit process safely**, then click the button to interrupt at a safe checkpoint and release the writer lease. This confirmation stays inside the page; it does not depend on a native JavaScript dialog. Closing only the window does not interrupt an active run.
+
 ## Credentials
 
 Operator config carries **credential references** — typed pointers to operator-owned files — never secret values. Migmate resolves a reference just in time and never copies the bytes into durable state. Reference files must be `0600` and owned by the invoking user, outside the repository; the qualification runner refuses anything looser.
