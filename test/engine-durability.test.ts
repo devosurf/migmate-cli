@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it, type TestContext } from "node:test";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   EngineRefusalError,
   openEngine,
@@ -708,6 +708,29 @@ describe("engine durability seam", () => {
     assert.equal(JSON.stringify(await events(h.engine, h.ref)).includes(secret), false);
   });
 
+  it("reads job folders written by earlier builds but refuses their retired keys as new input", async (t) => {
+    const h = await harness(t);
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const digest = "b".repeat(64);
+    const retired = {
+      guarantees: "default",
+      qualification: { bundle: `qualification/${"a".repeat(64)}/${digest}`, digest },
+    };
+    await writeFile(
+      path,
+      stringifyToml({ ...parseToml(await readFile(path, "utf8")), ...retired }),
+    );
+    reopen(h);
+    value(await h.engine.withWriterResult(h.ref, (writer) => writer.doctor()));
+    for (const [key, legacy] of Object.entries(retired))
+      refused(
+        await h.engine.withWriterResult(h.ref, (writer) =>
+          writer.onboard({ ...config(), [key]: legacy }),
+        ),
+        "configuration_invalid",
+      );
+  });
+
   it("round-trips an archive destination and separate credential references without persisting secrets", async (t) => {
     const directory = join(await realpath(tmpdir()), "operator-owned");
     const selected = {
@@ -851,14 +874,10 @@ describe("engine durability seam", () => {
     );
   });
 
-  it("refuses changed qualification and binary proofs without replacing approved verification evidence", async (t) => {
+  it("refuses a changed binary proof without replacing approved verification evidence", async (t) => {
     const h = await harness(t);
-    let qualification = "a".repeat(64),
-      binary = "b".repeat(64);
+    let binary = "b".repeat(64);
     Object.assign(h.port, {
-      async qualificationEvidence() {
-        return { digest: qualification, tuple: { route: "scripted-test" } };
-      },
       async binaryEvidence() {
         return { sha256: binary, version: "fake-worker-1.0.0", path: "" };
       },
@@ -867,12 +886,6 @@ describe("engine durability seam", () => {
     await execute(h);
     const digest = value(await h.engine.reader(h.ref).status()).verificationDigest;
     const reads = [...h.port.calls];
-    qualification = "c".repeat(64);
-    refused(
-      await h.engine.withWriterResult(h.ref, (writer) => writer.verify()),
-      "plan_revision_required",
-    );
-    qualification = "a".repeat(64);
     binary = "d".repeat(64);
     refused(
       await h.engine.withWriterResult(h.ref, (writer) => writer.verify()),

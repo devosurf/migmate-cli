@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Shared machinery for the live-qualification prerequisite probers.
+// Shared machinery for the live-test prerequisite probers.
 //
 // Both probers do the same four things against a real tenant — read an
 // operator-owned env file, take a client secret without echoing it, acquire an

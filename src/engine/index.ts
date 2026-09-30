@@ -107,7 +107,7 @@ const REFUSAL_CODES: Record<string, true> = Object.fromEntries(
     "approval_required",
     "approval_digest_stale",
     "plan_revision_required",
-    "unqualified_route",
+    "unsupported_route",
     "verification_unaccepted",
     "job_closed",
     "job_cancelled",
@@ -144,8 +144,6 @@ type FileReference = { resolver: "file"; path: string; mode: "0600" };
 type Mapping = FileMappingConfig & { sourceSiteId?: string };
 interface CommonConfig {
   route: string;
-  guarantees: string;
-  qualification?: { bundle: string; digest: string };
   transferBinary?: { path: string; sha256: string; provenance: string };
 }
 type FileConfig = CommonConfig & {
@@ -216,7 +214,7 @@ function fileReference(value: unknown, field: string, jobDir: string): FileRefer
 }
 function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
   const input = object(raw, "config");
-  const commonKeys = ["route", "guarantees", "qualification", "transferBinary"];
+  const commonKeys = ["route", "transferBinary"];
   keys(
     input,
     type === "file_migration"
@@ -244,15 +242,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           ? "sharepoint_library_to_shared_drive"
           : "teams_global_archive"
         : text(input.route, "route"),
-    guarantees: input.guarantees === undefined ? "default" : text(input.guarantees, "guarantees"),
   };
-  if (input.qualification !== undefined) {
-    const q = object(input.qualification, "qualification");
-    keys(q, ["bundle", "digest"], "qualification");
-    const digest = text(q.digest, "qualification.digest");
-    if (!SHA256.test(digest)) configError("qualification.digest");
-    common.qualification = { bundle: text(q.bundle, "qualification.bundle"), digest };
-  }
   if (input.transferBinary !== undefined) {
     const b = object(input.transferBinary, "transferBinary");
     keys(b, ["path", "sha256", "provenance"], "transferBinary");
@@ -499,6 +489,14 @@ function pathsFor(deps: EngineDeps, ref: JobRef): JobPaths {
   const dir = join(deps.home, "jobs", ref.id);
   return { dir, configPath: join(dir, CONFIG_FILENAME), artifactsDir: join(dir, "artifacts") };
 }
+/** Keys earlier builds persisted into every job folder's config; ADR-0009 retired them. */
+const RETIRED_CONFIG_KEYS = ["guarantees", "qualification"];
+function persisted(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => !RETIRED_CONFIG_KEYS.includes(key)),
+  );
+}
 function readConfig(paths: JobPaths, type: JobType): JobConfig {
   if (!existsSync(paths.configPath)) configError("config_missing");
   let parsed: unknown;
@@ -507,7 +505,7 @@ function readConfig(paths: JobPaths, type: JobType): JobConfig {
   } catch {
     configError("job.toml");
   }
-  return parseConfig(parsed, type, paths);
+  return parseConfig(persisted(parsed), type, paths);
 }
 function migrateConfig(paths: JobPaths, type: JobType): void {
   const legacy = join(paths.dir, LEGACY_CONFIG_FILENAME);
@@ -519,7 +517,7 @@ function migrateConfig(paths: JobPaths, type: JobType): void {
     } catch {
       configError("legacy_config");
     }
-    atomicFile(paths.configPath, stringifyToml(parseConfig(parsed, type, paths)));
+    atomicFile(paths.configPath, stringifyToml(parseConfig(persisted(parsed), type, paths)));
   }
   rmSync(legacy);
   syncDirectory(paths.dir);
@@ -881,39 +879,30 @@ interface BoundEvidence {
   applicationIdentity: string;
   binarySha256: string;
   binaryVersion: string;
-  qualificationDigest: string;
-  qualificationTuple: Record<string, unknown>;
   binaryPath: string;
 }
 function readBoundEvidence(value: unknown): BoundEvidence {
   const evidence = object(value, "plan.evidence"),
     binding = object(evidence.binding, "plan.evidence.binding");
-  const fields = [
-    "applicationIdentity",
-    "binarySha256",
-    "binaryVersion",
-    "qualificationDigest",
-    "binaryPath",
-  ] as const;
-  for (const field of fields)
-    if (typeof binding[field] !== "string")
+  const fields = ["applicationIdentity", "binarySha256", "binaryVersion", "binaryPath"] as const;
+  const bound = {} as BoundEvidence;
+  for (const field of fields) {
+    const value = binding[field];
+    if (typeof value !== "string")
       throw new EngineRefusalError({
         code: "plan_revision_required",
         message: "The plan lacks complete bound execution evidence.",
       });
-  const tuple = object(binding.qualificationTuple, "plan.evidence.qualificationTuple");
-  // Every member was checked at this durable boundary.
-  const checked = binding as unknown as BoundEvidence;
-  return { ...checked, qualificationTuple: tuple };
+    bound[field] = value;
+  }
+  // Plans from earlier builds may carry retired members; only these are compared.
+  return bound;
 }
 function needsTransferWorker(config: JobConfig): boolean {
   return "mappings" in config || config.destination !== undefined;
 }
 async function boundEvidence(provider: ProviderPort, config: JobConfig): Promise<BoundEvidence> {
   const identity = provider.applicationIdentity ? await provider.applicationIdentity() : "";
-  const qualification = provider.qualificationEvidence
-    ? await provider.qualificationEvidence()
-    : undefined;
   const binary: Record<string, unknown> =
     needsTransferWorker(config) && provider.binaryEvidence ? await provider.binaryEvidence() : {};
   return {
@@ -921,8 +910,6 @@ async function boundEvidence(provider: ProviderPort, config: JobConfig): Promise
     binarySha256: typeof binary.sha256 === "string" ? binary.sha256 : "",
     binaryVersion: typeof binary.version === "string" ? binary.version : "",
     binaryPath: typeof binary.path === "string" ? binary.path : "",
-    qualificationDigest: qualification?.digest ?? "",
-    qualificationTuple: qualification?.tuple ?? {},
   };
 }
 function semantic(value: unknown): unknown {
@@ -967,7 +954,6 @@ function inputFields(
           mappings: config.mappings,
           options: config.options,
           route: config.route,
-          guarantees: config.guarantees,
         }
       : {
           scopes: config.scopes,
@@ -980,7 +966,6 @@ function inputFields(
           lineage: config.lineage,
           ...(config.destination ? { destination: config.destination } : {}),
           route: config.route,
-          guarantees: config.guarantees,
         };
   const scopes = rows
     .filter((r) => r.jobType === "file_migration" && r.phase === "plan" && r.fileScope)
@@ -1045,7 +1030,7 @@ class RetryBudget {
       (code !== undefined &&
         (CODE_BY_NAME[code]?.retryable === false ||
           code === "plan_revision_required" ||
-          code === "unqualified_route"));
+          code === "unsupported_route"));
     const workerReason =
       e.evidence !== null && typeof e.evidence === "object" && "reason" in e.evidence
         ? e.evidence.reason
@@ -1272,7 +1257,7 @@ function makeWriter(
         ? "sharepoint_library_to_shared_drive"
         : "teams_global_archive")
     )
-      return refuse("unqualified_route", "The requested route is not implemented.");
+      return refuse("unsupported_route", "The requested route is not implemented.");
     const checks: CheckResult[] = [];
     const recordCheck = (check: CheckResult) => {
       checks.push(check);
@@ -1352,8 +1337,8 @@ function makeWriter(
     });
     if (!report.passed)
       return refuse(
-        checks.some((c) => c.code === "unqualified_route")
-          ? "unqualified_route"
+        checks.some((c) => c.code === "unsupported_route")
+          ? "unsupported_route"
           : "preflight_failed",
         "Preflight did not satisfy every required check.",
         { detail: { report } },

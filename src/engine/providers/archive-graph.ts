@@ -335,9 +335,9 @@ function hostedFailure(record: Json, route: ArchiveRoute): string {
     : "message_collection_incomplete";
 }
 
-/** Exact production route/role tuple used by qualification, never a claim that
- * a tuple has already passed a live route gate. */
-export function archiveQualificationRequirements(config: ArchiveConfig): {
+/** The exact Graph routes and application roles this archive configuration uses;
+ * preflight refuses a credential whose roles differ. */
+export function archiveRequirements(config: ArchiveConfig): {
   routes: string[];
   permissions: string[];
   options: { retainedHistory: boolean; transcripts: boolean; attachmentBytes: boolean };
@@ -460,7 +460,7 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
 
   const provider: ArchiveProvider = {
     async expand(config, signal) {
-      if (config.cloud !== "Global") throw new ArchiveEffectError("unqualified_route");
+      if (config.cloud !== "Global") throw new ArchiveEffectError("unsupported_route");
       const bindings = new Map<string, ArchiveScopeBinding>();
       const conversations = new Map<string, ArchiveConversation>();
       const channels = new Map<string, Map<string, Json>>();
@@ -678,10 +678,10 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
     async *preflight(config, plan, signal) {
       abort(signal);
       if (config.cloud !== "Global") {
-        yield failed("archive_cloud", new ArchiveEffectError("unqualified_route"));
+        yield failed("archive_cloud", new ArchiveEffectError("unsupported_route"));
         return;
       }
-      const requiredRoles = archiveQualificationRequirements(config).permissions;
+      const requiredRoles = archiveRequirements(config).permissions;
       try {
         const identity = await transport.evidence();
         abort(signal);

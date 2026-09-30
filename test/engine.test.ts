@@ -245,7 +245,7 @@ describe("engine seam", () => {
     );
   });
 
-  it("uses the production provider and refuses an unqualified route without credentials", async () => {
+  it("uses the production provider and refuses to plan without credentials", async () => {
     const home = mkdtempSync(join(tmpdir(), "migmate-engine-"));
     const engine = openEngine({ home, now: () => FIXED_NOW });
     const created = await engine.initJob({ type: "file_migration", config: jobConfig() });
@@ -257,7 +257,7 @@ describe("engine seam", () => {
     if (!planned.ok) throw new Error("unreachable");
     assert.equal(planned.value.ok, false);
     if (planned.value.ok) throw new Error("unreachable");
-    assert.equal(planned.value.refusal.code, "unqualified_route");
+    assert.equal(planned.value.refusal.code, "preflight_failed");
   });
 
   it("streams durable events with monotonic cursors", async () => {

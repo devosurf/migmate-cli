@@ -12,7 +12,7 @@ import { openEngine } from "../index.ts";
 import { FakeFileMigrationPort } from "./fake.ts";
 import { approve, fileConfig, fileFixture, value } from "../../../test/engine-fixture.ts";
 
-// Opt-in, real executable only. These exercise the supervisor seam, not route qualification.
+// Opt-in, real executable only. These exercise the supervisor seam and nothing else.
 const binaryPath = process.env.MIGMATE_TEST_RCLONE_BINARY;
 const binarySha256 = process.env.MIGMATE_TEST_RCLONE_SHA256;
 const binaryProvenance = process.env.MIGMATE_TEST_RCLONE_PROVENANCE;

@@ -508,7 +508,6 @@ mkdir -p "$(dirname "$MIGMATE_JOB_CONFIG")"
 cat > "$MIGMATE_JOB_CONFIG" <<EOF
 # Migmate file migration job. References only; no secret values live here.
 route = "sharepoint_library_to_shared_drive"
-guarantees = "default"
 
 [[mappings]]
 id = "$MIGMATE_MAPPING_ID"
@@ -530,11 +529,12 @@ write_env MIGMATE_JOB_CONFIG "$MIGMATE_JOB_CONFIG"
 write_env MIGMATE_MAPPING_ID "$MIGMATE_MAPPING_ID"
 note "Onboard it with: migmate init --type file_migration --config $MIGMATE_JOB_CONFIG"
 
-stage "Live qualification probe config"
-say "The release gate qualifies a route with real operations, so it needs disposable roots it may create and delete inside, and a second same-tenant app that may write to the disposable source folder. The normal route credential stays read-only."
+stage "Optional live test config"
+say "The optional live test exercises the route with real operations, so it needs disposable roots it may create and delete inside, and a second same-tenant app that may write to the disposable source folder. The normal route credential stays read-only. Jobs do not need it."
 open_url "https://learn.microsoft.com/en-us/graph/api/site-post-permissions?view=graph-rest-1.0"
-if ! confirm "Write the maintainer probe config now?"; then
-  warn "stopped before the probe config. Route qualification stays unrun; the job config above is complete."
+if ! confirm "Write the optional live test config now?"; then
+  finish
+  note "Skipped the optional live test config; the job config above is complete."
   exit 0
 fi
 say "Create a throwaway folder in the source library and a throwaway folder in the destination Shared Drive. The probe suite creates and deletes items beneath both, and deletes only ids it created itself."
@@ -594,9 +594,8 @@ cat > "$MIGMATE_PROBE_CONFIG" <<EOF
 {
   "schemaVersion": 1,
   "jobType": "file_migration",
-  "acknowledgement": "I authorize disposable live qualification probes",
+  "acknowledgement": "I authorize disposable live test probes",
   "jobConfig": {
-    "guarantees": "default",
     "rclone": {
       "config": { "resolver": "file", "path": "$MIGMATE_RCLONE_CONF_FILE", "mode": "0600" },
       "sourceRemote": "sharepoint-source",
@@ -635,6 +634,6 @@ write_env MIGMATE_PROBE_SOURCE_ITEM_ID "$MIGMATE_PROBE_SOURCE_ITEM_ID"
 write_env MIGMATE_PROBE_DEST_FOLDER_ID "$MIGMATE_PROBE_DEST_FOLDER_ID"
 write_env MIGMATE_PROBE_MUTATOR_CLIENT_ID "$MIGMATE_PROBE_MUTATOR_CLIENT_ID"
 write_env MIGMATE_PROBE_MUTATOR_SECRET_FILE "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
-note "Qualify with: npm run qualify:route -- --config $MIGMATE_PROBE_CONFIG --output <new-directory>"
+note "Run the live test with: npm run test:live -- --config $MIGMATE_PROBE_CONFIG"
 note "Secrets living outside the repo: $MIGMATE_ENTRA_CLIENT_SECRET_FILE, $MIGMATE_PROBE_MUTATOR_SECRET_FILE, $MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE, and $MIGMATE_RCLONE_CONF_FILE."
 finish

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 //
-// Records and proves the second Entra app the live file-route qualification
+// Records and proves the second Entra app the live file-route test
 // needs: the source-write fixture mutator. The route credential stays
-// read-only, and scripts/qualification/file-fixtures.ts refuses a mutator that
+// read-only, and scripts/live/file-fixtures.ts refuses a mutator that
 // shares the route's client id, so this is a separate app in the same tenant
 // holding Sites.Selected plus the `write` role on exactly the source site.
 //
@@ -88,7 +88,7 @@ try {
   }
   if (clientId === environment.MIGMATE_CLIENT_ID) {
     throw new Blocked(
-      "the mutator must be a different app from the read-only route app; the qualification suite refuses a shared client id",
+      "the mutator must be a different app from the read-only route app; the live test suite refuses a shared client id",
     );
   }
   if (process.argv.includes("--grant-instructions")) {

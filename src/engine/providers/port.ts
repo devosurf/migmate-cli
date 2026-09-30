@@ -91,18 +91,11 @@ export interface ProviderPort {
   }): AsyncIterable<CheckResult>;
   applicationIdentity?(): Promise<string>;
   close?(): Promise<void>;
-  /** Exact immutable evidence to bind into plan inputs and re-check before execute. */
-  qualificationEvidence?(): Promise<{
-    digest: string;
-    tuple: Record<string, unknown>;
-    bundle: string;
-  }>;
   binaryEvidence?(): Promise<Record<string, unknown>>;
   assertExecutionEvidence?(input: {
     applicationIdentity: string;
     binarySha256: string;
     binaryVersion: string;
-    qualificationDigest: string;
   }): Promise<void>;
   reserveDestinationId?(): Promise<string>;
   readSourceItem?(input: { driveId: string; itemId: string }): Promise<SourceEntry | null>;

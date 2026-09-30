@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTransferSupervisor } from "../src/engine/providers/transfer-worker.ts";
 import { unsupportedNode } from "../src/versions.ts";
-import { fileWorkerQualification } from "./qualification/file-worker.ts";
+import { fileWorkerLiveTest } from "./live/file-worker.ts";
 import { distributionPlatform } from "./platform.ts";
 
 const controller = new AbortController();
@@ -20,18 +20,18 @@ try {
   const supervisor = createTransferSupervisor({ configPath: null, jobDirectory: directory });
   const binary = await supervisor.proveBinary();
   await supervisor.close();
-  const proof = await fileWorkerQualification({
+  const proof = await fileWorkerLiveTest({
     jobDirectory: directory,
     configPath: null,
     binary,
     signal: controller.signal,
   });
   process.stdout.write(
-    `${JSON.stringify({ schemaVersion: 1, cell: platform.cell, ok: true, assertions: proof.assertions, observations: proof.observations, qualification: "not_claimed", scope: "managed_worker_transport_only" })}\n`,
+    `${JSON.stringify({ schemaVersion: 1, cell: platform.cell, ok: true, assertions: proof.assertions, observations: proof.observations, scope: "managed_worker_transport_only" })}\n`,
   );
 } catch {
   process.stderr.write(
-    "Managed worker transport smoke did not satisfy the required native authentication, lifecycle, or binary gate. No route was qualified.\n",
+    "Managed worker transport smoke did not satisfy the required native authentication, lifecycle, or binary gate.\n",
   );
   process.exitCode = controller.signal.aborted ? 130 : 1;
 } finally {

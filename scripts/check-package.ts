@@ -126,32 +126,6 @@ try {
   }
   assert.ok((await stat(join(installed, "dist", "engine", "store", "schema.sql"))).isFile());
 
-  // A route stays qualified only if its evidence survives packing and validates
-  // through the installed reader, whose root must not fall back to this checkout.
-  const gates = JSON.parse(await readFile(join(root, "qualification/gates.json"), "utf8"));
-  command(
-    process.execPath,
-    [
-      "--input-type=module",
-      "--eval",
-      `import { readFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
-const installed = ${JSON.stringify(installed)};
-const { readQualifiedBundle } = await import(pathToFileURL(installed + '/dist/qualification/bundle.js'));
-for (const route of ${JSON.stringify(gates.qualifiedRoutes)}) {
-  const bundle = 'qualification/' + route.tupleDigest + '/' + route.bundleDigest;
-  const evidence = JSON.parse(await readFile(installed + '/' + bundle + '/bundle.json', 'utf8'));
-  await readQualifiedBundle({
-    bundle, digest: route.bundleDigest, tuple: evidence.tuple,
-    requiredProbes: evidence.probes.map(probe => probe.id),
-  });
-  console.log('Installed qualified bundle accepted: ' + route.tupleDigest);
-}`,
-    ],
-    temporary,
-    { inherit: true },
-  );
-
   const privateSpecifiers = [
     manifest.name,
     `${manifest.name}/engine`,
@@ -263,14 +237,14 @@ try {
   if (desktop) {
     console.log(
       "MANUAL DESKTOP GATE: an operator must inspect the installed native window and close it. " +
-        "A successful process exit alone is not visual or route qualification evidence.",
+        "A successful process exit alone is not visual evidence.",
     );
     cli(["web", "--job", initialized.job.id, "--home", home], true);
-    console.log("Native desktop command exited; visual qualification must be recorded separately.");
+    console.log("Native desktop command exited; visual inspection must be recorded separately.");
   }
   console.log(
     `Installed package smoke passed for ${process.platform}-${process.arch}: one bin, private modules, ` +
-      "embedded assets, durable job, and managed rclone v1.75.0. No live route was qualified.",
+      "embedded assets, durable job, and managed rclone v1.75.0. No live tenant was contacted.",
   );
 } finally {
   await rm(temporary, { recursive: true, force: true });

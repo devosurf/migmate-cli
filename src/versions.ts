@@ -7,10 +7,10 @@
  * - The durable store is `node:sqlite`. That module is a release candidate (stability
  *   1.2), never stable, so its behaviour is only claimed for majors actually tested.
  *   `24.15.0` is where it reached 1.2; earlier 24.x releases carry 1.1.
- * - The transfer binary version is an element of the qualified route tuple, so a
- *   captured bundle is evidence about that exact executable. Accepting a later rclone
- *   would leave published evidence describing a binary no longer in use, and the
- *   differences are real: v1.75.0 has no `version --json`, for one.
+ * - The transfer binary's behaviour is observed, not documented: rclone's `onedrive`
+ *   backend ignores `root_folder_id` on object lookup, and below v1.69.0 a unix-socket
+ *   RC connection skipped its configured authentication. Migmate's read path is built
+ *   around what the pinned version does, and v1.75.0 has no `version --json`, for one.
  *
  * Tests assert the literals independently on purpose. A test that imported these
  * constants would agree with any value they were changed to.
@@ -19,7 +19,7 @@
 /** Tested Node majors, each with the minimum version carrying the `node:sqlite` RC API. */
 export const TESTED_NODE: Readonly<Record<string, string>> = { "24": "24.15.0" };
 
-/** Transfer binary versions whose observed behaviour a qualified route may rest on. */
+/** Transfer binary versions whose observed behaviour Migmate's read path rests on. */
 export const TESTED_TRANSFER_VERSIONS: Readonly<Record<string, true>> = { "v1.75.0": true };
 
 /** The single transfer binary version vendored in this artifact. */

@@ -22,9 +22,6 @@
   "files": [
     "dist",
     "vendor",
-    "qualification",
-    "!qualification/**/*.ts",
-    "!qualification/gates.json",
     "!vendor/**/*.zip",
     "!vendor/**/SHA256SUMS",
     "!vendor/**/*.sha256"
@@ -36,7 +33,7 @@
     "check:vendor": "node scripts/check-vendor.ts",
     "check:worker": "node scripts/check-worker.ts",
     "check:package": "node scripts/check-package.ts",
-    "qualify:route": "node scripts/qualify-route.ts",
+    "test:live": "node scripts/test-live.ts",
     "prepack": "npm run build && npm run check:vendor",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

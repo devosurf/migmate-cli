@@ -8,11 +8,9 @@ import {
   type BinaryProof,
   type TransferSupervisor,
 } from "./transfer-worker.ts";
-import { createArchiveProvider, archiveQualificationRequirements } from "./archive-graph.ts";
+import { createArchiveProvider } from "./archive-graph.ts";
 import type { ArchiveProvider } from "./archive.ts";
 import { parseArchiveConfig } from "../archive/config.ts";
-import { readQualifiedBundle } from "../../qualification/bundle.ts";
-import { TRANSFER_VERSION } from "../../versions.ts";
 
 export interface ProductionProviderInput {
   jobType: JobType;
@@ -28,11 +26,6 @@ interface ProviderState {
   graph: GraphTransport;
   worker: TransferSupervisor;
   files?: FileEffects;
-}
-interface QualificationEvidence {
-  digest: string;
-  tuple: Record<string, unknown>;
-  bundle: string;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -128,105 +121,6 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     return effects;
   }
 
-  async function qualificationEvidence(): Promise<QualificationEvidence> {
-    const reference = object(config.qualification);
-    if (
-      typeof reference.bundle !== "string" ||
-      typeof reference.digest !== "string" ||
-      !/^[a-f0-9]{64}$/.test(reference.digest)
-    )
-      throw new ProviderFault(
-        "unqualified_route",
-        "No immutable captured evidence bundle is bound to this route.",
-      );
-    const common = {
-      jobType: input.jobType,
-      transferVersion: TRANSFER_VERSION,
-      guaranteeSetId: typeof config.guarantees === "string" ? config.guarantees : "default",
-      desktopCell: `${process.platform}-${process.arch}`,
-    };
-    let tuple: Record<string, unknown>;
-    let requiredProbes: string[];
-    if (input.jobType === "file_migration") {
-      tuple = {
-        ...common,
-        source: {
-          system: "sharepoint_document_library",
-          backend: {
-            type: "onedrive",
-            driveType: "documentLibrary",
-            authentication: "client_credentials",
-            encoding: "Slash",
-          },
-        },
-        destination: {
-          system: "google_shared_drive",
-          backend: {
-            type: "drive",
-            authentication: "service_account",
-            importFormats: [],
-            skipGdocs: true,
-            skipShortcuts: true,
-            metadata: ["btime", "mtime", "content-type"],
-          },
-        },
-      };
-      requiredProbes = [
-        "zero_byte_and_empty_folder_copy",
-        "stable_id_additive_rerun_and_move",
-        "metadata_round_trip",
-        "provenance_marker_round_trip",
-        "checksum_fresh_upload",
-        "collision_matrix",
-        "route_limits_and_version_gate",
-      ];
-    } else {
-      const archive = parseArchiveConfig(input.config);
-      const requirements = archiveQualificationRequirements(archive);
-      tuple = {
-        ...common,
-        source: {
-          system: "microsoft_teams",
-          backend: {
-            cloud: "Global",
-            apiVersion: "v1.0",
-            routes: requirements.routes,
-            permissions: requirements.permissions,
-            options: requirements.options,
-          },
-        },
-        destination: archive.destination
-          ? {
-              system: "google_shared_drive",
-              backend: { type: "drive", authentication: "service_account" },
-            }
-          : { system: "local_archive_package" },
-      };
-      requiredProbes = [
-        "graph_route_matrix",
-        "hosted_content_bytes",
-        "package_self_consistency",
-        ...(archive.destination ? ["archive_destination"] : []),
-        ...(requirements.options.retainedHistory ? ["retained_history"] : []),
-        ...(requirements.options.transcripts ? ["transcripts"] : []),
-        ...(requirements.options.attachmentBytes ? ["attachment_bytes"] : []),
-      ];
-    }
-    try {
-      return await readQualifiedBundle({
-        bundle: reference.bundle,
-        digest: reference.digest,
-        tuple,
-        requiredProbes,
-      });
-    } catch {
-      throw new ProviderFault(
-        "unqualified_route",
-        "The immutable captured route evidence does not match the requested runtime guarantees.",
-      );
-    }
-  }
-
   async function binaryProof(): Promise<BinaryProof> {
     if (pending) return (await pending).worker.proveBinary();
     const probe = supervisor(null);
@@ -281,27 +175,38 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
         }
         if (loaded) yield* loaded.files!.preflight();
       }
-      try {
-        const route = await qualificationEvidence();
-        yield {
-          id: "provider.qualified_route",
-          title: "Immutable exact-route qualification",
-          status: "pass",
-          evidence: { ...route },
-        };
-      } catch (error) {
-        yield failedCheck(
-          "provider.qualified_route",
-          "Immutable exact-route qualification",
-          error,
-          {},
-        );
+      if (input.jobType === "teams_archive") {
+        try {
+          const archive = parseArchiveConfig(input.config);
+          const unsupported = [
+            ...(archive.transcripts ? ["transcripts"] : []),
+            ...(archive.attachmentBytes ? ["attachmentBytes"] : []),
+          ];
+          if (unsupported.length)
+            throw new ProviderFault(
+              "unsupported_route",
+              "Transcripts and attachment bytes have never run against a live tenant; this build refuses them.",
+              { options: unsupported },
+            );
+          yield {
+            id: "provider.archive_options",
+            title: "Archive options this build supports",
+            status: "pass",
+            evidence: {},
+          };
+        } catch (error) {
+          yield failedCheck(
+            "provider.archive_options",
+            "Archive options this build supports",
+            error,
+            {},
+          );
+        }
       }
     },
     async applicationIdentity() {
       return (await state()).session.identity();
     },
-    qualificationEvidence,
     async binaryEvidence() {
       return { ...(await binaryProof()) };
     },
@@ -316,12 +221,6 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
       } finally {
         fresh.dispose();
       }
-      const qualification = await qualificationEvidence();
-      if (qualification.digest !== expected.qualificationDigest)
-        throw new ProviderFault(
-          "plan_revision_required",
-          "The route evidence differs from the approved evidence.",
-        );
       if (needsTransferWorker) {
         const proof = await binaryProof();
         if (proof.sha256 !== expected.binarySha256 || proof.version !== expected.binaryVersion)

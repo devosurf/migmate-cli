@@ -1,6 +1,6 @@
 # ADR-0006: Every capability sample is observed, refused, or absent
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR-0009](0009-per-job-verification-replaces-route-qualification.md) (the proof values now bind the optional live test, not a published bundle)
 - Date: 2026-09-16
 - Context: [first-release spec #17](https://github.com/devosurf/migmate-cli/issues/17), [capability sample proofs #27](https://github.com/devosurf/migmate-cli/issues/27), [ADR-0005](0005-unrepresentable-path-proof.md)
 
@@ -26,7 +26,7 @@ A boolean present/absent treatment cannot tell these apart, so the bundle either
 | `source_refuses_creation`  | The platform refused a real create attempt in this run   | the live HTTP status of that attempt, which must be 400       |
 | `absent_from_source_scope` | No such item in the scanned scope and no API creates one | a kind census with items scanned > 0 and that kind's count 0  |
 
-The values live in `src/qualification/bundle.ts` beside `weakerProofByKind`, the one table naming the weaker proof each kind may rest on. The suite decides a value from it and the validator enforces it from the same table, so the two cannot drift; the validator refuses any fourth value. The `route_limits_and_version_gate` probe carries `capabilityProofs`, `sourceKindCensus`, and `sourceRefusedReferenceStatus`.
+The values live in `scripts/live/probes.ts` beside `weakerProofByKind`, the one table naming the weaker proof each kind may rest on. The suite decides a value from it and the live test's verdict enforces it from the same table, so the two cannot drift; the verdict refuses any fourth value. The `route_limits_and_version_gate` probe carries `capabilityProofs`, `sourceKindCensus`, and `sourceRefusedReferenceStatus`.
 
 **The scanned scope is the mapping source root's children.** That is the census's subject and the only place a supplied sample is accepted, so absence there is the same absence the omission would have been observed in. A file the source reports as not downloadable is counted as `undownloadable`, which is where the driver's omission falls.
 

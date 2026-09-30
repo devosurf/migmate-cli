@@ -284,7 +284,7 @@ export class FileEffects {
   #destination(raw: GoogleFile): DestinationEntry {
     const driveId = raw.driveId ?? this.#destDrive.get(raw.id);
     if (!driveId)
-      throw new ProviderFault("unqualified_route", "The destination is not a Shared Drive object.");
+      throw new ProviderFault("unsupported_route", "The destination is not a Shared Drive object.");
     this.#destDrive.set(raw.id, driveId);
     return {
       id: raw.id,
@@ -486,7 +486,7 @@ export class FileEffects {
       const { file } = await this.#getRaw(input.objectId);
       if (file.driveId !== input.driveId)
         throw new ProviderFault(
-          "unqualified_route",
+          "unsupported_route",
           "The destination object does not belong to the exact Shared Drive.",
         );
       return this.#destination(file);
@@ -511,7 +511,7 @@ export class FileEffects {
     }
     if (!driveId || !this.#destinationRoots.some((root) => root.destDriveId === driveId))
       throw new ProviderFault(
-        "unqualified_route",
+        "unsupported_route",
         "The destination parent is not in a configured Shared Drive.",
       );
     const items: DestinationEntry[] = [];
@@ -800,7 +800,7 @@ export class FileEffects {
           }>(`/v1.0/drives/${encodeURIComponent(mapping.sourceDriveId)}`);
           if (drive.id !== mapping.sourceDriveId || drive.driveType !== "documentLibrary")
             throw new ProviderFault(
-              "unqualified_route",
+              "unsupported_route",
               "The source is not the exact SharePoint document library.",
             );
           const source = await this.resolveSourceRoot(mapping);
@@ -1089,7 +1089,7 @@ export function failedCheck(
     status: "fail",
     code:
       error instanceof ProviderFault &&
-      ["unqualified_route", "plan_revision_required"].includes(error.code)
+      ["unsupported_route", "plan_revision_required"].includes(error.code)
         ? error.code
         : "preflight_failed",
     evidence: {

@@ -1,0 +1,78 @@
+name: Manual native launch and optional live test
+
+on:
+  workflow_dispatch:
+    inputs:
+      check:
+        description: Native launch needs a present operator; live-test needs prepared tenant access
+        type: choice
+        required: true
+        options: [desktop, live-test]
+      cell:
+        description: Exact native cell; self-hosted runner must carry this label
+        type: choice
+        required: true
+        options:
+          - darwin-arm64
+          - darwin-x64
+          - linux-arm64
+          - linux-x64
+
+permissions:
+  contents: read
+
+# Configure these environments with required reviewers. Do not run tenant or desktop checks on PRs.
+# migmate-desktop runners need an interactive logged-in desktop, an operator, and the native runtime:
+# macOS WebKit or Linux WebKitGTK 4.1 + libxdo and a display session.
+# migmate-live runners need the operator-prepared config and credential files outside the checkout.
+jobs:
+  desktop:
+    if: inputs.check == 'desktop'
+    name: Manual installed native launch / ${{ inputs.cell }}
+    runs-on: [self-hosted, migmate-desktop, "${{ inputs.cell }}"]
+    environment: desktop
+    timeout-minutes: 30
+    env:
+      MIGMATE_EXPECTED_CELL: ${{ inputs.cell }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Confirm native runtime cell
+        run: node -e "if (process.platform + '-' + process.arch !== process.env.MIGMATE_EXPECTED_CELL) throw new Error('Wrong native runner cell')"
+      - run: npm ci
+      - name: Launch the installed native window for operator inspection and closure
+        run: npm run check:package -- --desktop
+      # Process exit does not attest visual correctness. Record the operator's actual observations
+      # separately; neither this launch nor hosted CLI CI proves the GUI.
+
+  live-test:
+    if: inputs.check == 'live-test'
+    name: Optional live test / ${{ inputs.cell }}
+    runs-on: [self-hosted, migmate-live, "${{ inputs.cell }}"]
+    environment: live-test
+    timeout-minutes: 120
+    env:
+      MIGMATE_EXPECTED_CELL: ${{ inputs.cell }}
+      MIGMATE_LIVE_TEST_CONFIG: ${{ vars.MIGMATE_LIVE_TEST_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Confirm native runtime cell
+        run: node -e "if (process.platform + '-' + process.arch !== process.env.MIGMATE_EXPECTED_CELL) throw new Error('Wrong native runner cell')"
+      - run: npm ci
+      - name: Build and verify the installed artifact before touching a tenant
+        run: npm run check:package
+      - name: Run the live probe suite against the prepared tenant
+        run: >-
+          node --input-type=module -e "import { spawnSync } from 'node:child_process';
+          const config = process.env.MIGMATE_LIVE_TEST_CONFIG;
+          if (!config) throw new Error('Protected environment must name an operator-prepared live test config');
+          const result = spawnSync(process.execPath, ['scripts/test-live.ts', '--config', config], { stdio: 'inherit' });
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);"

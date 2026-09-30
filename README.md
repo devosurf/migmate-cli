@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release, and **not published to any registry** — there is no publish workflow, so merging to `main` does not release. Install from source.
 
-Only **five exact routes are qualified**, all on `darwin-arm64`: file migration, and Teams archive with or without a Shared Drive destination, each with either all options off or only retained history enabled. A route is a full tuple: source system, backend, permissions, options, destination, transfer binary version, and desktop cell. Change an element outside those tuples and it has no evidence, which the engine refuses with `unqualified_route` (exit 4). Transcripts and attachment bytes remain unqualified. This is a deliberate gate, not a bug. `docs/release-limits.md` states what is and is not claimed; `qualification/gates.json` is the gate register.
+Two job types on **five supported routes**: file migration, and Teams archive with or without a Shared Drive destination, each with archive options off or only retained history enabled. Every job verifies each item it writes — size, SHA-256, created and modified time, MIME type and provenance — and any gap is a finding that blocks `close` until it is accepted. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so a supported configuration runs on any of the four platforms. A shape this build does not implement refuses with `unsupported_route` (exit 4), and so do `transcripts` and `attachmentBytes`, which have never run against a live tenant. The five routes last passed the optional live test on `darwin-arm64` with Node 24.21.0 and rclone v1.75.0, between 2026-09-16 and 2026-09-20. `docs/release-limits.md` states what is and is not claimed.
 
 ## Requirements
 
@@ -109,27 +109,20 @@ In `migmate web`, tick the confirmation checkbox beside **Quit process safely**,
 
 ## Credentials
 
-Operator config carries **credential references** — typed pointers to operator-owned files — never secret values. Migmate resolves a reference just in time and never copies the bytes into durable state. Reference files must be regular files owned by the invoking user carrying no group or other permission bits — `0600`, or stricter — and live outside the repository; the engine and the qualification runner both refuse anything looser.
+Operator config carries **credential references** — typed pointers to operator-owned files — never secret values. Migmate resolves a reference just in time and never copies the bytes into durable state. Reference files must be regular files owned by the invoking user carrying no group or other permission bits — `0600`, or stricter — and live outside the repository; the engine and the live test runner both refuse anything looser.
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
 
 ### Teams retained history
 
-The qualified local retained-history tuple uses channel and user-chats scopes with
-`retainedHistory = true`, `transcripts = false`, `attachmentBytes = false`, and no destination.
-Bind its immutable evidence in the operator config:
-
-```toml
-[qualification]
-bundle = "qualification/f92d02ba93d671b31e0e268ad4c1fad3c37123f0fc72a6e97d6224ee7e1a20af/cc7064ad1b1075fd455d7054cada11ce8ab104ca18b3d9558a14e7a9d45417c8"
-digest = "cc7064ad1b1075fd455d7054cada11ce8ab104ca18b3d9558a14e7a9d45417c8"
-```
+Retained history uses channel and user-chats scopes with `retainedHistory = true`, while
+`transcripts` and `attachmentBytes` stay `false`.
 
 Private channels are collected too. Their retained versions are available only for
 edits/deletions after tenant storage migration completed and when an applicable retention
 policy captured them. An empty response is not proof of full historical coverage, and a
-missing migration completion timestamp remains unknown. See [release limits](docs/release-limits.md#5-only-five-exact-routes-are-qualified-on-one-machine-architecture)
-for the live sample and unqualified option combinations.
+missing migration completion timestamp remains unknown. See [release limits](docs/release-limits.md#5-five-routes-are-supported-and-every-job-verifies-itself)
+for the live sample and the refused options.
 
 ### Teams archive destination
 
@@ -175,24 +168,13 @@ and permits targeted retrieval without downloading the entire archive. The
 not separately to each job. See [archive destination limits](docs/release-limits.md#6-the-archive-destination-is-cold-storage-not-a-reading-surface)
 for the capacity accounting and protection boundary.
 
-**This destination is qualified on `darwin-arm64`, either with all options off or with only
-`retainedHistory` enabled.** Each combination owns independent evidence; the local-only
-bundles cannot qualify a destination. For the retained-history destination combination,
-use the destination tables above, channel and user-chats scopes, and
-`retainedHistory = true`, `transcripts = false`, `attachmentBytes = false`:
-
-```toml
-[qualification]
-bundle = "qualification/2be46b0c84231a54b9f1e5418bbe44a1db675c2f79932d1b2ef9386da123f04d/5087860e601a4a7095d376b6163585d949a6fceaa0a24d8586a1eb8e9d3841ed"
-digest = "5087860e601a4a7095d376b6163585d949a6fceaa0a24d8586a1eb8e9d3841ed"
-```
-
-The retained destination capture proves current and retained edited-text versions survive
-download and extraction into canonical records and offline HTML. It also proves download
-byte verification, lost-acknowledgement recovery, unchanged replay, timestamp-independent
-ZIPs, and refusal to overwrite unowned or drifted content. The private-history limits above
-still apply; this does not prove deleted-message recovery or retained hosted-content availability.
-See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
+**The destination works with all archive options off or with only `retainedHistory`
+enabled.** The last retained-destination live test proved that current and retained
+edited-text versions survive download and extraction into canonical records and offline
+HTML. It also proved download byte verification, lost-acknowledgement recovery, unchanged
+replay, timestamp-independent ZIPs, and refusal to overwrite unowned or drifted content.
+The private-history limits above still apply; nothing proves deleted-message recovery or
+retained hosted-content availability. See [ADR-0008](docs/adr/0008-archive-cold-storage-destination.md).
 
 ## Driving it from an agent or CI
 
@@ -225,9 +207,7 @@ Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, d
 - `npm run check:vendor` — verifies the vendored binary hashes.
 - `npm run check:worker` — opt-in, spawns the real `rclone` worker.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.
-- `npm run qualify:route` — the live gate. Needs real tenant prerequisites and a supported Node, and otherwise refuses `unqualified_route` with the specific block in `refusal.detail.gate`, such as `node_runtime_unsupported`; `--output` must be a new directory outside the repo.
-
-Published bundles are written `0444`/`0555`, so `chmod -R u+w` before removing an evidence directory.
+- `npm run test:live -- --config <file>` — optional. Runs the live probe suite against disposable roots in a real tenant and reports pass or fail per probe; nothing is written into the repository. The wizards write its config, described by `scripts/live/config.schema.json`. It is not part of `npm test`, CI, or any release step.
 
 ## Where to look next
 
@@ -236,5 +216,4 @@ Published bundles are written `0444`/`0555`, so `chmod -R u+w` before removing a
 | What does this term mean?             | `CONTEXT.md`                |
 | Why is it built this way?             | `docs/adr/`                 |
 | What does the release actually claim? | `docs/release-limits.md`    |
-| Which gates passed, and where?        | `qualification/gates.json`  |
 | How do agents work in this repo?      | `AGENTS.md`, `docs/agents/` |

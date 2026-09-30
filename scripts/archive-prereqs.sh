@@ -281,7 +281,7 @@ if confirm "Register the archive app and create its client secret now?"; then
   note "    ChannelMessage.Read.All    the channel export route"
   note "    Chat.Read.All              the user-chats export route"
   warn "Do not add Files.Read.All, OnlineMeetingTranscript.Read.All or OnlineMeetings.Read.All yet."
-  note "Those belong to the attachmentBytes and transcripts options, which this first qualification leaves off."
+  note "Those belong to the attachmentBytes and transcripts options, which this build refuses."
   step "Grant admin consent from the API permissions blade. There is no /adminconsent URL for a client-credentials app with no redirect URI."
   step "Certificates & secrets → New client secret → copy the Value, not the Secret ID."
   pause "Press Enter once the app exists, the three permissions are consented, and you have the secret value."
@@ -301,7 +301,7 @@ chmod 600 "$PREREQ_DIR/entra/archive-client-id.txt"
 pause
 
 stage "Disposable archive scope and its in-scope samples"
-say "The qualification suite reads real conversations. It refuses to run without real samples in them, and"
+say "The optional live test reads real conversations. It refuses to run without real samples in them, and"
 say "it refuses any collection gap, so point it at content you created for this purpose."
 warn "A channel scope reads the whole team. Graph v1.0 has no per-channel export route: the collector calls"
 warn "/teams/{teamId}/channels/getAllMessages and discards what the scope did not name. Every channel in that"
@@ -367,7 +367,7 @@ pause
 stage "Prove the app and the samples against the tenant"
 say "Nothing so far is evidence. This step authenticates the app, resolves the scope, follows both export"
 say "routes to exhaustion and fetches real hosted-content bytes, so a missing prerequisite fails here"
-say "rather than eleven minutes into a qualification run."
+say "rather than eleven minutes into a live test run."
 say ""
 say "It will ask for the client secret once, store it 0600 under $PREREQ_DIR/entra, and never echo it."
 if ! node "$(dirname "$0")/probe-archive-app.ts" --env "$ENV_FILE" --client-id "$MIGMATE_ARCHIVE_CLIENT_ID"; then
@@ -378,7 +378,7 @@ pause
 
 fi
 
-stage "Operator job config and live probe config"
+stage "Operator job config and optional live test config"
 load_env MIGMATE_PREREQ_DIR MIGMATE_TENANT_ID MIGMATE_ARCHIVE_CLIENT_ID MIGMATE_ARCHIVE_SECRET_FILE \
   MIGMATE_ARCHIVE_TEAM_ID MIGMATE_ARCHIVE_CHANNEL_ID MIGMATE_ARCHIVE_USER_ID \
   MIGMATE_ARCHIVE_WINDOW_FROM MIGMATE_ARCHIVE_WINDOW_TO MIGMATE_ARCHIVE_TIMEZONE
@@ -394,7 +394,7 @@ done
 
 say "Two files, both outside the repository, both references only:"
 note "  job.toml          what 'migmate init --type teams_archive --config' parses"
-note "  probe-config.json what 'npm run qualify:route' parses"
+note "  probe-config.json what the optional 'npm run test:live' parses"
 ask MIGMATE_ARCHIVE_JOB_CONFIG "Job config path outside the repo (job-archive.toml):"
 if [[ -z "$MIGMATE_ARCHIVE_JOB_CONFIG" ]]; then
   MIGMATE_ARCHIVE_JOB_CONFIG="$PREREQ_DIR/job-archive.toml"
@@ -410,7 +410,6 @@ esac
 cat > "$MIGMATE_ARCHIVE_JOB_CONFIG" <<TOML
 # Migmate Teams archive job. References only; no secret values live here.
 route = "teams_global_archive"
-guarantees = "default"
 cloud = "Global"
 timezone = "$MIGMATE_ARCHIVE_TIMEZONE"
 retainedHistory = false
@@ -460,9 +459,8 @@ cat > "$MIGMATE_ARCHIVE_PROBE_CONFIG" <<JSON
 {
   "schemaVersion": 1,
   "jobType": "teams_archive",
-  "acknowledgement": "I authorize disposable live qualification probes",
+  "acknowledgement": "I authorize disposable live test probes",
   "jobConfig": {
-    "guarantees": "default",
     "cloud": "Global",
     "timezone": "$MIGMATE_ARCHIVE_TIMEZONE",
     "retainedHistory": false,
@@ -496,7 +494,7 @@ cat > "$MIGMATE_ARCHIVE_PROBE_CONFIG" <<JSON
 JSON
 chmod 600 "$MIGMATE_ARCHIVE_PROBE_CONFIG"
 write_env MIGMATE_ARCHIVE_PROBE_CONFIG "$MIGMATE_ARCHIVE_PROBE_CONFIG"
-say "Qualify with: npm run qualify:route -- --config $MIGMATE_ARCHIVE_PROBE_CONFIG --output <new-directory>"
+say "Run the optional live test with: npm run test:live -- --config $MIGMATE_ARCHIVE_PROBE_CONFIG"
 note "The archive route has no fixtures block: it mutates nothing and reads only the samples proved above."
 
 finish

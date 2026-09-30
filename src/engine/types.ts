@@ -67,7 +67,7 @@ export type RefusalCode =
   | "approval_required"
   | "approval_digest_stale"
   | "plan_revision_required"
-  | "unqualified_route"
+  | "unsupported_route"
   | "verification_unaccepted"
   | "job_closed"
   | "job_cancelled"

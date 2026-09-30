@@ -1,6 +1,6 @@
 # ADR-0003: The file route is site-scoped, not tenant-wide
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR-0009](0009-per-job-verification-replaces-route-qualification.md) (the route tuple no longer exists; the role allowlist still binds)
 - Date: 2026-09-15
 - Context: [credential onboarding decision #15](https://github.com/devosurf/migmate-cli/issues/15), [spec #17](https://github.com/devosurf/migmate-cli/issues/17), [release qualification #25](https://github.com/devosurf/migmate-cli/issues/25)
 

@@ -1,6 +1,6 @@
 # ADR-0005: A source that refuses every rejected name proves the guard differently
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR-0009](0009-per-job-verification-replaces-route-qualification.md) (the proof now binds the optional live test, not a published bundle)
 - Date: 2026-09-15
 - Context: [file migration contract #6](https://github.com/devosurf/migmate-cli/issues/6), [release qualification #25](https://github.com/devosurf/migmate-cli/issues/25), [ADR-0003](0003-site-scoped-file-route.md)
 

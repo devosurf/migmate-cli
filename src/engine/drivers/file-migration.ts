@@ -200,7 +200,7 @@ async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<S
     destinationRoot.driveId !== mapping.destDriveId
   ) {
     throw Object.assign(new Error("A mapping root is missing or is not an ordinary folder"), {
-      code: "unqualified_route",
+      code: "unsupported_route",
     });
   }
   const sources: SourceView[] = [
@@ -1054,7 +1054,7 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
       id: `mapping:${mapping.id}`,
       title: "Exact mapping roots resolve as ordinary folders",
       status: pass ? "pass" : "fail",
-      ...(pass ? {} : { code: "unqualified_route" }),
+      ...(pass ? {} : { code: "unsupported_route" }),
       evidence: {
         sourceItemId: mapping.sourceItemId,
         sourceDriveId: mapping.sourceDriveId,
@@ -1087,7 +1087,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     body: [
       "Destination change detection is a compare-then-write, never an atomic conditional update: Drive publishes no ETag and honours no update precondition, so an edit landing between the comparison and the write is detected by the next verification pass rather than prevented.",
       "The destination concurrency token is the revision and modified time Drive does publish, measured holding still on one file across one window while Drive's own version field advanced with no writer present; Google promises no such stability, so a server-side move refuses prior_copy_drift instead of overwriting.",
-      "Transfer-binary behaviour is qualified at one exact version, recorded with its path and digest in the preflight evidence; any other version refuses rather than running unqualified.",
+      "Transfer-binary behaviour is pinned to one exact version, recorded with its path and digest in the preflight evidence; any other version refuses.",
       "The source grant is proven sufficient for the Graph calls this release makes, not promised for wider use: a call needing more permission refuses rather than degrading to a partial result.",
     ].join("\n"),
   };

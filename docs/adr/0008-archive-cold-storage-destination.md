@@ -1,6 +1,6 @@
 # ADR-0008: The Teams archive gets a cold-storage destination, one container per conversation
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR-0009](0009-per-job-verification-replaces-route-qualification.md) (the destination no longer owes its own evidence bundle)
 - Date: 2026-09-16
 - Context: [spec #17](https://github.com/devosurf/migmate-cli/issues/17) §10 and §11, stories 39 and 47; [destination decision #37](https://github.com/devosurf/migmate-cli/issues/37); [ADR-0007](0007-archive-scope-reads-and-window-filter.md)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Records and proves the Entra app the live Teams-archive qualification needs,
+// Records and proves the Entra app the live Teams-archive test needs,
 // and proves the in-scope samples its suite refuses to run without.
 //
 //   node scripts/probe-archive-app.ts --env <env-file> --client-id <app-id>
@@ -14,7 +14,7 @@
 //   * every scope entry resolves, and a channel entry names a real channel;
 //   * each scope kind holds at least one positive-byte hosted-content sample,
 //     and a channel scope holds one on a root message and one on a reply,
-//     which is what scripts/qualification/archive.ts demands separately;
+//     which is what scripts/live/archive.ts demands separately;
 //   * every export page chain terminates, so paging can be exhausted.
 //
 // It prints counts, byte totals and codes, never message content, and never

@@ -47,12 +47,12 @@ Exit 5 also covers a _successful_ `execute` whose outcome is `blocked`, so a che
 
 Codes worth recognising:
 
-- **`unqualified_route`** — the requested route tuple has no captured evidence. A tuple covers source system, backend, permissions, options, destination, transfer version, guarantees, and desktop cell, so flipping one archive option produces a different tuple that owns its own bundle. `docs/release-limits.md` states the qualified tuples and desktop cells. Report this and stop: qualifying a route requires live tenant evidence.
+- **`unsupported_route`** — the requested shape is not one this build implements: a destination outside the configured Shared Drive, a source that is not the named document library, a cloud other than Global, a mapping root that is not an ordinary folder, or an archive option it refuses. `transcripts` and `attachmentBytes` arrive through the `provider.archive_options` preflight check, because neither has run against a live tenant. `docs/release-limits.md` limit 5 lists the supported routes. Report this and stop: the fix is a config change or new code, never a retry.
 - **`preflight_failed`** — every credential and tenant fault arrives under this one code, with the specific check in `refusal.detail`. `detail.check: credential_permissions_invalid` means the credential's roles do not match the route's allowlist, which is exclusive: one extra role refuses the whole credential, which is why each route needs its own app registration. Read `detail` before reporting, because the top-level code alone says only "preflight".
 - **`lease_held` / `lease_stale_worker_alive`** — a writer owns the job. Read with `--review`. Clear a genuinely stale lease with `reclaim --job ID --confirm`, and reach for that only once the owning process is known to be gone; removing files by hand corrupts the job.
 - **`verification_unaccepted`** — `close` reached an unaccepted finding. Surface the findings and let a human decide each.
 
-`npm run qualify:route` is a separate surface that also refuses with `unqualified_route`, and names the block in `refusal.detail.gate`: `live_configuration_required` (operator prerequisites absent), `node_runtime_unsupported`, `file_credentials_required`, `credential_file_protection_required` (a reference file carrying group or other permission bits, or not owned by the invoking user), `operator_interrupted`, and one generated gate per live probe. Read `detail.gate`; the top-level code cannot distinguish them, and none of these gates ever reaches a `migmate` envelope.
+`npm run test:live` is an optional maintainer surface, never part of a job. It refuses with `live_test_failed` and names the block in `refusal.detail.gate`: `live_configuration_required` (operator prerequisites absent), `node_runtime_unsupported`, `file_credentials_required`, `credential_file_protection_required` (a reference file carrying group or other permission bits, or not owned by the invoking user), `operator_interrupted`, `live_probe_claims_unproven`, and one generated gate per live probe. Read `detail.gate`; none of these ever reaches a `migmate` envelope.
 
 ## Credentials
 
@@ -62,7 +62,7 @@ Operator config holds **credential references**: typed pointers to operator-owne
 
 ## Teams archive destination
 
-When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Use `docs/release-limits.md` limit 5 to select the exact qualified option/destination tuple and its independent evidence bundle; local-only evidence cannot qualify a Drive copy.
+When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Both work with archive options off or with only `retainedHistory` on; `docs/release-limits.md` limit 5 lists them.
 
 For a Drive copy, follow `README.md`'s "Teams archive destination" config: stable `destination.destDriveId` and `destination.destFolderId` plus a separate `secrets.google_service_account` file reference. Keep the existing Graph credential unchanged. Omit the destination and Google reference for a local-only archive; this remains the same Teams archive job type and lifecycle.
 
@@ -72,6 +72,4 @@ Before retaining a copy, read `docs/release-limits.md` limit 6 for the shared-dr
 
 ## Verifying a change to this repo
 
-`npm run typecheck` and `npm test` are hermetic and fast. `npm run check:package` packs, installs globally into a temporary prefix, and smoke-tests the artifact — run it when packaging, the vendored binaries, or the shipped qualification bundles are in scope.
-
-Those bundles under `qualification/<tupleDigest>/<bundleDigest>/` are runtime data: `readQualifiedBundle` is confined to the installed artifact, so dropping a bundle from the package unqualifies its route. Published bundles are `0444`/`0555`; `chmod -R u+w` before removing an evidence directory.
+`npm run typecheck` and `npm test` are hermetic and fast. `npm run check:package` packs, installs globally into a temporary prefix, and smoke-tests the artifact — run it when packaging or the vendored binaries are in scope. `npm run test:live -- --config <file>` exercises real providers, needs tenant access a human prepared, and is optional; never block on it.

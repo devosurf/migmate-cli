@@ -16,12 +16,12 @@ _Avoid_: File sync, replication
 A job that preserves Microsoft Teams conversations and assets as human-readable HTML plus structured records. It is an archive, not a file migration.
 _Avoid_: Teams migration, chat backup
 
-**Qualified route**:
-A source-and-destination combination whose supported behavior and fidelity have been tested and documented. Qualification of one route does not imply support for every compatible backend.
-_Avoid_: Universal remote support, all-remotes support
+**Supported route**:
+A source-and-destination combination this build implements and verifies item by item in every job. Anything outside it refuses as unsupported rather than degrading.
+_Avoid_: Qualified route, universal remote support, all-remotes support
 
 **Capability sample**:
-Real source content whose observation a route's qualification evidence rests on, such as an item kind a driver must omit or a message carrying inline bytes. A sample that cannot exist is recorded with a named reason, never assumed away.
+Real source content whose observation the optional live test rests on, such as an item kind a driver must omit or a message carrying inline bytes. A sample that cannot exist is recorded with a named reason, never assumed away.
 _Avoid_: Fixture, test data, seed
 
 **Operator**:
