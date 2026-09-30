@@ -74,6 +74,7 @@ status accepts the same row-query flags. Facets cover the whole matching set.
 JSONL streams durable events live during a verb. --from CURSOR resumes exclusively;
 without --from a writer streams only its new attempt. status --output jsonl replays
 the log and exits; it is not a watcher. Terminals are durable, never synthesized.
+json and jsonl write refusals to stdout; only text mode diverts them to stderr.
 Only text-mode approval with stdin/stdout/stderr all TTY may prompt, with no default.
 Machine approval always requires both explicit identity and read-back plan digest.
 
@@ -81,7 +82,7 @@ Exit codes: 0 success; 1 internal defect or unknown code/enum; 2 usage/configura
 (including unavailable web runtime); 3 lease/recovery refusal; 4 preflight/approval/
 route/verification gate; 5 retry budget exhausted, blocked at a checkpoint;
 6 already closed; 7 already cancelled; 8 unsupported state version;
-130 SIGINT; 141 broken pipe. Successful cancel exits 0.
+130 SIGINT; 141 broken pipe; 143 SIGTERM. Successful cancel exits 0.
 `;
 
 class Output {

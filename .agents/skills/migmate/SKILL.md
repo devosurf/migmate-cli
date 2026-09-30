@@ -9,21 +9,22 @@ The governing idea: Migmate is built to **refuse**. A refusal is a decision the 
 
 ## Always
 
-- Pass `--output json`. Parse the envelope; branch on `refusal.code` and the exit status, never on message text. Refusal envelopes arrive on stderr.
-- Run on Node 24.15.0 or later. Any other runtime refuses with `usage` at exit 2 before touching the store, because the durable store is the release-candidate `node:sqlite`. `src/versions.ts` is the one place that decides this.
-- Read with `--review` (`plan --review`, `verify --review`) when you only need evidence. It takes no writer lease, so it cannot collide with a running job.
+- Pass `--output json`. Parse the envelope; branch on `refusal.code` and the exit status, never on message text. In `json` and `jsonl`, refusals land on **stdout** beside successes — only text mode diverts a refusal to stderr, so an agent reading stderr for failures reads nothing.
+- Run on Node 24, at 24.15.0 or later. It is the only tested major, so later majors refuse exactly as earlier ones do: `usage` at exit 2, before the store is touched, because the durable store is the release-candidate `node:sqlite`. `src/versions.ts` is the one place that decides this.
+- Read with `--review` (`plan --review`, `verify --review`) when you only need evidence. It takes no writer lease, so it cannot collide with a running job; `status` never takes one at all.
+- The store is `--home PATH`, else `MIGMATE_HOME`, else the nearest `.migmate/` directory walking up from the current folder, else the OS default. Work inside the operator's folder and every verb already addresses their store. A `.migmate` that is a file or a symlink refuses with `usage` rather than falling through to a parent or the default.
 
 ## Driving a job
 
 Ten verbs on one rail: `init`, `doctor`, `plan`, `approve`, `execute`, `status`, `verify`, `report`, `close`, `cancel`.
 
 1. `init --type file_migration|teams_archive` returns the job id. Every later verb takes `--job ID`.
-2. `creds init --job ID --config job.toml` onboards the operator config. Without it the job is unconfigured and `doctor` refuses.
+2. `creds init --job ID --config job.toml` onboards the operator config; `init --config job.toml` does the same at creation. Until it is onboarded the job is unconfigured and `doctor` refuses.
 3. `doctor` runs preflight — conditions only an administrator can satisfy. A failure here is a **tenant prerequisite**, so the finishing move is to name the failing check and hand it to a human.
 4. `plan` returns a `planDigest` binding an immutable proposal.
 5. `approve` needs `--approver IDENTITY` and `--plan-digest DIGEST`. Both belong to the human: carry the identity they gave you and the digest they read back. When either is missing, stop and ask — approval is the one gate that exists to require a person.
 6. `execute`, then `verify`.
-7. `verify` raises findings. Each one a human chooses to accept becomes an **exception** via `accept --code CODE`, recorded permanently in the report. `close` refuses while any finding is unaccepted, which is the gate working.
+7. `verify` raises findings. Each one a human chooses to accept becomes an **exception** via `accept --job ID --verification-digest DIGEST --approver IDENTITY --code CODE`, repeating `--code` per finding, recorded permanently in the report. Omitting the digest refuses `verification_unaccepted`; omitting the approver or the codes is `usage`. `close` refuses while any finding is unaccepted, which is the gate working.
 8. `report`, then `close`.
 
 `status` is safe at any point. `cancel` is terminal and exits 0 on success.
@@ -34,24 +35,28 @@ Match the exit status first, then the code.
 
 | Exit | Meaning                                          | What to do                                           |
 | ---- | ------------------------------------------------ | ---------------------------------------------------- |
+| 1    | Internal defect, or a code this build cannot map | Report it as a defect; a retry proves nothing.       |
 | 2    | Usage or configuration                           | Fix the invocation or the config file.               |
 | 3    | Lease or recovery refusal                        | Another writer holds the job. See below.             |
 | 4    | Preflight, approval, route, or verification gate | Evidence or authority is missing. Report it.         |
 | 5    | Retry budget exhausted, blocked at a checkpoint  | Execution stopped mid-flight; report the checkpoint. |
 | 6, 7 | Already closed, already cancelled                | The job is terminal. Start a new one.                |
+| 8    | Durable state written by a newer build           | Stop: this build cannot read that job.               |
+
+Exit 5 also covers a _successful_ `execute` whose outcome is `blocked`, so a checkpoint report is the finishing move either way. Statuses `130` (interrupt, including an interrupted `execute`), `141` (broken stdout) and `143` (SIGTERM) are process outcomes carrying no refusal to read.
 
 Codes worth recognising:
 
-- **`unqualified_route`** — the requested route tuple has no captured evidence. A tuple covers source system, backend, permissions, options, destination, transfer version, and desktop cell, so flipping one archive option produces a different tuple that owns its own bundle. `docs/release-limits.md` states the qualified tuples and desktop cells. Report this and stop: qualifying a route requires live tenant evidence.
-- **`credential_permissions_invalid`** — the credential's roles do not match the route's allowlist, which is exclusive. One extra role refuses the whole credential, which is why each route needs its own app registration.
+- **`unqualified_route`** — the requested route tuple has no captured evidence. A tuple covers source system, backend, permissions, options, destination, transfer version, guarantees, and desktop cell, so flipping one archive option produces a different tuple that owns its own bundle. `docs/release-limits.md` states the qualified tuples and desktop cells. Report this and stop: qualifying a route requires live tenant evidence.
+- **`preflight_failed`** — every credential and tenant fault arrives under this one code, with the specific check in `refusal.detail`. `detail.check: credential_permissions_invalid` means the credential's roles do not match the route's allowlist, which is exclusive: one extra role refuses the whole credential, which is why each route needs its own app registration. Read `detail` before reporting, because the top-level code alone says only "preflight".
 - **`lease_held` / `lease_stale_worker_alive`** — a writer owns the job. Read with `--review`. Clear a genuinely stale lease with `reclaim --job ID --confirm`, and reach for that only once the owning process is known to be gone; removing files by hand corrupts the job.
 - **`verification_unaccepted`** — `close` reached an unaccepted finding. Surface the findings and let a human decide each.
 
-`npm run qualify:route` is a separate surface with its own block codes, so they never appear in a CLI envelope: `live_configuration_required` (operator prerequisites absent), `node_runtime_unsupported`, `file_credentials_required`, and `credential_file_protection_required` (a reference file looser than `0600`, or not owned by the invoking user).
+`npm run qualify:route` is a separate surface that also refuses with `unqualified_route`, and names the block in `refusal.detail.gate`: `live_configuration_required` (operator prerequisites absent), `node_runtime_unsupported`, `file_credentials_required`, `credential_file_protection_required` (a reference file carrying group or other permission bits, or not owned by the invoking user), `operator_interrupted`, and one generated gate per live probe. Read `detail.gate`; the top-level code cannot distinguish them, and none of these gates ever reaches a `migmate` envelope.
 
 ## Credentials
 
-Operator config holds **credential references**: typed pointers to operator-owned files, resolved just in time. Keep secret values out of config, out of issues, out of commits, and out of your own output — a reference is the thing to pass around. Reference files must be `0600` and owned by the invoking user, or the runner refuses them.
+Operator config holds **credential references**: typed pointers to operator-owned files, resolved just in time. Keep secret values out of config, out of issues, out of commits, and out of your own output — a reference is the thing to pass around. A reference file must be a regular file owned by the invoking user with no group or other permission bits — `0600`, or stricter — and a `mode` stated in the reference must read exactly `0600`.
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) walk a human through tenant setup and write those files. Both accept `--resume <env-file>`. These are human steps; hand them over rather than attempting the tenant work.
 

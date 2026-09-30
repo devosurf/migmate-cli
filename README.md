@@ -17,13 +17,13 @@ Only **five exact routes are qualified**, all on `darwin-arm64`: file migration,
 
 ## Requirements
 
-- **Node 24.15.0 or later.** Not a taste preference: the durable store is `node:sqlite`, which is a release candidate rather than a stable API, and `24.15.0` is where it reached that tier — earlier 24.x carries a weaker one. Migmate therefore claims only the majors it has actually tested, and a command on any other runtime refuses with `usage` (exit 4 is for gates; this is exit 2) instead of reaching the store. `migmate --help` still answers anywhere, so an operator can read the requirement off the tool.
+- **Node 24, at 24.15.0 or later.** Not a taste preference: the durable store is `node:sqlite`, which is a release candidate rather than a stable API, and `24.15.0` is where it reached that tier — earlier 24.x carries a weaker one. Migmate claims only the majors it has actually tested, which today is 24 alone, so a later major is refused exactly like an earlier one: `usage` (exit 4 is for gates; this is exit 2) instead of reaching the store. `migmate --help` still answers anywhere, so an operator can read the requirement off the tool.
 - **macOS 13.5+ or Linux**, on x64 or arm64. Any other platform is refused at install time by the `os` field, and `defaultHome` refuses it at runtime. Windows was removed deliberately — see `docs/adr/0002-drop-windows.md`.
 - A desktop session only for `migmate web`, which opens a native WebView rather than serving a port.
 
 `rclone` is vendored and checksum-pinned in the artifact. Do not install it separately.
 
-Both version pins live in `src/versions.ts`, which explains why each is narrow and is the only place to widen either.
+Both version pins live in `src/versions.ts`, which explains why each is narrow and is where widening either is decided. `package.json`'s `engines` only mirrors the floor for npm's benefit and carries no upper bound, so npm installs onto a major the runtime then refuses.
 
 ## Install
 
@@ -36,7 +36,7 @@ npm install -g ./devosurf-migmate-0.1.0-dev.tgz
 migmate --help
 ```
 
-`npm pack` produces a ~348 MB tarball; most of it is the four vendored `rclone` builds, which ship so that a transfer never depends on an unpinned binary.
+`npm pack` produces a ~117 MB tarball that unpacks to ~348 MB; almost all of it is the four vendored `rclone` builds, which ship so that a transfer never depends on an unpinned binary.
 
 To work in the repo without installing globally, `node dist/cli/main.js` after `npm run build` is equivalent to the `migmate` bin.
 
@@ -109,7 +109,7 @@ In `migmate web`, tick the confirmation checkbox beside **Quit process safely**,
 
 ## Credentials
 
-Operator config carries **credential references** — typed pointers to operator-owned files — never secret values. Migmate resolves a reference just in time and never copies the bytes into durable state. Reference files must be `0600` and owned by the invoking user, outside the repository; the qualification runner refuses anything looser.
+Operator config carries **credential references** — typed pointers to operator-owned files — never secret values. Migmate resolves a reference just in time and never copies the bytes into durable state. Reference files must be regular files owned by the invoking user carrying no group or other permission bits — `0600`, or stricter — and live outside the repository; the engine and the qualification runner both refuse anything looser.
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
 
@@ -209,9 +209,9 @@ Every command takes `--output text|json|jsonl` and answers with a versioned enve
 }
 ```
 
-`ok: false` replaces `value` with `refusal`, carrying a stable `code` — branch on that code and on the exit status, not on message text. Refusal envelopes go to stderr. `--output jsonl` streams durable events live during a verb, and `--from CURSOR` resumes exclusively; `status --output jsonl` replays the log and exits rather than watching.
+`ok: false` replaces `value` with `refusal`, carrying a stable `code` — branch on that code and on the exit status, not on message text. In `json` and `jsonl` a refusal is written to stdout like any other envelope; only text mode sends one to stderr. `--output jsonl` streams durable events live during a verb, and `--from CURSOR` resumes exclusively; `status --output jsonl` replays the log and exits rather than watching.
 
-Exit codes are meaningful: `0` success, `2` usage or configuration, `3` lease or recovery refusal, `4` a preflight, approval, route, or verification gate, `5` blocked at a checkpoint, `6`/`7` already closed or cancelled. `migmate --help` is the full reference for flags, row-query options, and the complete exit table — it is kept accurate, so read it rather than trusting a copy.
+Exit codes are meaningful: `0` success, `1` internal defect or an unmappable code, `2` usage or configuration, `3` lease or recovery refusal, `4` a preflight, approval, route, or verification gate, `5` blocked at a checkpoint, `6`/`7` already closed or cancelled, `8` durable state written by a newer build; `130`, `141` and `143` are interrupt, broken stdout and terminate. `migmate --help` is the full reference for flags, row-query options, and the complete exit table — it is kept accurate, so read it rather than trusting a copy.
 
 Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Only fully-TTY text mode may prompt, and it has no default answer, so an agent can never approve a plan by accident.
 
@@ -225,7 +225,7 @@ Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, d
 - `npm run check:vendor` — verifies the vendored binary hashes.
 - `npm run check:worker` — opt-in, spawns the real `rclone` worker.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.
-- `npm run qualify:route` — the live gate. Needs real tenant prerequisites and a supported Node, and blocks with `node_runtime_unsupported` otherwise; `--output` must be a new directory outside the repo.
+- `npm run qualify:route` — the live gate. Needs real tenant prerequisites and a supported Node, and otherwise refuses `unqualified_route` with the specific block in `refusal.detail.gate`, such as `node_runtime_unsupported`; `--output` must be a new directory outside the repo.
 
 Published bundles are written `0444`/`0555`, so `chmod -R u+w` before removing an evidence directory.
 
