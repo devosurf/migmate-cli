@@ -431,6 +431,23 @@ describe("file migration through the engine", () => {
     );
   });
 
+  it("requires a new plan before an approved excluded file moved outside its subtree can be copied", async (t) => {
+    const h = await harness(
+      t,
+      fixture(),
+      fileConfig([{ sourceItemId: "folder", reason: "Outside approved migration scope" }]),
+    );
+    await approve(h);
+    const before = h.port.snapshotDestination();
+    h.port.mutateSourceItem("zero", { parentId: "source-root" });
+    const result = value(await h.engine.withWriter(h.ref, (writer) => writer.execute()));
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("A previously excluded file was admitted without approval");
+    assert.equal(result.refusal.code, "plan_revision_required");
+    assert.deepEqual(h.port.snapshotDestination(), before);
+    assert.equal(value(await h.engine.reader(h.ref).status()).mappingPasses[0]?.status, "pending");
+  });
+
   it("blocks nested mappings and unrepresentable ancestor paths before descendant writes", async (t) => {
     const input = fixture();
     input.destinationItems.push({

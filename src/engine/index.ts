@@ -2233,10 +2233,10 @@ async function checkApprovedMappingScope(
         sourceSeen.add(parent.id);
         for (const child of await p.listSourceChildren(parent.id)) {
           const inExclusion = parent.excluded || requested.has(child.id);
-          if (inExclusion && !excluded.has(child.id))
+          if (inExclusion !== excluded.has(child.id))
             throw new EngineRefusalError({
               code: "plan_revision_required",
-              message: "An excluded subtree contains an item outside its approved stable-ID set.",
+              message: "The excluded subtree no longer matches its approved stable-ID set.",
             });
           if (child.kind === "folder") sourceStack.push({ id: child.id, excluded: inExclusion });
         }

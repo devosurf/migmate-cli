@@ -157,6 +157,85 @@ describe("windowless native protocol", () => {
     await session.close();
   });
 
+  it("shows mapping pass state, transfer stats and escaped failures in execute and status views", async () => {
+    const projected = status();
+    projected.progress = null;
+    projected.mappingPasses = [
+      {
+        revision: 1,
+        mappingId: "waiting",
+        passNumber: 1,
+        mode: "copy",
+        executeId: null,
+        jobid: null,
+        group: null,
+        status: "pending",
+        startedAt: null,
+        endedAt: null,
+        lastStats: null,
+        error: null,
+      },
+      {
+        revision: 1,
+        mappingId: "copying",
+        passNumber: 2,
+        mode: "copy",
+        executeId: "worker",
+        jobid: 7,
+        group: "group-7",
+        status: "running",
+        startedAt: "2026-10-01T00:00:00Z",
+        endedAt: null,
+        lastStats: { bytes: 8192, files: 3, speed: 1024, errors: 0, transferring: [] },
+        error: null,
+      },
+      {
+        revision: 1,
+        mappingId: "failed <mapping>",
+        passNumber: 1,
+        mode: "copy",
+        executeId: "worker",
+        jobid: 6,
+        group: "group-6",
+        status: "failed",
+        startedAt: "2026-10-01T00:00:00Z",
+        endedAt: "2026-10-01T00:00:05Z",
+        lastStats: { bytes: 4096, files: 1, speed: 0, errors: 2, transferring: [] },
+        error: '<img src="bad" onerror="steal()"> access denied',
+      },
+    ];
+    const session = new WebSession({ engine: readerEngine(projected, EMPTY), job: JOB });
+    const handle = createProtocolHandler({ session });
+    for (const stage of ["execute", "status"]) {
+      const document = parse(
+        await (await handle(new Request(`migmate://localhost/view?stage=${stage}`))).text(),
+      );
+      const table = elements(
+        document,
+        (element) =>
+          element.tagName === "table" &&
+          elements(element, (child) => child.tagName === "th" && text(child) === "Mapping").length >
+            0,
+      )[0];
+      assert.ok(table, `Mapping progress is missing from ${stage}`);
+      const rows = elements(table, (element) => element.tagName === "tr").slice(1);
+      const cells = rows.map((row) =>
+        elements(row, (element) => element.tagName === "td").map(text),
+      );
+      assert.deepEqual(
+        cells.map((row) => row.slice(0, 7)),
+        [
+          ["waiting", "1", "pending", "—", "—", "—", "—"],
+          ["copying", "2", "running", "8192", "3", "1024 bytes/s", "0"],
+          ["failed <mapping>", "1", "failed", "4096", "1", "0 bytes/s", "2"],
+        ],
+      );
+      assert.equal(cells[2]?.[7], '<img src="bad" onerror="steal()"> access denied');
+      assert.equal(elements(table, (element) => element.tagName === "img").length, 0);
+    }
+    await session.close();
+  });
+
   for (const code of ["lease_held", "lease_stale_worker_alive"] as const) {
     it(`${code} flips every ownership statement read-only and preserves the safe recovery facts`, async () => {
       const refusal: Refusal = {

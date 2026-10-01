@@ -43,10 +43,12 @@ function progress(snapshot: WebSnapshot): string {
   const status = snapshot.status;
   const value = status?.progress;
   const archive = status?.archiveProgress;
+  const passes = status?.mappingPasses ?? [];
   return `<dl class="progress"><dt>Durable state</dt><dd>${escapeHtml(status?.state ?? "unavailable")}</dd>
     <dt>Terminal outcome</dt><dd>${escapeHtml(status?.terminalState ?? "not terminal")}</dd><dt>Resumable</dt><dd>${status?.resumable ? "Yes — re-invoke execute" : "No"}</dd>
-    ${value ? `<dt>${escapeHtml(value.unit)}</dt><dd>${escapeHtml(value.done)}${value.total === null ? " · total not known" : ` of ${escapeHtml(value.total)}`}</dd>` : "<dt>Progress</dt><dd>No committed progress yet</dd>"}
-    ${archive ? `<dt>Conversations</dt><dd>${archive.conversations} of ${archive.totalConversations}</dd><dt>Records</dt><dd>${archive.records}${archive.totalRecords === null ? " · total not known" : ` of ${archive.totalRecords}`}</dd><dt>Assets</dt><dd>${archive.assets}</dd><dt>Bytes</dt><dd>${archive.bytes}</dd>` : ""}</dl>`;
+    ${value ? `<dt>${escapeHtml(value.unit)}</dt><dd>${escapeHtml(value.done)}${value.total === null ? " · total not known" : ` of ${escapeHtml(value.total)}`}</dd>` : passes.length ? "" : "<dt>Progress</dt><dd>No committed progress yet</dd>"}
+    ${archive ? `<dt>Conversations</dt><dd>${archive.conversations} of ${archive.totalConversations}</dd><dt>Records</dt><dd>${archive.records}${archive.totalRecords === null ? " · total not known" : ` of ${archive.totalRecords}`}</dd><dt>Assets</dt><dd>${archive.assets}</dd><dt>Bytes</dt><dd>${archive.bytes}</dd>` : ""}</dl>
+    ${passes.length ? `<section aria-label="Mapping copy progress"><h3>Mapping passes</h3><div class="table-scroll"><table><thead><tr><th>Mapping</th><th>Pass</th><th>State</th><th>Bytes</th><th>Files</th><th>Speed</th><th>Errors</th><th>Failure</th></tr></thead><tbody>${passes.map((pass) => `<tr><td>${escapeHtml(pass.mappingId)}</td><td>${escapeHtml(pass.passNumber)}</td><td>${escapeHtml(pass.status)}</td><td>${escapeHtml(pass.lastStats?.bytes ?? "—")}</td><td>${escapeHtml(pass.lastStats?.files ?? "—")}</td><td>${pass.lastStats ? `${escapeHtml(pass.lastStats.speed)} bytes/s` : "—"}</td><td>${escapeHtml(pass.lastStats?.errors ?? "—")}</td><td>${escapeHtml(pass.error ?? "—")}</td></tr>`).join("")}</tbody></table></div></section>` : ""}`;
 }
 
 function planReview(snapshot: WebSnapshot): string {
