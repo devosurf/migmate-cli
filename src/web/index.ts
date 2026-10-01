@@ -41,7 +41,7 @@ export async function launchWeb(options: {
   job: JobRef;
 }): Promise<WebOutcome<WebExit>> {
   if (!["darwin", "linux"].includes(process.platform) || !["x64", "arm64"].includes(process.arch)) {
-    return unavailable("macOS 13.5+ or a Linux desktop on x64/arm64 with Node 24");
+    return unavailable("macOS 13.5+ or a Linux desktop on x64/arm64 with Node 24.15.0 or later");
   }
   if (process.platform === "darwin") {
     const [major, minor] = release().split(".").map(Number);

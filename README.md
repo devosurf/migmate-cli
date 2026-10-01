@@ -17,13 +17,13 @@ Two job types on **five supported routes**: file migration, and Teams archive wi
 
 ## Requirements
 
-- **Node 24, at 24.15.0 or later.** Not a taste preference: the durable store is `node:sqlite`, which is a release candidate rather than a stable API, and `24.15.0` is where it reached that tier — earlier 24.x carries a weaker one. Migmate claims only the majors it has actually tested, which today is 24 alone, so a later major is refused exactly like an earlier one: `usage` (exit 4 is for gates; this is exit 2) instead of reaching the store. `migmate --help` still answers anywhere, so an operator can read the requirement off the tool.
+- **Node 24.15.0 or later**, any later major included. The floor is not a taste preference: the durable store is `node:sqlite`, which is a release candidate rather than a stable API, and `24.15.0` is where it reached that tier — earlier 24.x carries a weaker one. An earlier runtime is refused as `usage` (exit 4 is for gates; this is exit 2) instead of reaching the store. `migmate --help` still answers anywhere, so an operator can read the requirement off the tool.
 - **macOS 13.5+ or Linux**, on x64 or arm64. Any other platform is refused at install time by the `os` field, and `defaultHome` refuses it at runtime. Windows was removed deliberately — see `docs/adr/0002-drop-windows.md`.
 - A desktop session only for `migmate web`, which opens a native WebView rather than serving a port.
 
 `rclone` is vendored and checksum-pinned in the artifact. Do not install it separately.
 
-Both version pins live in `src/versions.ts`, which explains why each is narrow and is where widening either is decided. `package.json`'s `engines` only mirrors the floor for npm's benefit and carries no upper bound, so npm installs onto a major the runtime then refuses.
+Both version requirements live in `src/versions.ts`: an open Node floor, and an exact transfer binary pin whose narrowness that file explains and where widening it is decided. `package.json`'s `engines` mirrors the same Node floor for npm's benefit.
 
 ## Install
 

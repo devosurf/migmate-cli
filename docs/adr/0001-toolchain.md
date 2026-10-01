@@ -46,3 +46,9 @@ The original source-only decision was disproven by an actual Node 24 installed-p
 **An unsupported runtime refuses in the CLI**, as a `usage` refusal at exit 2, raised before the engine opens so it never reaches the store. `--help` still answers on any runtime, because an operator on the wrong Node needs to be able to read the requirement off the tool. The evidence validator now asks the same question of a bundle's recorded `nodeVersion` instead of matching `v24.` by prefix; both published bundles were captured on v24.21.0 and remain valid.
 
 Widening to Node 26 after its LTS promotion is now one entry in `TESTED_NODE` plus CI cells, and it stays a decision with evidence attached rather than a dependency bump. Tests assert the version literals independently, so a wrong constant fails rather than agreeing with itself.
+
+## Amendment 2026-10-01: the Node requirement is an open floor
+
+_Supersedes the tested-set half of the 2026-09-16 amendment._ Refusing every major not listed in `TESTED_NODE` turned each Node release into friction: on Node 26.4.0 the CLI refused every verb but `--help`, and 20 tests failed on that refusal alone. With the guard lifted, the full offline suite passes unchanged on 26.4.0, so the allowlist was protecting against a difference no test could find.
+
+**`src/versions.ts` now holds one `NODE_FLOOR`, `24.15.0`, and admits every version at or above it.** The floor keeps its reason: it is where `node:sqlite` reached the release-candidate tier. Below it the CLI still refuses as `usage` at exit 2 before opening the store, and `--help` still answers. `engines` already read `>=24.15.0`, so npm and the runtime now agree. CI still runs Node 24 cells only; a later major is supported without a cell of its own. The transfer binary keeps its exact pin.

@@ -10,7 +10,7 @@ The governing idea: Migmate is built to **refuse**. A refusal is a decision the 
 ## Always
 
 - Pass `--output json`. Parse the envelope; branch on `refusal.code` and the exit status, never on message text. In `json` and `jsonl`, refusals land on **stdout** beside successes — only text mode diverts a refusal to stderr, so an agent reading stderr for failures reads nothing.
-- Run on Node 24, at 24.15.0 or later. It is the only tested major, so later majors refuse exactly as earlier ones do: `usage` at exit 2, before the store is touched, because the durable store is the release-candidate `node:sqlite`. `src/versions.ts` is the one place that decides this.
+- Run on Node 24.15.0 or later, any later major included. An earlier version refuses with `usage` at exit 2, before the store is touched, because the durable store is the release-candidate `node:sqlite`. `src/versions.ts` is the one place that decides this.
 - Read with `--review` (`plan --review`, `verify --review`) when you only need evidence. It takes no writer lease, so it cannot collide with a running job; `status` never takes one at all.
 - The store is `--home PATH`, else `MIGMATE_HOME`, else the nearest `.migmate/` directory walking up from the current folder, else the OS default. Work inside the operator's folder and every verb already addresses their store. A `.migmate` that is a file or a symlink refuses with `usage` rather than falling through to a parent or the default.
 

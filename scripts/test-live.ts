@@ -14,7 +14,7 @@ import { fileProbeIds, probeFailures, type ProbeCapture } from "./live/probes.ts
 const usage =
   "Usage: npm run test:live -- --config <file>\n" +
   "Optional. Runs the live probe suite against disposable roots in a real tenant; see\n" +
-  "scripts/live/config.schema.json. Needs Node 24 and protected file credential references.\n";
+  "scripts/live/config.schema.json. Needs Node 24.15.0 or later and protected file credential references.\n";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const commandId = randomUUID();
 const controller = new AbortController();

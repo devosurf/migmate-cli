@@ -329,5 +329,5 @@
       }
     }
   ],
-  "description": "Run npm run test:live -- --config <this JSON file>. Optional: needs Node 24, the exact managed v1.75.0 host binary, live Global tenant consent/licensing/options and Google Shared Drive access as appropriate. Every probe performs real operations against disposable roots; nothing is written into the repository."
+  "description": "Run npm run test:live -- --config <this JSON file>. Optional: needs Node 24.15.0 or later, the exact managed v1.75.0 host binary, live Global tenant consent/licensing/options and Google Shared Drive access as appropriate. Every probe performs real operations against disposable roots; nothing is written into the repository."
 }

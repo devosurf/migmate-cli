@@ -12,8 +12,8 @@ process.once("SIGINT", interrupt);
 process.once("SIGTERM", interrupt);
 let directory: string | undefined;
 try {
-  const untested = unsupportedNode();
-  if (untested !== null) throw new Error(untested);
+  const unsupported = unsupportedNode();
+  if (unsupported !== null) throw new Error(unsupported);
   const platform = distributionPlatform();
   directory = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "mmw-"));
   await chmod(directory, 0o700);
