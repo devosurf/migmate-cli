@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release. Releases are GitHub Releases cut from `v*` tags by `.github/workflows/release.yml`; nothing is published to npm, and merging to `main` does not release.
 
-Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. Every job verifies each item it writes — size, SHA-256, created and modified time, MIME type and provenance — and any gap is a finding that blocks `close` until it is accepted. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on any of the four platforms, including archive options without live-test evidence. A shape this build does not implement refuses with `unsupported_route` (exit 4). Five configurations last passed the optional live test on `darwin-arm64` with Node 24.21.0 and rclone v1.75.0, between 2026-09-16 and 2026-09-20. `docs/release-limits.md` states what is and is not claimed.
+Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. File migrations execute rclone copy passes and verify relative file paths by hash (or explicitly selected size-only proof); archives verify their local package and any uploaded copy. Blocking findings require acceptance before `close`. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on all four platforms. Unsupported shapes refuse with `unsupported_route` (exit 4). Historical live observations and their limits are recorded in `docs/release-limits.md`; they do not prove the new rclone-executed file route.
 
 ## Requirements
 
@@ -107,7 +107,19 @@ flowchart LR
 
 `init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any finding is unaccepted.
 
-File-migration approval binds the destination root, not unrelated folder contents: adding or removing an unrelated object does not require a new plan. A missing root or changed root identity, drive, or folder type still refuses. Per-item checks block unowned same-path objects and drift of prior copies before writes; an excluded source subtree gaining a new member still requires replanning.
+File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member requires replanning. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
+
+### File mapping copies and recovery
+
+Keep the existing `[[mappings]]` job configuration. Each approved mapping runs sequentially through the managed rclone worker, with four transfers inside a pass. Destinations must already exist; this release adds no manifest loader, provisioning, mirror/delete mode, or mapping-concurrency setting.
+
+`status` exposes durable `mappingPasses`: mapping and pass number, mode, rclone handle, state, timestamps, last stats and error. Failed mappings retain rclone's error while later mappings continue. Run `execute` again to retry failed or interrupted mappings; completed mappings in the approved revision are skipped. On writer-open recovery, an unfinished pass whose worker is gone becomes interrupted. A retried copy lets rclone skip identical files instead of recovering per-file uploads.
+
+Ctrl-C stops active passes cooperatively, returns exit **130**, and leaves the job resumable. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
+
+rclone copies empty folders and preserves supported created/modified times and Google Drive content type through metadata; created time on Drive applies to fresh uploads. Owner, permission and label metadata are off. SharePoint roots are paths inside a drive pinned by id, never SharePoint `root_folder_id`; per-mapping connection overrides reuse the operator's two remotes. Copy never deletes: renamed or removed source files can leave destination-only files, reported nonblockingly by verification.
+
+File migration no longer stages file bytes locally or uses reserved destination IDs, private provenance markers, or move-by-id. Teams archive uploads retain their separate create-only protections.
 
 A minimal file-migration run:
 
@@ -229,7 +241,7 @@ Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, d
 - `npm run check:worker` — opt-in locally, required in CI's four platform cells. Spawns the vendored `rclone` worker and proves authentication, lifecycle, asynchronous copy, per-pass status/stats, cooperative stop and resumable copy, capped mirror deletions, and stored/downloaded hash listings against disposable local folders.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.
 - `npm run check:install` — packs, serves the artifact as a local GitHub-shaped release, and drives `scripts/install.sh` through a fresh install, `migmate upgrade`, pruning, a tampered checksum, and a private Node download from nodejs.org. CI's four cells run it after `check:package`.
-- `npm run test:live -- --config <file>` — optional. Runs the live probe suite against disposable roots in a real tenant and reports pass or fail per probe; nothing is written into the repository. The wizards write its config, described by `scripts/live/config.schema.json`. It is not part of `npm test`, CI, or any release step.
+- `npm run test:live -- --config <file>` — optional and credentialed. File probes use disposable mapping roots through the production engine for multi-mapping rclone copies, hash verification, cooperative interruption/reopen/resume, completed-pass skips, and source capability samples. An interruption that finishes too quickly is not claimed as proven. Archive probes remain separate. The wizards write its config, described by `scripts/live/config.schema.json`; it is not part of `npm test`, CI, or a release gate.
 
 The real-binary suites are skipped by ordinary `npm test`. To run the copy-pass suite alone, supply `MIGMATE_TEST_RCLONE_BINARY` (path), `MIGMATE_TEST_RCLONE_SHA256`, and `MIGMATE_TEST_RCLONE_PROVENANCE`, then run `node --test src/engine/providers/copy-pass.test.ts`; `npm run check:worker` resolves these from the vendored manifest automatically. The hash test also uses an encrypted local-folder remote to prove downloading a hash the remote cannot supply.
 

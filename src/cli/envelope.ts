@@ -51,10 +51,10 @@ const enums: Record<string, readonly unknown[]> = {
   state: [...JOB_STATES, ...EXECUTION_TERMINAL_STATES, ...VERB_STATES],
   terminalState: [...EXECUTION_TERMINAL_STATES, null],
   outcome: [...EXECUTION_TERMINAL_STATES, ...CLOSURE_OUTCOMES],
-  mode: ["interactive", "unattended"],
+  mode: ["interactive", "unattended", "copy", "mirror"],
   format: ["json", "jsonl", "html", "csv"],
   unit: PROGRESS_UNITS,
-  status: ["pass", "fail", "skip"],
+  status: ["pass", "fail", "skip", "pending", "running", "completed", "failed", "interrupted"],
 };
 // Inspect only contract-bearing members. Arbitrary provider evidence, prose, and
 // code-specific detail are not new enum namespaces for the adapter to interpret.
@@ -83,6 +83,7 @@ export function knownContract(value: unknown): boolean {
         "rail",
         "ownership",
         "progress",
+        "mappingPasses",
         "artifacts",
         "refusal",
         "currentPlan",

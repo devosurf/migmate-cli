@@ -1,10 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import type { CommitRow, FileCommitRow } from "../commit.ts";
+import type { FileCommitRow } from "../commit.ts";
 import type { DriverContext } from "./types.ts";
 import type {
   DestinationEntry,
@@ -58,86 +53,17 @@ export interface FileMarker extends ProvenanceRecord {
   stateRevision?: string;
 }
 
-/** Persist the whole object, including prepared intents, before advancing the generator. */
-export interface FileState {
-  version: 1;
-  generation: number;
-  status: "prepared" | "verified" | "unverified";
-  attempt: string;
-  action: "created" | "updated" | "moved";
-  source: FileSourceEvidence;
-  sourceFingerprint: string | null;
-  relativePath: string;
-  output: FileOutput;
-  marker: FileMarker;
-  previous: { output: FileOutput; marker: FileMarker } | null;
-}
-
 export interface FileScope {
   exclusions: FileExclusion[];
   sourceInventoryAt: string;
 }
 
 export interface FileEvidenceRow extends FileCommitRow {
-  fileState?: FileState;
   sourceEvidence?: FileSourceEvidence;
   fileScope?: FileScope;
 }
 
-/** Structural until the integration owner adds these fields to the shared context. */
-export type FileContext = DriverContext<FileMigrationConfig> & {
-  jobDirectory?: string;
-  resume: DriverContext<FileMigrationConfig>["resume"] & {
-    rows?: CommitRow[];
-    committedUnits?: string[];
-  };
-};
-
-export type FileProvider = ProviderPort & {
-  readSourceItem?(input: { driveId: string; itemId: string }): Promise<SourceEntry | null>;
-  readDestinationObject?(input: {
-    driveId: string;
-    objectId: string;
-  }): Promise<DestinationEntry | null>;
-  reserveDestinationId?(): Promise<string>;
-  createDestinationFolder(
-    input: Parameters<ProviderPort["createDestinationFolder"]>[0] & {
-      destinationId?: string;
-      marker?: FileMarker;
-    },
-  ): Promise<DestinationEntry>;
-  uploadDestinationContent(
-    input: Parameters<ProviderPort["uploadDestinationContent"]>[0] & {
-      create?: boolean;
-      marker?: FileMarker;
-      expectedRevision?: string;
-    },
-  ): Promise<DestinationEntry>;
-  moveDestinationObject(
-    input: Parameters<ProviderPort["moveDestinationObject"]>[0] & {
-      expectedRevision?: string;
-      marker?: FileMarker;
-    },
-  ): Promise<DestinationEntry>;
-  writeDestinationMarker(
-    input: Parameters<ProviderPort["writeDestinationMarker"]>[0] & {
-      expectedRevision?: string;
-    },
-  ): Promise<void>;
-};
-
-export class FileSourceChangedError extends Error {
-  readonly code = "source_read_failed";
-  readonly retryable = true;
-  readonly transient = true;
-  readonly reason = "source_changed";
-  readonly sourceItemId: string;
-  constructor(sourceItemId: string) {
-    super("Source changed before its content fingerprint could be accepted");
-    this.name = "FileSourceChangedError";
-    this.sourceItemId = sourceItemId;
-  }
-}
+export type FileContext = DriverContext<FileMigrationConfig>;
 
 export class FilePlanRevisionRequiredError extends Error {
   readonly code = "plan_revision_required";
@@ -175,58 +101,6 @@ export function sourceEvidence(source: SourceEntry): FileSourceEvidence {
   };
 }
 
-export function sourceToken(source: SourceEntry | FileSourceEvidence): string {
-  return JSON.stringify([
-    source.driveId,
-    source.id,
-    source.identity,
-    source.parentId,
-    source.name,
-    source.kind,
-    source.size,
-    source.etag,
-    source.createdAt,
-    source.modifiedAt,
-    source.mimeType,
-    source.downloadable,
-  ]);
-}
-
-export async function assertSourceStable(
-  provider: FileProvider,
-  source: SourceEntry | FileSourceEvidence,
-): Promise<void> {
-  let current: SourceEntry | null;
-  try {
-    current = provider.readSourceItem
-      ? await provider.readSourceItem({ driveId: source.driveId, itemId: source.id })
-      : await provider.resolveSourceRoot({
-          sourceDriveId: source.driveId,
-          sourceItemId: source.id,
-        });
-  } catch (error) {
-    if (!(error instanceof Error)) throw error;
-    const fault = error as Error & { status?: number; statusCode?: number; transient?: boolean };
-    const status = fault.status ?? fault.statusCode;
-    if (
-      fault.transient === true ||
-      status === undefined ||
-      status < 400 ||
-      status >= 500 ||
-      status === 429
-    )
-      throw error;
-    throw Object.assign(new Error("Source metadata could not be read"), {
-      code: "source_read_failed",
-      status,
-      transient: false,
-    });
-  }
-  if (!current || sourceToken(current) !== sourceToken(source)) {
-    throw new FileSourceChangedError(source.id);
-  }
-}
-
 export function second(value: string): number {
   return Math.floor(Date.parse(value) / 1000);
 }
@@ -246,76 +120,12 @@ export async function hashStream(
   return { sha256: hash.digest("hex"), size };
 }
 
-/**
- * Whether the source's listed size disagrees with the bytes it serves. SharePoint
- * rewrites some files and some downloads differ from the listing; the served bytes are
- * what exists to copy. A disagreement counts only when a second read returns the same
- * bytes, which rules out a truncated or changing download; differing reads are a change
- * in flight and stay retryable.
- */
-export async function confirmServedContent(
-  provider: FileProvider,
-  source: SourceEntry | FileSourceEvidence,
-  served: { sha256: string; size: number },
-  signal?: AbortSignal,
-): Promise<boolean> {
-  if (source.size === null || source.size === served.size) return false;
-  const again = await hashStream(provider.openSourceContent(source.id), signal);
-  await assertSourceStable(provider, source);
-  if (again.sha256 !== served.sha256 || again.size !== served.size)
-    throw new FileSourceChangedError(source.id);
-  return true;
-}
-
-/** One file on disk, bounded stream buffers, removed even on generator cancellation. */
-export async function stageSource(
-  ctx: FileContext,
-  source: SourceEntry,
-): Promise<{
-  sha256: string;
-  size: number;
-  content: () => AsyncIterable<Uint8Array>;
-  dispose: () => Promise<void>;
-}> {
-  if (!ctx.jobDirectory) throw new Error("File execution requires DriverContext.jobDirectory");
-  const stagingRoot = join(ctx.jobDirectory, "assets", ".staging");
-  await mkdir(stagingRoot, { recursive: true, mode: 0o700 });
-  const directory = await mkdtemp(join(stagingRoot, "file-"));
-  const path = join(directory, "content");
-  const hash = createHash("sha256");
-  let size = 0;
-  const dispose = () => rm(directory, { recursive: true, force: true });
-  try {
-    const provider: FileProvider = ctx.provider;
-    await assertSourceStable(provider, source);
-    await pipeline(
-      Readable.from(provider.openSourceContent(source.id)),
-      new Transform({
-        transform(chunk: Uint8Array, _encoding, callback) {
-          hash.update(chunk);
-          size += chunk.byteLength;
-          callback(null, chunk);
-        },
-      }),
-      createWriteStream(path, { mode: 0o600, flags: "wx" }),
-      { signal: ctx.signal },
-    );
-    await assertSourceStable(provider, source);
-    const sha256 = hash.digest("hex");
-    // A repeatable listed-size disagreement is copied as served; verify names it.
-    await confirmServedContent(provider, source, { sha256, size }, ctx.signal);
-    return { sha256, size, content: () => createReadStream(path), dispose };
-  } catch (error) {
-    await dispose();
-    throw error;
-  }
-}
 export interface Observation {
   entry: DestinationEntry;
   sha256: string | null;
 }
 export async function readObject(
-  provider: FileProvider,
+  provider: ProviderPort,
   driveId: string,
   objectId: string,
 ): Promise<DestinationEntry | null> {
@@ -335,7 +145,7 @@ export async function observe(
   ctx: Pick<DriverContext<unknown>, "provider" | "signal">,
   entry: DestinationEntry,
 ): Promise<Observation> {
-  const provider: FileProvider = ctx.provider;
+  const provider = ctx.provider;
   let sha256 = entry.reportedChecksum;
   if (entry.kind === "file" && !sha256) {
     try {

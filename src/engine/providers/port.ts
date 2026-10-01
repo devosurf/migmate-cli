@@ -43,12 +43,9 @@ export interface DestinationEntry {
   kind: DestinationItemKind;
   size: number | null;
   /**
-   * Google Drive v3 publishes no ETag and honours no `If-Match`, so the
-   * destination's concurrency token is `headRevisionId` for a binary file's
-   * content plus `modifiedTime`. Drive's own `version` is excluded: it was
-   * measured advancing with no writer present. Comparing the token before a
-   * write is a compare-then-write, not an atomic conditional update — see
-   * ADR-0004 and `docs/release-limits.md`.
+   * Observed content revision and modified time, retained for Teams archive
+   * verification. This is evidence of drift, not a conditional-write token.
+   * Drive's `version` is excluded because it can advance without a writer.
    */
   revision: string | null;
   createdAt: string;
@@ -115,6 +112,8 @@ export interface FilePassProvider {
       source: FilePassRoot;
       destination: FilePassRoot;
       transfers: number;
+      /** Literal mapping-relative paths; each excludes the item and its subtree. */
+      excludePaths?: string[];
     } & ({ mode: "copy" } | { mode: "mirror"; deleteLimit: number }),
   ): Promise<CopyPassHandle>;
   copyPassStatus(input: CopyPassReference): Promise<CopyPassStatus>;
@@ -189,9 +188,8 @@ export interface ProviderPort extends FilePassProvider {
   }): Promise<DestinationEntry>;
   uploadDestinationContent(input: {
     destinationId?: string;
-    create?: boolean;
+    create?: true;
     marker?: ProvenanceRecord;
-    expectedRevision?: string;
     parentFolderId: string;
     name: string;
     content: Uint8Array | AsyncIterable<Uint8Array>;
@@ -199,20 +197,7 @@ export interface ProviderPort extends FilePassProvider {
     modifiedAt: string;
     mimeType: string | null;
   }): Promise<DestinationEntry>;
-  moveDestinationObject(input: {
-    objectId: string;
-    parentFolderId: string;
-    name: string;
-    modifiedAt?: string;
-    expectedRevision?: string;
-    marker?: ProvenanceRecord;
-  }): Promise<DestinationEntry>;
   readDestinationMarker(objectId: string): Promise<ProvenanceRecord | null>;
-  writeDestinationMarker(input: {
-    objectId: string;
-    marker: ProvenanceRecord | null;
-    expectedRevision?: string;
-  }): Promise<void>;
   streamDestinationContent(objectId: string): AsyncIterable<Uint8Array>;
 
   startTransferWorker(input: {

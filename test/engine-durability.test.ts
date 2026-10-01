@@ -176,7 +176,7 @@ describe("engine durability seam", () => {
           value(await h.engine.reader(h.ref).status()).outstandingFindings,
           expected,
         );
-        for (const phase of ["plan", "execute", "verify"] as const)
+        for (const phase of ["plan", "verify"] as const)
           assert.deepEqual(
             value(
               await h.engine.reader(h.ref).rows({
@@ -268,45 +268,6 @@ describe("engine durability seam", () => {
     assert.equal(observedVerification, true);
   });
 
-  it("publishes coalesced progress only after durable commits and retains unknown totals", async (t) => {
-    const h = await harness(
-      t,
-      fileFixture(
-        Array.from({ length: 8 }, (_, index) => ({
-          id: `file-${index}`,
-          parentId: "source-root",
-          name: `file-${index}`,
-          kind: "file" as const,
-          content: "bytes",
-        })),
-      ),
-    );
-    await approve(h);
-    h.now = "2026-09-02T00:00:00.000Z";
-    const original = h.port.openSourceContent.bind(h.port);
-    t.mock.method(h.port, "openSourceContent", async function* (id: string) {
-      h.now = new Date(Date.parse(h.now) + 400).toISOString();
-      yield* original(id);
-    });
-    await execute(h);
-    const log = await events(h.engine, h.ref);
-    const progress = log.filter((event) => event.kind === "progress");
-    assert.ok(progress.length >= 3);
-    for (const [index, event] of progress.entries()) {
-      if (index > 0) assert.ok(Date.parse(event.at) - Date.parse(progress[index - 1]!.at) >= 1000);
-      const committed = log.findLast(
-        (candidate) => candidate.cursor < event.cursor && candidate.kind === "unit_committed",
-      );
-      assert.ok(committed);
-      assert.deepEqual(event.payload.progress, committed.payload.progress);
-      const counts = event.payload.progress;
-      assert.ok(counts && typeof counts === "object" && "total" in counts);
-      assert.equal(counts.total, null);
-    }
-    assert.equal(log.filter((event) => event.kind === "terminal").length, 1);
-    assert.equal(value(await h.engine.reader(h.ref).status()).ownership.held, false);
-  });
-
   it("binds same-count changed content while unchanged replans ignore observation time and revision", async (t) => {
     const h = await harness(t);
     const first = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
@@ -349,101 +310,6 @@ describe("engine durability seam", () => {
         (facet) => facet.code === "omitted_by_rule",
       ),
     );
-  });
-
-  it("reconciles atomically marked reserved uploads and moves after their responses are lost", async (t) => {
-    const input = fixture();
-    input.reservedDestinationIds = ["reserved-document"];
-    const h = await harness(t, input);
-    await approve(h);
-    h.port.loseResponseOnce("uploadDestinationContent", "reserved-document");
-    assert.equal((await execute(h)).outcome, "interrupted");
-    const applied = h.port.snapshotDestination().filter((entry) => entry.path === "document.bin");
-    assert.equal(applied.length, 1);
-    assert.equal(applied[0]?.id, "reserved-document");
-    assert.equal(applied[0]?.checksum, hash("original"));
-    assert.equal(applied[0]?.provenance?.sourceItemId, "document");
-    reopen(h);
-    assert.equal((await execute(h)).outcome, "completed");
-    assert.equal((await verify(h)).clean, true);
-    h.port.renameSourceItem("document", "renamed.bin");
-    h.port.loseResponseOnce("moveDestinationObject", "reserved-document");
-    assert.equal((await execute(h)).outcome, "interrupted");
-    const moved = h.port.snapshotDestination().find((entry) => entry.id === "reserved-document");
-    assert.equal(moved?.path, "renamed.bin");
-    assert.equal(moved?.provenance?.sourceRelativePath, "renamed.bin");
-    reopen(h);
-    assert.equal((await execute(h)).outcome, "completed");
-    assert.deepEqual(
-      h.port
-        .snapshotDestination()
-        .filter((entry) => entry.kind === "file")
-        .map((entry) => ({
-          id: entry.id,
-          path: entry.path,
-          checksum: entry.checksum,
-        })),
-      [{ id: "reserved-document", path: "renamed.bin", checksum: hash("original") }],
-    );
-    assert.equal((await verify(h)).clean, true);
-  });
-
-  it("resumes a lost folder-create response into that exact reserved parent", async (t) => {
-    const input = fixture();
-    input.sourceItems.push({
-      id: "folder",
-      parentId: "source-root",
-      name: "nested",
-      kind: "folder",
-    });
-    input.sourceItems[1]!.parentId = "folder";
-    input.reservedDestinationIds = ["reserved-folder", "reserved-child"];
-    const h = await harness(t, input);
-    await approve(h);
-    h.port.loseResponseOnce("createDestinationFolder", "reserved-folder");
-    assert.equal((await execute(h)).outcome, "interrupted");
-    const folder = h.port.snapshotDestination().find((entry) => entry.path === "nested");
-    assert.equal(folder?.id, "reserved-folder");
-    assert.equal(folder?.provenance?.sourceItemId, "folder");
-    reopen(h);
-    assert.equal((await execute(h)).outcome, "completed");
-    assert.deepEqual(
-      h.port
-        .snapshotDestination()
-        .filter((entry) => entry.path !== ".")
-        .map((entry) => ({
-          id: entry.id,
-          parentId: entry.parentId,
-          path: entry.path,
-        })),
-      [
-        { id: "reserved-folder", parentId: "destination-root", path: "nested" },
-        { id: "reserved-child", parentId: "reserved-folder", path: "nested/document.bin" },
-      ],
-    );
-    assert.equal((await verify(h)).clean, true);
-  });
-
-  it("requeues source changes after an atomic upload without losing authority over the prior output", async (t) => {
-    const input = fixture();
-    input.reservedDestinationIds = ["reserved-document"];
-    input.sourceMutations = [
-      {
-        sourceItemId: "document",
-        nextContent: "new authoritative source",
-        nextEtag: "source-v2",
-        when: "destination-upload",
-      },
-    ];
-    const h = await harness(t, input);
-    await approve(h);
-    assert.equal((await execute(h)).outcome, "completed");
-    const files = h.port.snapshotDestination().filter((entry) => entry.kind === "file");
-    assert.deepEqual(
-      files.map((entry) => ({ id: entry.id, checksum: entry.checksum })),
-      [{ id: "reserved-document", checksum: hash("new authoritative source") }],
-    );
-    assert.equal((await verify(h)).clean, true);
   });
 
   it("requires fresh acceptance after every verification, even for unchanged exception evidence", async (t) => {
@@ -873,8 +739,8 @@ describe("engine durability seam", () => {
     await approve(h);
     const defect = Object.assign(new Error("Unexpected provider defect"), { code: "constructor" });
     h.port.scriptEffect({
-      method: "openSourceContent",
-      objectId: "document",
+      method: "listFileHashes",
+      objectId: "source-root",
       count: 1,
       error: defect,
     });
@@ -1036,8 +902,30 @@ describe("engine durability seam", () => {
       database.close();
     }
     const status = value(await h.engine.reader(h.ref).status());
-    assert.equal(status.schemaVersion, 2);
+    assert.equal(status.schemaVersion, 3);
     assert.equal(status.state, "new");
+  });
+
+  it("opens an approved schema version 2 job and executes mapping passes without losing its approval", async (t) => {
+    const h = await harness(t);
+    const digest = await approve(h);
+    const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+    try {
+      database.exec("DROP TABLE mapping_pass; UPDATE job SET schema_version = 2");
+    } finally {
+      database.close();
+    }
+    reopen(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.schemaVersion, 3);
+    assert.equal(status.planDigest, digest);
+    assert.deepEqual(status.mappingPasses, []);
+    assert.equal((await execute(h)).outcome, "completed");
+    assert.equal((await verify(h)).clean, true);
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).mappingPasses[0]?.status,
+      "completed",
+    );
   });
 });
 

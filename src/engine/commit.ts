@@ -9,8 +9,8 @@
  * re-resolves by identity rather than replaying a link that has already expired.
  */
 
-import type { CodeKind, ProgressUnit, RowPhase } from "./types.ts";
-import type { FileState, FileSourceEvidence, FileScope } from "./drivers/file-state.ts";
+import type { CodeKind, MappingPass, ProgressUnit, RowPhase } from "./types.ts";
+import type { FileSourceEvidence, FileScope } from "./drivers/file-state.ts";
 import type { ArchiveDestinationState } from "./archive/destination.ts";
 import type {
   ArchivePlan,
@@ -42,7 +42,6 @@ export interface FileCommitRow extends CommitRowBase {
   destinationFileId?: string | null;
   destinationFingerprint?: string | null;
   provenanceState?: "none" | "marked" | "verified" | "drifted";
-  fileState?: FileState;
   sourceEvidence?: FileSourceEvidence;
   fileScope?: FileScope;
 }
@@ -99,6 +98,7 @@ export interface CommitUnit {
   assets?: DurableAsset[];
   watermark?: { unitKey: string; value: string };
   progress?: { unit: ProgressUnit; done: number; total: number | null };
+  mappingPass?: MappingPass;
   /** Verification idempotence is scoped to a fresh durable run, not just a plan. */
   verificationRun?: number;
   archivePlan?: ArchivePlan;

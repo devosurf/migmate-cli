@@ -369,7 +369,7 @@ write_env MIGMATE_DESTINATION_FOLDER_ID_FILE "$MIGMATE_DESTINATION_FOLDER_ID_FIL
 pause "Press Enter once the folder share is complete."
 
 stage "rclone.conf"
-say "rclone's docs say the client-credentials flow needs explicit ids, and the Google Drive backend can use a service-account file plus Shared Drive and folder ids. This wizard writes the config directly so Migmate can read it by path with --config and never copy its contents."
+say "Migmate runs sequential rclone copy passes using these two remotes with per-mapping connection overrides. SharePoint is addressed by path within a drive pinned by id, never root_folder_id. Copies preserve supported timestamps and empty folders, with owner, permission and label metadata off."
 open_url "https://rclone.org/onedrive/"
 open_url "https://rclone.org/drive/"
 if ! confirm "Write the operator-owned rclone.conf now?"; then
@@ -483,7 +483,8 @@ say "Vendored rclone version verified: 1.75.0"
 fi
 
 stage "Operator job config"
-say "This is the config migmate init --config reads. It stores typed file-backed references only, never secret values, and its mapping must name the same drive and root ids the rclone remotes point at."
+say "This is the config migmate init --config reads. It stores typed file-backed references, never secret values. Existing mappings run sequentially into existing destinations; there is no manifest loader or mapping-concurrency setting."
+say "Use dedicated destination roots: rclone copy never deletes, but can update same-path content without collision protection. Status records mapping passes and errors; execute retries failed/interrupted passes and skips completed ones. Ctrl-C stops cooperatively with exit 130. JSONL streams mapping stats; verify hashes files separately."
 if ! confirm "Write the operator job config now?"; then
   warn "stopped before the job config."
   exit 1

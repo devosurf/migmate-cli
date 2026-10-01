@@ -224,7 +224,13 @@ it(
     const h = setup(t);
     const id = await h.approve();
     const first = h.start(["execute", "--job", id, "--output", "jsonl"], true);
-    await first.event((event) => event.verb === "execute" && event.kind === "unit_committed");
+    const progress = await first.event(
+      (event) => event.kind === "mapping_progress" && event.payload.files === 1,
+    );
+    assert.equal(progress.payload.mappingId, "map-1");
+    assert.equal(progress.payload.bytes, 9);
+    assert.equal(progress.payload.errors, 0);
+    assert.equal(typeof progress.payload.speed, "number");
     first.child.kill("SIGINT");
     const stopped = await first.done;
     assert.equal(stopped.code, 130);
@@ -237,6 +243,8 @@ it(
     assert.equal(status.value.state, "interrupted");
     assert.equal(status.value.resumable, true);
     assert.notEqual(status.value.lastCheckpoint, null);
+    assert.equal(status.value.mappingPasses[0]?.status, "interrupted");
+    assert.equal(status.value.worker.active, false);
     const resumed = h.start(["execute", "--job", id, "--output", "jsonl"]);
     const finished = await resumed.done;
     assert.equal(finished.code, 0, finished.stdout);
@@ -328,18 +336,7 @@ it(
     const h = setup(t);
     const id = await h.approve();
     const running = h.start(["execute", "--job", id, "--output", "jsonl"], true);
-    // A prepared intent is already a unit commit. Wait for persisted destination
-    // bytes, not merely the first unit, before asserting remote output survives.
-    await running.event(
-      (event) =>
-        event.verb === "execute" &&
-        event.kind === "unit_committed" &&
-        h
-          .destinationRecords()
-          .some(
-            (row) => row.kind === "file" && row.name === "0.txt" && row.content === "content-0",
-          ),
-    );
+    await running.event((event) => event.kind === "mapping_progress" && event.payload.files === 1);
     running.child.kill("SIGKILL");
     assert.equal((await running.done).signal, "SIGKILL");
     const prior = h.destinationRecords();
@@ -349,6 +346,8 @@ it(
       ),
     );
     await h.reclaimKilledWriter(id, running.events);
+    const interrupted = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(interrupted.value.mappingPasses[0]?.status, "interrupted");
     const resumed = h.start(["execute", "--job", id, "--output", "jsonl"]);
     const done = await resumed.done;
     assert.equal(done.code, 0, done.stdout);
@@ -368,6 +367,15 @@ it(
     assert.equal(after.filter((row) => row.kind === "file").length, 8);
     assert.equal(new Set(after.map((row) => row.name)).size, after.length);
     assert.equal(new Set(after.map((row) => row.id)).size, after.length);
+    const status = await h.command<JobStatus>(["status", "--job", id]);
+    assert.deepEqual(
+      status.value.mappingPasses.map((pass) => [pass.passNumber, pass.status]),
+      [
+        [1, "interrupted"],
+        [2, "completed"],
+      ],
+    );
+    assert.equal(status.value.mappingPasses[1]?.lastStats?.files, 7);
   },
 );
 

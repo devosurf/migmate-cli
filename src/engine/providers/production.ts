@@ -240,14 +240,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async uploadDestinationContent(value) {
       return (await files()).uploadDestinationContent(value);
     },
-    async moveDestinationObject(value) {
-      return (await files()).moveDestinationObject(value);
-    },
     async readDestinationMarker(id) {
       return (await files()).readDestinationMarker(id);
-    },
-    async writeDestinationMarker(value) {
-      return (await files()).writeDestinationMarker(value);
     },
     async *streamDestinationContent(id) {
       yield* (await files()).streamDestinationContent(id);

@@ -896,6 +896,22 @@ export function createTransferSupervisor(options: {
           createEmptySrcDirs: true,
           _async: true,
           _group: group,
+          ...(input.excludePaths?.length
+            ? {
+                _filter: {
+                  ExcludeRule: input.excludePaths.flatMap((path) => {
+                    // Encode whitespace so rule parsing cannot trim or split literal names.
+                    const literal = path
+                      .replace(/[\\*?[\]{}]/g, "\\$&")
+                      .replace(
+                        /\s/g,
+                        (character) => `{{\\x{${character.codePointAt(0)!.toString(16)}}}}`,
+                      );
+                    return [`/${literal}`, `/${literal}/**`];
+                  }),
+                },
+              }
+            : {}),
           _config: {
             Transfers: input.transfers,
             Metadata: true,

@@ -61,6 +61,7 @@ function status(): JobStatus {
     verificationDigest: null,
     currentPlan: null,
     progress: { unit: "records", done: 27, total: null },
+    mappingPasses: [],
     lastCheckpoint: "durable-page-3",
     outstandingFindings: [],
     worker: { active: true, group: "recorded-group" },

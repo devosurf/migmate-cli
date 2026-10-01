@@ -370,3 +370,13 @@ CREATE TABLE revision_sequence (
   name TEXT PRIMARY KEY CHECK (name IN ('plan', 'verification')),
   value INTEGER NOT NULL
 ) STRICT;
+
+-- Mapping copy passes survive the worker's in-memory RC jobs.
+CREATE TABLE mapping_pass (
+  rev INTEGER NOT NULL,
+  mapping_id TEXT NOT NULL,
+  pass_number INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed','interrupted')),
+  payload TEXT NOT NULL,
+  PRIMARY KEY (rev, mapping_id, pass_number)
+) STRICT;

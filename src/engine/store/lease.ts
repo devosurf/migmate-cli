@@ -823,12 +823,19 @@ export async function reconcileWriterOpen(
       job.hostId === opts.hostId &&
       lease.pid === process.pid &&
       statusOf(readProcess(lease.pid), lease.processStartTime) === "alive";
-    if (!owned || job.state !== "executing") {
+    if (!owned) {
       db.exec("ROLLBACK");
       const recovery =
         lease === null ? null : (await inspectLease(lease, opts.hostId ?? "", opts)).report;
       return { changed: false, state: job.state, recovery };
     }
+    // Lease acquisition proved the previous worker is gone; its RC jobs are lost.
+    const endedAt = opts.now ? opts.now().toISOString() : new Date().toISOString();
+    db.prepare(
+      `UPDATE mapping_pass SET status='interrupted',
+      payload=json_set(payload,'$.status','interrupted','$.endedAt',?)
+      WHERE status='running' OR (status='pending' AND json_extract(payload,'$.startedAt') IS NOT NULL)`,
+    ).run(endedAt);
     const next = reconcile(job.state);
     db.prepare("UPDATE job SET state = ? WHERE id = ?").run(next, job.id);
     db.exec("COMMIT");

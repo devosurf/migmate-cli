@@ -15,7 +15,11 @@ import {
   type FakeDestinationItemFixture,
   type FakeArchiveFixture,
 } from "../src/engine/providers/fake.ts";
-import type { DestinationEntry, ProvenanceRecord } from "../src/engine/providers/port.ts";
+import type {
+  CopyPassReference,
+  DestinationEntry,
+  ProviderPort,
+} from "../src/engine/providers/port.ts";
 
 export const CLI_JOB_CONFIG = {
   mappings: [
@@ -120,6 +124,7 @@ export class PersistentCliPort extends FakeFileMigrationPort {
   constructor(destinationPath: string, delayMs: number) {
     const fixture = cliFixture();
     fixture.archive = cliArchiveFixture();
+    if (delayMs) fixture.copyPasses = [{ pause: true, afterFiles: 1 }];
     if (existsSync(destinationPath))
       fixture.destinationItems = JSON.parse(readFileSync(destinationPath, "utf8"));
     super(fixture);
@@ -134,6 +139,19 @@ export class PersistentCliPort extends FakeFileMigrationPort {
         return page(input);
       };
     }
+  }
+  override async startCopyPass(input: Parameters<ProviderPort["startCopyPass"]>[0]) {
+    const handle = await super.startCopyPass(input);
+    if (this.delayMs) {
+      const timer = setTimeout(() => this.releaseCopyPasses(), this.delayMs * 8);
+      timer.unref();
+    }
+    return handle;
+  }
+  override async copyPassStats(reference: CopyPassReference) {
+    const stats = await super.copyPassStats(reference);
+    await this.persist();
+    return stats;
   }
   override async *openSourceContent(sourceItemId: string) {
     // Cross-process SIGINT/SIGKILL cannot be driven by an in-process fake clock.
@@ -155,13 +173,6 @@ export class PersistentCliPort extends FakeFileMigrationPort {
     });
     await this.persist();
     return result;
-  }
-  override async writeDestinationMarker(input: {
-    objectId: string;
-    marker: ProvenanceRecord | null;
-  }) {
-    await super.writeDestinationMarker(input);
-    await this.persist();
   }
   async persist() {
     const records: FakeDestinationItemFixture[] = [];

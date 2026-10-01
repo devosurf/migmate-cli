@@ -1,4 +1,3 @@
-import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
   readCredentialFile,
@@ -14,7 +13,6 @@ import {
   responseJson,
 } from "../../src/engine/providers/http.ts";
 import type { FileMappingConfig } from "../../src/engine/drivers/file-migration.ts";
-import type { FileState } from "../../src/engine/drivers/file-state.ts";
 import { LiveTestBlocked } from "./common.ts";
 
 const folderMime = "application/vnd.google-apps.folder";
@@ -45,7 +43,6 @@ export interface FileFixturesConfig {
     packageId?: string;
     referenceId?: string;
     undownloadableId?: string;
-    pathUnrepresentableId?: string;
   };
 }
 
@@ -79,12 +76,7 @@ export function fixtureConfig(value: unknown, mapping: FileMappingConfig): FileF
       throw new LiveTestBlocked("file_fixture_roots_must_match_mapping");
   }
   const specialSources: FileFixturesConfig["specialSources"] = {};
-  for (const key of [
-    "packageId",
-    "referenceId",
-    "undownloadableId",
-    "pathUnrepresentableId",
-  ] as const) {
+  for (const key of ["packageId", "referenceId", "undownloadableId"] as const) {
     if (special[key] !== undefined) specialSources[key] = identifier(special[key]);
   }
   if (new Set(Object.values(specialSources)).size !== Object.values(specialSources).length)
@@ -126,8 +118,6 @@ function destinationRevision(item: GoogleItem): string | null {
 }
 interface OwnedDestination {
   privateOwner: boolean;
-  mappingIds: Set<string>;
-  revisions: Set<string>;
 }
 
 /** Mutation credentials are independent of the route's read-only Graph identity. No arbitrary mutation URL is accepted. */
@@ -334,33 +324,6 @@ export class FileFixtures {
     this.#sources.set(id, false);
     return id;
   }
-  async updateSource(id: string, bytes: Uint8Array): Promise<void> {
-    if (this.#sources.get(id) !== false)
-      throw new LiveTestBlocked("file_fixture_update_requires_owned_source_file");
-    const before = await this.#source(id);
-    await this.#sourceParent(identifier(before.parentReference?.id));
-    if (!before.eTag) throw new LiveTestBlocked("file_fixture_source_etag_required");
-    const after = await this.#graph<GraphItem>(`${this.#sourcePath(id)}/content`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/octet-stream", "If-Match": before.eTag },
-      body: bytes,
-    });
-    assert.deepStrictEqual(after.id, id);
-  }
-  async moveSource(id: string, parent: string, name: string): Promise<void> {
-    if (!this.#sources.has(id) || !this.#sources.has(parent))
-      throw new LiveTestBlocked("file_fixture_move_requires_owned_source");
-    const before = await this.#source(id);
-    await this.#sourceParent(parent);
-    await this.#sourceParent(identifier(before.parentReference?.id));
-    if (!before.eTag) throw new LiveTestBlocked("file_fixture_source_etag_required");
-    const after = await this.#graph<GraphItem>(this.#sourcePath(id), {
-      method: "PATCH",
-      headers: { "If-Match": before.eTag },
-      body: JSON.stringify({ parentReference: { id: parent }, name }),
-    });
-    assert.deepStrictEqual(after.id, id);
-  }
   async deleteSource(id: string, cleanup = false): Promise<void> {
     if (!this.#sources.has(id))
       throw new LiveTestBlocked("file_fixture_delete_requires_owned_source");
@@ -381,27 +344,6 @@ export class FileFixtures {
       cleanup,
     );
     this.#sources.delete(id);
-  }
-  async rejectedSourceName(parent: string): Promise<number> {
-    if (!this.#sources.has(parent))
-      throw new LiveTestBlocked("file_fixture_invalid_name_requires_owned_parent");
-    await this.#sourceParent(parent);
-    try {
-      // This is a real source route-limit observation, NOT a driver path_unrepresentable finding.
-      const item = await this.#graph<GraphItem>(`${this.#sourcePath(parent)}/children`, {
-        method: "POST",
-        body: JSON.stringify({
-          name: "invalid\\name",
-          folder: {},
-          "@microsoft.graph.conflictBehavior": "fail",
-        }),
-      });
-      this.#sources.set(identifier(item.id), true);
-      throw new LiveTestBlocked("file_source_invalid_name_was_not_rejected");
-    } catch (error) {
-      if (error instanceof HttpProviderFault && error.status === 400) return error.status;
-      throw error;
-    }
   }
   /** A reference is a `remoteItem`, which a document library refuses to hold: ADR-0006. */
   async rejectedReferenceItem(parent: string): Promise<number> {
@@ -436,95 +378,22 @@ export class FileFixtures {
     }
     throw new LiveTestBlocked("file_live_reference_fixture_creatable");
   }
-  async destinationObject(
-    parent: string,
-    name: string,
-    mimeType = folderMime,
-    shortcutTarget?: string,
-  ): Promise<string> {
+  async destinationObject(parent: string, name: string): Promise<string> {
     await this.#destinationParent(parent);
-    if (shortcutTarget && !this.#destinations.has(shortcutTarget))
-      throw new LiveTestBlocked("file_fixture_shortcut_target_not_owned");
     const item = await responseJson<GoogleItem>(
       await this.#google("/drive/v3/files?supportsAllDrives=true&fields=id", {
         method: "POST",
         body: JSON.stringify({
           name,
           parents: [parent],
-          mimeType,
+          mimeType: folderMime,
           appProperties: { qowner: this.owner },
-          ...(shortcutTarget ? { shortcutDetails: { targetId: shortcutTarget } } : {}),
         }),
       }),
     );
     const id = identifier(item.id);
-    this.#destinations.set(id, { privateOwner: true, mappingIds: new Set(), revisions: new Set() });
+    this.#destinations.set(id, { privateOwner: true });
     return id;
-  }
-  registerIntent(state: FileState): void {
-    if (!state.output.id || state.output.driveId !== this.#config.disposableRoots.destDriveId)
-      return;
-    const owned = this.#destinations.get(state.output.id) ?? {
-      privateOwner: false,
-      mappingIds: new Set<string>(),
-      revisions: new Set<string>(),
-    };
-    owned.mappingIds.add(state.marker.mappingId);
-    if (state.marker.stateRevision) owned.revisions.add(state.marker.stateRevision);
-    this.#destinations.set(state.output.id, owned);
-  }
-  async tagDestination(id: string, stateRevision: string, expectedRevision: string): Promise<void> {
-    const owned = this.#destinations.get(id);
-    if (!owned || !owned.revisions.has(stateRevision))
-      throw new LiveTestBlocked("file_fixture_destination_not_owned");
-    const current = await this.#destination(id);
-    if (
-      current.item.driveId !== this.#config.disposableRoots.destDriveId ||
-      current.revision !== expectedRevision
-    ) {
-      throw new LiveTestBlocked("file_fixture_destination_changed_before_tag");
-    }
-    if (current.item.appProperties?.qowner === this.owner) {
-      owned.privateOwner = true;
-      return;
-    }
-    if (current.item.appProperties?.qowner !== undefined)
-      throw new LiveTestBlocked("file_fixture_destination_has_different_owner");
-    await this.#patchDestination(
-      id,
-      { appProperties: { qowner: this.owner }, modifiedTime: current.item.modifiedTime },
-      current.revision,
-    );
-    owned.privateOwner = true;
-  }
-  async #patchDestination(
-    id: string,
-    patch: Record<string, unknown>,
-    revision: string | null,
-  ): Promise<void> {
-    if (!this.#destinations.has(id) || !revision)
-      throw new LiveTestBlocked("file_fixture_destination_ownership_or_revision_missing");
-    const current = await this.#destination(id);
-    if (current.revision !== revision || current.item.parents?.length !== 1)
-      throw new LiveTestBlocked("file_fixture_destination_changed_before_mutation");
-    await this.#destinationParent(current.item.parents[0]!);
-    const response = await this.#google(
-      `/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true&fields=id`,
-      {
-        method: "PATCH",
-        body: JSON.stringify(patch),
-      },
-    );
-    await requireSuccess(response);
-    await response.body?.cancel();
-  }
-  async renameDestination(id: string, name: string): Promise<void> {
-    const current = await this.#destination(id);
-    await this.#patchDestination(
-      id,
-      { name, modifiedTime: current.item.modifiedTime },
-      current.revision,
-    );
   }
   async destinationChildren(parent: string, cleanup = false): Promise<string[]> {
     const q = `'${parent.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}' in parents and trashed=false`;
@@ -545,6 +414,29 @@ export class FileFixtures {
     if (result.nextPageToken || result.incompleteSearch)
       throw new LiveTestBlocked("file_fixture_cleanup_inventory_incomplete");
     return result.files.map((item) => item.id);
+  }
+  /** Copy output is confined to newly created, explicitly disposable mapping roots.
+   * The root's fixture tag authorizes teardown, not production file provenance. */
+  async collectCopyOutputs(root: string): Promise<void> {
+    const owned = this.#destinations.get(root);
+    const current = await this.#destination(root, true);
+    if (!owned?.privateOwner || current.item.appProperties?.qowner !== this.owner)
+      throw new LiveTestBlocked("file_fixture_copy_root_not_owned");
+    await this.#destinationParent(root, true);
+    const parents = [root];
+    for (const parent of parents) {
+      for (const id of await this.destinationChildren(parent, true)) {
+        const child = await this.#destination(id, true);
+        if (
+          child.item.driveId !== this.#config.disposableRoots.destDriveId ||
+          child.item.parents?.length !== 1 ||
+          child.item.parents[0] !== parent
+        )
+          throw new LiveTestBlocked("file_fixture_copy_output_unconfined");
+        this.#destinations.set(id, { privateOwner: false });
+        if (child.item.mimeType === folderMime) parents.push(id);
+      }
+    }
   }
   async cleanup(): Promise<void> {
     let failed = false;
@@ -601,10 +493,6 @@ export class FileFixtures {
           if (owned.privateOwner) {
             if (current.item.appProperties?.qowner !== this.owner)
               throw new LiveTestBlocked("file_fixture_cleanup_owner_changed");
-          } else {
-            // Unfinished intents are never adopted by name. Decode through the real effects in the suite before tagging;
-            // absent objects are safe, but an untagged materialized object remains for manual recovery.
-            throw new LiveTestBlocked("file_fixture_cleanup_untagged_intent");
           }
           if (
             current.item.mimeType === folderMime &&

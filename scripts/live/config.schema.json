@@ -239,7 +239,7 @@
         },
         "specialSources": {
           "type": "object",
-          "description": "Optional real direct-child SharePoint fixture identities for actual package/reference/undownloadable/name-limit observations. A supplied sample must produce its omission live; a missing one is a gate unless the source refuses to create that kind or the scanned scope's kind census shows none, per ADR-0006. Never fabricated source entries.",
+          "description": "Optional real direct-child SharePoint fixture identities for package/reference/undownloadable observations. A supplied sample must produce its omission live; a missing one is a gate unless the source refuses to create that kind or the scanned scope's kind census shows none, per ADR-0006. Never fabricated source entries.",
           "properties": {
             "packageId": {
               "type": "string",
@@ -250,10 +250,6 @@
               "minLength": 1
             },
             "undownloadableId": {
-              "type": "string",
-              "minLength": 1
-            },
-            "pathUnrepresentableId": {
               "type": "string",
               "minLength": 1
             }

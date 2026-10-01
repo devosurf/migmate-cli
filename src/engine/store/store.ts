@@ -32,6 +32,7 @@ import {
   type JobState,
   type JobStatus,
   type JobType,
+  type MappingPass,
   type Outcome,
   type PlanRevision,
   type Progress,
@@ -57,7 +58,7 @@ import type {
 } from "../providers/archive.ts";
 import { canonicalJson, digestJson } from "./digest.ts";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 const BUSY_TIMEOUT_MS = 5_000;
 const schemaSql = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
 const extensionMarker = "-- Full file intents/results are retained";
@@ -140,6 +141,7 @@ export interface CheckResultRecord extends CheckResult {
 }
 export interface ResumeRecord extends ArchiveResumeState {
   rows: CommitRow[];
+  mappingPasses: MappingPass[];
   watermarks: Record<string, string>;
   committedUnits: string[];
 }
@@ -174,6 +176,7 @@ export interface Store {
   readCheckResults(verb?: Verb): CheckResultRecord[];
   writeCheckResult(record: CheckResultRecord): void;
   readResume(revision: number): ResumeRecord;
+  readMappingPasses(revision: number): MappingPass[];
   readAllRows(revision: number, phase?: RowPhase): CommitRow[];
   writeArtifactSet(value: ArtifactSet): void;
   readArtifactSet(): ArtifactSet;
@@ -399,6 +402,11 @@ function migrateVersion1(db: DatabaseSync): void {
         SELECT phase, rev, code, kind FROM item UNION ALL SELECT phase, rev, code, kind FROM conversation
       ) GROUP BY phase, rev, code, kind;
   `);
+  db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
+}
+
+function migrateVersion2(db: DatabaseSync): void {
+  db.exec(schemaSql.slice(schemaSql.indexOf("-- Mapping copy passes")));
   db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
 }
 
@@ -1126,23 +1134,15 @@ class StoreImpl implements Store {
       return result;
     });
   }
+  readMappingPasses(revision: number): MappingPass[] {
+    return this.db
+      .prepare("SELECT payload FROM mapping_pass WHERE rev=? ORDER BY mapping_id,pass_number")
+      .all(revision)
+      .map((row) => JSON.parse(String(row.payload)) as MappingPass);
+  }
   readResume(revision: number): ResumeRecord {
     return this.#snapshot(() => {
-      const rows = this.readAllRows(revision).map((row) => {
-        if (row.jobType !== "file_migration" || row.fileState === undefined) return row;
-        const { fileState: _state, ...evidence } = row;
-        return evidence;
-      });
-      for (const entry of this.db
-        .prepare(
-          "SELECT payload FROM file_authority ORDER BY mapping_id,source_drive_id,source_item_id",
-        )
-        .all()) {
-        const authority = JSON.parse(String(entry.payload)) as FileCommitRow;
-        // Keep the actual historical revision and full authority, rather than
-        // manufacturing a new row or letting a plan row erase the last intent.
-        rows.push(authority);
-      }
+      const rows = this.readAllRows(revision);
       const watermarks = Object.fromEntries(
         this.db
           .prepare("SELECT unit_key,value FROM watermark WHERE rev=? ORDER BY unit_key")
@@ -1158,7 +1158,12 @@ class StoreImpl implements Store {
       const plan = this.db
         .prepare("SELECT payload,manifest_digest FROM archive_plan WHERE rev=?")
         .get(revision);
-      const result: ResumeRecord = { rows, watermarks, committedUnits };
+      const result: ResumeRecord = {
+        rows,
+        watermarks,
+        committedUnits,
+        mappingPasses: this.readMappingPasses(revision),
+      };
       if (plan !== undefined) {
         result.archivePlan = JSON.parse(String(plan.payload)) as ArchivePlan;
         result.archiveRecords = this.db
@@ -1240,24 +1245,6 @@ class StoreImpl implements Store {
           "INSERT INTO file_state_history (rev,phase,verification_run,unit_key,payload) VALUES (?,?,?,?,?)",
         )
         .run(row.rev, row.phase, run, unit.unitKey, canonicalJson(row));
-      if (row.fileState !== undefined) {
-        const state = row.fileState;
-        const rank = state.status === "verified" ? 2 : state.status === "unverified" ? 1 : 0;
-        this.db
-          .prepare(
-            `INSERT INTO file_authority (mapping_id,source_drive_id,source_item_id,generation,state_rank,payload) VALUES (?,?,?,?,?,?)
-          ON CONFLICT(mapping_id,source_drive_id,source_item_id) DO UPDATE SET generation=excluded.generation,state_rank=excluded.state_rank,payload=excluded.payload
-          WHERE excluded.generation > file_authority.generation OR (excluded.generation=file_authority.generation AND excluded.state_rank >= file_authority.state_rank)`,
-          )
-          .run(
-            row.mappingId,
-            row.sourceDriveId,
-            row.sourceItemId,
-            state.generation,
-            rank,
-            canonicalJson(row),
-          );
-      }
     } else {
       this.db
         .prepare(
@@ -1548,6 +1535,27 @@ class StoreImpl implements Store {
           canonicalJson(resources),
         );
       if (gate.changes === 0) return { applied: false };
+      if (unit.mappingPass) {
+        const pass = unit.mappingPass;
+        if (pass.revision !== unit.rev) throw new Error("Mapping pass revision mismatch");
+        this.db
+          .prepare(
+            "INSERT INTO mapping_pass (rev,mapping_id,pass_number,status,payload) VALUES (?,?,?,?,?) ON CONFLICT(rev,mapping_id,pass_number) DO UPDATE SET status=excluded.status,payload=excluded.payload",
+          )
+          .run(pass.revision, pass.mappingId, pass.passNumber, pass.status, canonicalJson(pass));
+        if (pass.lastStats)
+          this.appendEvent({
+            verb: "execute",
+            phase: "execute",
+            kind: "mapping_progress",
+            payload: {
+              mappingId: pass.mappingId,
+              passNumber: pass.passNumber,
+              status: pass.status,
+              ...pass.lastStats,
+            },
+          });
+      }
       if (unit.archivePlan !== undefined) {
         const existing = this.db
           .prepare("SELECT payload FROM archive_plan WHERE rev=?")
@@ -2036,6 +2044,7 @@ class StoreImpl implements Store {
         currentPlan,
         verificationDigest: verification?.verificationDigest ?? null,
         progress,
+        mappingPasses: this.readMappingPasses(job.planRevision ?? 0),
         lastCheckpoint: job.lastCheckpoint ?? lease?.lastCheckpoint ?? null,
         outstandingFindings: findings.filter(
           (finding) => finding.kind !== "policy_outcome" && !accepted.has(finding.code),
@@ -2216,6 +2225,7 @@ export function openStore(
       else {
         const version = schemaVersion(db);
         if (version === 1) migrateVersion1(db);
+        else if (version === 2) migrateVersion2(db);
         else if (version !== null && version !== SCHEMA_VERSION)
           throw new Error("Job schema changed while opening");
       }

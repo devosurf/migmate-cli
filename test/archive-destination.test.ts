@@ -132,7 +132,7 @@ test("archive destination retains three root objects and one byte-verified conta
 test("a lost archive upload response resumes after reopening without replacing or duplicating copies", async () => {
   const home = await mkdtemp(join(tmpdir(), "migmate-archive-replay-"));
   const port = provider();
-  port.interruptAfterUploadOnce("index-csv");
+  port.loseResponseOnce("uploadDestinationContent", "index-csv");
   const { engine, ref } = await approved(home, port);
   let reopened;
   try {
@@ -263,17 +263,7 @@ test("archive byte verification streams missing checksums and never accepts size
     assert.ok(prior?.revision);
     const changed = await bytes(port.streamDestinationContent(prior.id));
     changed[0] = changed[0]! ^ 1; // Same size, different bytes.
-    await port.uploadDestinationContent({
-      destinationId: prior.id,
-      create: false,
-      expectedRevision: prior.revision,
-      parentFolderId: "archive-root",
-      name: prior.name,
-      content: changed,
-      createdAt: prior.createdAt,
-      modifiedAt: prior.modifiedAt,
-      mimeType: prior.mimeType,
-    });
+    port.mutateDestinationContent(prior.id, changed);
     const drifted = await engine.withWriterResult(ref, (writer) => writer.verify());
     assert.ok(drifted.ok);
     assert.ok(drifted.value.findings.some((f) => f.code === "content_mismatch"));

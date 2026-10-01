@@ -229,7 +229,7 @@ test("archive destination uses real Drive effects without SharePoint mappings or
   };
   const upload = {
     destinationId: id,
-    create: true,
+    create: true as const,
     parentFolderId: folderId,
     name: "archive.zip",
     content,
@@ -246,38 +246,17 @@ test("archive destination uses real Drive effects without SharePoint mappings or
     (await provider.listDestinationChildren(folderId)).map((file) => file.id),
     [id],
   );
-  const verifiedMarker = { ...marker, verifiedFingerprint: fingerprint };
-  await provider.writeDestinationMarker({
-    objectId: id,
-    marker: verifiedMarker,
-    expectedRevision: uploaded.revision!,
-  });
-  assert.deepEqual(await provider.readDestinationMarker(id), verifiedMarker);
+  assert.deepEqual(await provider.readDestinationMarker(id), marker);
   const chunks = [];
   for await (const chunk of provider.streamDestinationContent(id)) chunks.push(chunk);
   assert.deepEqual(Buffer.concat(chunks), content);
-  objects.get(id)!.headRevisionId = "external-edit";
-  await assert.rejects(
-    provider.uploadDestinationContent({
-      ...upload,
-      create: false,
-      expectedRevision: uploaded.revision!,
-    }),
-    { code: "prior_copy_drift" },
-  );
-  assert.equal(
-    (await provider.readDestinationObject!({ driveId: destination.destDriveId, objectId: id }))
-      ?.revision,
-    `external-edit:${timestamp}`,
-  );
-  assert.deepEqual(contents.get(id), content);
   const identity = await provider.applicationIdentity!();
   sourceAvailable = false;
   await rm(graphPath);
   const retained = createProductionProvider({ ...providerInput, mode: "archive_verification" });
   t.after(() => retained.close?.());
   assert.equal(await retained.applicationIdentity!(), identity);
-  assert.deepEqual(await retained.readDestinationMarker(id), verifiedMarker);
+  assert.deepEqual(await retained.readDestinationMarker(id), marker);
   const retainedChunks = [];
   for await (const chunk of retained.streamDestinationContent(id)) retainedChunks.push(chunk);
   assert.deepEqual(Buffer.concat(retainedChunks), content);

@@ -1026,6 +1026,10 @@ class RetryBudget {
   constructor(total: number) {
     this.total = total;
   }
+  mappingFailure(mappingId: string): void {
+    this.failedAttempts++;
+    this.failedUnits.add(`mapping:${mappingId}`);
+  }
   failure(
     error: unknown,
     key: string,
@@ -1382,6 +1386,7 @@ function makeWriter(
     verificationRun?: number,
   ): Promise<{ committed: number; interrupted: boolean; blocked: boolean }> {
     let committed = 0;
+    let mappingFailed = false;
     let lastUnit = job().lastCheckpoint ?? "start";
     for (;;) {
       if (signal?.aborted) return { committed, interrupted: true, blocked: false };
@@ -1402,12 +1407,17 @@ function makeWriter(
           if (store.commit(unit).applied) {
             committed++;
             store.publishProgress();
+            if (unit.mappingPass?.status === "failed") {
+              budget.mappingFailure(unit.mappingPass.mappingId);
+              mappingFailed = true;
+            }
           }
           lastUnit = unit.unitKey;
-          if (signal?.aborted) return { committed, interrupted: true, blocked: false };
+          if (signal?.aborted && !["pending", "running"].includes(unit.mappingPass?.status ?? ""))
+            return { committed, interrupted: true, blocked: false };
         }
         store.appendEvent({ verb: phase, phase, kind: "phase_completed", payload: { committed } });
-        return { committed, interrupted: false, blocked: false };
+        return { committed, interrupted: false, blocked: mappingFailed };
       } catch (error) {
         if (signal?.aborted || (error instanceof Error && error.name === "AbortError"))
           return { committed, interrupted: true, blocked: false };

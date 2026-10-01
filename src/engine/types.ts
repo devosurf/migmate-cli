@@ -4,6 +4,23 @@
  * contracts are the code registry, the exit-code table, and the CLI envelope.
  */
 
+import type { CopyPassStats } from "./providers/port.ts";
+
+export interface MappingPass {
+  revision: number;
+  mappingId: string;
+  passNumber: number;
+  mode: "copy" | "mirror";
+  executeId: string | null;
+  jobid: number | null;
+  group: string | null;
+  status: "pending" | "running" | "completed" | "failed" | "interrupted";
+  startedAt: string | null;
+  endedAt: string | null;
+  lastStats: CopyPassStats | null;
+  error: string | null;
+}
+
 export const JOB_TYPES = ["file_migration", "teams_archive"] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
@@ -150,6 +167,7 @@ export const EVENT_KINDS = [
   "check_result",
   "unit_committed",
   "progress",
+  "mapping_progress",
   "refusal",
   "terminal",
 ] as const;
@@ -337,6 +355,7 @@ export interface JobStatus {
   currentPlan: PlanRevision | null;
   verificationDigest: string | null;
   progress: Progress | null;
+  mappingPasses: MappingPass[];
   lastCheckpoint: string | null;
   outstandingFindings: FacetCount[];
   worker: { active: boolean; group: string | null };

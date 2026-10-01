@@ -1,22 +1,9 @@
 import { canonicalJson } from "../../src/engine/store/digest.ts";
 
 export const fileProbeIds = [
-  "zero_byte_and_empty_folder_copy",
-  "stable_id_additive_rerun_and_move",
-  "metadata_round_trip",
-  "provenance_marker_round_trip",
-  "checksum_fresh_upload",
-  "collision_matrix",
+  "rclone_mapping_copy_and_hash_verification",
+  "mapping_interrupt_and_resume",
   "route_limits_and_version_gate",
-] as const;
-export const collisionCodes = [
-  "destination_duplicate_name",
-  "destination_type_conflict",
-  "unowned_path_collision",
-  "prior_copy_drift",
-  "source_identity_reuse_collision",
-  "path_unrepresentable",
-  "mapping_overlap",
 ] as const;
 /** Unusual source kinds the live file suite must account for, each with a proof value: ADR-0006. */
 export const sourceCapabilityKinds = ["package", "reference", "undownloadable"] as const;
@@ -89,27 +76,6 @@ export function probeFailures(input: {
       );
     if (capture.probeId === "retained_history" && input.retained.channel)
       for (const reason of retainedFailures(observations, input.retained.chat)) fail(reason);
-    if (capture.probeId === "collision_matrix") {
-      const missing = collisionCodes.filter((code) => !capture.codes.includes(code));
-      if (missing.length) fail(`collision codes not observed: ${missing.join(", ")}`);
-      if (observations.sourcePathProof === "live_source_entry") {
-        if (!asserted("live_source_path_refusal", "path_unrepresentable"))
-          fail("live source path refusal not asserted");
-      } else if (observations.sourcePathProof === "source_refuses_every_rejected_name") {
-        // ADR-0005: a source that refuses every name the guard refuses cannot hold the
-        // fixture, so the finding is proven through the provenance capacity refusal,
-        // whose source name is valid, plus the source's own recorded rejection.
-        const capacity = observations.privateProvenanceCapacityRefusal;
-        if (
-          !record(capacity) ||
-          capacity.code !== "path_unrepresentable" ||
-          capacity.cause !== "private_provenance_capacity" ||
-          capacity.sourceNameValid !== true ||
-          observations.sourceRejectedNameStatus !== 400
-        )
-          fail("path guard proof incomplete");
-      } else fail("unknown source path proof");
-    }
     if (capture.probeId === "route_limits_and_version_gate") {
       const proofs = observations.capabilityProofs;
       if (!record(proofs)) {

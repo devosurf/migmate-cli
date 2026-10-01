@@ -28,6 +28,7 @@ import type {
 
 export interface FakeSourceItemFixture {
   id: string;
+  driveId?: string;
   parentId: string | null;
   name: string;
   kind: SourceItemKind;
@@ -44,6 +45,7 @@ export interface FakeSourceItemFixture {
 
 export interface FakeDestinationItemFixture {
   id: string;
+  driveId?: string;
   parentId: string | null;
   name: string;
   kind: DestinationItemKind;
@@ -63,18 +65,6 @@ export interface FakeRetryRule {
   objectId?: string;
   count: number;
   retryAfterMs: number;
-}
-
-export interface FakeSourceMutationRule {
-  sourceItemId: string;
-  nextContent: Uint8Array | string;
-  nextIdentity?: string;
-  nextModifiedAt?: string;
-  nextEtag?: string | null;
-  nextName?: string;
-  nextParentId?: string | null;
-  when?: "source-stream" | "destination-upload";
-  triggered?: boolean;
 }
 
 /** Errors are thrown at the effect seam; `after` means the mutation already happened. */
@@ -117,6 +107,13 @@ export interface FakeArchiveFixture {
   effects?: FakeEffectRule[];
 }
 
+export interface FakeCopyPassScenario {
+  sourceRootId?: string;
+  pause?: boolean;
+  error?: string;
+  afterFiles?: number;
+}
+
 export interface FakeFileMigrationFixture {
   sourceDriveId: string;
   sourceRootId: string;
@@ -130,13 +127,13 @@ export interface FakeFileMigrationFixture {
     alive?: boolean;
   };
   retryAfter?: FakeRetryRule[];
-  sourceMutations?: FakeSourceMutationRule[];
   runDirectory?: string;
   reservedDestinationIds?: string[];
   effects?: FakeEffectRule[];
   applicationIdentity?: string;
   checks?: CheckResult[];
   archive?: FakeArchiveFixture;
+  copyPasses?: FakeCopyPassScenario[];
 }
 
 interface MutableSourceEntry extends SourceEntry {
@@ -153,6 +150,7 @@ interface FakeCopyPass {
   stats: CopyPassStats;
   stopped: boolean;
   done: Promise<void>;
+  release?: () => void;
 }
 
 function fileHash(bytes: Uint8Array, type: "sha256" | "md5" | "quickxor"): string {
@@ -299,7 +297,6 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly destinationById: Record<string, MutableDestinationEntry> = Object.create(null);
   private readonly destinationChildrenByParent: Record<string, string[]> = Object.create(null);
   private readonly retryAfterRules: FakeRetryRule[];
-  private readonly sourceMutationRules: FakeSourceMutationRule[];
   private readonly withheldChecksums = new Set<string>();
   private readonly effects: FakeEffectRule[];
   private readonly reservedDestinationIds: string[];
@@ -315,17 +312,16 @@ export class FakeFileMigrationPort implements ProviderPort {
   private workerExecuteId = randomUUID();
   private readonly passes = new Map<number, FakeCopyPass>();
   private passSeed = 0;
+  private readonly copyPassScenarios: FakeCopyPassScenario[];
 
   constructor(fixture: FakeFileMigrationFixture) {
+    this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
     this.sourceDriveId = fixture.sourceDriveId;
     this.sourceRootId = fixture.sourceRootId;
     this.destinationDriveId = fixture.destinationDriveId;
     this.destinationRootId = fixture.destinationRootId;
     this.retryAfterRules = fixture.retryAfter
       ? fixture.retryAfter.map((rule) => ({ ...rule }))
-      : [];
-    this.sourceMutationRules = fixture.sourceMutations
-      ? fixture.sourceMutations.map((rule) => ({ ...rule }))
       : [];
     this.runDirectory = fixture.runDirectory ?? "/tmp/migmate-fake-run";
     this.effects = fixture.effects?.map((rule) => ({ ...rule })) ?? [];
@@ -381,26 +377,12 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.unavailableDestinationStreams.delete(objectId);
   }
 
-  interruptAfterMarkerOnce(objectId: string): void {
-    this.scriptEffect({
-      method: "writeDestinationMarker",
-      objectId,
-      timing: "after",
-      count: 1,
-      error: lostResponse(),
-    });
-  }
-
-  interruptAfterUploadOnce(objectId: string): void {
-    this.loseResponseOnce("uploadDestinationContent", objectId);
-  }
-
   scriptEffect(rule: FakeEffectRule): void {
     this.effects.push({ ...rule });
   }
 
   loseResponseOnce(
-    method: "createDestinationFolder" | "uploadDestinationContent" | "moveDestinationObject",
+    method: "createDestinationFolder" | "uploadDestinationContent",
     objectId?: string,
     error: Error = lostResponse(),
   ): void {
@@ -678,20 +660,8 @@ export class FakeFileMigrationPort implements ProviderPort {
     if (!entry || entry.content === null || !entry.downloadable) {
       throw destinationFault("source_read_failed", entry ? 403 : 404);
     }
-    const bytes = entry.content;
     const fault = takeEffect(this.effects, "openSourceContent", sourceItemId, "before", true);
-    const self = this;
-    return (async function* () {
-      let mutated = false;
-      for await (const chunk of scriptedStream(bytes, fault)) {
-        yield chunk;
-        if (!mutated) {
-          self.applySourceMutation(sourceItemId, "source-stream");
-          mutated = true;
-        }
-      }
-      if (!mutated) self.applySourceMutation(sourceItemId, "source-stream");
-    })();
+    return scriptedStream(entry.content, fault);
   }
 
   async resolveDestinationFolder(input: {
@@ -749,7 +719,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     };
     this.insertDestinationEntry(entry);
     this.reservedIds.delete(id);
-    this.afterMutation("createDestinationFolder", id, input.marker);
+    this.throwEffect("createDestinationFolder", id, "after");
     return cloneDestination(entry);
   }
 
@@ -760,18 +730,9 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.callLog.push(`uploadDestinationContent:${targetId}`);
     this.throwRetryAfter("uploadDestinationContent", targetId);
     const parent = this.destinationParent(input.parentFolderId);
-    const before = this.destinationById[targetId];
-    if (input.create === true && before) throw destinationFault("destination_id_conflict", 409);
-    if (input.create === false && !before) throw destinationFault("destination_write_failed", 404);
-    if (before?.kind !== undefined && before.kind !== "file") {
-      throw destinationFault("destination_type_conflict", 409);
-    }
-    this.checkRevision(before, input.expectedRevision);
+    if (this.destinationById[targetId]) throw destinationFault("destination_id_conflict", 409);
     const bytes = await readAll(input.content);
-    const existing = this.destinationById[targetId];
-    // The condition is evaluated again at commit, after the content stream ran.
-    this.checkRevision(existing, input.expectedRevision);
-    if (input.create === true && existing) throw destinationFault("destination_id_conflict", 409);
+    if (this.destinationById[targetId]) throw destinationFault("destination_id_conflict", 409);
     const entry: MutableDestinationEntry = {
       id: targetId,
       driveId: parent.driveId,
@@ -780,66 +741,24 @@ export class FakeFileMigrationPort implements ProviderPort {
       kind: "file",
       size: bytes.byteLength,
       revision: this.nextRevision(),
-      createdAt: existing?.createdAt ?? input.createdAt,
+      createdAt: input.createdAt,
       modifiedAt: input.modifiedAt,
       mimeType: input.mimeType,
       reportedChecksum: this.withheldChecksums.has(targetId) ? null : hashBytes(bytes),
-      provenance: input.marker
-        ? { ...input.marker }
-        : existing?.provenance
-          ? { ...existing.provenance }
-          : null,
+      provenance: input.marker ? { ...input.marker } : null,
       content: bytes,
     };
-    if (existing) {
-      this.destinationById[targetId] = entry;
-      this.relinkDestination(entry, existing.parentId, input.parentFolderId);
-    } else {
-      this.insertDestinationEntry(entry);
-    }
+    this.insertDestinationEntry(entry);
     this.reservedIds.delete(targetId);
-    if (input.marker) this.applySourceMutation(input.marker.sourceItemId, "destination-upload");
-    this.afterMutation("uploadDestinationContent", targetId, input.marker);
+    this.throwEffect("uploadDestinationContent", targetId, "after");
     return cloneDestination(entry);
   }
 
-  async moveDestinationObject(
-    input: Parameters<ProviderPort["moveDestinationObject"]>[0],
-  ): Promise<DestinationEntry> {
-    this.callLog.push(`moveDestinationObject:${input.objectId}`);
-    this.throwRetryAfter("moveDestinationObject", input.objectId);
-    const entry = this.destinationById[input.objectId];
-    if (!entry) throw destinationFault("destination_write_failed", 404);
-    const parent = this.destinationParent(input.parentFolderId);
-    this.checkRevision(entry, input.expectedRevision);
-    this.relinkDestination(entry, entry.parentId, parent.id);
-    entry.parentId = parent.id;
-    entry.driveId = parent.driveId;
-    entry.name = input.name;
-    if (input.modifiedAt !== undefined) entry.modifiedAt = input.modifiedAt;
-    if (input.marker) entry.provenance = { ...input.marker };
-    entry.revision = this.nextRevision();
-    this.afterMutation("moveDestinationObject", entry.id, input.marker);
-    return cloneDestination(entry);
-  }
   async readDestinationMarker(objectId: string): Promise<ProvenanceRecord | null> {
     this.callLog.push(`readDestinationMarker:${objectId}`);
     this.throwRetryAfter("readDestinationMarker", objectId);
     const entry = this.destinationById[objectId];
     return entry?.provenance ? { ...entry.provenance } : null;
-  }
-
-  async writeDestinationMarker(
-    input: Parameters<ProviderPort["writeDestinationMarker"]>[0],
-  ): Promise<void> {
-    this.callLog.push(`writeDestinationMarker:${input.objectId}`);
-    this.throwRetryAfter("writeDestinationMarker", input.objectId);
-    const entry = this.destinationById[input.objectId];
-    if (!entry) throw destinationFault("destination_write_failed", 404);
-    this.checkRevision(entry, input.expectedRevision);
-    entry.provenance = input.marker ? { ...input.marker } : null;
-    entry.revision = this.nextRevision();
-    this.throwEffect("writeDestinationMarker", input.objectId, "after");
   }
 
   streamDestinationContent(objectId: string): AsyncIterable<Uint8Array> {
@@ -916,26 +835,51 @@ export class FakeFileMigrationPort implements ProviderPort {
       done: Promise.resolve(),
     };
     this.passes.set(jobid, pass);
-    pass.done = this.executeCopyPass(input, pass);
+    const scenarioIndex = this.copyPassScenarios.findIndex(
+      (scenario) =>
+        scenario.sourceRootId === undefined || scenario.sourceRootId === input.source.fs,
+    );
+    const scenario =
+      scenarioIndex < 0 ? undefined : this.copyPassScenarios.splice(scenarioIndex, 1)[0];
+    pass.done = this.executeCopyPass(input, pass, scenario);
     return { ...handle };
   }
 
   private async executeCopyPass(
     input: Parameters<ProviderPort["startCopyPass"]>[0],
     pass: FakeCopyPass,
+    scenario?: FakeCopyPassScenario,
   ): Promise<void> {
     const active = () => {
       if (pass.stopped || pass.handle.executeId !== this.workerExecuteId)
         throw new Error("context canceled");
       this.assertPassWorker(input.socketPath);
     };
+    let scenarioApplied = false;
+    const checkpoint = async () => {
+      if (!scenario || scenarioApplied || pass.stats.files < (scenario.afterFiles ?? 0)) return;
+      scenarioApplied = true;
+      if (scenario.pause) {
+        await new Promise<void>((resolve) => {
+          pass.release = resolve;
+        });
+        delete pass.release;
+      }
+      active();
+      if (scenario.error) throw new Error(scenario.error);
+    };
     try {
       await setImmediate();
       active();
+      await checkpoint();
       const source = this.tree(input.source.fs);
       const destination = this.tree(input.destination.fs);
       const parents = new Map<string, string>([["", input.destination.fs]]);
+      const excluded = (path: string) =>
+        input.excludePaths?.some((exclude) => path === exclude || path.startsWith(`${exclude}/`)) ??
+        false;
       for (const [path, entry] of source) {
+        if (excluded(path)) continue;
         active();
         const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
         const parentId = parents.get(parentPath)!;
@@ -969,21 +913,31 @@ export class FakeFileMigrationPort implements ProviderPort {
         await setImmediate();
         active();
         this.throwRetryAfter("copyPass", path);
-        await this.uploadDestinationContent({
-          ...(existing ? { destinationId: existing.id } : {}),
-          parentFolderId: parentId,
-          name: entry.name,
-          content: entry.content,
-          createdAt: entry.createdAt,
-          modifiedAt: entry.modifiedAt,
-          mimeType: entry.mimeType,
-        });
+        if (existing && existing.kind !== "file") throw new Error(`not a file: ${path}`);
+        if (existing) {
+          this.mutateDestinationContent(existing.id, entry.content);
+          existing.modifiedAt = entry.modifiedAt;
+          existing.mimeType = entry.mimeType;
+        } else {
+          this.insertDestination({
+            id: this.nextDestinationId("file"),
+            parentId,
+            driveId: this.destinationParent(parentId).driveId,
+            name: entry.name,
+            kind: "file",
+            content: entry.content,
+            createdAt: entry.createdAt,
+            modifiedAt: entry.modifiedAt,
+            mimeType: entry.mimeType,
+          });
+        }
         pass.stats.bytes += entry.content.length;
         pass.stats.files++;
         pass.stats.transferring = [];
+        await checkpoint();
       }
       if (input.mode === "mirror") {
-        const extras = [...destination].filter(([path]) => !source.has(path));
+        const extras = [...destination].filter(([path]) => !excluded(path) && !source.has(path));
         const files = extras.filter(([, entry]) => entry.kind !== "folder");
         for (const [, entry] of files.slice(0, input.deleteLimit))
           this.removeDestinationItem(entry.id);
@@ -1014,6 +968,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   async stopCopyPass(reference: CopyPassReference): Promise<void> {
     const pass = this.pass(reference);
     pass.stopped = true;
+    pass.release?.();
     await pass.done;
   }
 
@@ -1057,6 +1012,20 @@ export class FakeFileMigrationPort implements ProviderPort {
     return hashes;
   }
 
+  /** Simulate an outside edit, not a provider upload. */
+  mutateDestinationContent(id: string, content: Uint8Array | string): void {
+    const entry = this.destinationById[id];
+    if (!entry) throw destinationFault("destination_missing", 404);
+    entry.content = encodeText(content);
+    entry.size = entry.content.byteLength;
+    entry.reportedChecksum = this.withheldChecksums.has(id) ? null : hashBytes(entry.content);
+    entry.revision = this.nextRevision();
+  }
+
+  releaseCopyPasses(): void {
+    for (const pass of this.passes.values()) pass.release?.();
+  }
+
   removeDestinationItem(id: string): void {
     const entry = this.destinationById[id];
     if (!entry) return;
@@ -1074,6 +1043,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.callLog.push(`startTransferWorker:${input.runDirectory}`);
     this.throwRetryAfter("startTransferWorker", input.runDirectory);
     for (const pass of this.passes.values()) pass.stopped = true;
+    this.releaseCopyPasses();
     await Promise.all([...this.passes.values()].map((pass) => pass.done));
     this.passes.clear();
     this.workerExecuteId = randomUUID();
@@ -1109,6 +1079,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.callLog.push(`stopTransferWorker:${input.socketPath}`);
     this.throwRetryAfter("stopTransferWorker", input.socketPath);
     for (const pass of this.passes.values()) pass.stopped = true;
+    this.releaseCopyPasses();
     await Promise.all([...this.passes.values()].map((pass) => pass.done));
     if (this.workerState && this.workerState.socketPath === input.socketPath) {
       this.workerState.alive = false;
@@ -1119,6 +1090,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.callLog.push(`terminateTransferWorker:${input.socketPath}`);
     this.throwRetryAfter("terminateTransferWorker", input.socketPath);
     for (const pass of this.passes.values()) pass.stopped = true;
+    this.releaseCopyPasses();
     await Promise.all([...this.passes.values()].map((pass) => pass.done));
     if (this.workerState && this.workerState.socketPath === input.socketPath) {
       this.workerState.alive = false;
@@ -1143,7 +1115,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     const bytes = fixture.content === undefined ? null : encodeText(fixture.content);
     const entry: MutableSourceEntry = {
       id: fixture.id,
-      driveId: this.sourceDriveId,
+      driveId: fixture.driveId ?? this.sourceDriveId,
       parentId: fixture.parentId,
       name: fixture.name,
       kind: fixture.kind,
@@ -1169,7 +1141,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     const checksum = bytes ? hashBytes(bytes) : null;
     const entry: MutableDestinationEntry = {
       id: fixture.id,
-      driveId: this.destinationDriveId,
+      driveId: fixture.driveId ?? this.destinationDriveId,
       parentId: fixture.parentId,
       name: fixture.name,
       kind: fixture.kind,
@@ -1192,24 +1164,6 @@ export class FakeFileMigrationPort implements ProviderPort {
     const children = this.destinationChildrenByParent[parentKey] ?? [];
     if (!children.includes(entry.id)) children.push(entry.id);
     this.destinationChildrenByParent[parentKey] = children;
-  }
-
-  private relinkDestination(
-    entry: MutableDestinationEntry,
-    oldParentId: string | null,
-    nextParentId: string,
-  ): void {
-    const oldKey = oldParentId ?? "";
-    this.destinationChildrenByParent[oldKey] = (
-      this.destinationChildrenByParent[oldKey] ?? []
-    ).filter((id) => id !== entry.id);
-
-    const newKey = nextParentId ?? "";
-    const newChildren = (this.destinationChildrenByParent[newKey] ?? []).filter(
-      (id) => id !== entry.id,
-    );
-    newChildren.push(entry.id);
-    this.destinationChildrenByParent[newKey] = newChildren;
   }
 
   private deleteSourceRecursive(sourceItemId: string): void {
@@ -1252,15 +1206,6 @@ export class FakeFileMigrationPort implements ProviderPort {
     return entry;
   }
 
-  private checkRevision(
-    entry: MutableDestinationEntry | undefined,
-    expected: string | undefined,
-  ): void {
-    if (expected !== undefined && (!expected || entry?.revision !== expected)) {
-      throw destinationFault("prior_copy_drift", 412);
-    }
-  }
-
   private throwEffect(
     method: string,
     objectId?: string,
@@ -1268,34 +1213,6 @@ export class FakeFileMigrationPort implements ProviderPort {
   ): void {
     const rule = takeEffect(this.effects, method, objectId, timing);
     if (rule) throw rule.error;
-  }
-
-  private afterMutation(method: string, id: string, marker: ProvenanceRecord | undefined): void {
-    this.throwEffect(method, id, "after");
-    // Legacy interruption control also covers markers committed atomically with content/metadata.
-    if (marker) this.throwEffect("writeDestinationMarker", id, "after");
-  }
-
-  private applySourceMutation(
-    sourceItemId: string,
-    when: "source-stream" | "destination-upload",
-  ): void {
-    const rule = this.sourceMutationRules.find(
-      (candidate) =>
-        candidate.sourceItemId === sourceItemId &&
-        !candidate.triggered &&
-        (candidate.when ?? "source-stream") === when,
-    );
-    if (!rule) return;
-    this.mutateSourceItem(sourceItemId, {
-      content: rule.nextContent,
-      ...(rule.nextIdentity === undefined ? {} : { identity: rule.nextIdentity }),
-      ...(rule.nextModifiedAt === undefined ? {} : { modifiedAt: rule.nextModifiedAt }),
-      ...(rule.nextEtag === undefined ? {} : { etag: rule.nextEtag }),
-      ...(rule.nextName === undefined ? {} : { name: rule.nextName }),
-      ...(rule.nextParentId === undefined ? {} : { parentId: rule.nextParentId }),
-    });
-    rule.triggered = true;
   }
 
   private throwRetryAfter(method: string, objectId?: string): void {

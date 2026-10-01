@@ -72,9 +72,9 @@ const FILE_FIELDS =
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
 /**
- * Drive v3 exposes no ETag and rejects no write on `If-Match`, so concurrency
- * rests on the fields it does publish: `headRevisionId` changes when a binary
- * file's content changes, and `modifiedTime` when its metadata does.
+ * Archive verification detects drift using `headRevisionId` for binary content
+ * and `modifiedTime` for metadata. Uploads are create-only, so this observation
+ * never authorizes an overwrite.
  *
  * `version` is deliberately excluded. Drive documents it as reflecting every
  * server-side change "even those not visible to the user", and it was observed
@@ -92,14 +92,8 @@ const MARKER_CHUNKS = 28;
 const MARKER_PART_BYTES = 118;
 
 /** Chunking observes Google's 30 private-property / 124-byte key+value limits. */
-function markerProperties(marker: ProvenanceRecord | null): Record<string, string | null> {
-  const properties: Record<string, string | null> = {};
-  if (marker === null) {
-    properties.mmv = null;
-    for (let i = 0; i < MARKER_CHUNKS; i++)
-      properties[`${MARKER_PREFIX}${i.toString().padStart(2, "0")}`] = null;
-    return properties;
-  }
+function markerProperties(marker: ProvenanceRecord): Record<string, string> {
+  const properties: Record<string, string> = {};
   const bytes = deflateRawSync(Buffer.from(JSON.stringify(marker)));
   const encoded = bytes.toString("base64url");
   const count = Math.ceil(encoded.length / MARKER_PART_BYTES);
@@ -633,44 +627,19 @@ export class FileEffects {
         "Google-native import and conversion are forbidden.",
       );
     await this.#assertParent(input.parentFolderId);
-    const create = input.create ?? !input.destinationId;
-    if (!create && !input.destinationId)
-      throw new ProviderFault(
-        "preflight_failed",
-        "An update requires a stable destination identity.",
-      );
     const marker = input.marker ? markerProperties(input.marker) : undefined;
     const query = new URLSearchParams({
       uploadType: "resumable",
       supportsAllDrives: "true",
       fields: FILE_FIELDS,
     });
-    if (!create) {
-      const prior = await this.#getRaw(input.destinationId!);
-      if (
-        prior.file.mimeType === FOLDER_MIME ||
-        prior.file.mimeType.startsWith("application/vnd.google-apps.")
-      )
-        throw new ProviderFault(
-          "destination_type_conflict",
-          "Only an ordinary binary destination file can be updated.",
-        );
-      if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
-        throw new ProviderFault(
-          "prior_copy_drift",
-          "The destination changed since the revision Migmate recorded, so its compare-then-write content update refuses.",
-        );
-      if (!prior.file.parents?.includes(input.parentFolderId)) {
-        query.set("addParents", input.parentFolderId);
-        if (prior.file.parents?.length) query.set("removeParents", prior.file.parents.join(","));
-      }
-    }
-    const path = `/upload/drive/v3/files${create ? "" : `/${encodeURIComponent(input.destinationId!)}`}?${query}`;
+    const path = `/upload/drive/v3/files?${query}`;
     const mimeType = input.mimeType ?? "application/octet-stream";
     const metadata = {
-      ...(create && input.destinationId ? { id: input.destinationId } : {}),
+      ...(input.destinationId ? { id: input.destinationId } : {}),
       name: input.name,
-      ...(create ? { parents: [input.parentFolderId], createdTime: input.createdAt } : {}),
+      parents: [input.parentFolderId],
+      createdTime: input.createdAt,
       modifiedTime: new Date(Math.floor(Date.parse(input.modifiedAt) / 1000) * 1000).toISOString(),
       mimeType,
       ...(marker ? { appProperties: marker } : {}),
@@ -679,7 +648,7 @@ export class FileEffects {
       "X-Upload-Content-Type": mimeType,
     };
     const start = await this.#google(path, {
-      method: create ? "POST" : "PATCH",
+      method: "POST",
       headers,
       body: JSON.stringify(metadata),
     });
@@ -739,58 +708,8 @@ export class FileEffects {
     throw new ProviderFault("provider_request_failed", "The destination upload did not complete.");
   }
 
-  async moveDestinationObject(
-    input: Parameters<ProviderPort["moveDestinationObject"]>[0],
-  ): Promise<DestinationEntry> {
-    requireName(input.name);
-    await this.#assertParent(input.parentFolderId);
-    const prior = await this.#getRaw(input.objectId);
-    if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
-      throw new ProviderFault(
-        "prior_copy_drift",
-        "The destination changed since the revision Migmate recorded, so its compare-then-write move refuses.",
-      );
-    const query = new URLSearchParams({ supportsAllDrives: "true", fields: FILE_FIELDS });
-    if (!prior.file.parents?.includes(input.parentFolderId)) {
-      query.set("addParents", input.parentFolderId);
-      if (prior.file.parents?.length) query.set("removeParents", prior.file.parents.join(","));
-    }
-    const response = await this.#google(
-      `/drive/v3/files/${encodeURIComponent(input.objectId)}?${query}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({
-          name: input.name,
-          ...(input.modifiedAt ? { modifiedTime: input.modifiedAt } : {}),
-          ...(input.marker ? { appProperties: markerProperties(input.marker) } : {}),
-        }),
-      },
-    );
-    return this.#destination(await responseJson<GoogleFile>(response));
-  }
-
   async readDestinationMarker(objectId: string): Promise<ProvenanceRecord | null> {
     return readMarker((await this.#getRaw(objectId)).file.appProperties);
-  }
-
-  async writeDestinationMarker(
-    input: Parameters<ProviderPort["writeDestinationMarker"]>[0],
-  ): Promise<void> {
-    const prior = await this.#getRaw(input.objectId);
-    if (!input.expectedRevision || destinationRevision(prior.file) !== input.expectedRevision)
-      throw new ProviderFault(
-        "prior_copy_drift",
-        "The destination changed since the revision Migmate recorded, so its compare-then-write marker update refuses.",
-      );
-    const response = await this.#google(
-      `/drive/v3/files/${encodeURIComponent(input.objectId)}?supportsAllDrives=true&fields=id`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({ appProperties: markerProperties(input.marker) }),
-      },
-    );
-    await requireSuccess(response);
-    await response.body?.cancel();
   }
 
   async *streamDestinationContent(objectId: string): AsyncIterable<Uint8Array> {

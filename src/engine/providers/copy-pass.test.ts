@@ -100,6 +100,71 @@ it(
 );
 
 it(
+  "excludes literal mapping paths and subtrees without filtering similarly named files",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-filter-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(join(source, "folder[1]"), { recursive: true });
+      await mkdir(join(source, "nested"), { recursive: true });
+      await mkdir(destination);
+      const excludedFiles = [
+        "brace{a,b}.txt",
+        ...(process.platform === "win32"
+          ? []
+          : ["secret*.txt", "question?.txt", "slash\\name.txt", "trailing "]),
+      ];
+      const excluded = [...excludedFiles, "folder[1]"];
+      const retained = ["secret-other.txt", "questionX.txt", "bracea.txt", "nested/brace{a,b}.txt"];
+      for (const path of [...excludedFiles, ...retained, "folder[1]/hidden.txt"]) {
+        await writeFile(join(source, path), path);
+      }
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: source, kind: "local" as const },
+        destination: { fs: destination, kind: "local" as const },
+        mode: "copy" as const,
+        transfers: 2,
+      };
+      const pass = await supervisor.startCopyPass({ ...input, excludePaths: excluded });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass }), {
+        state: "completed",
+        error: null,
+      });
+      for (const path of excluded)
+        await assert.rejects(
+          stat(join(destination, path)),
+          { code: "ENOENT" },
+          JSON.stringify(path),
+        );
+      for (const path of retained) {
+        assert.equal(await readFile(join(destination, path), "utf8"), path);
+      }
+      const unfiltered = await supervisor.startCopyPass(input);
+      assert.deepEqual(
+        await finish(supervisor, { socketPath: worker.socketPath, pass: unfiltered }),
+        { state: "completed", error: null },
+      );
+      assert.equal(
+        await readFile(join(destination, "folder[1]/hidden.txt"), "utf8"),
+        "folder[1]/hidden.txt",
+      );
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
   "lists relative paths, sizes and requested hashes, downloading hashes absent from the remote",
   { skip: !enabled },
   async () => {

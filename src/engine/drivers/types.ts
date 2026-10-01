@@ -1,4 +1,4 @@
-import type { CheckResult } from "../types.ts";
+import type { CheckResult, MappingPass } from "../types.ts";
 import type { ProviderPort } from "../providers/port.ts";
 
 import type { CommitRow, CommitUnit } from "../commit.ts";
@@ -20,6 +20,7 @@ export interface DriverResumeState extends ArchiveResumeState {
   checkpoint: string | null;
   watermarks: Record<string, string>;
   rows?: CommitRow[];
+  mappingPasses?: MappingPass[];
 }
 
 export interface DriverContext<Cfg> {
