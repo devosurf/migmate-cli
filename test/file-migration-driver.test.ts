@@ -488,6 +488,43 @@ describe("file migration through the engine", () => {
     value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
   });
 
+  it("retains observed destination ids for matching and destination-only files", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    await execute(h);
+    const original = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+    h.port.removeDestinationItem(original.id);
+    const replacement = await h.port.uploadDestinationContent({
+      parentFolderId: "destination-root",
+      name: "report.docx",
+      content: new Uint8Array([0, 255, 5, 0]),
+      createdAt: now,
+      modifiedAt: now,
+      mimeType: original.mimeType,
+    });
+    assert.notEqual(replacement.id, original.id);
+    h.port.withholdDestinationChecksum(replacement.id);
+    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.equal(verified.clean, true);
+    const matching = value(
+      await h.engine.reader(h.ref).rows({ phase: "verify", search: "report.docx" }),
+    ).rows[0];
+    assert.equal(
+      matching?.jobType === "file_migration" && matching.destinationFileId,
+      replacement.id,
+    );
+    h.port.deleteSourceItem("binary");
+    const retained = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.equal(retained.clean, true);
+    const leftover = value(
+      await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["destination_only_retained"] }),
+    ).rows[0];
+    assert.equal(
+      leftover?.jobType === "file_migration" && leftover.destinationFileId,
+      replacement.id,
+    );
+  });
+
   it("falls back per file to stored MD5 without downloading the destination", async (t) => {
     const h = await harness(t);
     await approve(h);
@@ -643,6 +680,58 @@ describe("file migration through the engine", () => {
         sourceHash: hash(new Uint8Array([0, 255, 5, 0])),
         destinationHash: hash("truncated"),
         hashType: "sha256",
+      },
+    );
+  });
+
+  it("distinguishes served-size inconsistency and destination-size mismatch when listed sizes agree", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        {
+          id: "still",
+          parentId: "source-root",
+          name: "photo.heic",
+          kind: "file",
+          content: "still frame",
+          size: 999,
+          mimeType: "image/heic",
+        },
+      ]),
+    );
+    await approve(h);
+    await execute(h);
+    const copied = h.port.snapshotDestination().find((entry) => entry.path === "photo.heic")!;
+    await h.port.uploadDestinationContent({
+      destinationId: copied.id,
+      parentFolderId: "destination-root",
+      name: "photo.heic",
+      content: Buffer.alloc(999),
+      createdAt: now,
+      modifiedAt: now,
+      mimeType: "image/heic",
+    });
+    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.deepEqual(verified.findings.map((entry) => entry.code).sort(), [
+      "content_mismatch",
+      "size_mismatch",
+      "source_size_inconsistent",
+    ]);
+    const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
+    const json = report.artifacts.find((artifact) => artifact.name === "report.json")!;
+    const findings = JSON.parse(await readFile(json.path, "utf8")).findings;
+    assert.deepEqual(
+      findings.find((entry: { code: string }) => entry.code === "source_size_inconsistent")
+        .evidence,
+      {
+        path: "photo.heic",
+        sourceSize: 999,
+        destinationSize: 999,
+        listedSize: 999,
+        servedSize: 11,
+        hashType: "sha256",
+        sourceHash: hash("still frame"),
+        destinationHash: hash(Buffer.alloc(999)),
       },
     );
   });

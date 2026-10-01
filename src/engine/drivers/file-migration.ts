@@ -1083,7 +1083,12 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       );
       const codes: string[] = [];
       let servedSize = downloaded?.size ?? source.size;
-      if (!sizeOnly && downloaded?.hash && destination && downloaded.size !== destination.size) {
+      if (
+        !sizeOnly &&
+        downloaded?.hash &&
+        destination &&
+        (downloaded.size !== destination.size || downloaded.hash !== destination.hash)
+      ) {
         // Equal content hashes also prove the served length. If content differs,
         // measure the download before blaming the destination's listed size.
         if (downloaded.hash === destination.hash) servedSize = destination.size;
@@ -1115,6 +1120,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       }
       const evidence = row(ctx, "verify", mapping, source, codes[0] ?? "unchanged");
       evidence.destinationDriveId = mapping.destDriveId;
+      evidence.destinationFileId = destination?.id ?? null;
       evidence.sourceFingerprint = downloaded?.hash ?? null;
       evidence.destinationFingerprint = destination?.hash ?? null;
       evidence.provenanceState = codes.some((code) => code !== "source_size_inconsistent")
@@ -1154,6 +1160,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       };
       const evidence = row(ctx, "verify", mapping, source, "destination_only_retained");
       evidence.destinationDriveId = mapping.destDriveId;
+      evidence.destinationFileId = destination.id ?? null;
       const stored =
         destination.hash === null
           ? (destinationMd5.get(destination.path) ?? destination)

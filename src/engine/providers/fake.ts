@@ -16,6 +16,7 @@ import type {
   CopyPassStatus,
   DestinationEntry,
   DestinationItemKind,
+  FileHashEntry,
   ProviderPort,
   ProvenanceRecord,
   RetryAfterError,
@@ -1028,7 +1029,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFileHashes", input.root.fs);
-    const hashes: { path: string; size: number; hash: string | null }[] = [];
+    const hashes: FileHashEntry[] = [];
     for (const [path, entry] of this.tree(input.root.fs)) {
       if (entry.kind === "folder") continue;
       const unreadable =
@@ -1051,7 +1052,7 @@ export class FakeFileMigrationPort implements ProviderPort {
           : !input.download && input.hashType === "sha256" && "reportedChecksum" in entry
             ? entry.reportedChecksum
             : fileHash(entry.content, input.hashType);
-      hashes.push({ path, size: entry.size ?? -1, hash });
+      hashes.push({ path, size: entry.size ?? -1, hash, id: entry.id });
     }
     return hashes;
   }

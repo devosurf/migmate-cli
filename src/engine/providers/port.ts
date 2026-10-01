@@ -100,6 +100,14 @@ export interface CopyPassStats {
   transferring: { path: string; bytes: number; size: number }[];
 }
 
+export interface FileHashEntry {
+  path: string;
+  size: number;
+  hash: string | null;
+  /** The backend's observed object identity, when it exposes one. */
+  id?: string;
+}
+
 export interface FilePassProvider {
   startCopyPass(
     input: {
@@ -117,7 +125,7 @@ export interface FilePassProvider {
     root: FilePassRoot;
     hashType: "sha256" | "md5" | "quickxor";
     download: boolean;
-  }): Promise<{ path: string; size: number; hash: string | null }[]>;
+  }): Promise<FileHashEntry[]>;
 }
 
 export interface RetryAfterError extends Error {

@@ -871,7 +871,12 @@ export function createTransferSupervisor(options: {
       return listing.list.map((file: unknown) => {
         if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
           throw fail("provider_failed", "worker_response_invalid");
-        return { path: file.Path, size: file.Size, hash: byPath.get(file.Path) ?? null };
+        return {
+          path: file.Path,
+          size: file.Size,
+          hash: byPath.get(file.Path) ?? null,
+          ...(typeof file.ID === "string" && file.ID.length > 0 ? { id: file.ID } : {}),
+        };
       });
     },
     async startCopyPass(input) {
