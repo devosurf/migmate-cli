@@ -45,8 +45,16 @@ A known gap between what a job planned and what is verifiably present, explicitl
 _Avoid_: Error, warning, caveat
 
 **File mapping**:
-An approved relation from one stable SharePoint document-library root to one stable Google destination folder. Items keep their relative hierarchy inside the mapping, and mappings within a job never overlap.
+An approved relation from one stable source root to one stable destination root, such as a SharePoint document library and a Google Shared Drive, in either direction. Items keep their relative hierarchy inside the mapping, and mappings within a job never overlap.
 _Avoid_: Route, mount, sync pair
+
+**Mapping manifest**:
+The batch list of a job's file mappings, each naming its destination (an existing root, or a Shared Drive the job creates) and that destination's members. It is loaded into the job and frozen into the plan; after that the job, not the file, is the authority.
+_Avoid_: Inventory, spreadsheet
+
+**Mirror**:
+An opt-in mode in which a repeat pass makes a destination the job created match its source, including deletions. Without it a pass only copies and never deletes.
+_Avoid_: Sync
 
 **Provenance**:
 Durable evidence tying a destination item to the authoritative source item and file mapping that produced it. A matching path alone is not provenance.
