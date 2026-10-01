@@ -8,7 +8,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { TESTED_TRANSFER_VERSIONS, TRANSFER_VERSION } from "../../versions.ts";
 import { ProviderFault } from "./credentials.ts";
-import type { ProviderPort, TransferWorkerHandle, TransferWorkerProbe } from "./port.ts";
+import type {
+  CopyPassHandle,
+  CopyPassReference,
+  FilePassProvider,
+  ProviderPort,
+  TransferWorkerHandle,
+  TransferWorkerProbe,
+} from "./port.ts";
 import { withSocketPath } from "./socket-path.ts";
 
 const VERSION_FLOOR = [1, 69, 0] as const;
@@ -27,7 +34,7 @@ export interface BinaryProof {
   versionJson: Record<string, unknown>;
 }
 
-export interface TransferSupervisor {
+export interface TransferSupervisor extends FilePassProvider {
   proveBinary(): Promise<BinaryProof>;
   startTransferWorker: ProviderPort["startTransferWorker"];
   probeTransferWorker: ProviderPort["probeTransferWorker"];
@@ -64,6 +71,7 @@ interface Worker {
   user: string;
   password: string;
   group: string;
+  passes: Map<number, CopyPassHandle>;
   proof: BinaryProof;
   stopping: Promise<void> | null;
 }
@@ -372,6 +380,7 @@ export function createTransferSupervisor(options: {
   configPath: string | null;
   jobDirectory: string;
   binary?: BinarySpec;
+  jobExpiry?: string;
 }): TransferSupervisor {
   const workers = new Map<string, Worker>();
   const starting = new Set<Promise<TransferWorkerHandle>>();
@@ -538,6 +547,14 @@ export function createTransferSupervisor(options: {
     return result.value;
   }
 
+  function passWorker({ socketPath, pass }: CopyPassReference): Worker {
+    const worker = owned(socketPath);
+    const expected = worker.passes.get(pass.jobid);
+    if (!expected || expected.executeId !== pass.executeId || expected.group !== pass.group)
+      throw fail("provider_failed", "copy_pass_handle_mismatch");
+    return worker;
+  }
+
   async function liveVersion(worker: Worker): Promise<string> {
     await rehash(worker.proof);
     const current = await authenticated(worker, "core/version");
@@ -574,7 +591,11 @@ export function createTransferSupervisor(options: {
     worker.stopping = (async () => {
       if (cooperative && worker.child.alive) {
         try {
-          await authenticated(worker, "job/stopgroup", { group: worker.group }, STOP_TIMEOUT);
+          await Promise.all(
+            [worker.group, ...[...worker.passes.values()].map((pass) => pass.group)].map((group) =>
+              authenticated(worker, "job/stopgroup", { group }, STOP_TIMEOUT),
+            ),
+          );
         } catch {
           /* The directly owned child remains eligible for bounded termination. */
         }
@@ -662,6 +683,8 @@ export function createTransferSupervisor(options: {
           "--onedrive-expose-onenote-files=true",
           "--retries=1",
           "--low-level-retries=1",
+          "--rc-job-expire-duration",
+          options.jobExpiry ?? "24h",
           "--rc-server-read-timeout",
           "1h",
           "--rc-server-write-timeout",
@@ -686,6 +709,7 @@ export function createTransferSupervisor(options: {
         user,
         password,
         group,
+        passes: new Map(),
         proof: executable,
         stopping: null,
       };
@@ -812,6 +836,131 @@ export function createTransferSupervisor(options: {
 
   return {
     proveBinary,
+    async listFileHashes({ socketPath, root, hashType, download }) {
+      const worker = owned(socketPath);
+      const listing = await authenticated(worker, "operations/list", {
+        fs: root.fs,
+        remote: "",
+        opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true },
+      });
+      const hashes = await authenticated(
+        worker,
+        "operations/hashsum",
+        {
+          fs: root.fs,
+          hashType,
+          download,
+          base64: false,
+        },
+        60 * 60 * 1_000,
+      );
+      if (
+        !record(listing) ||
+        !Array.isArray(listing.list) ||
+        !record(hashes) ||
+        !Array.isArray(hashes.hashsum)
+      )
+        throw fail("provider_failed", "worker_response_invalid");
+      const byPath = new Map<string, string | null>();
+      for (const line of hashes.hashsum) {
+        if (typeof line !== "string") throw fail("provider_failed", "worker_response_invalid");
+        const match = /^ *(\S*) {2}([\s\S]*)$/.exec(line);
+        if (!match) throw fail("provider_failed", "worker_response_invalid");
+        byPath.set(match[2]!, /^[a-fA-F0-9]+$/.test(match[1]!) ? match[1]!.toLowerCase() : null);
+      }
+      return listing.list.map((file: unknown) => {
+        if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
+          throw fail("provider_failed", "worker_response_invalid");
+        return { path: file.Path, size: file.Size, hash: byPath.get(file.Path) ?? null };
+      });
+    },
+    async startCopyPass(input) {
+      if (
+        input.mode === "mirror" &&
+        (!Number.isSafeInteger(input.deleteLimit) || input.deleteLimit < 0)
+      )
+        throw fail("provider_failed", "copy_pass_delete_limit_invalid");
+      const worker = owned(input.socketPath);
+      const group = `${worker.group}-${randomBytes(16).toString("hex")}`;
+      const result = await authenticated(
+        worker,
+        input.mode === "mirror" ? "sync/sync" : "sync/copy",
+        {
+          srcFs: input.source.fs,
+          dstFs: input.destination.fs,
+          createEmptySrcDirs: true,
+          _async: true,
+          _group: group,
+          _config: {
+            Transfers: input.transfers,
+            Metadata: true,
+            ...(input.mode === "mirror" ? { MaxDelete: input.deleteLimit } : {}),
+            ...(input.destination.kind === "sharepoint"
+              ? { IgnoreSize: true, IgnoreChecksum: true }
+              : {}),
+          },
+        },
+      );
+      if (
+        !record(result) ||
+        typeof result.executeId !== "string" ||
+        typeof result.jobid !== "number"
+      )
+        throw fail("provider_failed", "worker_response_invalid");
+      const pass = { executeId: result.executeId, jobid: result.jobid, group };
+      worker.passes.set(pass.jobid, pass);
+      return { ...pass };
+    },
+    async copyPassStatus({ socketPath, pass }) {
+      const result = await authenticated(passWorker({ socketPath, pass }), "job/status", {
+        jobid: pass.jobid,
+      });
+      if (
+        !record(result) ||
+        typeof result.finished !== "boolean" ||
+        typeof result.error !== "string"
+      )
+        throw fail("provider_failed", "worker_response_invalid");
+      return {
+        state: !result.finished ? "running" : result.success ? "completed" : "failed",
+        error: result.error || null,
+      };
+    },
+    async copyPassStats({ socketPath, pass }) {
+      const result = await authenticated(passWorker({ socketPath, pass }), "core/stats", {
+        group: pass.group,
+      });
+      if (
+        !record(result) ||
+        typeof result.bytes !== "number" ||
+        typeof result.transfers !== "number" ||
+        typeof result.errors !== "number" ||
+        typeof result.speed !== "number"
+      )
+        throw fail("provider_failed", "worker_response_invalid");
+      const transferring = Array.isArray(result.transferring)
+        ? result.transferring.map((file: unknown) => {
+            if (
+              !record(file) ||
+              typeof file.name !== "string" ||
+              typeof file.bytes !== "number" ||
+              typeof file.size !== "number"
+            )
+              throw fail("provider_failed", "worker_response_invalid");
+            return { path: file.name, bytes: file.bytes, size: file.size };
+          })
+        : [];
+      return {
+        bytes: result.bytes,
+        files: result.transfers,
+        errors: result.errors,
+        speed: result.speed,
+        transferring,
+      };
+    },
+    async stopCopyPass({ socketPath, pass }) {
+      await authenticated(passWorker({ socketPath, pass }), "job/stopgroup", { group: pass.group });
+    },
     async startTransferWorker(input) {
       const pending = start(input);
       starting.add(pending);

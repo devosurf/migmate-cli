@@ -70,6 +70,56 @@ export interface TransferWorkerProbe {
   version: string | null;
 }
 
+/** A resolved rclone filesystem; fake trees use their root item id as fs. */
+export interface FilePassRoot {
+  fs: string;
+  kind: "local" | "sharepoint" | "google_drive";
+}
+
+export interface CopyPassHandle {
+  executeId: string;
+  jobid: number;
+  group: string;
+}
+
+export interface CopyPassReference {
+  socketPath: string;
+  pass: CopyPassHandle;
+}
+
+export interface CopyPassStatus {
+  state: "running" | "completed" | "failed";
+  error: string | null;
+}
+
+export interface CopyPassStats {
+  bytes: number;
+  files: number;
+  errors: number;
+  speed: number;
+  transferring: { path: string; bytes: number; size: number }[];
+}
+
+export interface FilePassProvider {
+  startCopyPass(
+    input: {
+      socketPath: string;
+      source: FilePassRoot;
+      destination: FilePassRoot;
+      transfers: number;
+    } & ({ mode: "copy" } | { mode: "mirror"; deleteLimit: number }),
+  ): Promise<CopyPassHandle>;
+  copyPassStatus(input: CopyPassReference): Promise<CopyPassStatus>;
+  copyPassStats(input: CopyPassReference): Promise<CopyPassStats>;
+  stopCopyPass(input: CopyPassReference): Promise<void>;
+  listFileHashes(input: {
+    socketPath: string;
+    root: FilePassRoot;
+    hashType: "sha256" | "md5" | "quickxor";
+    download: boolean;
+  }): Promise<{ path: string; size: number; hash: string | null }[]>;
+}
+
 export interface RetryAfterError extends Error {
   retryAfterMs: number;
 }
@@ -82,7 +132,7 @@ export function hasRetryAfter(error: unknown): error is RetryAfterError {
   return typeof Reflect.get(error, "retryAfterMs") === "number";
 }
 
-export interface ProviderPort {
+export interface ProviderPort extends FilePassProvider {
   archive?: ArchiveProvider;
   preflight?(input: {
     jobType: JobType;

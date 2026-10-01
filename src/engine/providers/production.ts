@@ -252,6 +252,21 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async *streamDestinationContent(id) {
       yield* (await files()).streamDestinationContent(id);
     },
+    async startCopyPass(value) {
+      return (await state()).worker.startCopyPass(value);
+    },
+    async copyPassStatus(value) {
+      return (await state()).worker.copyPassStatus(value);
+    },
+    async copyPassStats(value) {
+      return (await state()).worker.copyPassStats(value);
+    },
+    async stopCopyPass(value) {
+      await (await state()).worker.stopCopyPass(value);
+    },
+    async listFileHashes(value) {
+      return (await state()).worker.listFileHashes(value);
+    },
     async startTransferWorker(value) {
       if (!needsTransferWorker || current)
         throw new ProviderFault(

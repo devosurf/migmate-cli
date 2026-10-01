@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { setImmediate } from "node:timers/promises";
 import type { CheckResult } from "../types.ts";
 import type {
   ArchiveAssetRequest,
@@ -9,6 +10,10 @@ import type {
   ArchiveScopeBinding,
 } from "./archive.ts";
 import type {
+  CopyPassHandle,
+  CopyPassReference,
+  CopyPassStats,
+  CopyPassStatus,
   DestinationEntry,
   DestinationItemKind,
   ProviderPort,
@@ -139,6 +144,31 @@ interface MutableSourceEntry extends SourceEntry {
 
 interface MutableDestinationEntry extends DestinationEntry {
   content: Uint8Array | null;
+}
+
+interface FakeCopyPass {
+  handle: CopyPassHandle;
+  status: CopyPassStatus;
+  stats: CopyPassStats;
+  stopped: boolean;
+  done: Promise<void>;
+}
+
+function fileHash(bytes: Uint8Array, type: "sha256" | "md5" | "quickxor"): string {
+  if (type !== "quickxor") return createHash(type).update(bytes).digest("hex");
+  const hash = Buffer.alloc(20);
+  for (let i = 0; i < bytes.length; i++) {
+    const bit = (i * 11) % 160;
+    const index = Math.floor(bit / 8);
+    const shift = bit % 8;
+    hash[index] = hash[index]! ^ (bytes[i]! << shift);
+    const next = (index + 1) % 20;
+    hash[next] = hash[next]! ^ (bytes[i]! >>> (8 - shift));
+  }
+  const size = Buffer.alloc(8);
+  size.writeBigUInt64LE(BigInt(bytes.length));
+  for (let i = 0; i < 8; i++) hash[12 + i] = hash[12 + i]! ^ size[i]!;
+  return hash.toString("hex");
 }
 
 function encodeText(value: Uint8Array | string): Uint8Array {
@@ -281,6 +311,9 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly runDirectory: string;
   private idSeed = 0;
   private revisionSeed = 0;
+  private workerExecuteId = randomUUID();
+  private readonly passes = new Map<number, FakeCopyPass>();
+  private passSeed = 0;
 
   constructor(fixture: FakeFileMigrationFixture) {
     this.sourceDriveId = fixture.sourceDriveId;
@@ -820,11 +853,219 @@ export class FakeFileMigrationPort implements ProviderPort {
     );
   }
 
+  private assertPassWorker(socketPath: string): void {
+    if (!this.workerState?.alive || this.workerState.socketPath !== socketPath)
+      throw destinationFault("worker_exited", 500);
+  }
+
+  private pass(reference: CopyPassReference): FakeCopyPass {
+    this.assertPassWorker(reference.socketPath);
+    const pass = this.passes.get(reference.pass.jobid);
+    if (
+      !pass ||
+      reference.pass.executeId !== this.workerExecuteId ||
+      reference.pass.group !== pass.handle.group
+    )
+      throw destinationFault("copy_pass_handle_mismatch", 500);
+    return pass;
+  }
+
+  private tree(root: string): Map<string, MutableSourceEntry | MutableDestinationEntry> {
+    const source = this.sourceById[root];
+    const entries = source ? this.sourceById : this.destinationById;
+    const children = source ? this.sourceChildrenByParent : this.destinationChildrenByParent;
+    if (entries[root]?.kind !== "folder") throw destinationFault("directory_not_found", 404);
+    const result = new Map<string, MutableSourceEntry | MutableDestinationEntry>();
+    const visit = (id: string, prefix: string) => {
+      for (const childId of children[id] ?? []) {
+        const child = entries[childId];
+        if (!child) continue;
+        const path = `${prefix}${child.name}`;
+        result.set(path, child);
+        if (child.kind === "folder") visit(child.id, `${path}/`);
+      }
+    };
+    visit(root, "");
+    return result;
+  }
+
+  async startCopyPass(
+    input: Parameters<ProviderPort["startCopyPass"]>[0],
+  ): Promise<CopyPassHandle> {
+    this.assertPassWorker(input.socketPath);
+    this.throwRetryAfter("startCopyPass", input.source.fs);
+    if (
+      input.mode === "mirror" &&
+      (!Number.isSafeInteger(input.deleteLimit) || input.deleteLimit < 0)
+    )
+      throw destinationFault("copy_pass_delete_limit_invalid", 400);
+    const jobid = ++this.passSeed;
+    const handle = {
+      executeId: this.workerExecuteId,
+      jobid,
+      group: `fake-${this.workerExecuteId}-${jobid}`,
+    };
+    const pass: FakeCopyPass = {
+      handle,
+      status: { state: "running", error: null },
+      stats: { bytes: 0, files: 0, errors: 0, speed: 0, transferring: [] },
+      stopped: false,
+      done: Promise.resolve(),
+    };
+    this.passes.set(jobid, pass);
+    pass.done = this.executeCopyPass(input, pass);
+    return { ...handle };
+  }
+
+  private async executeCopyPass(
+    input: Parameters<ProviderPort["startCopyPass"]>[0],
+    pass: FakeCopyPass,
+  ): Promise<void> {
+    const active = () => {
+      if (pass.stopped || pass.handle.executeId !== this.workerExecuteId)
+        throw new Error("context canceled");
+      this.assertPassWorker(input.socketPath);
+    };
+    try {
+      await setImmediate();
+      active();
+      const source = this.tree(input.source.fs);
+      const destination = this.tree(input.destination.fs);
+      const parents = new Map<string, string>([["", input.destination.fs]]);
+      for (const [path, entry] of source) {
+        active();
+        const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+        const parentId = parents.get(parentPath)!;
+        const existing = destination.get(path);
+        if (entry.kind === "folder") {
+          if (existing && existing.kind !== "folder") throw new Error(`not a directory: ${path}`);
+          const folder =
+            existing ??
+            (await this.createDestinationFolder({
+              parentFolderId: parentId,
+              name: entry.name,
+              createdAt: entry.createdAt,
+              modifiedAt: entry.modifiedAt,
+            }));
+          parents.set(path, folder.id);
+          continue;
+        }
+        if (
+          entry.kind !== "file" ||
+          entry.content === null ||
+          ("downloadable" in entry && !entry.downloadable)
+        )
+          throw new Error(`source unreadable: ${path}`);
+        if (
+          existing?.kind === "file" &&
+          existing.content !== null &&
+          hashBytes(existing.content) === hashBytes(entry.content)
+        )
+          continue;
+        pass.stats.transferring = [{ path, bytes: 0, size: entry.content.length }];
+        await setImmediate();
+        active();
+        this.throwRetryAfter("copyPass", path);
+        await this.uploadDestinationContent({
+          ...(existing ? { destinationId: existing.id } : {}),
+          parentFolderId: parentId,
+          name: entry.name,
+          content: entry.content,
+          createdAt: entry.createdAt,
+          modifiedAt: entry.modifiedAt,
+          mimeType: entry.mimeType,
+        });
+        pass.stats.bytes += entry.content.length;
+        pass.stats.files++;
+        pass.stats.transferring = [];
+      }
+      if (input.mode === "mirror") {
+        const extras = [...destination].filter(([path]) => !source.has(path));
+        const files = extras.filter(([, entry]) => entry.kind !== "folder");
+        for (const [, entry] of files.slice(0, input.deleteLimit))
+          this.removeDestinationItem(entry.id);
+        if (files.length > input.deleteLimit) throw new Error("max-delete limit exceeded");
+        for (const [, entry] of extras.reverse())
+          if (entry.kind === "folder") this.removeDestinationItem(entry.id);
+      }
+      pass.status = { state: "completed", error: null };
+    } catch (error) {
+      pass.stats.errors++;
+      pass.status = {
+        state: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      pass.stats.transferring = [];
+    }
+  }
+
+  async copyPassStatus(reference: CopyPassReference): Promise<CopyPassStatus> {
+    return { ...this.pass(reference).status };
+  }
+
+  async copyPassStats(reference: CopyPassReference): Promise<CopyPassStats> {
+    return structuredClone(this.pass(reference).stats);
+  }
+
+  async stopCopyPass(reference: CopyPassReference): Promise<void> {
+    const pass = this.pass(reference);
+    pass.stopped = true;
+    await pass.done;
+  }
+
+  async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
+    this.assertPassWorker(input.socketPath);
+    this.throwRetryAfter("listFileHashes", input.root.fs);
+    const hashes: { path: string; size: number; hash: string | null }[] = [];
+    for (const [path, entry] of this.tree(input.root.fs)) {
+      if (entry.kind === "folder") continue;
+      if (
+        input.download &&
+        (entry.content === null ||
+          ("downloadable" in entry && !entry.downloadable) ||
+          this.unavailableDestinationStreams.has(entry.id))
+      )
+        throw new Error(`file unreadable: ${path}`);
+      const supported =
+        input.download ||
+        input.root.kind === "local" ||
+        (input.root.kind === "sharepoint"
+          ? input.hashType === "quickxor"
+          : input.hashType !== "quickxor");
+      const hash =
+        !supported ||
+        entry.content === null ||
+        (!input.download && this.withheldChecksums.has(entry.id))
+          ? null
+          : !input.download && input.hashType === "sha256" && "reportedChecksum" in entry
+            ? entry.reportedChecksum
+            : fileHash(entry.content, input.hashType);
+      hashes.push({ path, size: entry.size ?? -1, hash });
+    }
+    return hashes;
+  }
+
+  private removeDestinationItem(id: string): void {
+    const entry = this.destinationById[id];
+    if (!entry) return;
+    delete this.destinationById[id];
+    delete this.destinationChildrenByParent[id];
+    const key = entry.parentId ?? "";
+    this.destinationChildrenByParent[key] = (this.destinationChildrenByParent[key] ?? []).filter(
+      (child) => child !== id,
+    );
+  }
+
   async startTransferWorker(
     input: Parameters<ProviderPort["startTransferWorker"]>[0],
   ): Promise<TransferWorkerHandle> {
     this.callLog.push(`startTransferWorker:${input.runDirectory}`);
     this.throwRetryAfter("startTransferWorker", input.runDirectory);
+    for (const pass of this.passes.values()) pass.stopped = true;
+    await Promise.all([...this.passes.values()].map((pass) => pass.done));
+    this.passes.clear();
+    this.workerExecuteId = randomUUID();
     this.workerState = {
       pid: this.workerState?.pid ?? 4242,
       version: this.workerState?.version ?? "fake-worker-1.0.0",
@@ -856,6 +1097,8 @@ export class FakeFileMigrationPort implements ProviderPort {
   async stopTransferWorker(input: { socketPath: string }): Promise<void> {
     this.callLog.push(`stopTransferWorker:${input.socketPath}`);
     this.throwRetryAfter("stopTransferWorker", input.socketPath);
+    for (const pass of this.passes.values()) pass.stopped = true;
+    await Promise.all([...this.passes.values()].map((pass) => pass.done));
     if (this.workerState && this.workerState.socketPath === input.socketPath) {
       this.workerState.alive = false;
     }
@@ -864,6 +1107,8 @@ export class FakeFileMigrationPort implements ProviderPort {
   async terminateTransferWorker(input: { socketPath: string }): Promise<void> {
     this.callLog.push(`terminateTransferWorker:${input.socketPath}`);
     this.throwRetryAfter("terminateTransferWorker", input.socketPath);
+    for (const pass of this.passes.values()) pass.stopped = true;
+    await Promise.all([...this.passes.values()].map((pass) => pass.done));
     if (this.workerState && this.workerState.socketPath === input.socketPath) {
       this.workerState.alive = false;
     }
