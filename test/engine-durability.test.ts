@@ -928,6 +928,70 @@ describe("engine durability seam", () => {
     );
   });
 
+  it("resumes pre-manifest approvals without changing frozen inputs and binds the digest only on replanning", async (t) => {
+    // The immutable plan and approval were written by cbaa5a3, before manifest support.
+    const legacy: {
+      plan: Record<string, string | number>;
+      inputs: Array<{ key: string; value: string }>;
+      approval: Record<string, string | number>;
+    } = JSON.parse(
+      await readFile(new URL("./fixtures/pre-manifest-approved.json", import.meta.url), "utf8"),
+    );
+    for (const state of ["approved", "interrupted"]) {
+      const h = await harness(t);
+      // Collect matching source evidence, but never approve with the current engine.
+      value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+      const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+      try {
+        database.exec(
+          "DELETE FROM plan_input; DELETE FROM plan_revision; DROP TABLE mapping; DROP TABLE mapping_manifest",
+        );
+        for (const [table, row] of [
+          ["plan_revision", legacy.plan],
+          ["approval", legacy.approval],
+        ] as const) {
+          const keys = Object.keys(row);
+          database
+            .prepare(
+              `INSERT INTO ${table} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`,
+            )
+            .run(...Object.values(row));
+        }
+        for (const input of legacy.inputs)
+          database
+            .prepare("INSERT INTO plan_input (rev,key,value) VALUES (1,?,?)")
+            .run(input.key, input.value);
+        database.prepare("UPDATE job SET schema_version=3,state=?").run(state);
+      } finally {
+        database.close();
+      }
+      await writeFile(join(h.home, "jobs", h.ref.id, "job.toml"), stringifyToml(config()));
+      reopen(h);
+      const configPath = join(h.home, "jobs", h.ref.id, "job.toml");
+      await writeFile(
+        configPath,
+        stringifyToml({ ...config(), options: { verificationMode: "size_only" } }),
+      );
+      refused(
+        await h.engine.withWriterResult(h.ref, (writer) => writer.execute()),
+        "plan_revision_required",
+      );
+      await writeFile(configPath, stringifyToml(config()));
+      assert.equal((await execute(h)).outcome, "completed");
+      const completed = value(await h.engine.reader(h.ref).status());
+      assert.equal(completed.planDigest, legacy.plan.plan_digest);
+      assert.equal(completed.currentPlan?.manifestDigest, undefined);
+      assert.equal((await verify(h)).clean, true);
+      const next = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+      assert.match(next.manifestDigest!, /^[a-f0-9]{64}$/u);
+      assert.notEqual(next.planDigest, legacy.plan.plan_digest);
+      refused(
+        await h.engine.withWriterResult(h.ref, (writer) => writer.execute()),
+        "approval_required",
+      );
+    }
+  });
+
   it("moves legacy config mappings into the store on writer open and retains their exclusions", async (t) => {
     const selected = config([{ sourceItemId: "document", reason: "Do not migrate this file" }]);
     const h = await harness(t, fixture(), selected);

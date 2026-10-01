@@ -166,6 +166,10 @@ ordered by mapping ID). Editing the input file has no effect until another load.
 Loading after planning/approval collects a new revision requiring approval again.
 If recollection fails, the loaded set remains but the prior approval cannot run:
 correct the reported prerequisite and run `plan`, then approve its digest.
+An approval written before manifest support keeps its original frozen input identity
+when its config mappings migrate, so unchanged approved or interrupted jobs can resume.
+The manifest digest is bound when a new plan is collected, not retroactively added to
+the old approval.
 
 For large jobs use `plan --review --view mappings --limit 50` or
 `status --view mappings --limit 50`, both with `--job "$ID" --output json`.

@@ -229,7 +229,7 @@ test("a job-contained credential is refused before a token request or secret dis
   assert.equal(contactedProvider, false);
 });
 
-test("loads manifest paths through Graph and ignores the remotes' seed roots", async (t) => {
+test("loads manifest paths and names destination identity failures without relabeling transport errors", async (t) => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "migmate-manifest-provider-")));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const keyPath = join(directory, "google.json"),
@@ -255,6 +255,8 @@ test("loads manifest paths through Graph and ignores the remotes' seed roots", a
     `[source]\ntype = onedrive\nclient_id = ${app}\nclient_secret = Abc8Q~tE1.vN-jK_pLq7zXyW4rS2mD6bH0uT9cVe\nclient_credentials = true\ntenant = ${tenant}\ndrive_type = documentLibrary\ndrive_id = seed-source\nroot_folder_id = seed-root\n[destination]\ntype = drive\nservice_account_file = ${keyPath}\nteam_drive = seed-drive\nroot_folder_id = seed-folder\n`,
     { mode: 0o600 },
   );
+  let observedDriveId = "shared-drive";
+  let destinationStatus = 200;
   t.mock.method(globalThis, "fetch", async (target: string | URL | Request) => {
     const url = new URL(String(target));
     if (url.hostname === "login.microsoftonline.com") {
@@ -294,14 +296,17 @@ test("loads manifest paths through Graph and ignores the remotes' seed roots", a
       if (url.pathname === "/v1.0/drives/source-drive/items/root")
         return Response.json({ id: "root", name: "Documents", folder: {} });
     }
-    if (url.pathname === "/drive/v3/files/destination-root")
+    if (url.pathname === "/drive/v3/files/destination-root") {
+      if (destinationStatus !== 200)
+        return Response.json({ error: { code: "forbidden" } }, { status: destinationStatus });
       return Response.json({
         id: "destination-root",
-        driveId: "shared-drive",
+        driveId: observedDriveId,
         name: "Archive",
         mimeType: "application/vnd.google-apps.folder",
         parents: [],
       });
+    }
     throw new Error(`Unexpected request ${url.origin}${url.pathname}`);
   });
   const engine = openEngine({ home: join(directory, "home") });
@@ -317,24 +322,22 @@ test("loads manifest paths through Graph and ignores the remotes' seed roots", a
     },
   });
   assert.equal(initialized.ok, true);
+  const content = JSON.stringify({
+    version: 1,
+    mappings: [
+      {
+        id: "reports",
+        source: { type: "sharepoint", driveId: "source-drive", folderPath: "Reports #%" },
+        destination: {
+          type: "google_shared_drive",
+          driveId: "shared-drive",
+          folderId: "destination-root",
+        },
+      },
+    ],
+  });
   const loaded = await engine.withWriterResult(initialized.value, (w) =>
-    w.loadManifest({
-      format: "json",
-      content: JSON.stringify({
-        version: 1,
-        mappings: [
-          {
-            id: "reports",
-            source: { type: "sharepoint", driveId: "source-drive", folderPath: "Reports #%" },
-            destination: {
-              type: "google_shared_drive",
-              driveId: "shared-drive",
-              folderId: "destination-root",
-            },
-          },
-        ],
-      }),
-    }),
+    w.loadManifest({ format: "json", content }),
   );
   assert.equal(loaded.ok, true, JSON.stringify(loaded));
   const page = await engine.reader(initialized.value).rows({ phase: "plan", view: "mappings" });
@@ -342,6 +345,18 @@ test("loads manifest paths through Graph and ignores the remotes' seed roots", a
   assert.deepEqual(
     page.value.rows.map((row) => (row.jobType === "file_migration" ? row.sourceItemId : null)),
     ["reports"],
+  );
+  observedDriveId = "another-shared-drive";
+  const mismatch = await engine.withWriterResult(initialized.value, (w) =>
+    w.loadManifest({ format: "json", content }),
+  );
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.refusal.code, "configuration_invalid");
+  assert.deepEqual(mismatch.refusal.detail, { row: 1, field: "destination.driveId" });
+  destinationStatus = 403;
+  await assert.rejects(
+    engine.withWriterResult(initialized.value, (w) => w.loadManifest({ format: "json", content })),
+    (error) => error instanceof HttpProviderFault && error.status === 403,
   );
 });
 

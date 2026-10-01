@@ -532,6 +532,7 @@ export class FileEffects {
         throw new ProviderFault(
           "unsupported_route",
           "The destination object does not belong to the exact Shared Drive.",
+          { reason: "destination_drive_mismatch" },
         );
       return this.#destination(file);
     } catch (error) {

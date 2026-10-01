@@ -1,6 +1,7 @@
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 import { digestJson } from "./store/digest.ts";
 import type { ProviderPort } from "./providers/port.ts";
+import { ProviderFault } from "./providers/credentials.ts";
 
 export interface ManifestMapping {
   id: string;
@@ -192,7 +193,27 @@ export async function validateMappingTrees(
           const entry =
             side === "source"
               ? await provider.resolveSourceRoot({ sourceDriveId: drive, sourceItemId: id })
-              : await provider.resolveDestinationFolder({ destDriveId: drive, destFolderId: id });
+              : await provider
+                  .resolveDestinationFolder({ destDriveId: drive, destFolderId: id })
+                  .catch((error: unknown) => {
+                    if (
+                      error instanceof ProviderFault &&
+                      error.code === "unsupported_route" &&
+                      error.evidence.reason === "destination_drive_mismatch"
+                    )
+                      throw new ManifestError(
+                        index + 1,
+                        "destination.driveId",
+                        "Destination folder belongs to a different Shared Drive",
+                      );
+                    throw error;
+                  });
+          if (side === "destination" && entry && entry.driveId !== drive)
+            throw new ManifestError(
+              index + 1,
+              "destination.driveId",
+              "Destination folder belongs to a different Shared Drive",
+            );
           if (!entry || entry.kind !== "folder" || entry.driveId !== drive)
             throw new ManifestError(index + 1, side, "Folder ancestry cannot be resolved");
           parents.set(key, entry.parentId);

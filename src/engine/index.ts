@@ -1906,6 +1906,9 @@ function makeWriter(
             "The current execution must be assessed before another pass.",
           );
         let config = readConfig(paths, job().type, store);
+        // Migration adds a store digest, not a new input to an immutable older approval.
+        // Only a newly collected plan can bind that additional manifest identity.
+        if ("mappings" in config && plan.manifestDigest === undefined) delete config.manifestDigest;
         const resume = store.readResume(plan.revision);
         if (!("mappings" in config) && !config.window.to && resume.archivePlan)
           config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
