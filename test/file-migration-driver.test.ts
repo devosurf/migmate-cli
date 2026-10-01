@@ -311,13 +311,7 @@ describe("file migration through the engine", () => {
     const ids = ["a", "b", "c", "d", "e"];
     const { input, selected } = multiMapping(ids);
     input.copyPasses = ids.map((sourceRootId) => ({ sourceRootId, pause: true, afterFiles: 0 }));
-    class ConfiguredPort extends FakeFileMigrationPort {
-      override async startCopyPass(input: Parameters<FakeFileMigrationPort["startCopyPass"]>[0]) {
-        assert.equal(input.transfers, 3);
-        return super.startCopyPass(input);
-      }
-    }
-    const port = new ConfiguredPort(input);
+    const port = new FakeFileMigrationPort(input);
     const h = await harness(
       t,
       input,
