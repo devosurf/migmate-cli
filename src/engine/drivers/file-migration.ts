@@ -5,14 +5,13 @@ import type { DestinationEntry, SourceEntry } from "../providers/port.ts";
 import type { CommitFinding, CommitUnit, JobTypeDriver, ReportSection } from "./types.ts";
 import {
   assertSourceStable,
-  confirmServedContent,
   FilePlanRevisionRequiredError,
   hashStream,
+  terminalUnavailable,
   readObject,
   observe,
   markerMatches,
   outputFindings,
-  terminalUnavailable,
   type Observation,
   second,
   sourceEvidence,
@@ -39,6 +38,7 @@ export interface FileMappingConfig {
 
 export interface FileMigrationConfig {
   mappings: FileMappingConfig[];
+  options?: { verificationMode?: "hash" | "size_only" };
 }
 
 type Phase = "plan" | "execute" | "verify";
@@ -188,21 +188,15 @@ function durableRows(
   return { states, scope };
 }
 
-async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<Snapshot> {
+async function sourceInventory(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+): Promise<SourceView[]> {
   const sourceRoot = await ctx.provider.resolveSourceRoot(mapping);
-  const destinationRoot = await ctx.provider.resolveDestinationFolder(mapping);
-  if (
-    !sourceRoot ||
-    sourceRoot.kind !== "folder" ||
-    sourceRoot.driveId !== mapping.sourceDriveId ||
-    !destinationRoot ||
-    destinationRoot.kind !== "folder" ||
-    destinationRoot.driveId !== mapping.destDriveId
-  ) {
-    throw Object.assign(new Error("A mapping root is missing or is not an ordinary folder"), {
+  if (!sourceRoot || sourceRoot.kind !== "folder" || sourceRoot.driveId !== mapping.sourceDriveId)
+    throw Object.assign(new Error("The source root is missing or is not an ordinary folder"), {
       code: "unsupported_route",
     });
-  }
   const sources: SourceView[] = [
     { ...sourceRoot, path: ".", representable: true, outsideRoot: false },
   ];
@@ -235,6 +229,21 @@ async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<S
       sourceById.set(child.id, view);
     }
   }
+  return sources;
+}
+
+async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<Snapshot> {
+  const sources = await sourceInventory(ctx, mapping);
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const destinationRoot = await ctx.provider.resolveDestinationFolder(mapping);
+  if (
+    !destinationRoot ||
+    destinationRoot.kind !== "folder" ||
+    destinationRoot.driveId !== mapping.destDriveId
+  )
+    throw Object.assign(new Error("The destination root is missing or is not an ordinary folder"), {
+      code: "unsupported_route",
+    });
   const destinations: DestinationView[] = [{ ...destinationRoot, path: "." }];
   const destinationById = new Map([[destinationRoot.id, destinations[0]!]]);
   const destinationByPath = new Map<string, DestinationView[]>([[".", [destinations[0]!]]]);
@@ -268,7 +277,7 @@ async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<S
   return { mapping, sources, sourceById, destinations, destinationById, destinationByPath };
 }
 
-function expandedExclusions(tree: Snapshot): FileExclusion[] {
+function expandedExclusions(tree: Pick<Snapshot, "mapping" | "sources">): FileExclusion[] {
   const excluded = new Map<string, string>();
   for (const selection of tree.mapping.exclusions ?? []) {
     if (!selection.sourceItemId || !selection.reason?.trim()) {
@@ -424,7 +433,7 @@ async function collision(
   return { observation };
 }
 
-async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUnit> {
+async function* runPhase(ctx: FileContext, phase: "plan" | "execute"): AsyncIterable<CommitUnit> {
   const provider: FileProvider = ctx.provider;
   const trees: Snapshot[] = [];
   for (const mapping of ctx.config.mappings) trees.push(await snapshot(ctx, mapping));
@@ -543,13 +552,6 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
           continue;
         }
         const observed = problem.observation;
-        if (phase === "verify") {
-          const verified = await verifyItem(ctx, tree, source, prior, observed, parentId, done + 1);
-          done += 1;
-          yield verified;
-          if (source.kind === "folder" && observed) parents.set(source.id, observed.entry.id);
-          continue;
-        }
         if (prior && prior.status !== "prepared") {
           const marker = observed ? await provider.readDestinationMarker(observed.entry.id) : null;
           const differences = observed
@@ -964,88 +966,218 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
   }
 }
 
-async function verifyItem(
-  ctx: FileContext,
-  tree: Snapshot,
-  source: SourceView,
-  state: FileState | undefined,
-  observed: Observation | null | undefined,
-  parentId: string | undefined,
-  done: number,
-): Promise<CommitUnit> {
-  const provider: FileProvider = ctx.provider;
-  const codes: string[] = [];
-  let served: { sha256: string; size: number } | null = null;
-  if (!state || !observed) codes.push("destination_missing");
-  else {
-    if (state.source.identity !== source.identity) codes.push("source_identity_reuse_collision");
-    if (observed.entry.parentId !== parentId || observed.entry.name !== source.name)
-      codes.push("destination_path_mismatch");
-    if (observed.entry.kind !== source.kind) codes.push("destination_type_conflict");
-    const marker = await provider.readDestinationMarker(observed.entry.id);
-    if (!markerMatches(marker, state.marker)) codes.push("provenance_mismatch");
-    await assertSourceStable(provider, source);
-    if (source.kind === "file") {
-      try {
-        served = await hashStream(provider.openSourceContent(source.id), ctx.signal);
-        if (await confirmServedContent(provider, source, served, ctx.signal))
-          codes.push("source_size_inconsistent");
-      } catch (error) {
-        if (!terminalUnavailable(error)) throw error;
-        codes.push("source_read_failed");
-      }
-      if (observed.entry.size !== (served?.size ?? state.output.size)) codes.push("size_mismatch");
-      if (observed.sha256 === null) codes.push("content_verification_degraded");
-      else if (served !== null && observed.sha256 !== served.sha256) codes.push("content_mismatch");
-      if (
-        Date.parse(observed.entry.createdAt) !== Date.parse(state.output.createdAt) ||
-        second(observed.entry.modifiedAt) !== second(source.modifiedAt) ||
-        observed.entry.mimeType !== source.mimeType
-      ) {
-        codes.push("metadata_mismatch");
-      }
+async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
+  let done = 0;
+  const sizeOnly = ctx.config.options?.verificationMode === "size_only";
+  for (const mapping of ctx.config.mappings) {
+    const sources = await sourceInventory(ctx, mapping);
+    const scope = (ctx.resume.rows ?? []).find(
+      (candidate): candidate is FileEvidenceRow =>
+        candidate.jobType === "file_migration" &&
+        candidate.mappingId === mapping.id &&
+        candidate.rev === ctx.revision &&
+        candidate.phase === "plan" &&
+        candidate.fileScope !== undefined,
+    )?.fileScope;
+    if (!scope) throw new FilePlanRevisionRequiredError();
+    const excluded = new Map(scope.exclusions.map((item) => [item.sourceItemId, item.reason]));
+    const expanded = expandedExclusions({ mapping, sources });
+    const current = new Map(expanded.map((item) => [item.sourceItemId, item.reason]));
+    if (
+      expanded.some((item) => excluded.get(item.sourceItemId) !== item.reason) ||
+      sources.some(
+        (source) => excluded.has(source.id) && current.get(source.id) !== excluded.get(source.id),
+      )
+    )
+      throw new FilePlanRevisionRequiredError();
+    if (sizeOnly) {
+      const evidence = row(ctx, "verify", mapping, sources[0]!, "content_verification_degraded");
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        [
+          finding(ctx, "verify", "content_verification_degraded", mapping.id, {
+            verificationMode: "size_only",
+          }),
+        ],
+        "verification-mode",
+        ++done,
+      );
     }
-    await assertSourceStable(provider, source);
-    const latest = await observe(ctx, observed.entry);
-    if (latest.sha256 !== observed.sha256) codes.push("prior_copy_drift");
-    const latestMarker = await provider.readDestinationMarker(observed.entry.id);
-    if (!markerMatches(latestMarker, state.marker)) codes.push("provenance_mismatch");
-    await assertSourceStable(provider, source);
-    // A clean match to today's source cannot erase an independently drifted
-    // last output or a durable/marker disagreement.
-    const priorDifferences = outputFindings(observed, state.output);
-    if (priorDifferences.some((code) => code !== "content_verification_degraded"))
-      codes.push("prior_copy_drift");
-  }
-  const unique = [...new Set(codes)];
-  const evidence = row(ctx, "verify", tree.mapping, source, unique[0] ?? "unchanged", state);
-  evidence.sourceFingerprint = served?.sha256 ?? null;
-  evidence.destinationFingerprint = observed?.sha256 ?? null;
-  // A listed-size disagreement is about the source; the copy itself can still be proven.
-  evidence.provenanceState = unique.some((code) => code !== "source_size_inconsistent")
-    ? "drifted"
-    : "verified";
-  return commit(
-    ctx,
-    "verify",
-    evidence,
-    [
-      ...unique.map((code) =>
-        finding(
+    const pass = await ctx.provider.resolveFilePass(mapping);
+    const sourceHashes = new Map(
+      (
+        await ctx.provider.listFileHashes({
+          socketPath: pass.socketPath,
+          root: pass.source,
+          hashType: "sha256",
+          download: !sizeOnly,
+        })
+      ).map((entry) => [entry.path, entry]),
+    );
+    const destinationHashes = new Map(
+      (
+        await ctx.provider.listFileHashes({
+          socketPath: pass.socketPath,
+          root: pass.destination,
+          hashType: "sha256",
+          download: false,
+        })
+      ).map((entry) => [entry.path, entry]),
+    );
+    const needsMd5 =
+      !sizeOnly && [...destinationHashes.values()].some((entry) => entry.hash === null);
+    const sourceMd5 = new Map(
+      needsMd5
+        ? (
+            await ctx.provider.listFileHashes({
+              socketPath: pass.socketPath,
+              root: pass.source,
+              hashType: "md5",
+              download: true,
+            })
+          ).map((entry) => [entry.path, entry])
+        : [],
+    );
+    const destinationMd5 = new Map(
+      needsMd5
+        ? (
+            await ctx.provider.listFileHashes({
+              socketPath: pass.socketPath,
+              root: pass.destination,
+              hashType: "md5",
+              download: false,
+            })
+          ).map((entry) => [entry.path, entry])
+        : [],
+    );
+    for (const source of sources) {
+      const omission = excluded.has(source.id)
+        ? "omitted_by_rule"
+        : source.kind === "file" || source.kind === "undownloadable"
+          ? null
+          : sourceOmission(source);
+      if (omission) {
+        yield commit(
           ctx,
           "verify",
-          code,
-          source.id,
-          code === "source_size_inconsistent"
-            ? { path: source.path, listedSize: source.size, servedSize: served?.size }
-            : { path: source.path },
-        ),
-      ),
-      ...metadataOmissions(ctx, "verify", source),
-    ],
-    "verification",
-    done,
-  );
+          row(ctx, "verify", mapping, source, omission),
+          [
+            finding(ctx, "verify", omission, source.id, {
+              path: source.path,
+              ...(excluded.has(source.id) ? { reason: excluded.get(source.id) } : {}),
+            }),
+          ],
+          "omission",
+          ++done,
+        );
+        continue;
+      }
+      if (source.kind === "folder") continue;
+      const hashType =
+        !sizeOnly && destinationHashes.get(source.path)?.hash === null ? "md5" : "sha256";
+      const downloaded = (hashType === "md5" ? sourceMd5 : sourceHashes).get(source.path);
+      const destination = (hashType === "md5" ? destinationMd5 : destinationHashes).get(
+        source.path,
+      );
+      const codes: string[] = [];
+      let servedSize = downloaded?.size ?? source.size;
+      if (!sizeOnly && downloaded?.hash && destination && downloaded.size !== destination.size) {
+        // Equal content hashes also prove the served length. If content differs,
+        // measure the download before blaming the destination's listed size.
+        if (downloaded.hash === destination.hash) servedSize = destination.size;
+        else {
+          try {
+            const measured = await hashStream(
+              ctx.provider.openSourceContent(source.id),
+              ctx.signal,
+            );
+            if (measured.sha256 !== sourceHashes.get(source.path)?.hash)
+              codes.push("source_read_failed");
+            else servedSize = measured.size;
+          } catch (error) {
+            if (!terminalUnavailable(error)) throw error;
+            codes.push("source_read_failed");
+          }
+        }
+        if (servedSize !== downloaded.size) codes.push("source_size_inconsistent");
+      }
+      if (!destination) codes.push("destination_missing");
+      if (!sizeOnly && !downloaded?.hash) codes.push("source_read_failed");
+      if (destination && downloaded) {
+        if (servedSize !== destination.size) codes.push("size_mismatch");
+        if (!sizeOnly) {
+          if (destination.hash === null) codes.push("content_verification_degraded");
+          else if (downloaded.hash && destination.hash !== downloaded.hash)
+            codes.push("content_mismatch");
+        }
+      }
+      const evidence = row(ctx, "verify", mapping, source, codes[0] ?? "unchanged");
+      evidence.destinationDriveId = mapping.destDriveId;
+      evidence.sourceFingerprint = downloaded?.hash ?? null;
+      evidence.destinationFingerprint = destination?.hash ?? null;
+      evidence.provenanceState = codes.some((code) => code !== "source_size_inconsistent")
+        ? "drifted"
+        : "verified";
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        codes
+          .map((code) =>
+            finding(ctx, "verify", code, source.id, {
+              path: source.path,
+              sourceSize: downloaded?.size ?? source.size,
+              destinationSize: destination?.size ?? null,
+              sourceHash: downloaded?.hash ?? null,
+              destinationHash: destination?.hash ?? null,
+              hashType: sizeOnly ? null : hashType,
+              ...(code === "source_size_inconsistent"
+                ? { listedSize: downloaded?.size, servedSize }
+                : {}),
+            }),
+          )
+          .concat(metadataOmissions(ctx, "verify", source)),
+        "verification",
+        ++done,
+      );
+    }
+    for (const destination of destinationHashes.values()) {
+      if (sourceHashes.has(destination.path)) continue;
+      const source: SourceView = {
+        ...sources[0]!,
+        id: `destination:${destination.path}`,
+        path: destination.path,
+        kind: "file",
+        size: destination.size,
+      };
+      const evidence = row(ctx, "verify", mapping, source, "destination_only_retained");
+      evidence.destinationDriveId = mapping.destDriveId;
+      const stored =
+        destination.hash === null
+          ? (destinationMd5.get(destination.path) ?? destination)
+          : destination;
+      evidence.destinationFingerprint = stored.hash;
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        [
+          finding(ctx, "verify", "destination_only_retained", source.id, {
+            path: destination.path,
+            sourceSize: null,
+            destinationSize: destination.size,
+            sourceHash: null,
+            destinationHash: stored.hash,
+            hashType: sizeOnly ? null : destination.hash === null ? "md5" : "sha256",
+          }),
+        ],
+        "retained",
+        ++done,
+      );
+    }
+  }
 }
 
 async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
@@ -1076,6 +1208,11 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
 }
 
 async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
+  yield {
+    title: "Verification mode",
+    format: "text",
+    body: JSON.stringify({ verificationMode: ctx.config.options?.verificationMode ?? "hash" }),
+  };
   yield {
     title: "File migration fidelity and additive retention",
     format: "text",
@@ -1138,9 +1275,7 @@ export const fileMigrationDriver: JobTypeDriver<FileMigrationConfig> = {
   execute(ctx) {
     return runPhase(ctx, "execute");
   },
-  verify(ctx) {
-    return runPhase(ctx, "verify");
-  },
+  verify,
   reportSections,
 };
 

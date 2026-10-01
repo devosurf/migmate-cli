@@ -149,7 +149,7 @@ interface CommonConfig {
 }
 type FileConfig = CommonConfig & {
   mappings: Mapping[];
-  options: Record<string, never>;
+  options: { verificationMode?: "hash" | "size_only" };
   rclone?: { config: FileReference; sourceRemote: string; destinationRemote: string };
 };
 type TeamsConfig = CommonConfig &
@@ -310,8 +310,22 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
       })
       .sort((a, b) => compareText(a.id, b.id));
     if (new Set(mappings.map((m) => m.id)).size !== mappings.length) configError("mappings");
-    if (input.options !== undefined) keys(object(input.options, "options"), [], "options");
-    const config: FileConfig = { ...common, mappings, options: {} };
+    const options = input.options === undefined ? {} : object(input.options, "options");
+    keys(options, ["verificationMode"], "options");
+    if (
+      options.verificationMode !== undefined &&
+      options.verificationMode !== "hash" &&
+      options.verificationMode !== "size_only"
+    )
+      configError("options.verificationMode");
+    const config: FileConfig = {
+      ...common,
+      mappings,
+      options:
+        options.verificationMode === undefined
+          ? {}
+          : { verificationMode: options.verificationMode },
+    };
     if (input.rclone !== undefined) {
       const r = object(input.rclone, "rclone");
       keys(r, ["config", "sourceRemote", "destinationRemote"], "rclone");

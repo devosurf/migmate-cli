@@ -264,6 +264,10 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async stopCopyPass(value) {
       await (await state()).worker.stopCopyPass(value);
     },
+    async resolveFilePass(value) {
+      if (!current) throw new ProviderFault("provider_failed", "The transfer worker is absent.");
+      return { socketPath: current.socketPath, ...(await (await files()).resolveFilePass(value)) };
+    },
     async listFileHashes(value) {
       return (await state()).worker.listFileHashes(value);
     },

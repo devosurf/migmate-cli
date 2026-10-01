@@ -415,6 +415,38 @@ export class FileEffects {
     return path;
   }
 
+  async resolveFilePass(input: {
+    sourceDriveId: string;
+    sourceItemId: string;
+    destDriveId: string;
+    destFolderId: string;
+  }) {
+    const source = await this.resolveSourceRoot(input);
+    if (!source || source.kind !== "folder")
+      throw new ProviderFault("unsupported_route", "The source root is not an ordinary folder.");
+    const root = await this.#graph.request<GraphItem>(
+      `/v1.0/drives/${encodeURIComponent(input.sourceDriveId)}/root?$select=id`,
+    );
+    const path =
+      root.id === source.id
+        ? ""
+        : await this.#sourcePath({
+            driveId: input.sourceDriveId,
+            item: source,
+          });
+    const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    return {
+      source: {
+        fs: `${this.#session.sourceRemote},drive_id=${quote(input.sourceDriveId)},root_folder_id=,encoding=Slash:${path}`,
+        kind: "sharepoint" as const,
+      },
+      destination: {
+        fs: `${this.#session.destinationRemote},team_drive=${quote(input.destDriveId)},root_folder_id=${quote(input.destFolderId)}:`,
+        kind: "google_drive" as const,
+      },
+    };
+  }
+
   async resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;

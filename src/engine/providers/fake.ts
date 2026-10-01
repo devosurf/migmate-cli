@@ -467,6 +467,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       modifiedAt: string;
       etag: string | null;
       size: number | null;
+      downloadable: boolean;
     }>,
   ): void {
     const entry = this.sourceById[sourceItemId];
@@ -478,6 +479,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       entry.content = encodeText(patch.content);
       entry.size = entry.content.byteLength;
     }
+    if (patch.downloadable !== undefined) entry.downloadable = patch.downloadable;
     if (patch.name !== undefined) entry.name = patch.name;
     if (patch.metadata !== undefined) entry.metadata = structuredClone(patch.metadata);
     if (patch.parentId !== undefined && patch.parentId !== entry.parentId) {
@@ -1014,19 +1016,26 @@ export class FakeFileMigrationPort implements ProviderPort {
     await pass.done;
   }
 
+  async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
+    if (!this.workerState?.alive) throw destinationFault("worker_exited", 500);
+    return {
+      socketPath: this.workerState.socketPath,
+      source: { fs: input.sourceItemId, kind: "sharepoint" as const },
+      destination: { fs: input.destFolderId, kind: "google_drive" as const },
+    };
+  }
+
   async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFileHashes", input.root.fs);
     const hashes: { path: string; size: number; hash: string | null }[] = [];
     for (const [path, entry] of this.tree(input.root.fs)) {
       if (entry.kind === "folder") continue;
-      if (
+      const unreadable =
         input.download &&
         (entry.content === null ||
           ("downloadable" in entry && !entry.downloadable) ||
-          this.unavailableDestinationStreams.has(entry.id))
-      )
-        throw new Error(`file unreadable: ${path}`);
+          this.unavailableDestinationStreams.has(entry.id));
       const supported =
         input.download ||
         input.root.kind === "local" ||
@@ -1035,8 +1044,9 @@ export class FakeFileMigrationPort implements ProviderPort {
           : input.hashType !== "quickxor");
       const hash =
         !supported ||
+        unreadable ||
         entry.content === null ||
-        (!input.download && this.withheldChecksums.has(entry.id))
+        (!input.download && input.hashType === "sha256" && this.withheldChecksums.has(entry.id))
           ? null
           : !input.download && input.hashType === "sha256" && "reportedChecksum" in entry
             ? entry.reportedChecksum
@@ -1046,7 +1056,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     return hashes;
   }
 
-  private removeDestinationItem(id: string): void {
+  removeDestinationItem(id: string): void {
     const entry = this.destinationById[id];
     if (!entry) return;
     delete this.destinationById[id];

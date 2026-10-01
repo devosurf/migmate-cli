@@ -133,6 +133,12 @@ export function hasRetryAfter(error: unknown): error is RetryAfterError {
 }
 
 export interface ProviderPort extends FilePassProvider {
+  resolveFilePass(input: {
+    sourceDriveId: string;
+    sourceItemId: string;
+    destDriveId: string;
+    destFolderId: string;
+  }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
   preflight?(input: {
     jobType: JobType;

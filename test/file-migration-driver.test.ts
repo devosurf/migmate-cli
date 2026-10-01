@@ -176,6 +176,32 @@ describe("file migration through the engine", () => {
       value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean,
       true,
     );
+    const retained = value(
+      await h.engine.reader(h.ref).rows({
+        phase: "verify",
+        codes: ["destination_only_retained"],
+      }),
+    ).rows;
+    assert.deepEqual(
+      retained.map((item) => item.jobType === "file_migration" && item.relativePath).sort(),
+      ["keep.txt", "report.docx"],
+    );
+    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+    const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
+    const json = report.artifacts.find((artifact) => artifact.name === "report.json")!;
+    const findings = JSON.parse(await readFile(json.path, "utf8")).findings;
+    assert.deepEqual(
+      findings.find((entry: { evidence: { path: string } }) => entry.evidence.path === "keep.txt")
+        .evidence,
+      {
+        path: "keep.txt",
+        sourceSize: null,
+        destinationSize: 8,
+        sourceHash: null,
+        destinationHash: hash("external"),
+        hashType: "sha256",
+      },
+    );
   });
 
   it("never adopts a marker-only object, including an exact same-source marker", async (t) => {
@@ -273,7 +299,6 @@ describe("file migration through the engine", () => {
     );
     assert.equal(verification.clean, false);
     assert.ok(verification.findings.some((entry) => entry.code === "content_mismatch"));
-    assert.ok(verification.findings.some((entry) => entry.code === "prior_copy_drift"));
     assert.equal(
       verification.findings.some((entry) => entry.code === "content_verification_degraded"),
       false,
@@ -444,33 +469,182 @@ describe("file migration through the engine", () => {
     assert.equal(planned.get("empty"), "path_unrepresentable");
   });
 
-  it("streams a withheld destination SHA-256 and requires an exception when byte proof is unavailable", async (t) => {
-    class UnavailableStreamPort extends FakeFileMigrationPort {
-      unavailable = false;
-      override streamDestinationContent(objectId: string): AsyncIterable<Uint8Array> {
-        if (this.unavailable)
-          throw Object.assign(new Error("Destination read denied"), { status: 403 });
-        return super.streamDestinationContent(objectId);
-      }
+  it("verifies matching paths and hashes without per-item provenance markers", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
+    assert.ok(
+      plan.sections
+        .filter((section) => section.body.startsWith("{"))
+        .some((section) => JSON.parse(section.body).verificationMode === "hash"),
+    );
+    await execute(h);
+    for (const item of h.port.snapshotDestination()) {
+      await h.port.writeDestinationMarker({ objectId: item.id, marker: null });
     }
-    const port = new UnavailableStreamPort(fixture());
-    const h = await harness(t, fixture(), config, port);
+    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.equal(verified.clean, true);
+    assert.deepEqual(verified.findings, []);
+    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+  });
+
+  it("falls back per file to stored MD5 without downloading the destination", async (t) => {
+    const h = await harness(t);
     await approve(h);
     await execute(h);
-    const item = port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
-    port.withholdDestinationChecksum(item.id);
+    const item = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+    h.port.withholdDestinationChecksum(item.id);
+    h.port.blockDestinationStream(item.id);
     assert.equal(
       value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean,
       true,
     );
-    port.unavailable = true;
-    const degraded = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
-    assert.equal(degraded.clean, false);
-    assert.ok(degraded.findings.some((entry) => entry.code === "content_verification_degraded"));
+    await h.port.uploadDestinationContent({
+      destinationId: item.id,
+      parentFolderId: "destination-root",
+      name: item.name,
+      content: new Uint8Array([1, 1, 1, 1]),
+      createdAt: now,
+      modifiedAt: now,
+      mimeType: item.mimeType,
+    });
+    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.deepEqual(
+      verified.findings.map((entry) => entry.code),
+      ["content_mismatch"],
+    );
+    const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
+    const json = report.artifacts.find((artifact) => artifact.name === "report.json")!;
+    const mismatch = JSON.parse(await readFile(json.path, "utf8")).findings[0];
+    assert.deepEqual(mismatch.evidence, {
+      path: "report.docx",
+      sourceSize: 4,
+      destinationSize: 4,
+      hashType: "md5",
+      sourceHash: "c9c9788f6ba353546d6f3723ddd869b6",
+      destinationHash: "3b5b9852567ef7618aac7f5f2d74ef74",
+    });
+  });
+
+  it("requires acceptance of size-only verification and states the mode in the plan", async (t) => {
+    const h = await harness(t, fixture(), {
+      ...config,
+      options: { verificationMode: "size_only" },
+    });
+    await approve(h);
+    const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
+    assert.ok(
+      plan.sections
+        .filter((section) => section.body.startsWith("{"))
+        .some((section) => JSON.parse(section.body).verificationMode === "size_only"),
+    );
+    await execute(h);
+    const item = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+    await h.port.uploadDestinationContent({
+      destinationId: item.id,
+      parentFolderId: "destination-root",
+      name: item.name,
+      content: new Uint8Array([1, 1, 1, 1]),
+      createdAt: now,
+      modifiedAt: now,
+      mimeType: item.mimeType,
+    });
+    h.port.mutateSourceItem("binary", { downloadable: false });
+    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.deepEqual(
+      verified.findings.map((entry) => entry.code),
+      ["content_verification_degraded"],
+    );
     const closed = value(await h.engine.withWriter(h.ref, (writer) => writer.close()));
     assert.equal(closed.ok, false);
-    if (closed.ok) throw new Error("A size-only verification closed cleanly");
+    if (closed.ok) throw new Error("Size-only verification closed without acceptance");
     assert.equal(closed.refusal.code, "verification_unaccepted");
+    value(
+      value(
+        await h.engine.withWriter(h.ref, (writer) =>
+          writer.accept({
+            verificationDigest: verified.verificationDigest,
+            approver: "operator",
+            codes: [{ code: "content_verification_degraded" }],
+          }),
+        ),
+      ),
+    );
+    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+  });
+
+  it("names an unreadable source without losing verification of readable files", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    await execute(h);
+    h.port.mutateSourceItem("binary", { downloadable: false });
+    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.deepEqual(
+      verified.findings.map((entry) => entry.code),
+      ["source_read_failed"],
+    );
+    const rows = await codes(h, "verify");
+    assert.equal(rows.get("binary"), "source_read_failed");
+    assert.equal(rows.get("zero"), "unchanged");
+    const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
+    const json = report.artifacts.find((artifact) => artifact.name === "report.json")!;
+    assert.deepEqual(JSON.parse(await readFile(json.path, "utf8")).findings[0].evidence, {
+      path: "report.docx",
+      sourceSize: 4,
+      destinationSize: 4,
+      hashType: "sha256",
+      sourceHash: null,
+      destinationHash: hash(new Uint8Array([0, 255, 5, 0])),
+    });
+  });
+
+  it("reports deleted and size-differing destination files with path and both sides' evidence", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    await execute(h);
+    const items = h.port.snapshotDestination();
+    h.port.removeDestinationItem(items.find((entry) => entry.path === "nested/zero.bin")!.id);
+    const item = items.find((entry) => entry.path === "report.docx")!;
+    await h.port.uploadDestinationContent({
+      destinationId: item.id,
+      parentFolderId: "destination-root",
+      name: item.name,
+      content: Buffer.from("truncated"),
+      createdAt: now,
+      modifiedAt: now,
+      mimeType: item.mimeType,
+    });
+    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    assert.deepEqual(verified.findings.map((entry) => entry.code).sort(), [
+      "content_mismatch",
+      "destination_missing",
+      "size_mismatch",
+    ]);
+    const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
+    const json = report.artifacts.find((artifact) => artifact.name === "report.json")!;
+    const findings = JSON.parse(await readFile(json.path, "utf8")).findings;
+    assert.deepEqual(
+      findings.find((entry: { code: string }) => entry.code === "destination_missing").evidence,
+      {
+        path: "nested/zero.bin",
+        sourceSize: 0,
+        destinationSize: null,
+        sourceHash: hash(""),
+        destinationHash: null,
+        hashType: "sha256",
+      },
+    );
+    assert.deepEqual(
+      findings.find((entry: { code: string }) => entry.code === "size_mismatch").evidence,
+      {
+        path: "report.docx",
+        sourceSize: 4,
+        destinationSize: 9,
+        sourceHash: hash(new Uint8Array([0, 255, 5, 0])),
+        destinationHash: hash("truncated"),
+        hashType: "sha256",
+      },
+    );
   });
 
   it("copies what the source serves when its listed size disagrees, and names that for acceptance", async (t) => {
@@ -538,6 +712,11 @@ describe("file migration through the engine", () => {
       path: "photo.heic",
       listedSize: 999,
       servedSize: 11,
+      sourceSize: 999,
+      destinationSize: 11,
+      sourceHash: hash("still frame"),
+      destinationHash: hash("still frame"),
+      hashType: "sha256",
     });
   });
 

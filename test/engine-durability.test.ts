@@ -249,9 +249,9 @@ describe("engine durability seam", () => {
   it("exposes one verification gate with execution already complete to a live reader", async (t) => {
     const h = await harness(t);
     await approve(h);
-    const original = h.port.openSourceContent.bind(h.port);
+    const original = h.port.listFileHashes.bind(h.port);
     let observedVerification = false;
-    t.mock.method(h.port, "openSourceContent", async function* (id: string) {
+    t.mock.method(h.port, "listFileHashes", async (input: Parameters<typeof original>[0]) => {
       const rail = value(await h.engine.reader(h.ref).status()).rail;
       if (rail.some((entry) => entry.verb === "verify" && entry.state === "current")) {
         observedVerification = true;
@@ -262,7 +262,7 @@ describe("engine durability seam", () => {
         for (const verb of ["plan", "approve", "execute"])
           assert.equal(rail.find((entry) => entry.verb === verb)?.state, "done");
       }
-      yield* original(id);
+      return original(input);
     });
     await execute(h);
     assert.equal(observedVerification, true);
