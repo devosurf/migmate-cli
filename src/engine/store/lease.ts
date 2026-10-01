@@ -351,6 +351,12 @@ function heartbeatAgeMs(heartbeatAt: string, now: () => Date): number {
   return Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
 }
 
+/**
+ * Process absence alone is not proof: hostId lives in the engine home, so two
+ * Linux containers sharing that home are one "host" with separate PID namespaces,
+ * and a live owner reads as absent or PID-reused. Its fresh heartbeat is then the
+ * only liveness signal, so expiry stays required even when the PID is gone.
+ */
 export function evaluateReclaim(i: ReclaimInputs): ReclaimDecision {
   if (!i.hostMatches) return { reclaimable: false, code: "foreign_host" };
   if (!i.heartbeatExpired || !i.ownerProcessGone) return { reclaimable: false, code: "lease_held" };
