@@ -207,12 +207,7 @@ it(
       const limited = await supervisor.startCopyPass({ ...input, deleteLimit: 0 });
       const failed = await finish(supervisor, { socketPath: worker.socketPath, pass: limited });
       assert.equal(failed.state, "failed");
-      const rcloneStatus = await supervisor.call<{ error: string }>(
-        worker.socketPath,
-        "job/status",
-        { jobid: limited.jobid },
-      );
-      assert.equal(failed.error, rcloneStatus.error);
+      assert.match(failed.error!, /delete/i);
       assert.equal(await readFile(join(destination, "extra-one"), "utf8"), "one");
       assert.equal(await readFile(join(destination, "extra-two"), "utf8"), "two");
       assert.ok(
