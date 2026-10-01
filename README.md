@@ -11,13 +11,13 @@ Two job types:
 
 ## Status
 
-Pre-release, and **not published to any registry** — there is no publish workflow, so merging to `main` does not release. Install from source.
+Pre-release. Releases are GitHub Releases cut from `v*` tags by `.github/workflows/release.yml`; nothing is published to npm, and merging to `main` does not release.
 
 Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. Every job verifies each item it writes — size, SHA-256, created and modified time, MIME type and provenance — and any gap is a finding that blocks `close` until it is accepted. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on any of the four platforms, including archive options without live-test evidence. A shape this build does not implement refuses with `unsupported_route` (exit 4). Five configurations last passed the optional live test on `darwin-arm64` with Node 24.21.0 and rclone v1.75.0, between 2026-09-16 and 2026-09-20. `docs/release-limits.md` states what is and is not claimed.
 
 ## Requirements
 
-- **Node 24.15.0 or later**, any later major included. The floor is not a taste preference: the durable store is `node:sqlite`, which is a release candidate rather than a stable API, and `24.15.0` is where it reached that tier — earlier 24.x carries a weaker one. An earlier runtime is refused as `usage` (exit 4 is for gates; this is exit 2) instead of reaching the store. `migmate --help` still answers anywhere, so an operator can read the requirement off the tool.
+- **Node 24.15.0 or later**, any later major included; the [installer](#install) supplies a private one when the host's is missing or older. The floor is not a taste preference: the durable store is `node:sqlite`, which is a release candidate rather than a stable API, and `24.15.0` is where it reached that tier — earlier 24.x carries a weaker one. An earlier runtime is refused as `usage` (exit 4 is for gates; this is exit 2) instead of reaching the store. `migmate --help` still answers anywhere, so an operator can read the requirement off the tool.
 - **macOS 13.5+ or Linux**, on x64 or arm64. Any other platform is refused at install time by the `os` field, and `defaultHome` refuses it at runtime. Windows was removed deliberately — see `docs/adr/0002-drop-windows.md`.
 - A desktop session only for `migmate web`, which opens a native WebView rather than serving a port.
 
@@ -26,6 +26,25 @@ Two job types: file migration, and Teams archive with or without a Shared Drive 
 Both version requirements live in `src/versions.ts`: an open Node floor, and an exact transfer binary pin whose narrowness that file explains and where widening it is decided. `package.json`'s `engines` mirrors the same Node floor for npm's benefit.
 
 ## Install
+
+```sh
+curl -fsSL https://github.com/devosurf/migmate-cli/releases/latest/download/install.sh | sh
+```
+
+The installer checks the platform, downloads the latest release (~117 MB, almost all of it the four vendored `rclone` builds) and verifies it against the release's `SHA256SUMS`, then writes a `migmate` launcher to `~/.local/bin`. It uses your `node` when it meets the release's Node floor and has npm beside it; otherwise it downloads a private Node from nodejs.org, checks it against nodejs.org's `SHASUMS256.txt`, and keeps it inside the install. It never edits shell startup files: when `~/.local/bin` is not on `PATH`, it prints the line to add.
+
+Update with `migmate upgrade`, or run the same one-liner again. The previous version stays on disk until the next upgrade, so a job still running from it keeps its files.
+
+| Setting                               | Default                      | Effect                                                             |
+| ------------------------------------- | ---------------------------- | ------------------------------------------------------------------ |
+| `--version X.Y.Z` / `MIGMATE_VERSION` | latest                       | Install or move to one release: `migmate upgrade --version X.Y.Z`  |
+| `MIGMATE_INSTALL_DIR`                 | `~/.local/share/migmate-cli` | Installed versions, any private Node, and the `current` link       |
+| `MIGMATE_BIN_DIR`                     | `~/.local/bin`               | Where the `migmate` launcher goes                                  |
+| `MIGMATE_NODE`                        | `auto`                       | `system` insists on your Node; `bundled` always uses a private one |
+
+Pass options through the pipe with `sh -s --`, for example `… | sh -s -- --version 0.1.0`. Uninstall with `rm -rf ~/.local/share/migmate-cli ~/.local/bin/migmate`; job stores live elsewhere and are left alone.
+
+### From source
 
 ```sh
 git clone git@github.com:devosurf/migmate-cli.git
@@ -209,7 +228,10 @@ Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, d
 - `npm run check:vendor` — verifies the vendored binary hashes.
 - `npm run check:worker` — opt-in, spawns the real `rclone` worker.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.
+- `npm run check:install` — packs, serves the artifact as a local GitHub-shaped release, and drives `scripts/install.sh` through a fresh install, `migmate upgrade`, pruning, a tampered checksum, and a private Node download from nodejs.org. CI's four cells run it after `check:package`.
 - `npm run test:live -- --config <file>` — optional. Runs the live probe suite against disposable roots in a real tenant and reports pass or fail per probe; nothing is written into the repository. The wizards write its config, described by `scripts/live/config.schema.json`. It is not part of `npm test`, CI, or any release step.
+
+**Releasing.** Set `version` in `package.json`, commit, then push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). `.github/workflows/release.yml` reruns CI on all four cells and publishes `migmate-<version>.tgz`, `install.sh`, and `SHA256SUMS` as a GitHub release. A version with a `-` suffix is marked prerelease, which `latest` and `migmate upgrade` skip.
 
 ## Where to look next
 

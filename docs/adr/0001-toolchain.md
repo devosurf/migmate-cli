@@ -52,3 +52,13 @@ Widening to Node 26 after its LTS promotion is now one entry in `TESTED_NODE` pl
 _Supersedes the tested-set half of the 2026-09-16 amendment._ Refusing every major not listed in `TESTED_NODE` turned each Node release into friction: on Node 26.4.0 the CLI refused every verb but `--help`, and 20 tests failed on that refusal alone. With the guard lifted, the full offline suite passes unchanged on 26.4.0, so the allowlist was protecting against a difference no test could find.
 
 **`src/versions.ts` now holds one `NODE_FLOOR`, `24.15.0`, and admits every version at or above it.** The floor keeps its reason: it is where `node:sqlite` reached the release-candidate tier. Below it the CLI still refuses as `usage` at exit 2 before opening the store, and `--help` still answers. `engines` already read `>=24.15.0`, so npm and the runtime now agree. CI still runs Node 24 cells only; a later major is supported without a cell of its own. The transfer binary keeps its exact pin.
+
+## Amendment 2026-10-01: releases ship through GitHub Releases and a one-line installer
+
+Installing meant cloning, `npm ci`, `npm pack`, and a global npm install onto a host that already had Node 24.15 or later, which most Linux hosts do not. The artifact stays the same npm tarball; only how it reaches a host changes.
+
+**A `v*` tag publishes a GitHub release.** `.github/workflows/release.yml` requires the tag to match `package.json`, reruns the four-cell CI workflow, and uploads `migmate-<version>.tgz`, `install.sh`, and `SHA256SUMS`. Nothing goes to the npm registry. The one-line `curl … | sh` needs the repository to be public; artifacts from a private repository need an authenticated download.
+
+**`scripts/install.sh` installs one release per directory and switches a `current` link.** It verifies the tarball against the release's `SHA256SUMS` and reads the Node floor from the tarball's own `engines`, so `src/versions.ts` stays the only source. It uses the host's Node when that meets the floor and has npm beside it, and otherwise downloads a private Node from nodejs.org, checked against its `SHASUMS256.txt`. The install root defaults to `~/.local/share/migmate-cli`, never `~/.migmate`, because the CLI treats the nearest `.migmate` directory as a job store. The launcher it writes handles `migmate upgrade` by rerunning the latest installer, so the job CLI gains no network or self-update code. The previous version is kept until the next upgrade, so a running job keeps its files.
+
+`npm run check:install` serves a packed release from 127.0.0.1 in GitHub's URL shape and drives the installer through install, upgrade, pruning, a tampered checksum, and a private Node download; all four CI cells run it, so Ubuntu's dash exercises the POSIX script.

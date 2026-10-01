@@ -33,6 +33,7 @@
     "check:vendor": "node scripts/check-vendor.ts",
     "check:worker": "node scripts/check-worker.ts",
     "check:package": "node scripts/check-package.ts",
+    "check:install": "node scripts/check-install.ts",
     "test:live": "node scripts/test-live.ts",
     "prepack": "npm run build && npm run check:vendor",
     "format": "prettier --write .",
