@@ -71,7 +71,11 @@ import {
 } from "./store/lease.ts";
 import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
-import { fileMigrationDriver, type FileMappingConfig } from "./drivers/file-migration.ts";
+import {
+  fileMigrationDriver,
+  type FileMappingConfig,
+  type FileMigrationConfig,
+} from "./drivers/file-migration.ts";
 import { teamsArchiveDriver } from "./drivers/teams-archive.ts";
 import { parseArchiveConfig } from "./archive/config.ts";
 import type { ArchiveConfig } from "./providers/archive.ts";
@@ -149,7 +153,7 @@ interface CommonConfig {
 }
 type FileConfig = CommonConfig & {
   mappings: Mapping[];
-  options: { verificationMode?: "hash" | "size_only" };
+  options: NonNullable<FileMigrationConfig["options"]>;
   rclone?: { config: FileReference; sourceRemote: string; destinationRemote: string };
 };
 type TeamsConfig = CommonConfig &
@@ -311,7 +315,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
       .sort((a, b) => compareText(a.id, b.id));
     if (new Set(mappings.map((m) => m.id)).size !== mappings.length) configError("mappings");
     const options = input.options === undefined ? {} : object(input.options, "options");
-    keys(options, ["verificationMode"], "options");
+    keys(options, ["verificationMode", "mappingsInFlight", "transfersPerMapping"], "options");
     if (
       options.verificationMode !== undefined &&
       options.verificationMode !== "hash" &&
@@ -326,6 +330,13 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           ? {}
           : { verificationMode: options.verificationMode },
     };
+    for (const name of ["mappingsInFlight", "transfersPerMapping"] as const) {
+      const value = options[name];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+        configError(`options.${name}`);
+      config.options[name] = value;
+    }
     if (input.rclone !== undefined) {
       const r = object(input.rclone, "rclone");
       keys(r, ["config", "sourceRemote", "destinationRemote"], "rclone");
@@ -1413,9 +1424,10 @@ function makeWriter(
             }
           }
           lastUnit = unit.unitKey;
-          if (signal?.aborted && !["pending", "running"].includes(unit.mappingPass?.status ?? ""))
+          if (signal?.aborted && !unit.mappingPass)
             return { committed, interrupted: true, blocked: false };
         }
+        if (signal?.aborted) return { committed, interrupted: true, blocked: false };
         store.appendEvent({ verb: phase, phase, kind: "phase_completed", payload: { committed } });
         return { committed, interrupted: false, blocked: mappingFailed };
       } catch (error) {

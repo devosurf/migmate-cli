@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,21 +82,31 @@ function hash(content: string | Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-function multiMapping() {
-  const input = fileFixture([
-    { id: "a", parentId: "source-root", name: "a", kind: "folder" },
-    { id: "a-file", parentId: "a", name: "one.txt", kind: "file", content: "one" },
-    { id: "b", parentId: "source-root", name: "b", kind: "folder" },
-    { id: "b-file", parentId: "b", name: "two.txt", kind: "file", content: "two" },
-  ]);
+function multiMapping(ids = ["a", "b"]) {
+  const input = fileFixture(
+    ids.flatMap((id, index) => [
+      { id, parentId: "source-root", name: id, kind: "folder" as const },
+      {
+        id: `${id}-file`,
+        parentId: id,
+        name: index === 0 ? "one.txt" : "two.txt",
+        kind: "file" as const,
+        content: index === 0 ? "one" : "two",
+      },
+    ]),
+  );
   input.destinationItems.push(
-    { id: "dest-a", parentId: "destination-root", name: "a", kind: "folder" },
-    { id: "dest-b", parentId: "destination-root", name: "b", kind: "folder" },
+    ...ids.map((id) => ({
+      id: `dest-${id}`,
+      parentId: "destination-root",
+      name: id,
+      kind: "folder" as const,
+    })),
   );
   return {
     input,
     selected: {
-      mappings: ["a", "b"].map((id) => ({
+      mappings: ids.map((id) => ({
         id,
         sourceDriveId: "source-drive",
         sourceItemId: id,
@@ -106,6 +118,250 @@ function multiMapping() {
 }
 
 describe("file migration through the engine", () => {
+  it("refuses copy limits that are not positive safe integers before planning", async (t) => {
+    const h = await harness(t);
+    for (const name of ["mappingsInFlight", "transfersPerMapping"]) {
+      for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null]) {
+        const result = await h.engine.initJob({
+          type: "file_migration",
+          config: { ...config, options: { [name]: invalid } },
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) throw new Error("Expected invalid copy limit refusal");
+        assert.equal(result.refusal.code, "configuration_invalid");
+      }
+    }
+  });
+
+  it("cooperatively interrupts all concurrent passes without starting queued mappings", async (t) => {
+    const { input, selected } = multiMapping(["a", "b", "c"]);
+    input.copyPasses = ["a", "b"].map((sourceRootId) => ({
+      sourceRootId,
+      pause: true,
+      afterFiles: 0,
+    }));
+    const h = await harness(t, input, selected);
+    await approve(h);
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]);
+    const executing = h.engine.withWriterResult(h.ref, (writer) => writer.execute({ signal }));
+    const running = new Set<string>();
+    for await (const event of h.engine.reader(h.ref).events({ follow: true, signal })) {
+      if (event.kind === "mapping_progress" && event.payload.status === "running") {
+        running.add(String(event.payload.mappingId));
+        if (running.size === 2) {
+          controller.abort();
+          break;
+        }
+      }
+    }
+    assert.equal(value(await executing).outcome, "interrupted");
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(
+      status.mappingPasses.map((pass) => [pass.mappingId, pass.status]),
+      [
+        ["a", "interrupted"],
+        ["b", "interrupted"],
+        ["c", "pending"],
+      ],
+    );
+    assert.equal(status.worker.active, false);
+    await execute(h);
+    assert.equal(value(await h.engine.reader(h.ref).status()).state, "verified");
+  });
+
+  it(
+    "recovers every running mapping after a killed writer and resumes pending mappings",
+    { timeout: 20000 },
+    async (t) => {
+      const ids = ["a", "b", "c", "d"];
+      const { input, selected } = multiMapping(ids);
+      input.copyPasses = ids.map((sourceRootId) => ({ sourceRootId, pause: true, afterFiles: 1 }));
+      const h = await harness(t, input, {
+        ...selected,
+        options: { mappingsInFlight: 3 },
+      });
+      await approve(h);
+      const child = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+      import { openEngine } from ${JSON.stringify(new URL("../src/engine/index.ts", import.meta.url).href)};
+      import { FakeFileMigrationPort } from ${JSON.stringify(new URL("../src/engine/providers/fake.ts", import.meta.url).href)};
+      const engine = openEngine({
+        home: process.env.COPY_HOME,
+        now: () => new Date(${JSON.stringify(now)}),
+        provider: new FakeFileMigrationPort(JSON.parse(process.env.COPY_FIXTURE)),
+      });
+      const ref = { id: process.env.COPY_JOB };
+      const executing = engine.withWriterResult(ref, (writer) => writer.execute());
+      const active = new Set();
+      for await (const event of engine.reader(ref).events({ follow: true })) {
+        if (event.kind === "mapping_progress" && event.payload.status === "running") {
+          active.add(event.payload.mappingId);
+          if (active.size === 3) {
+            process.stdout.write("ready");
+            break;
+          }
+        }
+      }
+      await executing;
+    `,
+        ],
+        {
+          env: {
+            ...process.env,
+            COPY_HOME: h.home,
+            COPY_JOB: h.ref.id,
+            COPY_FIXTURE: JSON.stringify(input),
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const closed = once(child, "close");
+      let stderr = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk) => {
+        stderr += chunk;
+      });
+      t.after(async () => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await closed;
+      });
+      await Promise.race([
+        once(child.stdout, "data"),
+        closed.then(() => {
+          throw new Error(`Writer exited before concurrent passes: ${stderr}`);
+        }),
+      ]);
+      const running = value(await h.engine.reader(h.ref).status()).mappingPasses;
+      assert.deepEqual(
+        running.map((pass) => pass.status),
+        ["running", "running", "running", "pending"],
+      );
+      assert.equal(
+        new Set(running.filter((pass) => pass.status === "running").map((pass) => pass.executeId))
+          .size,
+        1,
+      );
+      child.kill("SIGKILL");
+      assert.equal((await closed)[1], "SIGKILL");
+      h.engine.close();
+      // Only the injected engine clock advances; the writer really is dead.
+      const port = new FakeFileMigrationPort({ ...input, copyPasses: [] });
+      h.engine = openEngine({
+        home: h.home,
+        now: () => new Date(Date.parse(now) + 30001),
+        provider: port,
+      });
+      value(
+        await h.engine.withWriterResult(h.ref, async (writer) => {
+          const recovered = value(await h.engine.reader(h.ref).status());
+          assert.deepEqual(
+            recovered.mappingPasses.map((pass) => pass.status),
+            ["interrupted", "interrupted", "interrupted", "pending"],
+          );
+          return writer.execute();
+        }),
+      );
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.equal(status.state, "verified");
+      assert.deepEqual(
+        status.mappingPasses.map((pass) => [pass.mappingId, pass.passNumber, pass.status]),
+        [
+          ["a", 1, "interrupted"],
+          ["a", 2, "completed"],
+          ["b", 1, "interrupted"],
+          ["b", 2, "completed"],
+          ["c", 1, "interrupted"],
+          ["c", 2, "completed"],
+          ["d", 1, "completed"],
+        ],
+      );
+      assert.deepEqual(
+        port
+          .snapshotDestination()
+          .filter((item) => item.kind === "file")
+          .map((item) => item.path)
+          .sort(),
+        ["a/one.txt", "b/two.txt", "c/two.txt", "d/two.txt"],
+      );
+    },
+  );
+
+  it("freezes effective copy limits in the plan, including conservative defaults", async (t) => {
+    for (const options of [undefined, { mappingsInFlight: 1, transfersPerMapping: 7 }]) {
+      const h = await harness(t, fixture(), options ? { ...config, options } : config);
+      await approve(h);
+      const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
+      const section = plan.sections.find((section) => section.title === "Copy concurrency");
+      assert.ok(section);
+      assert.deepEqual(
+        JSON.parse(section.body),
+        options ?? {
+          mappingsInFlight: 2,
+          transfersPerMapping: 4,
+        },
+      );
+    }
+  });
+
+  it("keeps the configured number of mappings in flight and fills freed slots before slower passes finish", async (t) => {
+    const ids = ["a", "b", "c", "d", "e"];
+    const { input, selected } = multiMapping(ids);
+    input.copyPasses = ids.map((sourceRootId) => ({ sourceRootId, pause: true, afterFiles: 0 }));
+    class ConfiguredPort extends FakeFileMigrationPort {
+      override async startCopyPass(input: Parameters<FakeFileMigrationPort["startCopyPass"]>[0]) {
+        assert.equal(input.transfers, 3);
+        return super.startCopyPass(input);
+      }
+    }
+    const port = new ConfiguredPort(input);
+    const h = await harness(
+      t,
+      input,
+      {
+        ...selected,
+        options: { mappingsInFlight: 2, transfersPerMapping: 3 },
+      },
+      port,
+    );
+    await approve(h);
+    const signal = AbortSignal.timeout(5000);
+    const executing = h.engine.withWriterResult(h.ref, (writer) => writer.execute({ signal }));
+    const active = new Set<string>();
+    const completed = new Set<string>();
+    let filledWhileFirstRunning = false;
+    for await (const event of h.engine.reader(h.ref).events({ follow: true, signal })) {
+      if (event.kind !== "mapping_progress") continue;
+      const id = String(event.payload.mappingId);
+      if (event.payload.status === "running") {
+        if (active.has(id)) continue;
+        active.add(id);
+        assert.ok(active.size <= 2);
+        if (id === "c") {
+          assert.ok(active.has("a"));
+          filledWhileFirstRunning = true;
+        }
+        if (active.size === 2 || completed.size === 4) {
+          const status = value(await h.engine.reader(h.ref).status());
+          const pass = status.mappingPasses.find((pass) => pass.mappingId === id)!;
+          port.releaseCopyPasses(pass.jobid!);
+        }
+        if (id === "e") port.releaseCopyPasses();
+      } else if (event.payload.status === "completed") {
+        active.delete(id);
+        completed.add(id);
+        if (completed.size === ids.length) break;
+      }
+    }
+    assert.equal(value(await executing).outcome, "completed");
+    assert.equal(filledWhileFirstRunning, true);
+    assert.deepEqual([...completed].sort(), ids);
+    assert.equal(value(await h.engine.reader(h.ref).status()).state, "verified");
+  });
+
   it("copies and verifies multiple mappings end to end and emits per-mapping progress", async (t) => {
     const { input, selected } = multiMapping();
     const h = await harness(t, input, selected);

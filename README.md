@@ -111,9 +111,19 @@ File-migration approval binds the destination root, not unrelated folder content
 
 ### File mapping copies and recovery
 
-Keep the existing `[[mappings]]` job configuration. Each approved mapping runs sequentially through the managed rclone worker, with four transfers inside a pass. Destinations must already exist; this release adds no manifest loader, provisioning, mirror/delete mode, or mapping-concurrency setting.
+Keep the existing `[[mappings]]` job configuration. Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Destinations must already exist; this release adds no manifest loader, provisioning, or mirror/delete mode.
 
-`status` exposes durable `mappingPasses`: mapping and pass number, mode, rclone handle, state, timestamps, last stats and error. Failed mappings retain rclone's error while later mappings continue. Run `execute` again to retry failed or interrupted mappings; completed mappings in the approved revision are skipped. On writer-open recovery, an unfinished pass whose worker is gone becomes interrupted. A retried copy lets rclone skip identical files instead of recovering per-file uploads.
+The job's `[options]` controls both limits, shown in the immutable plan's **Copy concurrency** section and the report:
+
+```toml
+[options]
+mappingsInFlight = 2
+transfersPerMapping = 4
+```
+
+These are conservative defaults: two active mappings, each with up to four file transfers (eight in total). Both settings accept positive safe integers; set `mappingsInFlight = 1` for serial mapping copies. Raising them increases simultaneous provider work and may increase throttling; they are not tenant-throughput guarantees. The next queued mapping starts as a slot frees, rather than waiting for a whole batch.
+
+`status` exposes durable `mappingPasses`: mapping and pass number, mode, rclone handle, state, timestamps, last stats and error. rclone's backend pacer handles throttling within each pass. A failed pass retains rclone's error and counts against the run's retry budget without stopping other active or queued mappings; the run remains blocked if any pass fails. Run `execute` again to retry failed or interrupted mappings; completed mappings in the approved revision are skipped. On writer-open recovery, every unfinished pass whose worker is gone becomes interrupted, including all passes active at a crash. A retried copy lets rclone skip identical files instead of recovering per-file uploads.
 
 Ctrl-C stops active passes cooperatively, returns exit **130**, and leaves the job resumable. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
 

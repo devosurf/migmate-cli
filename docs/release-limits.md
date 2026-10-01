@@ -8,15 +8,17 @@ The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclo
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
 
-Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. There is no job-level mirror mode, manifest loader, drive provisioning, or mapping concurrency setting in this release. Keep the existing mappings configuration and pre-existing destination roots.
+Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. There is no job-level mirror mode, manifest loader, or drive provisioning in this release. Keep the existing mappings configuration and pre-existing destination roots.
 
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. An excluded source subtree gaining a new member still requires replanning.
 
 ## 2. Mapping recovery is durable; rclone jobs are not
 
-Mappings execute sequentially, each with four transfers. `status.mappingPasses` records revision, mapping ID, pass number, mode, nullable rclone handle (`executeId`, `jobid`, stats group), status, start/end timestamps, last stats and error. States are pending, running, completed, failed or interrupted. A failed mapping retains rclone's error while later mappings continue; a run with failures remains blocked.
+Job `[options]` settings `mappingsInFlight` (default **2**) and `transfersPerMapping` (default **4**) are positive safe integers and appear in the immutable plan and report. These conservative defaults allow up to eight simultaneous file transfers, not a promised throughput under tenant throttling. Set `mappingsInFlight = 1` for serial mappings. At most the configured number of passes run inside one worker; a freed slot admits the next mapping without a batch barrier. One writer commits observations serially.
 
-On writer-open recovery, unfinished passes whose worker is gone become interrupted. The next `execute` retries failed/interrupted mappings and skips completed passes for the approved revision. rclone compares files and skips identical ones on retry; this is not replay of a durable rclone job. Ctrl-C stops passes cooperatively and exits 130, leaving the job resumable.
+`status.mappingPasses` records revision, mapping ID, pass number, mode, nullable rclone handle (`executeId`, `jobid`, stats group), status, start/end timestamps, last stats and error. States are pending, running, completed, failed or interrupted. rclone's pacer absorbs throttling within a pass. A failed pass retains rclone's error and counts against the run's retry budget without stopping other active or queued mappings; a run with failures remains blocked.
+
+On writer-open recovery, all unfinished passes whose worker is gone become interrupted, including every pass active at a crash. The next `execute` retries failed/interrupted mappings and skips completed passes for the approved revision. rclone compares files and skips identical ones on retry; this is not replay of a durable rclone job. Ctrl-C stops all active passes cooperatively and exits 130, leaving the job resumable.
 
 `execute --output jsonl` emits `mapping_progress` with `mappingId`, `passNumber`, `bytes`, `files`, `speed` and `errors`. Copy statistics are not verification proof. Hash verification is a point-in-time statement, not a source freeze or future-drift guarantee.
 

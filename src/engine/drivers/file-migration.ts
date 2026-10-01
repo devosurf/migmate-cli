@@ -25,8 +25,14 @@ export interface FileMappingConfig {
 
 export interface FileMigrationConfig {
   mappings: FileMappingConfig[];
-  options?: { verificationMode?: "hash" | "size_only" };
+  options?: {
+    verificationMode?: "hash" | "size_only";
+    mappingsInFlight?: number;
+    transfersPerMapping?: number;
+  };
 }
+
+const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
 
 type Phase = "plan" | "execute" | "verify";
 interface SourceView extends SourceEntry {
@@ -350,80 +356,127 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
 }
 
 async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
-  for (const mapping of ctx.config.mappings) {
+  const mappings = ctx.config.mappings[Symbol.iterator]();
+  const active = new Set<AsyncGenerator<CommitUnit>>();
+  const limit = ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight;
+  let exhausted = false;
+  try {
+    while (active.size || !exhausted) {
+      while (!ctx.signal?.aborted && !exhausted && active.size < limit) {
+        const next = mappings.next();
+        if (next.done) exhausted = true;
+        else active.add(copyMapping(ctx, next.value));
+      }
+      if (!active.size) break;
+      let progressed = false;
+      for (const iterator of active) {
+        const next = await iterator.next();
+        if (next.done) {
+          active.delete(iterator);
+          progressed = true;
+          continue;
+        }
+        const pass = next.value.mappingPass!;
+        if (pass.status !== "pending" && pass.status !== "running") {
+          active.delete(iterator);
+          await iterator.return(undefined);
+          progressed = true;
+        } else if (!pass.lastStats) {
+          progressed = true;
+        }
+        yield next.value;
+      }
+      if (!progressed && !ctx.signal?.aborted) {
+        // Passes run in rclone; only their durable observations are serialized here.
+        await delay(100, undefined, { signal: ctx.signal }).catch((error) => {
+          if (!ctx.signal?.aborted) throw error;
+        });
+      }
+    }
+  } finally {
+    // An engine/store failure must still stop every pass, even if one stop fails.
+    const stopped = await Promise.allSettled(
+      [...active].map((iterator) => iterator.return(undefined)),
+    );
+    const failed = stopped.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
+  }
+}
+
+async function* copyMapping(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+): AsyncGenerator<CommitUnit> {
+  const previous = (ctx.resume.mappingPasses ?? [])
+    .filter((pass) => pass.mappingId === mapping.id)
+    .at(-1);
+  if (previous?.status === "completed") return;
+  let pass =
+    previous?.status === "pending"
+      ? previous
+      : pendingPass(ctx.revision, mapping.id, (previous?.passNumber ?? 0) + 1);
+  pass = { ...pass, startedAt: ctx.now().toISOString() };
+  let sequence = 0;
+  const unit = (): CommitUnit => ({
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["mapping", mapping.id, pass.passNumber, sequence++]),
+    checkpoint: mapping.id,
+    rows: [],
+    findings: [],
+    mappingPass: { ...pass },
+  });
+  yield unit();
+  let reference: CopyPassReference | undefined;
+  try {
     ctx.signal?.throwIfAborted();
-    const previous = (ctx.resume.mappingPasses ?? [])
-      .filter((pass) => pass.mappingId === mapping.id)
-      .at(-1);
-    if (previous?.status === "completed") continue;
-    let pass =
-      previous?.status === "pending"
-        ? previous
-        : pendingPass(ctx.revision, mapping.id, (previous?.passNumber ?? 0) + 1);
-    pass = { ...pass, startedAt: ctx.now().toISOString() };
-    let sequence = 0;
-    const unit = (): CommitUnit => ({
-      rev: ctx.revision,
-      phase: "execute",
-      unitKey: JSON.stringify(["mapping", mapping.id, pass.passNumber, sequence++]),
-      checkpoint: mapping.id,
-      rows: [],
-      findings: [],
-      mappingPass: { ...pass },
+    const sources = await sourceInventory(ctx, mapping);
+    const excluded = new Set(
+      expandedExclusions({ mapping, sources }).map((item) => item.sourceItemId),
+    );
+    const resolved = await ctx.provider.resolveFilePass(mapping);
+    const handle = await ctx.provider.startCopyPass({
+      ...resolved,
+      mode: "copy",
+      transfers: ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
+      excludePaths: sources
+        .filter((source) => excluded.has(source.id) || sourceOmission(source))
+        .map((source) => source.path),
     });
+    reference = { socketPath: resolved.socketPath, pass: handle };
+    pass = { ...pass, ...handle, status: "running", startedAt: ctx.now().toISOString() };
     yield unit();
-    let reference: CopyPassReference | undefined;
-    try {
+    for (;;) {
       ctx.signal?.throwIfAborted();
-      const sources = await sourceInventory(ctx, mapping);
-      const excluded = new Set(
-        expandedExclusions({ mapping, sources }).map((item) => item.sourceItemId),
-      );
-      const resolved = await ctx.provider.resolveFilePass(mapping);
-      const handle = await ctx.provider.startCopyPass({
-        ...resolved,
-        mode: "copy",
-        transfers: 4,
-        excludePaths: sources
-          .filter((source) => excluded.has(source.id) || sourceOmission(source))
-          .map((source) => source.path),
-      });
-      reference = { socketPath: resolved.socketPath, pass: handle };
-      pass = { ...pass, ...handle, status: "running", startedAt: ctx.now().toISOString() };
-      yield unit();
-      for (;;) {
-        ctx.signal?.throwIfAborted();
-        const status = await ctx.provider.copyPassStatus(reference);
-        const lastStats = await ctx.provider.copyPassStats(reference);
-        pass = {
-          ...pass,
-          status: status.state,
-          error: status.error,
-          lastStats,
-          endedAt: status.state === "running" ? null : ctx.now().toISOString(),
-        };
-        yield unit();
-        if (status.state !== "running") break;
-        await delay(100, undefined, { signal: ctx.signal });
-      }
-    } catch (error) {
-      const interrupted =
-        ctx.signal?.aborted || (error instanceof Error && error.name === "AbortError");
-      if (reference) {
-        await ctx.provider.stopCopyPass(reference);
-        reference = undefined;
-      }
+      const status = await ctx.provider.copyPassStatus(reference);
+      const lastStats = await ctx.provider.copyPassStats(reference);
       pass = {
         ...pass,
-        status: interrupted ? "interrupted" : "failed",
-        error: interrupted ? null : error instanceof Error ? error.message : String(error),
-        endedAt: ctx.now().toISOString(),
+        status: status.state,
+        error: status.error,
+        lastStats,
+        endedAt: status.state === "running" ? null : ctx.now().toISOString(),
       };
       yield unit();
-      if (interrupted) return;
-    } finally {
-      if (reference && pass.status === "running") await ctx.provider.stopCopyPass(reference);
+      if (status.state !== "running") break;
     }
+  } catch (error) {
+    const interrupted =
+      ctx.signal?.aborted || (error instanceof Error && error.name === "AbortError");
+    if (reference) {
+      await ctx.provider.stopCopyPass(reference);
+      reference = undefined;
+    }
+    pass = {
+      ...pass,
+      status: interrupted ? "interrupted" : "failed",
+      error: interrupted ? null : error instanceof Error ? error.message : String(error),
+      endedAt: ctx.now().toISOString(),
+    };
+    yield unit();
+    if (interrupted) return;
+  } finally {
+    if (reference && pass.status === "running") await ctx.provider.stopCopyPass(reference);
   }
 }
 
@@ -682,6 +735,15 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     body: JSON.stringify({ verificationMode: ctx.config.options?.verificationMode ?? "hash" }),
   };
   yield {
+    title: "Copy concurrency",
+    format: "text",
+    body: JSON.stringify({
+      mappingsInFlight: ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight,
+      transfersPerMapping:
+        ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
+    }),
+  };
+  yield {
     title: "File migration fidelity and additive retention",
     format: "text",
     body: [
@@ -689,7 +751,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       "Permissions and ownership were not assessed and were not migrated.",
       "Destination drives and mapping roots are supplied and administered outside Migmate.",
       "Destination-only content and source-deleted prior copies are retained, never deleted.",
-      "rclone copies mappings sequentially, preserves supported created and modified times and file types, and creates empty source directories. Owner, permission and label metadata are not copied.",
+      "rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories. Owner, permission and label metadata are not copied.",
       "Copy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.",
       "Verification is a timestamped point-in-time statement, not a source freeze, cutover, settled delta, or future-drift guarantee.",
     ].join("\n"),

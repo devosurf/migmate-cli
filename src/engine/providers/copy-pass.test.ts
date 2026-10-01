@@ -100,6 +100,77 @@ it(
 );
 
 it(
+  "runs two independent passes in one worker with per-pass transfer limits",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-parallel-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      await supervisor.call(worker.socketPath, "core/bwlimit", { rate: "1M" });
+      const references: CopyPassReference[] = [];
+      for (const [index, transfers] of [1, 3].entries()) {
+        const source = join(directory, `source-${index}`);
+        const destination = join(directory, `destination-${index}`);
+        await mkdir(source);
+        const content = Buffer.alloc(4 * 1024 * 1024, index + 37);
+        for (let file = 0; file < 4; file++) await writeFile(join(source, `${file}.bin`), content);
+        const pass = await supervisor.startCopyPass({
+          socketPath: worker.socketPath,
+          source: { fs: `:local,no_clone=true:${source}`, kind: "local" },
+          destination: { fs: `:local,no_clone=true:${destination}`, kind: "local" },
+          mode: "copy",
+          transfers,
+        });
+        references.push({ socketPath: worker.socketPath, pass });
+      }
+      assert.equal(references[0]!.pass.executeId, references[1]!.pass.executeId);
+      assert.notEqual(references[0]!.pass.jobid, references[1]!.pass.jobid);
+      const deadline = Date.now() + 10000;
+      let counts: number[] = [];
+      do {
+        counts = await Promise.all(
+          references.map(
+            async (reference) => (await supervisor.copyPassStats(reference)).transferring.length,
+          ),
+        );
+        if (counts[0] === 1 && counts[1] === 3) break;
+        await delay(20);
+      } while (Date.now() < deadline);
+      // These are live rclone transfers, not just accepted RC configuration.
+      assert.deepEqual(counts, [1, 3]);
+      assert.deepEqual(
+        await Promise.all(
+          references.map(async (reference) => (await supervisor.copyPassStatus(reference)).state),
+        ),
+        ["running", "running"],
+      );
+      await supervisor.call(worker.socketPath, "core/bwlimit", { rate: "off" });
+      for (const [index, reference] of references.entries()) {
+        assert.deepEqual(await finish(supervisor, reference), { state: "completed", error: null });
+        const stats = await supervisor.copyPassStats(reference);
+        assert.equal(stats.files, 4);
+        assert.equal(stats.bytes, 16 * 1024 * 1024);
+        assert.equal(stats.errors, 0);
+        for (let file = 0; file < 4; file++) {
+          assert.deepEqual(
+            await readFile(join(directory, `destination-${index}`, `${file}.bin`)),
+            Buffer.alloc(4 * 1024 * 1024, index + 37),
+          );
+        }
+      }
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
   "excludes literal mapping paths and subtrees without filtering similarly named files",
   { skip: !enabled },
   async () => {

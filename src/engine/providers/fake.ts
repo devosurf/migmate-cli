@@ -1022,8 +1022,9 @@ export class FakeFileMigrationPort implements ProviderPort {
     entry.revision = this.nextRevision();
   }
 
-  releaseCopyPasses(): void {
-    for (const pass of this.passes.values()) pass.release?.();
+  releaseCopyPasses(jobid?: number): void {
+    for (const pass of this.passes.values())
+      if (jobid === undefined || pass.handle.jobid === jobid) pass.release?.();
   }
 
   removeDestinationItem(id: string): void {
