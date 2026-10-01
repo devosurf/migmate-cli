@@ -91,6 +91,18 @@ Operator config holds **credential references**: typed pointers to operator-owne
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) walk a human through tenant setup and write those files. Both accept `--resume <env-file>`. These are human steps; hand them over rather than attempting the tenant work.
 
+For file-job delegation, set top-level `impersonate = true` and `subject` in job
+TOML, before any table header. Have a Workspace admin authorize the service account's
+numeric client id with only `https://www.googleapis.com/auth/drive`; use an ordinary
+non-admin subject with destination access. Migmate cannot check admin status without
+Admin SDK scopes and never requests them. The key is domain-wide: do not describe
+it as restricted to the subject. `doctor` proves token issuance and exact
+`about.user.emailAddress`; delegation refusals name the fix. Keep `impersonate` out
+of rclone.conf: Migmate injects it per mapping and refuses operator-file overrides.
+Read back the plan's acting account before approval, and hand the closing report's
+open key/delegation deletion items to the administrator. With impersonation off,
+the service account acts as itself. See README's **Acting Google account**.
+
 ## Teams archive destination
 
 When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Both support `retainedHistory`, `transcripts`, and `attachmentBytes`, subject to option-specific permissions and tenant probes. Live-test evidence is not required; per-job verification findings are the signal. A hosted-content probe with no non-empty sample skips rather than blocking a text-only or empty scope; an unreadable found asset still fails. `docs/release-limits.md` limit 5 states the coverage and prerequisites.

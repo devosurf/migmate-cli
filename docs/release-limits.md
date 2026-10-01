@@ -12,6 +12,18 @@ Copy never deletes. A renamed or removed source file can leave a destination-onl
 
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. An excluded source subtree gaining a new member still requires replanning.
 
+**Acting account.** File jobs may set top-level `impersonate = true` and `subject`.
+Preflight proves a token can be issued and `about.user.emailAddress` equals that
+subject; it does not check Shared Drive creation authority or provision drives.
+Authorize the service account's numeric client id for domain-wide delegation with
+only `https://www.googleapis.com/auth/drive`. The subject must be an ordinary
+non-admin account; Migmate cannot check admin status without Admin SDK scopes and
+never requests them. The key is domain-wide despite the configured subject.
+The plan and report identify that subject, and the closing report lists deleting
+the service-account key and delegation entry as open operator tasks. Per-mapping
+rclone overrides inject impersonation; setting it in the operator's rclone file
+refuses. With impersonation off, the service account continues acting as itself.
+
 ## 2. Mapping recovery is durable; rclone jobs are not
 
 Job `[options]` settings `mappingsInFlight` (default **2**) and `transfersPerMapping` (default **4**) are positive safe integers and appear in the immutable plan and report. These conservative defaults allow up to eight simultaneous file transfers, not a promised throughput under tenant throttling. Set `mappingsInFlight = 1` for serial mappings. At most the configured number of passes run inside one worker; a freed slot admits the next mapping without a batch barrier. One writer commits observations serially.

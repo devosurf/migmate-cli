@@ -34,6 +34,7 @@ export interface CredentialSession {
   readonly rcloneConfigPath: string | null;
   readonly sourceRemote: string | null;
   readonly destinationRemote: string | null;
+  readonly delegatedSubject?: string | undefined;
   dispose(): void;
 }
 
@@ -56,6 +57,7 @@ interface GoogleCredential {
   clientId: string;
   subject: string;
   keyId: string;
+  delegatedSubject?: string;
   privateKey: KeyObject;
 }
 
@@ -566,6 +568,11 @@ async function loadCredentials(
       let google: GoogleCredential;
       try {
         google = googleCredential(serviceAccount.bytes);
+        if (input.impersonate === true) {
+          if (typeof input.subject !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(input.subject))
+            throw refused("credential_config_invalid");
+          google.delegatedSubject = input.subject;
+        }
       } finally {
         serviceAccount.bytes.fill(0);
       }
@@ -793,10 +800,10 @@ export async function createCredentialSession(input: {
         const header = Buffer.from(
           JSON.stringify({ alg: "RS256", typ: "JWT", kid: credential.keyId }),
         ).toString("base64url");
-        // No sub claim: domain-wide impersonation is not a first-release route.
         const claims = Buffer.from(
           JSON.stringify({
             iss: credential.subject,
+            ...(credential.delegatedSubject ? { sub: credential.delegatedSubject } : {}),
             scope: GOOGLE_SCOPE,
             aud: GOOGLE_TOKEN_ENDPOINT,
             iat: issuedAt,
@@ -846,6 +853,9 @@ export async function createCredentialSession(input: {
 
   return {
     graphToken,
+    get delegatedSubject() {
+      return active().google?.delegatedSubject;
+    },
     googleToken,
     async identity() {
       if (input.mode === "archive_verification") await googleToken();
@@ -855,7 +865,13 @@ export async function createCredentialSession(input: {
       const identity = {
         graph: { tenantId: current.graph.tenantId, clientId: current.graph.clientId },
         google: current.google
-          ? { clientId: current.google.clientId, subject: current.google.subject }
+          ? {
+              clientId: current.google.clientId,
+              subject: current.google.subject,
+              ...(current.google.delegatedSubject
+                ? { delegatedSubject: current.google.delegatedSubject }
+                : {}),
+            }
           : null,
       };
       return `sha256:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
@@ -875,6 +891,9 @@ export async function createCredentialSession(input: {
               google: {
                 clientId: current.google.clientId,
                 subject: current.google.subject,
+                ...(current.google.delegatedSubject
+                  ? { delegatedSubject: current.google.delegatedSubject }
+                  : {}),
                 grantedScopes: [...googleCache!.permissions],
                 scopeEvidence: "oauth_token_exchange",
                 authenticatedAt: googleCache!.authenticatedAt,

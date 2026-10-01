@@ -139,7 +139,13 @@ export function hasRetryAfter(error: unknown): error is RetryAfterError {
   return typeof Reflect.get(error, "retryAfterMs") === "number";
 }
 
+export interface GoogleAbout {
+  user: { emailAddress: string };
+  canCreateDrives: boolean;
+}
+
 export interface ProviderPort extends FilePassProvider {
+  googleAbout(): Promise<GoogleAbout>;
   resolveFilePass(input: {
     sourceDriveId: string;
     sourceItemId: string;

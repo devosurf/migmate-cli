@@ -12,7 +12,13 @@ import {
   cursorPages,
 } from "./http.ts";
 import type { CheckResult } from "../types.ts";
-import type { DestinationEntry, ProvenanceRecord, ProviderPort, SourceEntry } from "./port.ts";
+import type {
+  DestinationEntry,
+  GoogleAbout,
+  ProvenanceRecord,
+  ProviderPort,
+  SourceEntry,
+} from "./port.ts";
 
 interface DestinationRoot {
   destDriveId: string;
@@ -409,6 +415,19 @@ export class FileEffects {
     return path;
   }
 
+  async googleAbout(): Promise<GoogleAbout> {
+    const response = await this.#google(
+      "/drive/v3/about?fields=user(emailAddress),canCreateDrives",
+    );
+    const about = await responseJson<GoogleAbout>(response);
+    if (typeof about?.user?.emailAddress !== "string" || typeof about.canCreateDrives !== "boolean")
+      throw new ProviderFault("preflight_failed", "Google acting identity is unavailable.");
+    return {
+      user: { emailAddress: about.user.emailAddress },
+      canCreateDrives: about.canCreateDrives,
+    };
+  }
+
   async resolveFilePass(input: {
     sourceDriveId: string;
     sourceItemId: string;
@@ -435,7 +454,7 @@ export class FileEffects {
         kind: "sharepoint" as const,
       },
       destination: {
-        fs: `${this.#session.destinationRemote},team_drive=${quote(input.destDriveId)},root_folder_id=${quote(input.destFolderId)}:`,
+        fs: `${this.#session.destinationRemote},team_drive=${quote(input.destDriveId)},root_folder_id=${quote(input.destFolderId)}${this.#session.delegatedSubject ? `,impersonate=${quote(this.#session.delegatedSubject)}` : ""}:`,
         kind: "google_drive" as const,
       },
     };

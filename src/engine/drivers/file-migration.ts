@@ -26,6 +26,8 @@ export interface FileMappingConfig {
 
 export interface FileMigrationConfig {
   mappings: FileMappingConfig[];
+  impersonate?: boolean;
+  subject?: string;
   options?: {
     verificationMode?: "hash" | "size_only";
     mappingsInFlight?: number;
@@ -704,6 +706,31 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
 
 async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
   const provider = ctx.provider;
+  if (ctx.config.impersonate) {
+    let actualSubject: string | null = null;
+    try {
+      actualSubject = (await provider.googleAbout()).user.emailAddress;
+    } catch {
+      // Token refusal and inaccessible identity are both delegation prerequisites.
+    }
+    const pass = actualSubject === ctx.config.subject;
+    yield {
+      id: "google.delegation",
+      title: "Google acts as the configured subject",
+      status: pass ? "pass" : "fail",
+      ...(pass ? {} : { code: "preflight_failed" }),
+      evidence: {
+        subject: ctx.config.subject,
+        actualSubject,
+        ...(!pass
+          ? {
+              fix: "Authorize domain-wide delegation for the service account's numeric client id with only https://www.googleapis.com/auth/drive, and use an ordinary non-admin subject.",
+            }
+          : {}),
+      },
+    };
+    if (!pass) return;
+  }
   for (const mapping of ctx.config.mappings) {
     const source = await provider.resolveSourceRoot(mapping);
     const destination = await provider.resolveDestinationFolder(mapping);
@@ -730,6 +757,19 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
 }
 
 async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
+  yield {
+    title: "Acting Google account",
+    format: "text",
+    body: ctx.config.impersonate
+      ? `Acting account: ${ctx.config.subject} (domain-wide delegation).`
+      : "The service account acts as itself (impersonation off).",
+  };
+  if (ctx.config.impersonate)
+    yield {
+      title: "Open cleanup items",
+      format: "text",
+      body: "Delete the service-account key after the job.\nDelete the domain-wide delegation entry after the job.",
+    };
   yield {
     title: "Verification mode",
     format: "text",

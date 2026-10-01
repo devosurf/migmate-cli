@@ -159,6 +159,8 @@ interface CommonConfig {
 }
 type FileConfig = CommonConfig & {
   mappings: Mapping[];
+  impersonate?: boolean;
+  subject?: string;
   options: NonNullable<FileMigrationConfig["options"]>;
   manifestDigest?: string;
   rclone?: { config: FileReference; sourceRemote: string; destinationRemote: string };
@@ -230,7 +232,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
   keys(
     input,
     type === "file_migration"
-      ? [...commonKeys, "mappings", "options", "rclone"]
+      ? [...commonKeys, "mappings", "options", "rclone", "impersonate", "subject"]
       : [
           ...commonKeys,
           "scopes",
@@ -339,6 +341,16 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           ? {}
           : { verificationMode: options.verificationMode },
     };
+    if (input.impersonate !== undefined) {
+      if (typeof input.impersonate !== "boolean") configError("impersonate");
+      config.impersonate = input.impersonate;
+    }
+    if (input.subject !== undefined) {
+      const subject = text(input.subject, "subject");
+      if (!/^[^\s@]+@[^\s@]+$/u.test(subject)) configError("subject");
+      config.subject = subject;
+    }
+    if (config.impersonate && !config.subject) configError("subject");
     for (const name of ["mappingsInFlight", "transfersPerMapping"] as const) {
       const value = options[name];
       if (value === undefined) continue;

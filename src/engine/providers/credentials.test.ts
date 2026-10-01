@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -34,7 +34,7 @@ function serviceAccount(): string {
 async function operatorFiles(
   t: { after: (fn: () => Promise<unknown>) => void },
   sourceSection: string,
-): Promise<{ jobDirectory: string; config: unknown }> {
+) {
   const directory = await mkdtemp(join(tmpdir(), "migmate-credentials-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const keyPath = join(directory, "service-account.json");
@@ -174,6 +174,64 @@ test("accepts the site-scoped grant and refuses a tenant-wide one", async (t) =>
       await session.dispose();
     }
   }
+});
+
+test("file impersonation requests a delegated subject with only the Drive scope", async (t) => {
+  const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
+  t.mock.method(globalThis, "fetch", async (_target: unknown, init?: RequestInit) => {
+    const body = new URLSearchParams(String(init?.body));
+    const claims = JSON.parse(
+      Buffer.from(body.get("assertion")!.split(".")[1]!, "base64url").toString(),
+    );
+    assert.equal(claims.iss, "migmate@migmate-test.iam.gserviceaccount.com");
+    assert.equal(claims.sub, "files@example.com");
+    assert.equal(claims.scope, "https://www.googleapis.com/auth/drive");
+    return Response.json({
+      access_token: "delegated-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+    });
+  });
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    config: { ...config, impersonate: true, subject: "files@example.com" },
+    jobDirectory,
+  });
+  t.after(() => session.dispose());
+  assert.equal(await session.googleToken(), "delegated-token");
+});
+
+test("file tokens omit the subject when impersonation is off", async (t) => {
+  const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
+  t.mock.method(globalThis, "fetch", async (_target: unknown, init?: RequestInit) => {
+    const body = new URLSearchParams(String(init?.body));
+    const claims = JSON.parse(
+      Buffer.from(body.get("assertion")!.split(".")[1]!, "base64url").toString(),
+    );
+    assert.equal(claims.sub, undefined);
+    assert.equal(claims.scope, "https://www.googleapis.com/auth/drive");
+    return Response.json({ access_token: "self-token", token_type: "Bearer", expires_in: 3600 });
+  });
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    config: { ...config, impersonate: false, subject: "ignored@example.com" },
+    jobDirectory,
+  });
+  t.after(() => session.dispose());
+  assert.equal(await session.googleToken(), "self-token");
+});
+
+test("operator rclone impersonation refuses even when job delegation is enabled", async (t) => {
+  const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
+  await appendFile(config.rclone.config.path, "impersonate = other@example.com\n");
+  await assert.rejects(
+    createCredentialSession({
+      jobType: "file_migration",
+      config: { ...config, impersonate: true, subject: "files@example.com" },
+      jobDirectory,
+    }),
+    { code: "credential_backend_unsupported" },
+  );
 });
 
 async function archiveFiles(t: { after: (fn: () => Promise<unknown>) => void }) {

@@ -84,6 +84,44 @@ async function bytes(content: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(result);
 }
 
+test("delegated Google copies carry a per-mapping impersonation override", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    assert.equal(url.hostname, "graph.microsoft.com");
+    return Response.json({ id: "source-root", name: "root", folder: {} });
+  });
+  const files = new FileEffects({
+    config: { mappings: [mapping] },
+    session: { ...session, delegatedSubject: "files@example.com" },
+    graph: createGraphTransport(session),
+    worker: {
+      async *read() {
+        throw new Error("No bytes expected");
+      },
+    },
+  });
+  const pass = await files.resolveFilePass(mapping);
+  assert.equal(
+    pass.destination.fs,
+    'destination,team_drive="shared-drive",root_folder_id="destination-root",impersonate="files@example.com":',
+  );
+  assert.equal(pass.source.fs, 'source,drive_id="source-drive",root_folder_id=,encoding=Slash:');
+});
+
+test("Google about proves the acting email and exposes drive creation capability", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    assert.equal(url.pathname, "/drive/v3/about");
+    assert.equal(url.searchParams.get("fields"), "user(emailAddress),canCreateDrives");
+    assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer secret-google-canary");
+    return Response.json({ user: { emailAddress: "files@example.com" }, canCreateDrives: false });
+  });
+  assert.deepEqual(await effects().googleAbout(), {
+    user: { emailAddress: "files@example.com" },
+    canCreateDrives: false,
+  });
+});
+
 test("a lost create response can be reconciled by the reserved ID and atomic private marker", async (t) => {
   const source = Buffer.from([0, 1, 0, 255, 128]);
   let persisted: Record<string, unknown> | undefined;

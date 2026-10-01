@@ -17,6 +17,7 @@ import type {
   DestinationEntry,
   DestinationItemKind,
   FileHashEntry,
+  GoogleAbout,
   ProviderPort,
   ProvenanceRecord,
   RetryAfterError,
@@ -131,6 +132,7 @@ export interface FakeFileMigrationFixture {
   reservedDestinationIds?: string[];
   effects?: FakeEffectRule[];
   applicationIdentity?: string;
+  googleAbout?: GoogleAbout | Error;
   checks?: CheckResult[];
   archive?: FakeArchiveFixture;
   copyPasses?: FakeCopyPassScenario[];
@@ -304,6 +306,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly unavailableDestinationStreams = new Map<string, Error>();
   private readonly checks: CheckResult[];
   private applicationId: string;
+  private readonly about: GoogleAbout | Error;
   private readonly callLog: string[] = [];
   private workerState: { pid: number; version: string; alive: boolean; socketPath: string } | null;
   private readonly runDirectory: string;
@@ -327,6 +330,10 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.effects = fixture.effects?.map((rule) => ({ ...rule })) ?? [];
     this.reservedDestinationIds = [...(fixture.reservedDestinationIds ?? [])];
     this.applicationId = fixture.applicationIdentity ?? "scripted-application";
+    this.about = fixture.googleAbout ?? {
+      user: { emailAddress: "service-account@example.com" },
+      canCreateDrives: false,
+    };
     this.checks = structuredClone(fixture.checks ?? []);
     if (fixture.archive) this.archive = new FakeArchivePort(fixture.archive);
 
@@ -402,6 +409,11 @@ export class FakeFileMigrationPort implements ProviderPort {
   async applicationIdentity(): Promise<string> {
     this.throwRetryAfter("applicationIdentity");
     return this.applicationId;
+  }
+
+  async googleAbout(): Promise<GoogleAbout> {
+    if (this.about instanceof Error) throw this.about;
+    return structuredClone(this.about);
   }
 
   async *preflight(

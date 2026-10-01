@@ -109,6 +109,32 @@ flowchart LR
 
 File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member, or an approved excluded item moving outside that subtree within the mapping, requires replanning before any copy starts. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
 
+### Acting Google account
+
+File jobs optionally enable domain-wide delegation with top-level job TOML settings
+(before any table header):
+
+```toml
+impersonate = true
+subject = "files@example.com"
+```
+
+With impersonation omitted or `false`, the service account acts as itself.
+For delegation, a Workspace administrator authorizes the service account's **numeric
+client id** (from its JSON key, not its email) with only
+`https://www.googleapis.com/auth/drive`. Choose an ordinary **non-admin subject**
+and give that account access to each destination. Migmate cannot check admin status
+without Admin SDK scopes and never requests them; checking it is the operator's responsibility.
+Delegation is a domain-wide key, not access limited to the named subject.
+
+Preflight proves Google issues a subject token and `about.user.emailAddress` equals
+the configured subject; failures name the delegation fix. Migmate requests only the
+Drive scope and injects `impersonate` into each mapping's rclone connection string.
+Keep `impersonate` out of the operator's rclone config: its strict allowlist refuses it.
+Plan and report show the acting account. The closing report leaves deleting the
+service-account key and deleting the delegation entry as open operator tasks;
+Migmate does not perform those administrative deletions. Drive creation is not enabled.
+
 ### Mapping manifests
 
 Load a batch with `migmate manifest load --job "$ID" --file mappings.json --output json`.

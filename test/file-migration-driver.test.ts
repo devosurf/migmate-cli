@@ -118,6 +118,61 @@ function multiMapping(ids = ["a", "b"]) {
 }
 
 describe("file migration through the engine", () => {
+  it("binds the acting subject into the plan and closing cleanup report", async (t) => {
+    const input = fixture();
+    input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: false };
+    const h = await harness(t, input, {
+      ...config,
+      impersonate: true,
+      subject: "files@example.com",
+    });
+    const plan = value(value(await h.engine.withWriter(h.ref, (w) => w.plan())));
+    assert.ok(JSON.stringify(plan).includes("files@example.com"));
+    await approve(h);
+    await execute(h);
+    value(value(await h.engine.withWriter(h.ref, (w) => w.verify())));
+    value(value(await h.engine.withWriter(h.ref, (w) => w.close())));
+    const report = value(value(await h.engine.withWriter(h.ref, (w) => w.report())));
+    const json = report.artifacts.find((a) => a.name === "report.json")!;
+    const contents = await readFile(json.path, "utf8");
+    assert.match(contents, /files@example.com/);
+    assert.match(contents, /Delete the service-account key/);
+    assert.match(contents, /Delete the domain-wide delegation entry/);
+  });
+  it("refuses delegation failures before planning and leaves impersonation off unchanged", async (t) => {
+    for (const googleAbout of [
+      { user: { emailAddress: "other@example.com" }, canCreateDrives: true },
+      new Error("Google refused the delegated token"),
+    ]) {
+      const input = fixture();
+      input.googleAbout = googleAbout;
+      const h = await harness(t, input, {
+        ...config,
+        impersonate: true,
+        subject: "files@example.com",
+      });
+      const result = value(await h.engine.withWriter(h.ref, (w) => w.plan()));
+      assert.equal(result.ok, false);
+      if (result.ok) throw new Error("Delegation must refuse");
+      assert.equal(result.refusal.code, "preflight_failed");
+      assert.match(JSON.stringify(result), /numeric client id/);
+      assert.match(JSON.stringify(result), /https:\/\/www.googleapis.com\/auth\/drive/);
+    }
+    const input = fixture();
+    input.googleAbout = new Error("Impersonation off must not query about");
+    const h = await harness(t, input, {
+      ...config,
+      impersonate: false,
+      subject: "ignored@example.com",
+    });
+    const plan = value(value(await h.engine.withWriter(h.ref, (w) => w.plan())));
+    assert.match(JSON.stringify(plan), /service account acts as itself/);
+    assert.doesNotMatch(JSON.stringify(plan.sections), /delegation entry|ignored@example.com/);
+    await approve(h);
+    await execute(h);
+    value(value(await h.engine.withWriter(h.ref, (w) => w.verify())));
+    value(value(await h.engine.withWriter(h.ref, (w) => w.close())));
+  });
   it("loads and plans 1000 mappings with bounded resources and pages filtered mapping rows", async (t) => {
     const ids = Array.from({ length: 1000 }, (_, i) => `library-${String(i).padStart(4, "0")}`);
     const { input, selected } = multiMapping(ids);
