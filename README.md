@@ -47,11 +47,11 @@ Pass options through the pipe with `sh -s --`, for example `… | sh -s -- --ver
 ### From source
 
 ```sh
-git clone git@github.com:devosurf/migmate-cli.git
+git clone https://github.com/devosurf/migmate-cli.git
 cd migmate-cli
 npm ci
 npm pack                                   # prepack builds and verifies the vendored binaries
-npm install -g ./devosurf-migmate-0.1.0-dev.tgz
+npm install -g ./devosurf-migmate-*.tgz
 migmate --help
 ```
 
