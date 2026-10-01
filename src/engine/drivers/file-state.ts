@@ -246,6 +246,27 @@ export async function hashStream(
   return { sha256: hash.digest("hex"), size };
 }
 
+/**
+ * Whether the source's listed size disagrees with the bytes it serves. SharePoint
+ * rewrites some files and some downloads differ from the listing; the served bytes are
+ * what exists to copy. A disagreement counts only when a second read returns the same
+ * bytes, which rules out a truncated or changing download; differing reads are a change
+ * in flight and stay retryable.
+ */
+export async function confirmServedContent(
+  provider: FileProvider,
+  source: SourceEntry | FileSourceEvidence,
+  served: { sha256: string; size: number },
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (source.size === null || source.size === served.size) return false;
+  const again = await hashStream(provider.openSourceContent(source.id), signal);
+  await assertSourceStable(provider, source);
+  if (again.sha256 !== served.sha256 || again.size !== served.size)
+    throw new FileSourceChangedError(source.id);
+  return true;
+}
+
 /** One file on disk, bounded stream buffers, removed even on generator cancellation. */
 export async function stageSource(
   ctx: FileContext,
@@ -280,8 +301,10 @@ export async function stageSource(
       { signal: ctx.signal },
     );
     await assertSourceStable(provider, source);
-    if (source.size !== null && source.size !== size) throw new FileSourceChangedError(source.id);
-    return { sha256: hash.digest("hex"), size, content: () => createReadStream(path), dispose };
+    const sha256 = hash.digest("hex");
+    // A repeatable listed-size disagreement is copied as served; verify names it.
+    await confirmServedContent(provider, source, { sha256, size }, ctx.signal);
+    return { sha256, size, content: () => createReadStream(path), dispose };
   } catch (error) {
     await dispose();
     throw error;

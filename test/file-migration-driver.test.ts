@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
@@ -10,7 +10,12 @@ import {
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
 import type { FileMigrationConfig } from "../src/engine/drivers/file-migration.ts";
-import type { FileProvider } from "../src/engine/drivers/file-state.ts";
+import {
+  confirmServedContent,
+  FileSourceChangedError,
+  hashStream,
+  type FileProvider,
+} from "../src/engine/drivers/file-state.ts";
 import { fileConfig, fileFixture, value, approve } from "./engine-fixture.ts";
 
 const now = "2026-09-01T00:00:00.000Z";
@@ -466,6 +471,96 @@ describe("file migration through the engine", () => {
     assert.equal(closed.ok, false);
     if (closed.ok) throw new Error("A size-only verification closed cleanly");
     assert.equal(closed.refusal.code, "verification_unaccepted");
+  });
+
+  it("copies what the source serves when its listed size disagrees, and names that for acceptance", async (t) => {
+    // SharePoint can list a size its download contradicts (rewritten Office files,
+    // iOS Live Photos). The served bytes are what exists, so they are copied.
+    const input = fileFixture([
+      {
+        id: "still",
+        parentId: "source-root",
+        name: "photo.heic",
+        kind: "file",
+        content: "still frame",
+        size: 999,
+        mimeType: "image/heic",
+      },
+    ]);
+    const h = await harness(t, input);
+    await approve(h);
+    await execute(h);
+    const copied = h.port.snapshotDestination().find((entry) => entry.path === "photo.heic");
+    assert.equal(copied?.checksum, hash("still frame"));
+
+    const first = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+    const found = first.findings.map((entry) => entry.code);
+    assert.ok(found.includes("source_size_inconsistent"));
+    assert.equal(found.includes("size_mismatch"), false);
+    assert.equal(found.includes("content_mismatch"), false);
+    const [named] = value(
+      await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["source_size_inconsistent"] }),
+    ).rows;
+    assert.equal(named?.jobType === "file_migration" && named.provenanceState, "verified");
+    const accept = async (verificationDigest: string) =>
+      value(
+        value(
+          await h.engine.withWriter(h.ref, (writer) =>
+            writer.accept({
+              verificationDigest,
+              approver: "operator",
+              codes: [{ code: "source_size_inconsistent" }],
+            }),
+          ),
+        ),
+      );
+    await accept(first.verificationDigest);
+
+    // The served size is the copy's size, so a rerun finds nothing to re-upload.
+    await execute(h);
+    assert.equal((await codes(h, "execute")).get("still"), "unchanged");
+    assert.equal(
+      h.port.snapshotDestination().find((entry) => entry.path === "photo.heic")?.id,
+      copied?.id,
+    );
+
+    await accept(
+      value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())))
+        .verificationDigest,
+    );
+    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+    const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
+    const json = report.artifacts.find((artifact) => artifact.name === "report.json");
+    assert.ok(json);
+    const [exception] = JSON.parse(await readFile(json.path, "utf8")).acceptedExceptions;
+    assert.equal(exception.code, "source_size_inconsistent");
+    assert.deepEqual(exception.items[0].evidence, {
+      path: "photo.heic",
+      listedSize: 999,
+      servedSize: 11,
+    });
+  });
+
+  it("refuses served bytes that change between reads instead of copying a truncated download", async () => {
+    class ShiftingPort extends FakeFileMigrationPort {
+      reads = 0;
+      override openSourceContent(sourceItemId: string): AsyncIterable<Uint8Array> {
+        const bytes = new TextEncoder().encode(`frame ${++this.reads}`);
+        return (async function* () {
+          yield bytes;
+        })();
+      }
+    }
+    const port = new ShiftingPort(
+      fileFixture([
+        { id: "still", parentId: "source-root", name: "photo.heic", kind: "file", size: 999 },
+      ]),
+    );
+    const provider: FileProvider = port;
+    const source = await port.readSourceItem({ driveId: "source-drive", itemId: "still" });
+    assert.ok(source);
+    const served = await hashStream(provider.openSourceContent("still"));
+    await assert.rejects(confirmServedContent(provider, source, served), FileSourceChangedError);
   });
 
   it("reconciles a lost upload response by its durably reserved identity across engine restart", async (t) => {

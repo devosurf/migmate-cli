@@ -5,8 +5,8 @@ import type { DestinationEntry, SourceEntry } from "../providers/port.ts";
 import type { CommitFinding, CommitUnit, JobTypeDriver, ReportSection } from "./types.ts";
 import {
   assertSourceStable,
+  confirmServedContent,
   FilePlanRevisionRequiredError,
-  FileSourceChangedError,
   hashStream,
   readObject,
   observe,
@@ -298,7 +298,7 @@ function expectedOutput(
   mapping: FileMappingConfig,
   source: SourceView,
   parentId: string,
-  fingerprint: string | null,
+  served: { sha256: string; size: number } | null,
   previous?: FileState,
 ): FileOutput {
   return {
@@ -307,11 +307,12 @@ function expectedOutput(
     parentId,
     name: source.name,
     kind: source.kind === "folder" ? "folder" : "file",
-    size: source.kind === "file" ? source.size : null,
+    // The copy holds what the source serves, which can differ from its listed size.
+    size: source.kind === "file" ? (served?.size ?? source.size) : null,
     createdAt: previous?.output.createdAt ?? source.createdAt,
     modifiedAt: source.modifiedAt,
     mimeType: source.kind === "file" ? source.mimeType : null,
-    sha256: fingerprint,
+    sha256: served?.sha256 ?? null,
   };
 }
 
@@ -672,13 +673,13 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
           if (!staged) await assertSourceStable(provider, source);
           effect = "destination";
           const fingerprint = staged?.sha256 ?? null;
-          const expected = expectedOutput(mapping, source, parentId, fingerprint, prior);
+          const expected = expectedOutput(mapping, source, parentId, staged, prior);
           const lastOutput = prior?.status === "prepared" ? prior.previous?.output : prior?.output;
           const changedContent =
             !lastOutput ||
             (source.kind === "file" &&
               (lastOutput.sha256 !== fingerprint ||
-                lastOutput.size !== source.size ||
+                lastOutput.size !== expected.size ||
                 lastOutput.mimeType !== expected.mimeType ||
                 second(lastOutput.modifiedAt) !== second(expected.modifiedAt)));
           const moved =
@@ -974,7 +975,7 @@ async function verifyItem(
 ): Promise<CommitUnit> {
   const provider: FileProvider = ctx.provider;
   const codes: string[] = [];
-  let fingerprint: string | null = null;
+  let served: { sha256: string; size: number } | null = null;
   if (!state || !observed) codes.push("destination_missing");
   else {
     if (state.source.identity !== source.identity) codes.push("source_identity_reuse_collision");
@@ -986,18 +987,16 @@ async function verifyItem(
     await assertSourceStable(provider, source);
     if (source.kind === "file") {
       try {
-        const content = await hashStream(provider.openSourceContent(source.id), ctx.signal);
-        fingerprint = content.sha256;
-        if (source.size !== null && content.size !== source.size)
-          throw new FileSourceChangedError(source.id);
+        served = await hashStream(provider.openSourceContent(source.id), ctx.signal);
+        if (await confirmServedContent(provider, source, served, ctx.signal))
+          codes.push("source_size_inconsistent");
       } catch (error) {
         if (!terminalUnavailable(error)) throw error;
         codes.push("source_read_failed");
       }
-      if (observed.entry.size !== source.size) codes.push("size_mismatch");
+      if (observed.entry.size !== (served?.size ?? state.output.size)) codes.push("size_mismatch");
       if (observed.sha256 === null) codes.push("content_verification_degraded");
-      else if (fingerprint !== null && observed.sha256 !== fingerprint)
-        codes.push("content_mismatch");
+      else if (served !== null && observed.sha256 !== served.sha256) codes.push("content_mismatch");
       if (
         Date.parse(observed.entry.createdAt) !== Date.parse(state.output.createdAt) ||
         second(observed.entry.modifiedAt) !== second(source.modifiedAt) ||
@@ -1020,15 +1019,28 @@ async function verifyItem(
   }
   const unique = [...new Set(codes)];
   const evidence = row(ctx, "verify", tree.mapping, source, unique[0] ?? "unchanged", state);
-  evidence.sourceFingerprint = fingerprint;
+  evidence.sourceFingerprint = served?.sha256 ?? null;
   evidence.destinationFingerprint = observed?.sha256 ?? null;
-  evidence.provenanceState = unique.length ? "drifted" : "verified";
+  // A listed-size disagreement is about the source; the copy itself can still be proven.
+  evidence.provenanceState = unique.some((code) => code !== "source_size_inconsistent")
+    ? "drifted"
+    : "verified";
   return commit(
     ctx,
     "verify",
     evidence,
     [
-      ...unique.map((code) => finding(ctx, "verify", code, source.id, { path: source.path })),
+      ...unique.map((code) =>
+        finding(
+          ctx,
+          "verify",
+          code,
+          source.id,
+          code === "source_size_inconsistent"
+            ? { path: source.path, listedSize: source.size, servedSize: served?.size }
+            : { path: source.path },
+        ),
+      ),
       ...metadataOmissions(ctx, "verify", source),
     ],
     "verification",

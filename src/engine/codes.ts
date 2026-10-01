@@ -67,6 +67,8 @@ export const CODES: readonly CodeEntry[] = [
   entry("destination_missing", "finding", "verify", FILE),
   entry("destination_path_mismatch", "finding", "verify", FILE),
   entry("provenance_mismatch", "finding", "verify", FILE),
+  // The source lists a size its repeatable download contradicts; the copy holds the served bytes.
+  entry("source_size_inconsistent", "finding", "verify", FILE),
   entry("size_mismatch", "finding", "verify", FILE),
   entry("content_mismatch", "finding", "verify", FILE),
   entry("metadata_mismatch", "finding", "verify", FILE),
