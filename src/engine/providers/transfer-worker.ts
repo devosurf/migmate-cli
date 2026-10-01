@@ -964,11 +964,12 @@ export function createTransferSupervisor(options: {
             if (
               !record(file) ||
               typeof file.name !== "string" ||
-              typeof file.bytes !== "number" ||
+              (file.bytes !== undefined && typeof file.bytes !== "number") ||
               typeof file.size !== "number"
             )
               throw fail("provider_failed", "worker_response_invalid");
-            return { path: file.name, bytes: file.bytes, size: file.size };
+            // rclone lists a transfer before its byte-accounting reader is attached.
+            return { path: file.name, bytes: file.bytes ?? 0, size: file.size };
           })
         : [];
       return {

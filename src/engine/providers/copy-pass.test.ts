@@ -134,9 +134,14 @@ it(
       let counts: number[] = [];
       do {
         counts = await Promise.all(
-          references.map(
-            async (reference) => (await supervisor.copyPassStats(reference)).transferring.length,
-          ),
+          references.map(async (reference) => {
+            const stats = await supervisor.copyPassStats(reference);
+            for (const file of stats.transferring) {
+              assert.equal(file.size, 4 * 1024 * 1024);
+              assert.ok(file.bytes >= 0 && file.bytes <= file.size);
+            }
+            return stats.transferring.length;
+          }),
         );
         if (counts[0] === 1 && counts[1] === 3) break;
         await delay(20);
