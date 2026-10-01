@@ -64,6 +64,8 @@ export const CODES: readonly CodeEntry[] = [
   // ---- file migration: execution / verification findings -------------------
   entry("source_read_failed", "finding", "execute", FILE, true),
   entry("destination_write_failed", "finding", "execute", FILE, true),
+  entry("drive_creation_ambiguous", "finding", "execute", FILE),
+  entry("drive_membership_mismatch", "finding", "verify", FILE),
   entry("destination_missing", "finding", "verify", FILE),
   entry("destination_path_mismatch", "finding", "verify", FILE),
   entry("provenance_mismatch", "finding", "verify", FILE),

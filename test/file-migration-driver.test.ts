@@ -117,7 +117,356 @@ function multiMapping(ids = ["a", "b"]) {
   };
 }
 
+async function provisioningHarness(t: TestContext, input = fixture()): Promise<Harness> {
+  input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
+  const h = await harness(t, input);
+  value(
+    await h.engine.withWriterResult(h.ref, (w) =>
+      w.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "finance",
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+              destination: { type: "google_shared_drive", create: "Finance" },
+              members: [{ email: "finance@example.com", type: "group", role: "writer" }],
+            },
+          ],
+        }),
+      }),
+    ),
+  );
+  await approve(h);
+  return h;
+}
+
 describe("file migration through the engine", () => {
+  it("recovers a lost drive creation response without duplicating a drive", async (t) => {
+    const input = fixture();
+    input.effects = [
+      {
+        method: "createSharedDrive",
+        timing: "after",
+        count: 1,
+        error: new TypeError("Connection lost after creation"),
+      },
+    ];
+    const h = await provisioningHarness(t, input);
+    await execute(h);
+    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.mappingPasses[0]?.status, "completed");
+    assert.equal(status.memberGrants[0]?.member.email, "finance@example.com");
+    await execute(h);
+    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+  });
+  it("refuses ambiguous lost creation responses instead of guessing a same-named drive", async (t) => {
+    const h = await provisioningHarness(t);
+    await h.port.createSharedDrive({ name: "Finance", requestId: "operator-drive" });
+    h.port.scriptEffect({
+      method: "createSharedDrive",
+      timing: "after",
+      count: 1,
+      error: new TypeError("Lost response"),
+    });
+    const result = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("Ambiguous drives must refuse");
+    assert.equal(result.refusal.code, "drive_creation_ambiguous");
+    assert.equal((await h.port.findSharedDrives("Finance")).length, 2);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.createdDrives[0]?.driveId, null);
+    assert.deepEqual(status.memberGrants, []);
+    assert.equal(status.mappingPasses[0]?.status, "pending");
+  });
+  it("resumes after a crash between drive creation and member grant using the durable id", async (t) => {
+    const h = await provisioningHarness(t);
+    h.port.scriptEffect({
+      method: "addDriveMember",
+      count: 1,
+      error: new Error("simulated process crash"),
+    });
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, (w) => w.execute()),
+      /simulated process crash/,
+    );
+    const crashed = value(await h.engine.reader(h.ref).status());
+    const driveId = crashed.createdDrives[0]!.driveId!;
+    assert.match(driveId, /^drive-/);
+    assert.deepEqual(crashed.memberGrants, []);
+    assert.equal(crashed.mappingPasses[0]?.status, "pending");
+    await h.port.createSharedDrive({ name: "Finance", requestId: "unrelated-after-crash" });
+    h.engine.close();
+    h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+    await execute(h);
+    const recovered = value(await h.engine.reader(h.ref).status());
+    assert.equal(recovered.createdDrives[0]?.driveId, driveId);
+    assert.equal(recovered.mappingPasses[0]?.status, "completed");
+    assert.equal(recovered.memberGrants[0]?.driveId, driveId);
+    assert.equal((await h.port.findSharedDrives("Finance")).length, 2);
+  });
+  it("reports membership drift as a blocking finding without repairing access during verification", async (t) => {
+    const h = await provisioningHarness(t);
+    await execute(h);
+    const before = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(before.clean, true);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    await h.port.addDriveMember(driveId, {
+      email: "finance@example.com",
+      type: "group",
+      role: "reader",
+    });
+    const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verification.clean, false);
+    assert.ok(verification.findings.some((f) => f.code === "drive_membership_mismatch"));
+    const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(closing.ok, false);
+    assert.equal(
+      (await h.port.listDriveMembers(driveId)).find((m) => m.email === "finance@example.com")?.role,
+      "reader",
+    );
+    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    const text = await readFile(
+      report.artifacts.find((a) => a.name === "report.json")!.path,
+      "utf8",
+    );
+    assert.match(text, /drive_membership_mismatch/);
+    assert.match(text, /finance@example.com/);
+  });
+  it("keeps completed member grants unchanged on execute replay so drift stays visible", async (t) => {
+    const h = await provisioningHarness(t);
+    await execute(h);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    await h.port.addDriveMember(driveId, {
+      email: "finance@example.com",
+      type: "group",
+      role: "reader",
+    });
+    await execute(h);
+    assert.equal(
+      (await h.port.listDriveMembers(driveId)).find((m) => m.email === "finance@example.com")?.role,
+      "reader",
+    );
+    assert.ok(
+      value(await h.engine.reader(h.ref).status()).outstandingFindings.some(
+        (f) => f.code === "drive_membership_mismatch",
+      ),
+    );
+  });
+  it("reconciles a granted member whose response was lost before its checkpoint", async (t) => {
+    const h = await provisioningHarness(t);
+    h.port.scriptEffect({
+      method: "addDriveMember",
+      timing: "after",
+      count: 1,
+      error: new Error("crash after member grant"),
+    });
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, (w) => w.execute()),
+      /crash after member grant/,
+    );
+    h.port.scriptEffect({
+      method: "addDriveMember",
+      count: 1,
+      error: new Error("Existing grants must not be submitted again"),
+    });
+    h.engine.close();
+    h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+    await execute(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.memberGrants[0]?.member.role, "writer");
+    assert.equal(status.mappingPasses[0]?.status, "completed");
+  });
+  it("plans a new revision against the already-created drive and refuses renaming its creation intent", async (t) => {
+    const h = await provisioningHarness(t);
+    await execute(h);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    const reload = (name: string) =>
+      h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "finance",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+                destination: { type: "google_shared_drive", create: name },
+                members: [{ email: "finance@example.com", type: "group", role: "writer" }],
+              },
+            ],
+          }),
+        }),
+      );
+    const changed = await reload("Different");
+    assert.equal(changed.ok, false);
+    if (changed.ok) throw new Error("A creation request cannot change its name");
+    assert.deepEqual(changed.refusal.detail, { row: 1, field: "destination.create" });
+    value(await reload("Finance"));
+    await approve(h);
+    await execute(h);
+    assert.equal(value(await h.engine.reader(h.ref).status()).createdDrives[0]?.driveId, driveId);
+    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+  });
+  it("recovers creation intents with zero or one visible candidate after reopening", async (t) => {
+    for (const timing of ["before", "after"] as const) {
+      const h = await provisioningHarness(t);
+      h.port.scriptEffect({
+        method: "createSharedDrive",
+        timing,
+        count: 1,
+        error: new Error("crash before durable response"),
+      });
+      await assert.rejects(
+        h.engine.withWriterResult(h.ref, (w) => w.execute()),
+        /crash before durable response/,
+      );
+      const intent = value(await h.engine.reader(h.ref).status()).createdDrives[0]!;
+      assert.equal(intent.driveId, null);
+      h.engine.close();
+      h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+      await execute(h);
+      const recovered = value(await h.engine.reader(h.ref).status());
+      assert.equal(recovered.createdDrives[0]?.requestId, intent.requestId);
+      assert.equal(recovered.mappingPasses[0]?.status, "completed");
+      assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+    }
+  });
+  it("copies into existing and created destinations in the same approved manifest", async (t) => {
+    const { input, selected } = multiMapping();
+    input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
+    const h = await harness(t, input, selected);
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "a",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "a" },
+                destination: { type: "google_shared_drive", create: "A" },
+                members: [],
+              },
+              {
+                id: "b",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "b" },
+                destination: {
+                  type: "google_shared_drive",
+                  driveId: "destination-drive",
+                  folderId: "dest-b",
+                },
+              },
+            ],
+          }),
+        }),
+      ),
+    );
+    await approve(h);
+    await execute(h);
+    const drive = (await h.port.findSharedDrives("A"))[0]!;
+    assert.equal(
+      (await h.port.listDestinationChildren(drive.id))[0]?.reportedChecksum,
+      hash("one"),
+    );
+    assert.equal(
+      (await h.port.listDestinationChildren("dest-b"))[0]?.reportedChecksum,
+      hash("two"),
+    );
+    assert.equal(value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).clean, true);
+  });
+  it("plans Shared Drives with exact members and checks creation authority", async (t) => {
+    const content = JSON.stringify({
+      version: 1,
+      mappings: [
+        {
+          id: "new-drive",
+          source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+          destination: { type: "google_shared_drive", create: "Finance" },
+          members: [{ email: "finance@example.com", type: "group", role: "fileOrganizer" }],
+        },
+      ],
+    });
+    for (const canCreateDrives of [false, true]) {
+      const input = fixture();
+      input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives };
+      const h = await harness(t, input);
+      value(
+        await h.engine.withWriterResult(h.ref, (w) => w.loadManifest({ content, format: "json" })),
+      );
+      const result = await h.engine.withWriterResult(h.ref, (w) => w.plan());
+      assert.equal(result.ok, canCreateDrives, JSON.stringify(result));
+      if (result.ok) {
+        const section = result.value.sections.find((s) => s.title === "Shared Drives to create");
+        assert.deepEqual(JSON.parse(section!.body), [
+          {
+            mappingId: "new-drive",
+            name: "Finance",
+            members: [{ email: "finance@example.com", type: "group", role: "fileOrganizer" }],
+          },
+        ]);
+      } else {
+        assert.equal(result.refusal.code, "preflight_failed");
+        assert.match(JSON.stringify(result), /canCreateDrives/);
+      }
+    }
+  });
+  it("provisions members before copying and reports durable drive identities", async (t) => {
+    const input = fixture();
+    input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
+    const h = await harness(t, input);
+    const members = [{ email: "finance@example.com", type: "group", role: "writer" }];
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "finance",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+                destination: { type: "google_shared_drive", create: "Finance" },
+                members,
+              },
+            ],
+          }),
+        }),
+      ),
+    );
+    await approve(h);
+    await execute(h);
+    const drives = await h.port.findSharedDrives("Finance");
+    assert.equal(drives.length, 1);
+    assert.deepEqual(await h.port.listDriveMembers(drives[0]!.id), [
+      { email: "files@example.com", type: "user", role: "organizer" },
+      ...members,
+    ]);
+    const children = await h.port.listDestinationChildren(drives[0]!.id);
+    assert.equal(
+      children.find((file) => file.name === "report.docx")?.reportedChecksum,
+      hash(new Uint8Array([0, 255, 5, 0])),
+    );
+    const nested = children.find((file) => file.name === "nested")!;
+    assert.equal(
+      (await h.port.listDestinationChildren(nested.id)).find((file) => file.name === "zero.bin")
+        ?.reportedChecksum,
+      hash(""),
+    );
+    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    const json = JSON.parse(
+      await readFile(report.artifacts.find((a) => a.name === "report.json")!.path, "utf8"),
+    );
+    assert.match(JSON.stringify(json), new RegExp(drives[0]!.id));
+    assert.match(JSON.stringify(json), /finance@example.com/);
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).createdDrives[0]?.driveId,
+      drives[0]!.id,
+    );
+  });
   it("binds the acting subject into the plan and closing cleanup report", async (t) => {
     const input = fixture();
     input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: false };

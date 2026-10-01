@@ -910,7 +910,7 @@ describe("engine durability seam", () => {
     const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
     try {
       database.exec(
-        "DROP TABLE mapping_pass; DROP TABLE mapping; DROP TABLE mapping_manifest; UPDATE job SET schema_version = 2",
+        "DROP TABLE mapping_pass; DROP TABLE mapping; DROP TABLE mapping_manifest; DROP TABLE member_grant; DROP TABLE created_drive; UPDATE job SET schema_version = 2",
       );
     } finally {
       database.close();
@@ -926,6 +926,25 @@ describe("engine durability seam", () => {
       value(await h.engine.reader(h.ref).status()).mappingPasses[0]?.status,
       "completed",
     );
+  });
+
+  it("upgrades an approved schema version 4 job without changing its manifest or approval", async (t) => {
+    const h = await harness(t);
+    const digest = await approve(h);
+    const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+    try {
+      database.exec(
+        "DROP TABLE member_grant; DROP TABLE created_drive; UPDATE job SET schema_version=4",
+      );
+    } finally {
+      database.close();
+    }
+    reopen(h);
+    assert.equal((await execute(h)).outcome, "completed");
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.planDigest, digest);
+    assert.equal(status.mappingPasses[0]?.status, "completed");
+    assert.equal((await verify(h)).clean, true);
   });
 
   it("resumes pre-manifest approvals without changing frozen inputs and binds the digest only on replanning", async (t) => {
@@ -944,7 +963,7 @@ describe("engine durability seam", () => {
       const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
       try {
         database.exec(
-          "DELETE FROM plan_input; DELETE FROM plan_revision; DROP TABLE mapping; DROP TABLE mapping_manifest",
+          "DELETE FROM plan_input; DELETE FROM plan_revision; DROP TABLE mapping; DROP TABLE mapping_manifest; DROP TABLE member_grant; DROP TABLE created_drive",
         );
         for (const [table, row] of [
           ["plan_revision", legacy.plan],
@@ -999,7 +1018,7 @@ describe("engine durability seam", () => {
     const database = new DatabaseSync(join(directory, "state.db"));
     try {
       database.exec(
-        "DROP TABLE mapping; DROP TABLE mapping_manifest; UPDATE job SET schema_version=3",
+        "DROP TABLE mapping; DROP TABLE mapping_manifest; DROP TABLE member_grant; DROP TABLE created_drive; UPDATE job SET schema_version=3",
       );
     } finally {
       database.close();

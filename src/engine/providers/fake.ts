@@ -18,6 +18,9 @@ import type {
   DestinationItemKind,
   FileHashEntry,
   GoogleAbout,
+  DriveMember,
+  DriveMembership,
+  SharedDrive,
   ProviderPort,
   ProvenanceRecord,
   RetryAfterError,
@@ -307,6 +310,9 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly checks: CheckResult[];
   private applicationId: string;
   private readonly about: GoogleAbout | Error;
+  private readonly sharedDrives = new Map<string, SharedDrive>();
+  private readonly driveRequests = new Map<string, string>();
+  private readonly driveMembers = new Map<string, DriveMembership[]>();
   private readonly callLog: string[] = [];
   private workerState: { pid: number; version: string; alive: boolean; socketPath: string } | null;
   private readonly runDirectory: string;
@@ -414,6 +420,42 @@ export class FakeFileMigrationPort implements ProviderPort {
   async googleAbout(): Promise<GoogleAbout> {
     if (this.about instanceof Error) throw this.about;
     return structuredClone(this.about);
+  }
+
+  async createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null> {
+    this.throwEffect("createSharedDrive", input.name, "before");
+    if (this.driveRequests.has(input.requestId)) return null;
+    const id = `drive-${this.sharedDrives.size + 1}`;
+    const drive = { id, name: input.name };
+    this.sharedDrives.set(id, drive);
+    this.driveRequests.set(input.requestId, id);
+    this.driveMembers.set(id, [
+      {
+        email: (await this.googleAbout()).user.emailAddress,
+        type: "user",
+        role: "organizer",
+      },
+    ]);
+    this.insertDestination({ id, driveId: id, name: input.name, parentId: null, kind: "folder" });
+    this.throwEffect("createSharedDrive", input.name, "after");
+    return { ...drive };
+  }
+  async findSharedDrives(name: string): Promise<SharedDrive[]> {
+    return [...this.sharedDrives.values()]
+      .filter((drive) => drive.name === name)
+      .map((drive) => ({ ...drive }));
+  }
+  async listDriveMembers(driveId: string): Promise<DriveMembership[]> {
+    return structuredClone(this.driveMembers.get(driveId) ?? []);
+  }
+  async addDriveMember(driveId: string, member: DriveMember): Promise<void> {
+    this.throwEffect("addDriveMember", member.email, "before");
+    const members = this.driveMembers.get(driveId);
+    if (!members) throw destinationFault("destination_missing", 404);
+    const existing = members.findIndex((m) => m.email === member.email && m.type === member.type);
+    if (existing < 0) members.push({ ...member });
+    else members[existing] = { ...member };
+    this.throwEffect("addDriveMember", member.email, "after");
   }
 
   async *preflight(

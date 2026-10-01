@@ -42,8 +42,8 @@ interface MappingIdentity {
   sourceDriveId: string;
   sourceItemId?: string;
   sourceFolderPath?: string;
-  destDriveId: string;
-  destFolderId: string;
+  destDriveId?: string;
+  destFolderId?: string;
   sourceSiteId?: string;
 }
 
@@ -322,8 +322,12 @@ function parseMappings(value: unknown): MappingIdentity[] {
     const mapping = record(item);
     const result: MappingIdentity = {
       sourceDriveId: stableId(mapping.sourceDriveId),
-      destDriveId: stableId(mapping.destDriveId),
-      destFolderId: stableId(mapping.destFolderId),
+      ...(mapping.createDrive === undefined || mapping.destDriveId !== undefined
+        ? {
+            destDriveId: stableId(mapping.destDriveId),
+            destFolderId: stableId(mapping.destFolderId),
+          }
+        : {}),
     };
     if (mapping.sourceItemId !== undefined) result.sourceItemId = stableId(mapping.sourceItemId);
     else if (typeof mapping.sourceFolderPath === "string")

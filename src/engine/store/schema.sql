@@ -379,3 +379,15 @@ CREATE TABLE mapping_manifest (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   digest TEXT NOT NULL
 ) STRICT;
+
+-- Shared Drive provisioning is job-scoped, surviving plan revisions.
+CREATE TABLE created_drive (
+  mapping_id TEXT PRIMARY KEY,
+  payload TEXT NOT NULL
+) STRICT;
+CREATE TABLE member_grant (
+  mapping_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY (mapping_id, email)
+) STRICT;

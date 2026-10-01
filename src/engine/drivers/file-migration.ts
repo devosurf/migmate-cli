@@ -1,8 +1,15 @@
 import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
 import type { CheckResult, MappingPass } from "../types.ts";
-import type { CopyPassReference, DestinationEntry, SourceEntry } from "../providers/port.ts";
+import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
+import type {
+  CopyPassReference,
+  DestinationEntry,
+  DriveMember,
+  SourceEntry,
+} from "../providers/port.ts";
 import type { CommitFinding, CommitUnit, JobTypeDriver, ReportSection } from "./types.ts";
 import {
   FilePlanRevisionRequiredError,
@@ -19,8 +26,9 @@ export interface FileMappingConfig {
   sourceDriveId: string;
   sourceItemId: string;
   sourceFolderPath?: string;
-  destDriveId: string;
-  destFolderId: string;
+  destDriveId?: string;
+  destFolderId?: string;
+  createDrive?: { name: string; members: DriveMember[] };
   exclusions?: FileExclusion[];
 }
 
@@ -53,6 +61,126 @@ interface Snapshot {
   destinations: DestinationView[];
   destinationById: Map<string, DestinationView>;
   destinationByPath: Map<string, DestinationView[]>;
+}
+
+function destinationMapping(
+  mapping: FileMappingConfig,
+): FileMappingConfig & { destDriveId: string; destFolderId: string } {
+  if (!mapping.destDriveId || !mapping.destFolderId)
+    throw new Error(`Mapping ${mapping.id} has no provisioned destination`);
+  return { ...mapping, destDriveId: mapping.destDriveId, destFolderId: mapping.destFolderId };
+}
+
+function provisionedMapping(ctx: FileContext, mapping: FileMappingConfig): FileMappingConfig {
+  if (!mapping.createDrive) return mapping;
+  const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
+  return drive?.driveId
+    ? { ...mapping, destDriveId: drive.driveId, destFolderId: drive.driveId }
+    : mapping;
+}
+
+async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
+  for (const mapping of ctx.config.mappings) {
+    if (!mapping.createDrive) continue;
+    let drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
+    const recovering = drive !== undefined;
+    const unit = (key: string): CommitUnit => ({
+      rev: ctx.revision,
+      phase: "execute",
+      unitKey: JSON.stringify(["provision", mapping.id, key]),
+      checkpoint: mapping.id,
+      rows: [],
+      findings: [],
+    });
+    if (!drive) {
+      drive = {
+        mappingId: mapping.id,
+        requestId: digest([basename(ctx.jobDirectory), mapping.id]),
+        name: mapping.createDrive.name,
+        driveId: null,
+        creatorEmail: (await ctx.provider.googleAbout()).user.emailAddress,
+      };
+      yield { ...unit("intent"), createdDrive: drive };
+    }
+    if (!drive.driveId) {
+      const recover = async () => {
+        const matches = await ctx.provider.findSharedDrives(drive!.name);
+        if (matches.length > 1)
+          throw Object.assign(new Error("Several Shared Drives match the planned name."), {
+            code: "drive_creation_ambiguous",
+            detail: { mappingId: mapping.id, name: drive!.name, candidates: matches },
+          });
+        return matches[0] ?? null;
+      };
+      let created = recovering ? await recover() : null;
+      if (!created) {
+        try {
+          created = await ctx.provider.createSharedDrive({
+            name: drive.name,
+            requestId: drive.requestId,
+          });
+        } catch (error) {
+          if (
+            !(error instanceof TypeError) &&
+            !(error instanceof HttpProviderFault && retryableStatus(error.status))
+          )
+            throw error;
+        }
+        if (!created) created = await recover();
+        if (!created)
+          created = await ctx.provider.createSharedDrive({
+            name: drive.name,
+            requestId: drive.requestId,
+          });
+        if (!created)
+          throw Object.assign(
+            new Error("Drive creation is not yet visible; retry the same request."),
+            {
+              code: "provider_request_failed",
+              transient: true,
+            },
+          );
+      }
+      drive = { ...drive, driveId: created.id };
+      // The engine commits this yield before requesting the first permission.
+      yield { ...unit("created"), createdDrive: drive };
+    }
+    for (const member of mapping.createDrive.members) {
+      if (
+        ctx.resume.memberGrants?.some(
+          (grant) =>
+            grant.mappingId === mapping.id &&
+            grant.driveId === drive!.driveId &&
+            grant.member.email === member.email &&
+            grant.member.type === member.type &&
+            grant.member.role === member.role,
+        )
+      )
+        continue;
+      const members = await ctx.provider.listDriveMembers(drive.driveId!);
+      if (
+        !members.some(
+          (m) =>
+            m.email.toLowerCase() === member.email.toLowerCase() &&
+            m.type === member.type &&
+            m.role === member.role,
+        )
+      )
+        await ctx.provider.addDriveMember(drive.driveId!, member);
+      yield {
+        ...unit(`member:${digest(member)}`),
+        memberGrant: {
+          mappingId: mapping.id,
+          driveId: drive.driveId!,
+          member,
+        },
+      };
+    }
+    ctx.resume.createdDrives = [
+      ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== mapping.id),
+      drive,
+    ];
+  }
 }
 
 function digest(value: unknown): string {
@@ -186,7 +314,16 @@ async function sourceInventory(
 async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<Snapshot> {
   const sources = await sourceInventory(ctx, mapping);
   const sourceById = new Map(sources.map((source) => [source.id, source]));
-  const destinationRoot = await ctx.provider.resolveDestinationFolder(mapping);
+  if (mapping.createDrive && !mapping.destDriveId)
+    return {
+      mapping,
+      sources,
+      sourceById,
+      destinations: [],
+      destinationById: new Map(),
+      destinationByPath: new Map(),
+    };
+  const destinationRoot = await ctx.provider.resolveDestinationFolder(destinationMapping(mapping));
   if (
     !destinationRoot ||
     destinationRoot.kind !== "folder" ||
@@ -300,7 +437,8 @@ function pendingPass(revision: number, mappingId: string, passNumber: number): M
 
 async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
   const trees: Snapshot[] = [];
-  for (const mapping of ctx.config.mappings) trees.push(await snapshot(ctx, mapping));
+  for (const mapping of ctx.config.mappings)
+    trees.push(await snapshot(ctx, provisionedMapping(ctx, mapping)));
   const overlapping = new Set<string>();
   for (let left = 0; left < trees.length; left++) {
     for (let right = left + 1; right < trees.length; right++) {
@@ -310,9 +448,10 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
         a.mapping.id === b.mapping.id ||
         (a.mapping.sourceDriveId === b.mapping.sourceDriveId &&
           (a.sourceById.has(b.mapping.sourceItemId) || b.sourceById.has(a.mapping.sourceItemId))) ||
-        (a.mapping.destDriveId === b.mapping.destDriveId &&
-          (a.destinationById.has(b.mapping.destFolderId) ||
-            b.destinationById.has(a.mapping.destFolderId)))
+        (a.mapping.destDriveId !== undefined &&
+          a.mapping.destDriveId === b.mapping.destDriveId &&
+          (a.destinationById.has(b.mapping.destFolderId!) ||
+            b.destinationById.has(a.mapping.destFolderId!)))
       ) {
         overlapping.add(a.mapping.id);
         overlapping.add(b.mapping.id);
@@ -333,8 +472,8 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
           : (sourceOmission(source) ?? (source.path === "." ? "unchanged" : "created"));
       const evidence = row(ctx, "plan", mapping, source, code);
       if (source.path === ".") {
-        evidence.destinationDriveId = mapping.destDriveId;
-        evidence.destinationFileId = mapping.destFolderId;
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        evidence.destinationFileId = mapping.destFolderId ?? null;
         evidence.fileScope = { exclusions, sourceInventoryAt: ctx.now().toISOString() };
       }
       const unit = commit(
@@ -359,6 +498,7 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
 }
 
 async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
+  yield* provision(ctx);
   const mappings = ctx.config.mappings[Symbol.iterator]();
   const active = new Set<AsyncGenerator<CommitUnit>>();
   const limit = ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight;
@@ -368,7 +508,7 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
       while (!ctx.signal?.aborted && !exhausted && active.size < limit) {
         const next = mappings.next();
         if (next.done) exhausted = true;
-        else active.add(copyMapping(ctx, next.value));
+        else active.add(copyMapping(ctx, provisionedMapping(ctx, next.value)));
       }
       if (!active.size) break;
       let progressed = false;
@@ -437,7 +577,7 @@ async function* copyMapping(
     const excluded = new Set(
       expandedExclusions({ mapping, sources }).map((item) => item.sourceItemId),
     );
-    const resolved = await ctx.provider.resolveFilePass(mapping);
+    const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
     const handle = await ctx.provider.startCopyPass({
       ...resolved,
       mode: "copy",
@@ -486,8 +626,47 @@ async function* copyMapping(
 async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
   let done = 0;
   const sizeOnly = ctx.config.options?.verificationMode === "size_only";
-  for (const mapping of ctx.config.mappings) {
+  for (const planned of ctx.config.mappings) {
+    const mapping = provisionedMapping(ctx, planned);
     const sources = await sourceInventory(ctx, mapping);
+    if (mapping.createDrive) {
+      const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
+      if (!drive?.driveId) throw new Error("Verification requires the durable created drive");
+      const expected = [...mapping.createDrive.members];
+      if (
+        !expected.some(
+          (member) =>
+            member.type === "user" &&
+            member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
+        )
+      )
+        expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
+      const actual = await ctx.provider.listDriveMembers(drive.driveId);
+      const identities = (members: typeof actual) =>
+        members
+          .map((member) => JSON.stringify([member.email.toLowerCase(), member.type, member.role]))
+          .sort();
+      if (JSON.stringify(identities(expected)) !== JSON.stringify(identities(actual))) {
+        const evidence = row(ctx, "verify", mapping, sources[0]!, "drive_membership_mismatch");
+        evidence.destinationDriveId = drive.driveId;
+        evidence.destinationFileId = drive.driveId;
+        yield commit(
+          ctx,
+          "verify",
+          evidence,
+          [
+            finding(ctx, "verify", "drive_membership_mismatch", mapping.id, {
+              mappingId: mapping.id,
+              driveId: drive.driveId,
+              expected,
+              actual,
+            }),
+          ],
+          "drive-membership",
+          ++done,
+        );
+      }
+    }
     const scope = (ctx.resume.rows ?? []).find(
       (candidate): candidate is FileEvidenceRow =>
         candidate.jobType === "file_migration" &&
@@ -522,7 +701,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         ++done,
       );
     }
-    const pass = await ctx.provider.resolveFilePass(mapping);
+    const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
     const sourceHashes = new Map(
       (
         await ctx.provider.listFileHashes({
@@ -636,7 +815,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         }
       }
       const evidence = row(ctx, "verify", mapping, source, codes[0] ?? "unchanged");
-      evidence.destinationDriveId = mapping.destDriveId;
+      evidence.destinationDriveId = mapping.destDriveId ?? null;
       evidence.destinationFileId = destination?.id ?? null;
       evidence.sourceFingerprint = downloaded?.hash ?? null;
       evidence.destinationFingerprint = destination?.hash ?? null;
@@ -676,7 +855,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         size: destination.size,
       };
       const evidence = row(ctx, "verify", mapping, source, "destination_only_retained");
-      evidence.destinationDriveId = mapping.destDriveId;
+      evidence.destinationDriveId = mapping.destDriveId ?? null;
       evidence.destinationFileId = destination.id ?? null;
       const stored =
         destination.hash === null
@@ -731,14 +910,31 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
     };
     if (!pass) return;
   }
+  if (ctx.config.mappings.some((m) => m.createDrive)) {
+    let canCreateDrives = false;
+    try {
+      canCreateDrives = (await provider.googleAbout()).canCreateDrives;
+    } catch {}
+    yield {
+      id: "google.canCreateDrives",
+      title: "Acting account may create Shared Drives",
+      status: canCreateDrives ? "pass" : "fail",
+      ...(canCreateDrives ? {} : { code: "preflight_failed" }),
+      evidence: { canCreateDrives },
+    };
+    if (!canCreateDrives) return;
+  }
   for (const mapping of ctx.config.mappings) {
     const source = await provider.resolveSourceRoot(mapping);
-    const destination = await provider.resolveDestinationFolder(mapping);
+    const destination =
+      mapping.createDrive && !mapping.destDriveId
+        ? null
+        : await provider.resolveDestinationFolder(destinationMapping(mapping));
     const pass =
       source?.kind === "folder" &&
       source.driveId === mapping.sourceDriveId &&
-      destination?.kind === "folder" &&
-      destination.driveId === mapping.destDriveId;
+      (mapping.createDrive !== undefined ||
+        (destination?.kind === "folder" && destination.driveId === mapping.destDriveId));
     yield {
       id: `mapping:${mapping.id}`,
       title: "Exact mapping roots resolve as ordinary folders",
@@ -757,6 +953,23 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
 }
 
 async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
+  const drives = ctx.config.mappings
+    .filter((m) => m.createDrive)
+    .map((m) => ({
+      mappingId: m.id,
+      ...m.createDrive!,
+    }));
+  if (drives.length)
+    yield { title: "Shared Drives to create", format: "text", body: JSON.stringify(drives) };
+  if (ctx.resume.createdDrives?.length)
+    yield {
+      title: "Created Shared Drives and members",
+      format: "text",
+      body: JSON.stringify({
+        drives: ctx.resume.createdDrives,
+        grants: ctx.resume.memberGrants ?? [],
+      }),
+    };
   yield {
     title: "Acting Google account",
     format: "text",
@@ -790,7 +1003,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     body: [
       "Current downloadable binary file version only; counted version history is omitted.",
       "Permissions and ownership were not assessed and were not migrated.",
-      "Destination drives and mapping roots are supplied and administered outside Migmate.",
+      "Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.",
       "Destination-only content and source-deleted prior copies are retained, never deleted.",
       "rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories. Owner, permission and label metadata are not copied.",
       "Copy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.",

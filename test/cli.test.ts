@@ -147,6 +147,20 @@ it("refuses unsupported manifest extensions and malformed CSV without replacing 
   for (const [invalid, row, field] of [
     [{ version: 1, mappings: [mapping], mirror: true }, 0, "mirror"],
     [{ version: 1, mappings: [{ ...mapping, members: [] }] }, 1, "members"],
+    ...["anyone", "domain"].map((type) => [
+      {
+        version: 1,
+        mappings: [
+          {
+            ...mapping,
+            destination: { type: "google_shared_drive", create: "New drive" },
+            members: [{ email: "team@example.com", type, role: "reader" }],
+          },
+        ],
+      },
+      1,
+      "members.0.type",
+    ]),
     [
       {
         version: 1,
@@ -211,6 +225,41 @@ it("refuses unsupported manifest extensions and malformed CSV without replacing 
     ),
   );
   assert.equal(status.value.review.totalRows, 1);
+});
+
+it("loads CSV drives-to-create and refuses public member types in the members cell", async (t) => {
+  const h = harness(t);
+  const init = document<{ id: string }>(
+    await invoke(["init", "--type", "file_migration", "--output", "json"], h.engine()),
+  );
+  const path = join(h.home, "provision.csv");
+  const args = ["manifest", "load", "--job", init.value.id, "--file", path, "--output", "json"];
+  for (const type of ["group", "anyone", "domain"]) {
+    const members = JSON.stringify([
+      { email: "team@example.com", type, role: "organizer" },
+    ]).replaceAll('"', '""');
+    writeFileSync(
+      path,
+      `id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members\nlibrary,sharepoint,src-drive,,google_shared_drive,,,"Finance, records","${members}"\n`,
+    );
+    const loaded = await invoke(args, h.engine());
+    assert.equal(loaded.code, type === "group" ? 0 : 2, loaded.stdout);
+    if (type !== "group")
+      assert.deepEqual(document(loaded).refusal.detail, { row: 1, field: "members.0.type" });
+  }
+  const rows = await h
+    .engine()
+    .reader({ id: init.value.id })
+    .rows({ phase: "plan", view: "mappings" });
+  assert.equal(rows.ok, true);
+  if (!rows.ok) throw new Error("Stored mapping missing");
+  const row = rows.value.rows[0]!;
+  assert.equal(row.jobType, "file_migration");
+  if (row.jobType === "file_migration")
+    assert.deepEqual(row.mapping?.createDrive, {
+      name: "Finance, records",
+      members: [{ email: "team@example.com", type: "group", role: "organizer" }],
+    });
 });
 
 it("loads JSON and CSV mapping manifests into the job and names invalid rows and fields", async (t) => {

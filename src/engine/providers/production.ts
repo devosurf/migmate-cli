@@ -264,6 +264,18 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async googleAbout() {
       return (await files()).googleAbout();
     },
+    async createSharedDrive(input) {
+      return (await files()).createSharedDrive(input);
+    },
+    async findSharedDrives(name) {
+      return (await files()).findSharedDrives(name);
+    },
+    async listDriveMembers(driveId) {
+      return (await files()).listDriveMembers(driveId);
+    },
+    async addDriveMember(driveId, member) {
+      return (await files()).addDriveMember(driveId, member);
+    },
     async resolveFilePass(value) {
       if (!current) throw new ProviderFault("provider_failed", "The transfer worker is absent.");
       return { socketPath: current.socketPath, ...(await (await files()).resolveFilePass(value)) };

@@ -119,6 +119,7 @@ const REFUSAL_CODES: Record<string, true> = Object.fromEntries(
     "approval_digest_stale",
     "plan_revision_required",
     "unsupported_route",
+    "drive_creation_ambiguous",
     "verification_unaccepted",
     "job_closed",
     "job_cancelled",
@@ -586,6 +587,10 @@ function expectedFailure<T>(error: unknown): Outcome<T> | null {
   if (error instanceof ManifestError)
     return refuse(error.code, error.message, { detail: error.detail });
   const code = errorCode(error);
+  if (code === "drive_creation_ambiguous" && error instanceof Error && "detail" in error)
+    return refuse("drive_creation_ambiguous", error.message, {
+      detail: error.detail as Record<string, unknown>,
+    });
   if (code && Object.hasOwn(REFUSAL_CODES, code))
     return refuse(code as RefusalCode, "The operation could not satisfy its required gate.");
   if (code?.startsWith("credential_") || code === "recovery_required")
@@ -1279,8 +1284,17 @@ function makeWriter(
       }
     }
   }
+  function resolvedMappings<T extends { id: string; createDrive?: unknown }>(mappings: T[]): T[] {
+    const drives = new Map(store.readCreatedDrives().map((drive) => [drive.mappingId, drive]));
+    return mappings.map((mapping) => {
+      const driveId = mapping.createDrive ? drives.get(mapping.id)?.driveId : null;
+      return driveId ? { ...mapping, destDriveId: driveId, destFolderId: driveId } : mapping;
+    });
+  }
   function provider(config: JobConfig, archiveVerification = false): ProviderPort {
-    const p = providerFor(deps, paths, job().type, config, archiveVerification);
+    const resolved =
+      "mappings" in config ? { ...config, mappings: resolvedMappings(config.mappings) } : config;
+    const p = providerFor(deps, paths, job().type, resolved, archiveVerification);
     providers.add(p);
     return p;
   }
@@ -1670,6 +1684,22 @@ function makeWriter(
         if (job().type !== "file_migration")
           return refuse("unsupported_route", "Mapping manifests require a file migration job.");
         const manifest = parseManifest(input.content, input.format);
+        const creations = new Map(
+          store.readCreatedDrives().map((drive) => [drive.mappingId, drive]),
+        );
+        for (const [index, mapping] of manifest.mappings.entries()) {
+          const previous = creations.get(mapping.id);
+          if (
+            previous &&
+            "create" in mapping.destination &&
+            previous.name !== mapping.destination.create
+          )
+            throw new ManifestError(
+              index + 1,
+              "destination.create",
+              "A submitted creation name is immutable; use the existing drive id",
+            );
+        }
         const base = existsSync(paths.configPath)
           ? readConfig(paths, job().type, store)
           : parseConfig({}, job().type, paths);
@@ -1678,14 +1708,15 @@ function makeWriter(
           id: m.id,
           sourceDriveId: m.source.driveId,
           sourceFolderPath: m.source.folderPath,
-          destDriveId: m.destination.driveId,
-          destFolderId: m.destination.folderId,
+          ...("create" in m.destination
+            ? { createDrive: { name: m.destination.create, members: m.members ?? [] } }
+            : { destDriveId: m.destination.driveId, destFolderId: m.destination.folderId }),
         }));
         const p =
           deps.provider ??
           createProductionProvider({
             jobType: "file_migration",
-            config: { ...base, mappings: pending },
+            config: { ...base, mappings: resolvedMappings(pending) },
             jobDirectory: paths.dir,
           });
         providers.add(p);
@@ -1705,7 +1736,7 @@ function makeWriter(
             );
           mappings.push({ ...mapping, sourceItemId: root.id });
         }
-        await validateMappingTrees(p, mappings);
+        await validateMappingTrees(p, resolvedMappings(mappings));
         const previousRevision = job().planRevision;
         store.atomic(() => {
           store.writeMappings({ mappings, digest: manifest.digest });
@@ -2333,12 +2364,18 @@ async function checkApprovedMappingScope(
         code: "plan_revision_required",
         message: "The plan has no frozen mapping scope.",
       });
-    const root = await p.resolveDestinationFolder(mapping);
+    const root = mapping.createDrive
+      ? null
+      : await p.resolveDestinationFolder({
+          destDriveId: mapping.destDriveId!,
+          destFolderId: mapping.destFolderId!,
+        });
     if (
-      !root ||
-      root.id !== mapping.destFolderId ||
-      root.driveId !== mapping.destDriveId ||
-      root.kind !== "folder"
+      !mapping.createDrive &&
+      (!root ||
+        root.id !== mapping.destFolderId ||
+        root.driveId !== mapping.destDriveId ||
+        root.kind !== "folder")
     )
       throw new EngineRefusalError({
         code: "plan_revision_required",

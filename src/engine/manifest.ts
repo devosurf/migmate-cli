@@ -1,12 +1,15 @@
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 import { digestJson } from "./store/digest.ts";
-import type { ProviderPort } from "./providers/port.ts";
+import type { DriveMember, ProviderPort } from "./providers/port.ts";
 import { ProviderFault } from "./providers/credentials.ts";
 
 export interface ManifestMapping {
   id: string;
   source: { type: "sharepoint"; driveId: string; folderPath: string };
-  destination: { type: "google_shared_drive"; driveId: string; folderId: string };
+  destination: { type: "google_shared_drive" } & (
+    { driveId: string; folderId: string } | { create: string }
+  );
+  members?: DriveMember[];
 }
 export interface LoadedManifest {
   mappingCount: number;
@@ -33,6 +36,8 @@ const columns = [
   "destination.type",
   "destination.driveId",
   "destination.folderId",
+  "destination.create",
+  "members",
 ];
 function csv(text: string): unknown {
   const rows: string[][] = [];
@@ -67,16 +72,34 @@ function csv(text: string): unknown {
       throw new ManifestError(rows.length, columns[row.length] ?? "csv");
     else cell += c;
   }
-  if (JSON.stringify(rows.shift()) !== JSON.stringify(columns))
+  const header = rows.shift();
+  if (
+    JSON.stringify(header) !== JSON.stringify(columns) &&
+    JSON.stringify(header) !== JSON.stringify(columns.slice(0, 7))
+  )
     throw new ManifestError(0, "header");
   return {
     version: 1,
     mappings: rows.map((r, i) => {
-      if (r.length !== columns.length) throw new ManifestError(i + 1, "columns");
+      if (r.length !== header!.length) throw new ManifestError(i + 1, "columns");
+      let members: unknown;
+      if (r[8]) {
+        try {
+          members = JSON.parse(r[8]);
+        } catch {
+          throw new ManifestError(i + 1, "members");
+        }
+      }
       return {
         id: r[0],
         source: { type: r[1], driveId: r[2], folderPath: r[3] },
-        destination: { type: r[4], driveId: r[5], folderId: r[6] },
+        destination: {
+          type: r[4],
+          ...(r[7] ? { create: r[7] } : {}),
+          ...(r[5] || !r[7] ? { driveId: r[5] } : {}),
+          ...(r[6] || !r[7] ? { folderId: r[6] } : {}),
+        },
+        ...(members !== undefined ? { members } : {}),
       };
     }),
   };
@@ -116,18 +139,52 @@ export function parseManifest(
   const ids = new Set<string>();
   const mappings = root.mappings.map((raw, index): ManifestMapping => {
     const row = index + 1,
-      m = object(raw, row, "", ["id", "source", "destination"]);
+      m = object(raw, row, "", ["id", "source", "destination", "members"]);
     const id = text(m.id, row, "id");
     if (ids.has(id)) throw new ManifestError(row, "id", "Duplicate mapping id");
     ids.add(id);
+    const members: DriveMember[] = [];
+    if (m.members !== undefined) {
+      if (!Array.isArray(m.members)) throw new ManifestError(row, "members");
+      for (const [index, rawMember] of m.members.entries()) {
+        const field = `members.${index}`;
+        const member = object(rawMember, row, field, ["email", "type", "role"]);
+        if (member.type !== "user" && member.type !== "group")
+          throw new ManifestError(row, `${field}.type`);
+        if (
+          !["organizer", "fileOrganizer", "writer", "commenter", "reader"].includes(
+            String(member.role),
+          )
+        )
+          throw new ManifestError(row, `${field}.role`);
+        if (!/^[^\s@]+@[^\s@]+$/u.test(text(member.email, row, `${field}.email`)))
+          throw new ManifestError(row, `${field}.email`);
+        const email = String(member.email).toLowerCase();
+        if (members.some((m) => m.email === email))
+          throw new ManifestError(row, `${field}.email`, "Duplicate member");
+        members.push({ email, type: member.type, role: member.role as DriveMember["role"] });
+      }
+      if (!(m.destination && typeof m.destination === "object" && "create" in m.destination))
+        throw new ManifestError(row, "members", "Members require a drive to create");
+    }
     const s = object(m.source, row, "source", ["type", "driveId", "folderPath"]);
-    const d = object(m.destination, row, "destination", ["type", "driveId", "folderId"]);
+    const d = object(m.destination, row, "destination", ["type", "driveId", "folderId", "create"]);
+    if (d.create !== undefined && (d.driveId !== undefined || d.folderId !== undefined))
+      throw new ManifestError(
+        row,
+        "destination.create",
+        "Choose an existing destination or create",
+      );
     if (s.type !== "sharepoint") throw new ManifestError(row, "source.type");
     if (d.type !== "google_shared_drive") throw new ManifestError(row, "destination.type");
     for (const [value, field] of [
       [s.driveId, "source.driveId"],
-      [d.driveId, "destination.driveId"],
-      [d.folderId, "destination.folderId"],
+      ...(d.create === undefined
+        ? [
+            [d.driveId, "destination.driveId"] as const,
+            [d.folderId, "destination.folderId"] as const,
+          ]
+        : []),
     ] as const) {
       if (
         typeof value !== "string" ||
@@ -151,11 +208,15 @@ export function parseManifest(
         driveId: text(s.driveId, row, "source.driveId"),
         folderPath: path,
       },
-      destination: {
-        type: "google_shared_drive",
-        driveId: text(d.driveId, row, "destination.driveId"),
-        folderId: text(d.folderId, row, "destination.folderId"),
-      },
+      destination:
+        d.create !== undefined
+          ? { type: "google_shared_drive", create: text(d.create, row, "destination.create") }
+          : {
+              type: "google_shared_drive",
+              driveId: text(d.driveId, row, "destination.driveId"),
+              folderId: text(d.folderId, row, "destination.folderId"),
+            },
+      ...(d.create !== undefined ? { members } : {}),
     };
   });
   const sorted = [...mappings].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -170,6 +231,7 @@ export async function validateMappingTrees(
   for (const side of ["source", "destination"] as const) {
     const roots = new Map<string, number>();
     for (const [index, m] of mappings.entries()) {
+      if (side === "destination" && m.createDrive && !m.destDriveId) continue;
       const key = JSON.stringify(
         side === "source" ? [m.sourceDriveId, m.sourceItemId] : [m.destDriveId, m.destFolderId],
       );
@@ -178,8 +240,9 @@ export async function validateMappingTrees(
     }
     const parents = new Map<string, string | null>();
     for (const [index, m] of mappings.entries()) {
-      const drive = side === "source" ? m.sourceDriveId : m.destDriveId;
-      let id: string | null = side === "source" ? m.sourceItemId : m.destFolderId;
+      if (side === "destination" && m.createDrive && !m.destDriveId) continue;
+      const drive = side === "source" ? m.sourceDriveId : m.destDriveId!;
+      let id: string | null = side === "source" ? m.sourceItemId : m.destFolderId!;
       const seen = new Set<string>();
       while (id !== null) {
         const key: string = JSON.stringify([drive, id]);

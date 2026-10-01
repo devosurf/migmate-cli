@@ -9,7 +9,14 @@
  * re-resolves by identity rather than replaying a link that has already expired.
  */
 
-import type { CodeKind, MappingPass, ProgressUnit, RowPhase } from "./types.ts";
+import type {
+  CodeKind,
+  CreatedDrive,
+  MemberGrant,
+  MappingPass,
+  ProgressUnit,
+  RowPhase,
+} from "./types.ts";
 import type { FileSourceEvidence, FileScope } from "./drivers/file-state.ts";
 import type { ArchiveDestinationState } from "./archive/destination.ts";
 import type {
@@ -99,6 +106,8 @@ export interface CommitUnit {
   watermark?: { unitKey: string; value: string };
   progress?: { unit: ProgressUnit; done: number; total: number | null };
   mappingPass?: MappingPass;
+  createdDrive?: CreatedDrive;
+  memberGrant?: MemberGrant;
   /** Verification idempotence is scoped to a fresh durable run, not just a plan. */
   verificationRun?: number;
   archivePlan?: ArchivePlan;

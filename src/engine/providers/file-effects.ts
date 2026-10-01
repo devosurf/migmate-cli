@@ -15,6 +15,9 @@ import type { CheckResult } from "../types.ts";
 import type {
   DestinationEntry,
   GoogleAbout,
+  DriveMember,
+  DriveMembership,
+  SharedDrive,
   ProvenanceRecord,
   ProviderPort,
   SourceEntry,
@@ -24,10 +27,12 @@ interface DestinationRoot {
   destDriveId: string;
   destFolderId: string;
 }
-interface Mapping extends DestinationRoot {
+interface Mapping {
   sourceDriveId: string;
   sourceItemId?: string;
   sourceSiteId?: string;
+  destDriveId?: string;
+  destFolderId?: string;
 }
 interface GraphItem {
   id: string;
@@ -192,7 +197,10 @@ function readMappings(config: unknown): Mapping[] {
     if (!raw || typeof raw !== "object")
       throw new ProviderFault("preflight_failed", "A file mapping is invalid.");
     const record = raw as Record<string, unknown>;
-    for (const field of ["sourceDriveId", "destDriveId", "destFolderId"]) {
+    const hasDestination = record.createDrive === undefined || record.destDriveId !== undefined;
+    for (const field of hasDestination
+      ? ["sourceDriveId", "destDriveId", "destFolderId"]
+      : ["sourceDriveId"]) {
       if (
         typeof record[field] !== "string" ||
         !record[field] ||
@@ -204,8 +212,12 @@ function readMappings(config: unknown): Mapping[] {
     return {
       sourceDriveId: String(record.sourceDriveId),
       ...(typeof record.sourceItemId === "string" ? { sourceItemId: record.sourceItemId } : {}),
-      destDriveId: String(record.destDriveId),
-      destFolderId: String(record.destFolderId),
+      ...(hasDestination
+        ? {
+            destDriveId: String(record.destDriveId),
+            destFolderId: String(record.destFolderId),
+          }
+        : {}),
       ...(typeof record.sourceSiteId === "string" ? { sourceSiteId: record.sourceSiteId } : {}),
     };
   });
@@ -214,7 +226,7 @@ function readMappings(config: unknown): Mapping[] {
 /** Stable IDs drive every mutation. Names are never used to select an overwrite target. */
 export class FileEffects {
   readonly mappings: Mapping[];
-  readonly #destinationRoots: (DestinationRoot | Mapping)[];
+  readonly #destinationRoots: DestinationRoot[];
   readonly #session: CredentialSession;
   readonly #graph: GraphTransport;
   readonly #worker: SourceWorker;
@@ -229,7 +241,13 @@ export class FileEffects {
     worker: SourceWorker;
   }) {
     this.mappings = input.destination ? [] : readMappings(input.config);
-    this.#destinationRoots = input.destination ? [input.destination] : this.mappings;
+    this.#destinationRoots = input.destination
+      ? [input.destination]
+      : this.mappings.flatMap((m) =>
+          m.destDriveId && m.destFolderId
+            ? [{ destDriveId: m.destDriveId, destFolderId: m.destFolderId }]
+            : [],
+        );
     this.#session = input.session;
     this.#graph = input.graph;
     this.#worker = input.worker;
@@ -426,6 +444,94 @@ export class FileEffects {
       user: { emailAddress: about.user.emailAddress },
       canCreateDrives: about.canCreateDrives,
     };
+  }
+
+  async createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null> {
+    const query = new URLSearchParams({ requestId: input.requestId, fields: "id,name" });
+    const response = await this.#google(`/drive/v3/drives?${query}`, {
+      method: "POST",
+      body: JSON.stringify({ name: input.name }),
+    });
+    if (response.status === 409) {
+      await response.body?.cancel();
+      return null;
+    }
+    return responseJson<SharedDrive>(response);
+  }
+
+  async findSharedDrives(name: string): Promise<SharedDrive[]> {
+    const found: SharedDrive[] = [];
+    for await (const drives of cursorPages(
+      null,
+      async (cursor) => {
+        const query = new URLSearchParams({
+          q: `name = '${name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`,
+          fields: "nextPageToken,drives(id,name)",
+          pageSize: "100",
+        });
+        if (cursor) query.set("pageToken", cursor);
+        const page = await responseJson<{ drives?: SharedDrive[]; nextPageToken?: string }>(
+          await this.#google(`/drive/v3/drives?${query}`),
+        );
+        return { value: page.drives ?? [], next: page.nextPageToken };
+      },
+      () => new ProviderFault("provider_request_failed", "Drive listing cursor repeated."),
+    ))
+      found.push(...drives.filter((drive) => drive.name === name));
+    return found;
+  }
+
+  async listDriveMembers(driveId: string): Promise<DriveMembership[]> {
+    const members: DriveMembership[] = [];
+    for await (const permissions of cursorPages(
+      null,
+      async (cursor) => {
+        const query = new URLSearchParams({
+          supportsAllDrives: "true",
+          pageSize: "100",
+          fields: "nextPageToken,permissions(id,emailAddress,domain,type,role,deleted)",
+        });
+        if (cursor) query.set("pageToken", cursor);
+        const page = await responseJson<{
+          permissions?: {
+            emailAddress?: string;
+            domain?: string;
+            type: string;
+            role: string;
+            deleted?: boolean;
+          }[];
+          nextPageToken?: string;
+        }>(
+          await this.#google(`/drive/v3/files/${encodeURIComponent(driveId)}/permissions?${query}`),
+        );
+        return { value: page.permissions ?? [], next: page.nextPageToken };
+      },
+      () => new ProviderFault("provider_request_failed", "Member listing cursor repeated."),
+    ))
+      members.push(
+        ...permissions.map((member) => ({
+          email: member.emailAddress ?? member.domain ?? "",
+          type: member.deleted ? "deleted" : member.type,
+          role: member.role,
+        })),
+      );
+    return members;
+  }
+
+  async addDriveMember(driveId: string, member: DriveMember): Promise<void> {
+    await responseJson(
+      await this.#google(
+        `/drive/v3/files/${encodeURIComponent(driveId)}/permissions?supportsAllDrives=true&sendNotificationEmail=false&fields=id`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            emailAddress: member.email,
+            type: member.type,
+            role: member.role,
+          }),
+        },
+      ),
+    );
   }
 
   async resolveFilePass(input: {
@@ -764,7 +870,7 @@ export class FileEffects {
   }
 
   async *preflight(): AsyncIterable<CheckResult> {
-    for (const root of this.#destinationRoots) {
+    for (const root of this.mappings.length ? this.mappings : this.#destinationRoots) {
       const mapping = "sourceDriveId" in root ? root : undefined;
       const evidence = {
         ...(mapping
@@ -835,6 +941,15 @@ export class FileEffects {
             sourceDriveType: drive.driveType,
           };
         }
+        if (!root.destDriveId || !root.destFolderId) {
+          yield {
+            id: checkId,
+            title: "Exact source access before provisioning",
+            status: "pass",
+            evidence: { ...evidence, ...sourceEvidence },
+          };
+          continue;
+        }
         const destination = await this.#getRaw(root.destFolderId);
         if (
           destination.file.driveId !== root.destDriveId ||
@@ -857,7 +972,13 @@ export class FileEffects {
         continue;
       }
       try {
-        const result = await this.#probeDestination(root, mapping);
+        const result = await this.#probeDestination(
+          {
+            destDriveId: root.destDriveId!,
+            destFolderId: root.destFolderId!,
+          },
+          mapping,
+        );
         yield {
           id: `provider.probe.${root.destFolderId}`,
           title: "Disposable destination capability probe",

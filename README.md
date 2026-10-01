@@ -133,7 +133,8 @@ Drive scope and injects `impersonate` into each mapping's rclone connection stri
 Keep `impersonate` out of the operator's rclone config: its strict allowlist refuses it.
 Plan and report show the acting account. The closing report leaves deleting the
 service-account key and deleting the delegation entry as open operator tasks;
-Migmate does not perform those administrative deletions. Drive creation is not enabled.
+Migmate does not perform those administrative deletions. A manifest that creates
+Shared Drives also requires `about.canCreateDrives = true` in preflight.
 
 ### Mapping manifests
 
@@ -170,19 +171,48 @@ Mappings overlap if their source roots in the same drive are equal or one is an
 ancestor of the other, **or** their destination roots in the same Shared Drive are
 equal or nested. Sibling trees are allowed; exclusions do not make overlapping roots safe.
 
-CSV uses this exact header and column order, with no extra columns:
+For a new Shared Drive, replace `destination` with
+`{ "type": "google_shared_drive", "create": "Finance" }` and optionally add
+`members` beside `source` and `destination`:
+
+```json
+{
+  "members": [
+    { "email": "finance@example.com", "type": "group", "role": "fileOrganizer" },
+    { "email": "reviewer@example.com", "type": "user", "role": "reader" }
+  ]
+}
+```
+
+The drive root becomes the destination folder. Existing destinations and drives
+to create may coexist in one manifest. Members apply only to drives the job
+creates; types are `user` or `group`, and roles are `organizer`, `fileOrganizer`,
+`writer`, `commenter`, or `reader`. `anyone` and `domain` refuse at load, naming
+the row and `members.N.type`. Emails are case-insensitive and duplicates refuse.
+
+For existing destinations, CSV accepts this exact seven-column header:
 
 ```csv
 id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId
 finance,sharepoint,sharepoint-library-id,Reports/2026,google_shared_drive,shared-drive-id,existing-folder-id
 ```
 
+For provisioning, use the exact nine-column layout below. Leave existing
+destination IDs empty when `destination.create` is set; the `members` cell is
+a JSON array encoded as a CSV string. Leave the two added cells empty for existing
+destinations in a mixed manifest.
+
+```csv
+id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members
+finance,sharepoint,sharepoint-library-id,Reports/2026,google_shared_drive,,,Finance,"[{""email"":""finance@example.com"",""type"":""group"",""role"":""writer""}]"
+```
+
 Use UTF-8 and standard double-quoted CSV cells (double a quote inside a quoted cell);
 LF and CRLF are accepted. An empty source path is an empty cell. Validation refuses
 with `configuration_invalid` (exit 2), `refusal.detail.row` (one-based mapping/data
 record; 0 means document/header), and `refusal.detail.field`. JSON fields and CSV
-columns are strict: members, drives-to-create, Google sources, mirror, and every
-unknown field refuse rather than being ignored.
+columns are strict: Google sources, mirror, and every unknown field refuse rather
+than being ignored.
 
 A successful load replaces the entire mapping set in SQLite, not the credential
 settings. Legacy `[[mappings]]` configs move into SQLite on writer open, preserving
@@ -207,9 +237,40 @@ definitions. `--revision N` reviews earlier plans. Mapping view omits the unpage
 top-level `mappingPasses`; default item view retains it. `--mapping` also filters
 item rows.
 
+### Shared Drive provisioning and recovery
+
+The plan lists each drive to create and its members and roles. Before any copy,
+`execute` creates drives as the acting account, using a request ID derived from
+the job ID and mapping ID. Creation intent and returned drive ID are checkpointed;
+the ID is durable **before** any member is added. Member grants use
+`supportsAllDrives=true` and `sendNotificationEmail=false`, and are checkpointed too.
+
+A lost creation response, including a replay returning HTTP 409, is recovered by
+listing drives visible to the acting account with exactly the planned name.
+One match is adopted; none retries the same creation request; several refuse with
+`drive_creation_ambiguous` (exit 4), including candidate IDs. Never guess a match.
+After a crash, rerun `execute`: a stored drive ID is reused without name lookup,
+and an already-present matching member grant is recorded without submitting it again.
+Once creation has been submitted, its mapping ID cannot be reused with a different
+creation name. Use the existing destination ID rather than changing that intent.
+
+Google automatically grants the creator `organizer`. Verification compares the
+manifest members plus that implicit creator (unless explicitly listed) against
+the drive's complete membership. Missing, extra, or changed grants raise
+`drive_membership_mismatch`, with expected and actual memberships in the report;
+the finding blocks `close` until accepted. Verification and execute replay do not
+repair already-checkpointed grants. Members removed from a later manifest are
+not revoked automatically; they appear as drift.
+
+`status.createdDrives` exposes mapping, request ID, nullable drive ID, planned name,
+and creator email; a null drive ID is an unresolved creation intent.
+`status.memberGrants` and the report retain completed grants. Existing destination
+memberships are neither managed nor verified. Provisioning is covered by fake
+provider and HTTP-transport contracts; this does not claim a live tenant run.
+
 ### File mapping copies and recovery
 
-Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Destinations must already exist; provisioning and mirror/delete mode are not implemented.
+Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying. Mirror/delete mode is not implemented.
 
 The job's `[options]` controls both limits, shown in the immutable plan's **Copy concurrency** section and the report:
 

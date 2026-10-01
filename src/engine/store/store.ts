@@ -33,6 +33,8 @@ import {
   type JobStatus,
   type JobType,
   type MappingPass,
+  type CreatedDrive,
+  type MemberGrant,
   type Outcome,
   type PlanRevision,
   type Progress,
@@ -59,7 +61,7 @@ import type {
 import { canonicalJson, digestJson } from "./digest.ts";
 import type { StoredMappings } from "../manifest.ts";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 const BUSY_TIMEOUT_MS = 5_000;
 const schemaSql = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
 const extensionMarker = "-- Full file intents/results are retained";
@@ -143,6 +145,8 @@ export interface CheckResultRecord extends CheckResult {
 export interface ResumeRecord extends ArchiveResumeState {
   rows: CommitRow[];
   mappingPasses: MappingPass[];
+  createdDrives: CreatedDrive[];
+  memberGrants: MemberGrant[];
   watermarks: Record<string, string>;
   committedUnits: string[];
 }
@@ -180,6 +184,7 @@ export interface Store {
   writeCheckResult(record: CheckResultRecord): void;
   readResume(revision: number): ResumeRecord;
   readMappingPasses(revision: number): MappingPass[];
+  readCreatedDrives(): CreatedDrive[];
   readAllRows(revision: number, phase?: RowPhase): CommitRow[];
   writeArtifactSet(value: ArtifactSet): void;
   readArtifactSet(): ArtifactSet;
@@ -415,6 +420,11 @@ function migrateVersion2(db: DatabaseSync): void {
 
 function migrateVersion3(db: DatabaseSync): void {
   db.exec(schemaSql.slice(schemaSql.indexOf("-- Loaded mapping manifest")));
+  db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
+}
+
+function migrateVersion4(db: DatabaseSync): void {
+  db.exec(schemaSql.slice(schemaSql.indexOf("-- Shared Drive provisioning")));
   db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
 }
 
@@ -1171,6 +1181,18 @@ class StoreImpl implements Store {
       .all(revision)
       .map((row) => JSON.parse(String(row.payload)) as MappingPass);
   }
+  readCreatedDrives(): CreatedDrive[] {
+    return this.db
+      .prepare("SELECT payload FROM created_drive ORDER BY mapping_id")
+      .all()
+      .map((row) => JSON.parse(String(row.payload)) as CreatedDrive);
+  }
+  readMemberGrants(): MemberGrant[] {
+    return this.db
+      .prepare("SELECT payload FROM member_grant ORDER BY mapping_id,email")
+      .all()
+      .map((row) => JSON.parse(String(row.payload)) as MemberGrant);
+  }
   readResume(revision: number): ResumeRecord {
     return this.#snapshot(() => {
       const rows = this.readAllRows(revision);
@@ -1194,6 +1216,8 @@ class StoreImpl implements Store {
         watermarks,
         committedUnits,
         mappingPasses: this.readMappingPasses(revision),
+        createdDrives: this.readCreatedDrives(),
+        memberGrants: this.readMemberGrants(),
       };
       if (plan !== undefined) {
         result.archivePlan = JSON.parse(String(plan.payload)) as ArchivePlan;
@@ -1566,6 +1590,22 @@ class StoreImpl implements Store {
           canonicalJson(resources),
         );
       if (gate.changes === 0) return { applied: false };
+      if (unit.createdDrive)
+        this.db
+          .prepare(
+            "INSERT INTO created_drive(mapping_id,payload) VALUES (?,?) ON CONFLICT(mapping_id) DO UPDATE SET payload=excluded.payload",
+          )
+          .run(unit.createdDrive.mappingId, canonicalJson(unit.createdDrive));
+      if (unit.memberGrant)
+        this.db
+          .prepare(
+            "INSERT INTO member_grant(mapping_id,email,payload) VALUES (?,?,?) ON CONFLICT(mapping_id,email) DO UPDATE SET payload=excluded.payload",
+          )
+          .run(
+            unit.memberGrant.mappingId,
+            unit.memberGrant.member.email,
+            canonicalJson(unit.memberGrant),
+          );
       if (unit.mappingPass) {
         const pass = unit.mappingPass;
         if (pass.revision !== unit.rev) throw new Error("Mapping pass revision mismatch");
@@ -1797,7 +1837,7 @@ class StoreImpl implements Store {
         sourceItemId: mapping.sourceItemId,
         relativePath: mapping.sourceFolderPath ?? ".",
         size: null,
-        destinationFileId: mapping.destFolderId,
+        destinationFileId: mapping.destFolderId ?? null,
         provenanceState: "none",
         code: String(row.code),
         kind: row.kind as FileItemRow["kind"],
@@ -2187,6 +2227,8 @@ class StoreImpl implements Store {
         verificationDigest: verification?.verificationDigest ?? null,
         progress,
         mappingPasses: this.readMappingPasses(job.planRevision ?? 0),
+        createdDrives: this.readCreatedDrives(),
+        memberGrants: this.readMemberGrants(),
         lastCheckpoint: job.lastCheckpoint ?? lease?.lastCheckpoint ?? null,
         outstandingFindings: findings.filter(
           (finding) => finding.kind !== "policy_outcome" && !accepted.has(finding.code),
@@ -2370,6 +2412,7 @@ export function openStore(
         if (version === 1) migrateVersion1(db);
         else if (version === 2) migrateVersion2(db);
         else if (version === 3) migrateVersion3(db);
+        else if (version === 4) migrateVersion4(db);
         else if (version !== null && version !== SCHEMA_VERSION)
           throw new Error("Job schema changed while opening");
       }

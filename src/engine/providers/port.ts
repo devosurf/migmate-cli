@@ -144,8 +144,29 @@ export interface GoogleAbout {
   canCreateDrives: boolean;
 }
 
+export interface DriveMember {
+  email: string;
+  type: "user" | "group";
+  role: "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader";
+}
+export interface SharedDrive {
+  id: string;
+  name: string;
+}
+/** Observations include unsupported public/domain grants so verification can report them. */
+export interface DriveMembership {
+  email: string;
+  type: string;
+  role: string;
+}
+
 export interface ProviderPort extends FilePassProvider {
   googleAbout(): Promise<GoogleAbout>;
+  /** A 409 replay returns null: the caller must reconcile by exact name. */
+  createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null>;
+  findSharedDrives(name: string): Promise<SharedDrive[]>;
+  listDriveMembers(driveId: string): Promise<DriveMembership[]>;
+  addDriveMember(driveId: string, member: DriveMember): Promise<void>;
   resolveFilePass(input: {
     sourceDriveId: string;
     sourceItemId: string;

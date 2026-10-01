@@ -33,10 +33,12 @@ For file migration batches, initialize with credential config, then run
 `manifest load --job ID --file mappings.json --output json` before `doctor`.
 JSON uses `{ "version": 1, "mappings": [...] }`; each mapping has `id`,
 `source: { type: "sharepoint", driveId, folderPath }`, and
-`destination: { type: "google_shared_drive", driveId, folderId }`.
+`destination: { type: "google_shared_drive", driveId, folderId }` for existing roots.
+To provision, use `destination: { type: "google_shared_drive", create: "Drive name" }`
+and optional mapping-level `members: [{ email, type, role }]`. Read README's
+**Mapping manifests** for member roles and the seven-/nine-column CSV layouts.
 `folderPath` is literal drive-relative text (`""` for the root), not URL-encoded.
-For CSV use README's **Mapping manifests** exact seven-column header and quoting rules.
-Extra fields, members, drives-to-create, Google sources, and mirror refuse.
+Extra fields, Google sources, mirror, and `anyone`/`domain` members refuse.
 On `configuration_invalid`, fix `refusal.detail.row` and `.field`; row 0 means the
 document/header, other rows are one-based mapping records. Equal or nested source
 roots within one drive, or destination roots within one Shared Drive, overlap and refuse.
@@ -50,13 +52,29 @@ In mapping view, read each row's `mapping` and `mappingPass`, not top-level
 `mappingPasses` (omitted to keep the page bounded). Read back the new plan digest,
 not the old approval's digest.
 
+Before approving provisioning, read back every planned drive name, member and role.
+`doctor` requires `about.canCreateDrives` for these manifests. Creation and member
+grants finish before copying; notification emails are suppressed. After a crash,
+rerun `execute` using the same job: its request IDs, created drive IDs and grants
+are durable. Read `status.createdDrives` (a null drive ID is an unresolved intent)
+and `status.memberGrants`; the report retains both.
+
+On `drive_creation_ambiguous` (exit 4), surface the candidate IDs and stop: several
+visible drives have the exact planned name, so recovery cannot choose safely.
+Keep a submitted creation name bound to its mapping ID; use an existing destination
+ID rather than changing that intent. On `drive_membership_mismatch`, surface expected
+and actual members for human review and acceptance. Google adds the creator as an
+implicit organizer; verification includes it unless explicitly listed in the manifest.
+Verify and execute replay leave checkpointed grants alone. Removing a manifest member
+does not revoke access. Existing destination memberships are outside this feature.
+
 For file migrations, read the plan's verification mode before approval. The default `"hash"` re-downloads source bytes and compares each relative file path to Drive's stored SHA-256, falling back per file to MD5 without downloading the destination. `[options] verificationMode = "size_only"` trades content proof for listed-size comparison and always requires acceptance of `content_verification_degraded`, even for an empty mapping. Missing, size-differing, corrupt, and unreadable files carry their path, both sizes, and available hashes in the report. Surface those exact paths and evidence. Leftovers (`destination_only_retained`) are retained and reported without blocking close. Verification proves files, not empty folders or metadata.
 
 Read the plan's **Copy concurrency** before approval. Job `[options]` settings `mappingsInFlight` (default `2`) and `transfersPerMapping` (default `4`) accept positive safe integers; the conservative defaults allow eight file transfers across two mappings. Use `mappingsInFlight = 1` for serial mappings. Passes share one managed worker and one serial checkpoint writer; a freed slot starts the next queued mapping. rclone's pacer absorbs throttling within a pass. Failed passes count against the run's retry budget without stopping other mappings.
 
 Read `status.mappingPasses` for durable outcomes and rclone errors. Re-run `execute` to retry failed/interrupted passes, skipping completed passes for that revision; writer recovery marks all unfinished passes interrupted after the worker is gone, including every pass active at a crash. rclone skips identical files on retry. Ctrl-C stops active passes cooperatively and exits 130. Use `--output jsonl` for `mapping_progress` events (`mappingId`, `passNumber`, `bytes`, `files`, `speed`, `errors`).
 
-Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File migration uses no reserved IDs, private markers, move-by-id or local staging; Teams archive uploads retain their own protections. rclone copies empty directories and supported timestamps/content type with owner, permission and label metadata off. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary; mirror and provisioning are not job features in this release.
+Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File migration uses no reserved IDs, private markers, move-by-id or local staging; Teams archive uploads retain their own protections. rclone copies empty directories and supported timestamps/content type with owner, permission and label metadata off. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary; mirror is not a job feature in this release.
 
 ## Reading a refusal
 

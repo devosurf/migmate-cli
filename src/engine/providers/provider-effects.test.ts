@@ -122,6 +122,80 @@ test("Google about proves the acting email and exposes drive creation capability
   });
 });
 
+test("creates Shared Drives with a replayable request id and reads and grants exact members without mail", async (t) => {
+  let created = false;
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/drive/v3/drives" && init?.method === "POST") {
+      assert.equal(url.searchParams.get("requestId"), "job-mapping-request");
+      assert.deepEqual(JSON.parse(String(init.body)), { name: "Finance's drive" });
+      if (created) return new Response(null, { status: 409 });
+      created = true;
+      return Response.json({ id: "new-drive", name: "Finance's drive" });
+    }
+    if (url.pathname === "/drive/v3/drives") {
+      assert.equal(url.searchParams.get("q"), "name = 'Finance\\'s drive'");
+      assert.equal(url.searchParams.has("useDomainAdminAccess"), false);
+      return Response.json(
+        url.searchParams.has("pageToken")
+          ? { drives: [{ id: "other", name: "Different drive" }] }
+          : { drives: [{ id: "new-drive", name: "Finance's drive" }], nextPageToken: "next" },
+      );
+    }
+    assert.equal(url.pathname, "/drive/v3/files/new-drive/permissions");
+    assert.equal(url.searchParams.get("supportsAllDrives"), "true");
+    if (init?.method === "POST") {
+      assert.equal(url.searchParams.get("sendNotificationEmail"), "false");
+      assert.deepEqual(JSON.parse(String(init.body)), {
+        emailAddress: "finance@example.com",
+        type: "group",
+        role: "fileOrganizer",
+      });
+      return Response.json({ id: "permission" });
+    }
+    return Response.json(
+      url.searchParams.has("pageToken")
+        ? {
+            permissions: [
+              { id: "b", emailAddress: "reader@example.com", type: "user", role: "reader" },
+            ],
+          }
+        : {
+            permissions: [
+              {
+                id: "a",
+                emailAddress: "finance@example.com",
+                type: "group",
+                role: "fileOrganizer",
+              },
+            ],
+            nextPageToken: "next",
+          },
+    );
+  });
+  const files = effects();
+  assert.deepEqual(
+    await files.createSharedDrive({ name: "Finance's drive", requestId: "job-mapping-request" }),
+    { id: "new-drive", name: "Finance's drive" },
+  );
+  assert.equal(
+    await files.createSharedDrive({ name: "Finance's drive", requestId: "job-mapping-request" }),
+    null,
+  );
+  assert.deepEqual(await files.findSharedDrives("Finance's drive"), [
+    { id: "new-drive", name: "Finance's drive" },
+  ]);
+  assert.deepEqual(await files.listDriveMembers("new-drive"), [
+    { email: "finance@example.com", type: "group", role: "fileOrganizer" },
+    { email: "reader@example.com", type: "user", role: "reader" },
+  ]);
+  await files.addDriveMember("new-drive", {
+    email: "finance@example.com",
+    type: "group",
+    role: "fileOrganizer",
+  });
+});
+
 test("a lost create response can be reconciled by the reserved ID and atomic private marker", async (t) => {
   const source = Buffer.from([0, 1, 0, 255, 128]);
   let persisted: Record<string, unknown> | undefined;
@@ -384,6 +458,23 @@ test("loads manifest paths and names destination identity failures without relab
     page.value.rows.map((row) => (row.jobType === "file_migration" ? row.sourceItemId : null)),
     ["reports"],
   );
+  const creating = await engine.withWriterResult(initialized.value, (w) =>
+    w.loadManifest({
+      format: "json",
+      content: JSON.stringify({
+        version: 1,
+        mappings: [
+          {
+            id: "new-reports",
+            source: { type: "sharepoint", driveId: "source-drive", folderPath: "Reports #%" },
+            destination: { type: "google_shared_drive", create: "Reports" },
+            members: [{ email: "reports@example.com", type: "group", role: "reader" }],
+          },
+        ],
+      }),
+    }),
+  );
+  assert.equal(creating.ok, true, JSON.stringify(creating));
   observedDriveId = "another-shared-drive";
   const mismatch = await engine.withWriterResult(initialized.value, (w) =>
     w.loadManifest({ format: "json", content }),

@@ -28,13 +28,13 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
   const raw = object(jobConfig.mappings[0]);
   if (raw.exclusions !== undefined)
     throw new LiveTestBlocked("file_fixture_mapping_exclusions_forbidden");
-  const root: FileMappingConfig = {
+  const root = {
     id: identifier(raw.id),
     sourceDriveId: identifier(raw.sourceDriveId),
     sourceItemId: identifier(raw.sourceItemId),
     destDriveId: identifier(raw.destDriveId),
     destFolderId: identifier(raw.destFolderId),
-  };
+  } satisfies FileMappingConfig;
   const configured = fixtureConfig(input.config.fixtures, root);
   const factory = {
     jobType: "file_migration" as const,
@@ -102,7 +102,7 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
       root.destFolderId,
       `migmate-live-${fixtures.owner}`,
     );
-    async function pair(name: string): Promise<FileMappingConfig> {
+    async function pair(name: string): Promise<typeof root> {
       const destination = await fixtures.destinationObject(destinationRoot, name);
       copyRoots.push(destination);
       return {

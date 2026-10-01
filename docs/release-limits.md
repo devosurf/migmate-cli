@@ -1,6 +1,6 @@
 # Release limits
 
-This page separates shipped guarantees from historical live observations. File migration currently supports SharePoint document-library roots to existing Google Shared Drive folders. Teams archives remain local packages with optional Shared Drive cold storage.
+This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots to existing Google Shared Drive folders or to Shared Drives created from the manifest. Teams archives remain local packages with optional Shared Drive cold storage.
 
 The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclone-executes-file-transfers.md)). Earlier measurements of Migmate's per-item file writer do not prove this implementation. Archive uploads retain their own reserved IDs, private markers, revision checks and create-only behavior.
 
@@ -8,13 +8,13 @@ The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclo
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
 
-Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Destinations must already exist. Job-level mirror, members, Google sources and drive provisioning remain unsupported and refuse explicitly.
+Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create. Job-level mirror and Google sources remain unsupported and refuse explicitly.
 
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. An excluded source subtree gaining a new member still requires replanning.
 
 **Acting account.** File jobs may set top-level `impersonate = true` and `subject`.
 Preflight proves a token can be issued and `about.user.emailAddress` equals that
-subject; it does not check Shared Drive creation authority or provision drives.
+subject. When a manifest creates Shared Drives, `about.canCreateDrives` must be true.
 Authorize the service account's numeric client id for domain-wide delegation with
 only `https://www.googleapis.com/auth/drive`. The subject must be an ordinary
 non-admin account; Migmate cannot check admin status without Admin SDK scopes and
@@ -23,6 +23,23 @@ The plan and report identify that subject, and the closing report lists deleting
 the service-account key and delegation entry as open operator tasks. Per-mapping
 rclone overrides inject impersonation; setting it in the operator's rclone file
 refuses. With impersonation off, the service account continues acting as itself.
+
+**Provisioning.** The plan lists each new drive and its explicit user/group members
+and roles. Execute checkpoints a deterministic job-and-mapping request ID, creates
+the drive, records its ID before granting members, and suppresses notification
+emails. Lost responses recover by exact visible name: one candidate is adopted,
+none retries the same request, several refuse `drive_creation_ambiguous` (exit 4).
+Creation names cannot change after submission for that mapping ID. Schema version 5
+adds job-scoped created drives and member grants without revising earlier approvals.
+
+Verification compares created-drive membership against the manifest plus Google's
+implicit creator-organizer grant. Missing, additional, or changed grants raise
+blocking `drive_membership_mismatch` with both memberships as evidence.
+It does not translate source permissions, repair drift, revoke removed members,
+or manage existing-drive permissions. `anyone` and `domain` refuse at manifest load.
+Status and report retain the created IDs and member grants. Offline engine and
+HTTP contracts cover provisioning and crash recovery; no live tenant provisioning
+measurement is claimed.
 
 ## 2. Mapping recovery is durable; rclone jobs are not
 

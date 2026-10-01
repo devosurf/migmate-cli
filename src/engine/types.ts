@@ -4,7 +4,7 @@
  * contracts are the code registry, the exit-code table, and the CLI envelope.
  */
 
-import type { CopyPassStats } from "./providers/port.ts";
+import type { CopyPassStats, DriveMember } from "./providers/port.ts";
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 
 export interface MappingPass {
@@ -20,6 +20,19 @@ export interface MappingPass {
   endedAt: string | null;
   lastStats: CopyPassStats | null;
   error: string | null;
+}
+
+export interface CreatedDrive {
+  mappingId: string;
+  requestId: string;
+  name: string;
+  driveId: string | null;
+  creatorEmail: string;
+}
+export interface MemberGrant {
+  mappingId: string;
+  driveId: string;
+  member: DriveMember;
 }
 
 export const JOB_TYPES = ["file_migration", "teams_archive"] as const;
@@ -86,6 +99,7 @@ export type RefusalCode =
   | "approval_digest_stale"
   | "plan_revision_required"
   | "unsupported_route"
+  | "drive_creation_ambiguous"
   | "verification_unaccepted"
   | "job_closed"
   | "job_cancelled"
@@ -362,6 +376,8 @@ export interface JobStatus {
   verificationDigest: string | null;
   progress: Progress | null;
   mappingPasses: MappingPass[];
+  createdDrives: CreatedDrive[];
+  memberGrants: MemberGrant[];
   lastCheckpoint: string | null;
   outstandingFindings: FacetCount[];
   worker: { active: boolean; group: string | null };
