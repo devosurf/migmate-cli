@@ -117,9 +117,13 @@ function multiMapping(ids = ["a", "b"]) {
   };
 }
 
-async function provisioningHarness(t: TestContext, input = fixture()): Promise<Harness> {
+async function provisioningHarness(
+  t: TestContext,
+  input = fixture(),
+  options?: FileMigrationConfig["options"],
+): Promise<Harness> {
   input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
-  const h = await harness(t, input);
+  const h = await harness(t, input, options ? { mappings: [], options } : config);
   value(
     await h.engine.withWriterResult(h.ref, (w) =>
       w.loadManifest({
@@ -143,6 +147,153 @@ async function provisioningHarness(t: TestContext, input = fixture()): Promise<H
 }
 
 describe("file migration through the engine", () => {
+  it("caps deletions per mirror mapping and reports failure while other mappings finish", async (t) => {
+    const input = multiMapping().input;
+    input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
+    const h = await harness(t, input, { mappings: [], options: { mirror: true, deleteLimit: 0 } });
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: ["a", "b"].map((id) => ({
+              id,
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+              destination: { type: "google_shared_drive", create: id },
+            })),
+          }),
+        }),
+      ),
+    );
+    await approve(h);
+    await execute(h);
+    h.port.deleteSourceItem("a-file");
+    h.port.mutateSourceItem("b-file", { content: "changed" });
+    await approve(h);
+    await execute(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.mappingPasses.find((p) => p.mappingId === "a")?.status, "failed");
+    assert.match(status.mappingPasses.find((p) => p.mappingId === "a")!.error!, /max-delete/);
+    assert.equal(status.mappingPasses.find((p) => p.mappingId === "b")?.status, "completed");
+    const driveId = status.createdDrives.find((d) => d.mappingId === "a")!.driveId!;
+    assert.deepEqual(
+      (await h.port.listDestinationChildren(driveId)).map((f) => f.name),
+      ["one.txt"],
+    );
+    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    const json = await readFile(
+      report.artifacts.find((a) => a.name === "report.json")!.path,
+      "utf8",
+    );
+    assert.match(json, /max-delete limit exceeded/);
+  });
+  it("repeat copy passes retain deleted and renamed source files", async (t) => {
+    const h = await provisioningHarness(t);
+    await execute(h);
+    h.port.deleteSourceItem("binary");
+    h.port.renameSourceItem("zero", "renamed.bin");
+    await approve(h);
+    await execute(h);
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, true);
+    const rows = value(
+      await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["destination_only_retained"] }),
+    ).rows;
+    assert.deepEqual(
+      rows.map((r) => (r.jobType === "file_migration" ? r.relativePath : "")).sort(),
+      ["nested/zero.bin", "report.docx"],
+    );
+  });
+  it("requires a safe nonnegative delete limit and refuses legacy mirror destinations", async (t) => {
+    const h = await harness(t);
+    for (const deleteLimit of [undefined, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, "2", null]) {
+      const result = await h.engine.initJob({
+        type: "file_migration",
+        config: {
+          mappings: [],
+          options: { mirror: true, deleteLimit },
+        },
+      });
+      assert.equal(result.ok, false);
+      if (result.ok) throw new Error("Unsafe delete limit accepted");
+      assert.equal(result.refusal.code, "configuration_invalid");
+    }
+    const result = await h.engine.initJob({
+      type: "file_migration",
+      config: {
+        ...config,
+        options: { mirror: true, deleteLimit: 1 },
+      },
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("Legacy existing destination accepted");
+    assert.deepEqual(result.refusal.detail, { row: 1, field: "destination" });
+  });
+  it("discloses mirror and the per-mapping delete limit in plan and report", async (t) => {
+    for (const options of [undefined, { mirror: true, deleteLimit: 3 }]) {
+      const h = await provisioningHarness(t, fixture(), options);
+      const status = value(await h.engine.reader(h.ref).status());
+      const section = status.currentPlan!.sections.find((s) => s.title === "Mirror");
+      assert.ok(section);
+      assert.deepEqual(JSON.parse(section.body), {
+        mirror: options?.mirror ?? false,
+        deleteLimit: options?.deleteLimit ?? null,
+      });
+      await execute(h);
+      const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+      const json = JSON.parse(
+        await readFile(report.artifacts.find((a) => a.name === "report.json")!.path, "utf8"),
+      );
+      assert.equal(
+        json.sections.find((s: { title: string }) => s.title === "Mirror").body,
+        section.body,
+      );
+    }
+  });
+  it("refuses mirror manifests naming existing destinations with row and field", async (t) => {
+    const h = await harness(t, fixture(), {
+      mappings: [],
+      options: { mirror: true, deleteLimit: 0 },
+    });
+    const result = await h.engine.withWriterResult(h.ref, (w) =>
+      w.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "existing",
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+              destination: {
+                type: "google_shared_drive",
+                driveId: "destination-drive",
+                folderId: "destination-root",
+              },
+            },
+          ],
+        }),
+      }),
+    );
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("Mirror must refuse existing destinations");
+    assert.equal(result.refusal.code, "configuration_invalid");
+    assert.deepEqual(result.refusal.detail, { row: 1, field: "destination" });
+  });
+  it("mirrors deletions and renames on a repeat pass into a job-created drive", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { mirror: true, deleteLimit: 2 });
+    await execute(h);
+    h.port.deleteSourceItem("binary");
+    h.port.renameSourceItem("zero", "renamed.bin");
+    await approve(h);
+    await execute(h);
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, true);
+    assert.deepEqual(verified.findings, []);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.mappingPasses[0]?.mode, "mirror");
+    assert.equal(status.mappingPasses[0]?.status, "completed");
+  });
   it("recovers a lost drive creation response without duplicating a drive", async (t) => {
     const input = fixture();
     input.effects = [

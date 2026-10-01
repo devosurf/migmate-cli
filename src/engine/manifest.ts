@@ -223,6 +223,20 @@ export function parseManifest(
   return { mappings, digest: digestJson({ version: 1, mappings: sorted }) };
 }
 
+export function validateMirrorDestinations(
+  mappings: { id: string; createDrive?: unknown }[],
+  mirror: boolean | undefined,
+): void {
+  if (!mirror) return;
+  for (const [index, mapping] of mappings.entries())
+    if (!mapping.createDrive)
+      throw new ManifestError(
+        index + 1,
+        "destination",
+        "Mirror requires a drive created by this job",
+      );
+}
+
 /** Compare stable ancestor identities, not display names or string prefixes. */
 export async function validateMappingTrees(
   provider: ProviderPort,

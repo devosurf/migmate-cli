@@ -40,6 +40,8 @@ export interface FileMigrationConfig {
     verificationMode?: "hash" | "size_only";
     mappingsInFlight?: number;
     transfersPerMapping?: number;
+    mirror?: boolean;
+    deleteLimit?: number;
   };
 }
 
@@ -418,12 +420,17 @@ function metadataOmissions(ctx: FileContext, phase: Phase, source: SourceView): 
   return results;
 }
 
-function pendingPass(revision: number, mappingId: string, passNumber: number): MappingPass {
+function pendingPass(
+  revision: number,
+  mappingId: string,
+  passNumber: number,
+  mode: MappingPass["mode"],
+): MappingPass {
   return {
     revision,
     mappingId,
     passNumber,
-    mode: "copy",
+    mode,
     executeId: null,
     jobid: null,
     group: null,
@@ -491,7 +498,13 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
         "plan",
         ++done,
       );
-      if (source.path === ".") unit.mappingPass = pendingPass(ctx.revision, mapping.id, 1);
+      if (source.path === ".")
+        unit.mappingPass = pendingPass(
+          ctx.revision,
+          mapping.id,
+          1,
+          ctx.config.options?.mirror ? "mirror" : "copy",
+        );
       yield unit;
     }
   }
@@ -557,7 +570,12 @@ async function* copyMapping(
   let pass =
     previous?.status === "pending"
       ? previous
-      : pendingPass(ctx.revision, mapping.id, (previous?.passNumber ?? 0) + 1);
+      : pendingPass(
+          ctx.revision,
+          mapping.id,
+          (previous?.passNumber ?? 0) + 1,
+          ctx.config.options?.mirror ? "mirror" : "copy",
+        );
   pass = { ...pass, startedAt: ctx.now().toISOString() };
   let sequence = 0;
   const unit = (): CommitUnit => ({
@@ -580,7 +598,9 @@ async function* copyMapping(
     const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
     const handle = await ctx.provider.startCopyPass({
       ...resolved,
-      mode: "copy",
+      ...(ctx.config.options?.mirror
+        ? { mode: "mirror" as const, deleteLimit: ctx.config.options.deleteLimit! }
+        : { mode: "copy" as const }),
       transfers: ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
       excludePaths: sources
         .filter((source) => excluded.has(source.id) || sourceOmission(source))
@@ -989,6 +1009,14 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     body: JSON.stringify({ verificationMode: ctx.config.options?.verificationMode ?? "hash" }),
   };
   yield {
+    title: "Mirror",
+    format: "text",
+    body: JSON.stringify({
+      mirror: ctx.config.options?.mirror ?? false,
+      deleteLimit: ctx.config.options?.mirror ? ctx.config.options.deleteLimit : null,
+    }),
+  };
+  yield {
     title: "Copy concurrency",
     format: "text",
     body: JSON.stringify({
@@ -998,13 +1026,15 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     }),
   };
   yield {
-    title: "File migration fidelity and additive retention",
+    title: "File migration fidelity and retention",
     format: "text",
     body: [
       "Current downloadable binary file version only; counted version history is omitted.",
       "Permissions and ownership were not assessed and were not migrated.",
       "Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.",
-      "Destination-only content and source-deleted prior copies are retained, never deleted.",
+      ctx.config.options?.mirror
+        ? `Mirror removes destination-only content in job-created drives, capped at ${ctx.config.options.deleteLimit} file deletions per mapping pass; exceeding the limit fails that mapping.`
+        : "Destination-only content and source-deleted prior copies are retained, never deleted.",
       "rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories. Owner, permission and label metadata are not copied.",
       "Copy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.",
       "Verification is a timestamped point-in-time statement, not a source freeze, cutover, settled delta, or future-drift guarantee.",

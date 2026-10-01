@@ -38,7 +38,7 @@ To provision, use `destination: { type: "google_shared_drive", create: "Drive na
 and optional mapping-level `members: [{ email, type, role }]`. Read README's
 **Mapping manifests** for member roles and the seven-/nine-column CSV layouts.
 `folderPath` is literal drive-relative text (`""` for the root), not URL-encoded.
-Extra fields, Google sources, mirror, and `anyone`/`domain` members refuse.
+Extra fields, Google sources, and `anyone`/`domain` members refuse.
 On `configuration_invalid`, fix `refusal.detail.row` and `.field`; row 0 means the
 document/header, other rows are one-based mapping records. Equal or nested source
 roots within one drive, or destination roots within one Shared Drive, overlap and refuse.
@@ -74,7 +74,11 @@ Read the plan's **Copy concurrency** before approval. Job `[options]` settings `
 
 Read `status.mappingPasses` for durable outcomes and rclone errors. Re-run `execute` to retry failed/interrupted passes, skipping completed passes for that revision; writer recovery marks all unfinished passes interrupted after the worker is gone, including every pass active at a crash. rclone skips identical files on retry. Ctrl-C stops active passes cooperatively and exits 130. Use `--output jsonl` for `mapping_progress` events (`mappingId`, `passNumber`, `bytes`, `files`, `speed`, `errors`).
 
-Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File migration uses no reserved IDs, private markers, move-by-id or local staging; Teams archive uploads retain their own protections. rclone copies empty directories and supported timestamps/content type with owner, permission and label metadata off. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary; mirror is not a job feature in this release.
+Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File migration uses no reserved IDs, private markers, move-by-id or local staging; Teams archive uploads retain their own protections. rclone copies empty directories and supported timestamps/content type with owner, permission and label metadata off. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary.
+
+Read back the plan's **Mirror** setting and delete limit before approval. Default copy passes never delete. Job `[options] mirror = true` requires a nonnegative safe-integer `deleteLimit` per mapping pass (`0` permits no file deletions); every manifest mapping must use `destination.create`, otherwise load refuses with row and `field: "destination"`. Keep the mapping ID and creation intent for later passes so the durable created drive is reused. Plan and approve a new revision to copy source changes; completed passes in the same revision are skipped.
+
+Mirror runs `sync/sync`. On a delete-limit failure, surface the mapping's rclone error from `status.mappingPasses` and the report; other mappings continue. Deletions within the cap are not rolled back and retrying gives a fresh per-pass cap. Successful mirror leaves no destination-only files; verification still reports any leftovers it observes, including outside writes after a pass.
 
 ## Reading a refusal
 

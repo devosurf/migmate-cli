@@ -211,7 +211,7 @@ Use UTF-8 and standard double-quoted CSV cells (double a quote inside a quoted c
 LF and CRLF are accepted. An empty source path is an empty cell. Validation refuses
 with `configuration_invalid` (exit 2), `refusal.detail.row` (one-based mapping/data
 record; 0 means document/header), and `refusal.detail.field`. JSON fields and CSV
-columns are strict: Google sources, mirror, and every unknown field refuse rather
+columns are strict: Google sources and every unknown field refuse rather
 than being ignored.
 
 A successful load replaces the entire mapping set in SQLite, not the credential
@@ -270,7 +270,7 @@ provider and HTTP-transport contracts; this does not claim a live tenant run.
 
 ### File mapping copies and recovery
 
-Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying. Mirror/delete mode is not implemented.
+Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying.
 
 The job's `[options]` controls both limits, shown in the immutable plan's **Copy concurrency** section and the report:
 
@@ -289,6 +289,35 @@ Ctrl-C stops active passes cooperatively, returns exit **130**, and leaves the j
 The web view's **execute** and **status** stages show each mapping's pass number, state, bytes, files, speed, error count, and failure message. Pending passes show unknown statistics until rclone reports them; earlier attempts remain visible alongside resumed passes.
 
 rclone copies empty folders and preserves supported created/modified times and Google Drive content type through metadata; created time on Drive applies to fresh uploads. Owner, permission and label metadata are off. SharePoint roots are paths inside a drive pinned by id, never SharePoint `root_folder_id`; per-mapping connection overrides reuse the operator's two remotes. Copy never deletes: renamed or removed source files can leave destination-only files, reported nonblockingly by verification.
+
+#### Mirror for job-created drives
+
+Copy is the default, including repeat passes. To remove destination-only files,
+set both settings in the job TOML before loading a manifest:
+
+```toml
+[options]
+mirror = true
+deleteLimit = 100
+```
+
+`deleteLimit` is a required nonnegative safe integer: the maximum file deletions
+**per mapping pass**, not a pooled job allowance; `0` prohibits file deletion.
+Every mapping must use `destination.create`. An existing destination ID refuses
+with `configuration_invalid`, the mapping row and `field: "destination"`, even if
+that ID names a drive created earlier. Keep the same mapping ID and `create` intent
+on later manifest loads so the job reuses its durable created-drive ID.
+The plan and report's **Mirror** section state whether mirror is on and its limit.
+
+Mirror runs rclone `sync/sync`; exceeding the limit fails that mapping with
+rclone's error without deleting beyond the cap, while other mappings continue.
+Deletions already within the cap are not rolled back; retries have a fresh
+per-pass cap. For a repeat pass after source changes, run `plan`, approve its new
+digest, then `execute` and `verify`; replaying a completed revision skips its passes.
+A successful mirror removes leftovers, so verification reports no
+`destination_only_retained` for an unchanged source/destination after the pass.
+Verification still reports any leftovers it actually observes (for example,
+outside writes after the pass); mirror never suppresses that evidence.
 
 File migration no longer stages file bytes locally or uses reserved destination IDs, private provenance markers, or move-by-id. Teams archive uploads retain their separate create-only protections.
 

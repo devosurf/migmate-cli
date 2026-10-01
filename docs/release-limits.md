@@ -8,7 +8,9 @@ The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclo
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
 
-Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create. Job-level mirror and Google sources remain unsupported and refuse explicitly.
+Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. Google sources remain unsupported and refuse explicitly.
+
+Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back, and each retry has a fresh cap. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
 
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. An excluded source subtree gaining a new member still requires replanning.
 
@@ -65,7 +67,7 @@ One lifecycle writer holds a job. Automatic same-host takeover requires a heartb
 
 **Where you see it.** The `provider.transfer_binary` preflight check, which records the resolved path, SHA-256, and the exact version the binary reports; the `version_untested` and `version_below_floor` refusals; the live worker's version re-checked at execute time, where drift refuses `plan_revision_required`.
 
-**Copy behavior.** rclone's asynchronous `sync/copy` copies empty source directories and uses metadata to preserve supported created and modified times and Google Drive content type; Drive created time applies to fresh uploads. Owner, permission and label metadata are off. File verification does not verify folders or metadata. Finished rclone jobs remain queryable for 24 hours by default, but a worker restart invalidates old handles; Migmate's mapping-pass records supply recovery. The lower-level provider also supports capped mirror passes, but file jobs submit copy only and expose no mirror setting.
+**Copy behavior.** rclone's asynchronous `sync/copy` (or `sync/sync` with `MaxDelete` for mirror) copies empty source directories and uses metadata to preserve supported created and modified times and Google Drive content type; Drive created time applies to fresh uploads. Owner, permission and label metadata are off. File verification does not verify folders or metadata. Finished rclone jobs remain queryable for 24 hours by default, but a worker restart invalidates old handles; Migmate's mapping-pass records supply recovery.
 
 ## 4. `Sites.Selected` sufficiency is proven for today's calls
 

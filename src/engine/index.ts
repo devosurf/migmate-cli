@@ -22,6 +22,7 @@ import {
   ManifestError,
   parseManifest,
   validateMappingTrees,
+  validateMirrorDestinations,
   type LoadedManifest,
 } from "./manifest.ts";
 import {
@@ -327,7 +328,11 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     if (new Set(parsedMappings.map((m) => m.id)).size !== parsedMappings.length)
       configError("mappings");
     const options = input.options === undefined ? {} : object(input.options, "options");
-    keys(options, ["verificationMode", "mappingsInFlight", "transfersPerMapping"], "options");
+    keys(
+      options,
+      ["verificationMode", "mappingsInFlight", "transfersPerMapping", "mirror", "deleteLimit"],
+      "options",
+    );
     if (
       options.verificationMode !== undefined &&
       options.verificationMode !== "hash" &&
@@ -342,6 +347,21 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           ? {}
           : { verificationMode: options.verificationMode },
     };
+    if (options.mirror !== undefined) {
+      if (typeof options.mirror !== "boolean") configError("options.mirror");
+      config.options.mirror = options.mirror;
+    }
+    if (options.deleteLimit !== undefined) {
+      if (
+        typeof options.deleteLimit !== "number" ||
+        !Number.isSafeInteger(options.deleteLimit) ||
+        options.deleteLimit < 0
+      )
+        configError("options.deleteLimit");
+      config.options.deleteLimit = options.deleteLimit;
+    }
+    if (options.mirror === true && options.deleteLimit === undefined)
+      configError("options.deleteLimit");
     if (input.impersonate !== undefined) {
       if (typeof input.impersonate !== "boolean") configError("impersonate");
       config.impersonate = input.impersonate;
@@ -375,6 +395,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         destinationRemote,
       };
     }
+    validateMirrorDestinations(config.mappings, config.options.mirror);
     return config;
   }
   for (const raw of Array.isArray(input.scopes) ? input.scopes : []) {
@@ -555,8 +576,10 @@ function readConfig(paths: JobPaths, type: JobType, store?: Store): JobConfig {
   }
   const config = parseConfig(persisted(parsed), type, paths);
   const loaded = store?.readMappings();
-  if ("mappings" in config && loaded)
+  if ("mappings" in config && loaded) {
+    validateMirrorDestinations(loaded.mappings, config.options.mirror);
     return { ...config, mappings: loaded.mappings, manifestDigest: loaded.digest };
+  }
   return config;
 }
 function migrateConfig(paths: JobPaths, type: JobType): void {
@@ -1712,6 +1735,7 @@ function makeWriter(
             ? { createDrive: { name: m.destination.create, members: m.members ?? [] } }
             : { destDriveId: m.destination.driveId, destFolderId: m.destination.folderId }),
         }));
+        validateMirrorDestinations(pending, base.options.mirror);
         const p =
           deps.provider ??
           createProductionProvider({
