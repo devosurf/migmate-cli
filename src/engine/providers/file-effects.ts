@@ -20,7 +20,7 @@ interface DestinationRoot {
 }
 interface Mapping extends DestinationRoot {
   sourceDriveId: string;
-  sourceItemId: string;
+  sourceItemId?: string;
   sourceSiteId?: string;
 }
 interface GraphItem {
@@ -186,7 +186,7 @@ function readMappings(config: unknown): Mapping[] {
     if (!raw || typeof raw !== "object")
       throw new ProviderFault("preflight_failed", "A file mapping is invalid.");
     const record = raw as Record<string, unknown>;
-    for (const field of ["sourceDriveId", "sourceItemId", "destDriveId", "destFolderId"]) {
+    for (const field of ["sourceDriveId", "destDriveId", "destFolderId"]) {
       if (
         typeof record[field] !== "string" ||
         !record[field] ||
@@ -197,7 +197,7 @@ function readMappings(config: unknown): Mapping[] {
     }
     return {
       sourceDriveId: String(record.sourceDriveId),
-      sourceItemId: String(record.sourceItemId),
+      ...(typeof record.sourceItemId === "string" ? { sourceItemId: record.sourceItemId } : {}),
       destDriveId: String(record.destDriveId),
       destFolderId: String(record.destFolderId),
       ...(typeof record.sourceSiteId === "string" ? { sourceSiteId: record.sourceSiteId } : {}),
@@ -228,7 +228,7 @@ export class FileEffects {
     this.#graph = input.graph;
     this.#worker = input.worker;
     for (const mapping of this.mappings) {
-      this.#sourceDrive.set(mapping.sourceItemId, mapping.sourceDriveId);
+      if (mapping.sourceItemId) this.#sourceDrive.set(mapping.sourceItemId, mapping.sourceDriveId);
     }
     for (const root of this.#destinationRoots) {
       this.#destDrive.set(root.destFolderId, root.destDriveId);
@@ -439,6 +439,24 @@ export class FileEffects {
         kind: "google_drive" as const,
       },
     };
+  }
+
+  async resolveSourceFolder(input: {
+    driveId: string;
+    folderPath: string;
+  }): Promise<SourceEntry | null> {
+    const suffix = input.folderPath
+      ? `root:/${input.folderPath.split("/").map(encodeURIComponent).join("/")}`
+      : "root";
+    try {
+      const item = await this.#graph.request<GraphItem>(
+        `/v1.0/drives/${encodeURIComponent(input.driveId)}/${suffix}`,
+      );
+      return this.readSourceItem({ driveId: input.driveId, itemId: item.id });
+    } catch (error) {
+      if (error instanceof HttpProviderFault && error.status === 404) return null;
+      throw error;
+    }
   }
 
   async resolveSourceRoot(input: {
@@ -754,7 +772,12 @@ export class FileEffects {
               "unsupported_route",
               "The source is not the exact SharePoint document library.",
             );
-          const source = await this.resolveSourceRoot(mapping);
+          if (!mapping.sourceItemId)
+            throw new ProviderFault("preflight_failed", "Load the source path before planning.");
+          const source = await this.resolveSourceRoot({
+            sourceDriveId: mapping.sourceDriveId,
+            sourceItemId: mapping.sourceItemId,
+          });
           if (!source || source.kind !== "folder")
             throw new ProviderFault(
               "preflight_failed",

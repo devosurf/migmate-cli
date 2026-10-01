@@ -57,8 +57,9 @@ import type {
   ArchiveResumeState,
 } from "../providers/archive.ts";
 import { canonicalJson, digestJson } from "./digest.ts";
+import type { StoredMappings } from "../manifest.ts";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 const BUSY_TIMEOUT_MS = 5_000;
 const schemaSql = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
 const extensionMarker = "-- Full file intents/results are retained";
@@ -156,6 +157,8 @@ export interface Store {
   writeLease(lease: LeaseRecord): void;
   clearLease(): void;
   touchLease(update: { heartbeatAt: string; lastCheckpoint?: string | null }): void;
+  readMappings(): StoredMappings | null;
+  writeMappings(value: StoredMappings): void;
   nextPlanRevision(): number;
   nextVerificationRun(): number;
   readPlanRevision(revision: number): PlanRevisionRecord | null;
@@ -407,6 +410,11 @@ function migrateVersion1(db: DatabaseSync): void {
 
 function migrateVersion2(db: DatabaseSync): void {
   db.exec(schemaSql.slice(schemaSql.indexOf("-- Mapping copy passes")));
+  db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
+}
+
+function migrateVersion3(db: DatabaseSync): void {
+  db.exec(schemaSql.slice(schemaSql.indexOf("-- Loaded mapping manifest")));
   db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
 }
 
@@ -778,6 +786,29 @@ class StoreImpl implements Store {
         )
         .run(run);
       return run;
+    });
+  }
+  readMappings(): StoredMappings | null {
+    const manifest = this.db.prepare("SELECT digest FROM mapping_manifest").get();
+    if (!manifest) return null;
+    return {
+      digest: String(manifest.digest),
+      mappings: this.db
+        .prepare("SELECT payload FROM mapping ORDER BY id")
+        .all()
+        .map((row) => JSON.parse(String(row.payload))),
+    };
+  }
+  writeMappings(value: StoredMappings): void {
+    this.atomic(() => {
+      this.db.prepare("DELETE FROM mapping").run();
+      const insert = this.db.prepare("INSERT INTO mapping (id,payload) VALUES (?,?)");
+      for (const mapping of value.mappings) insert.run(mapping.id, canonicalJson(mapping));
+      this.db
+        .prepare(
+          "INSERT INTO mapping_manifest (singleton,digest) VALUES (1,?) ON CONFLICT(singleton) DO UPDATE SET digest=excluded.digest",
+        )
+        .run(value.digest);
     });
   }
   readPlanRevision(revision: number): PlanRevisionRecord | null {
@@ -1684,15 +1715,123 @@ class StoreImpl implements Store {
     if (receipt.applied) this.#pendingProgress = unit.phase;
     return receipt;
   }
+  #mappingRows(query: RowQuery, revision: number | null): RowPage {
+    const input =
+      revision === null
+        ? null
+        : this.db
+            .prepare("SELECT value FROM plan_input WHERE rev=? AND key='configuration'")
+            .get(revision);
+    const definition =
+      revision === null
+        ? "SELECT id,payload FROM mapping"
+        : "SELECT json_extract(value,'$.id') AS id,value AS payload FROM json_each(?, '$.mappings')";
+    const params: Array<string | number> = revision === null ? [] : [String(input?.value ?? "{}")];
+    const cte = `WITH definitions AS (${definition}), passes AS (
+      SELECT d.*, (SELECT p.payload FROM mapping_pass p WHERE p.rev=? AND p.mapping_id=d.id ORDER BY pass_number DESC LIMIT 1) AS pass
+      FROM definitions d
+    ), rows AS (
+      SELECT *, CASE WHEN json_extract(pass,'$.status')='failed' THEN 'destination_write_failed' ELSE 'unchanged' END AS code,
+      CASE WHEN json_extract(pass,'$.status')='failed' THEN 'finding' ELSE 'policy_outcome' END AS kind FROM passes
+    )`;
+    params.push(revision ?? 0);
+    const filters = ["1=1"];
+    if (query.mappingId !== undefined) {
+      filters.push("id=?");
+      params.push(query.mappingId);
+    }
+    if (query.search) {
+      filters.push("instr(lower(payload),lower(?))>0");
+      params.push(query.search);
+    }
+    if (query.codes?.length) {
+      filters.push(`code IN (${query.codes.map(() => "?").join(",")})`);
+      params.push(...query.codes);
+    }
+    const where = `WHERE ${filters.join(" AND ")}`;
+    const counts = facets(
+      this.db
+        .prepare(
+          `${cte} SELECT code,kind,COUNT(*) AS count FROM rows ${where} GROUP BY code,kind ORDER BY code`,
+        )
+        .all(...params),
+    );
+    const binding = digestJson({
+      revision,
+      digest:
+        revision === null
+          ? this.db.prepare("SELECT digest FROM mapping_manifest").get()?.digest
+          : input?.value,
+      phase: query.phase,
+      view: "mappings",
+      search: query.search ?? "",
+      codes: query.codes ?? [],
+      mappingId: query.mappingId ?? null,
+    });
+    let after = "";
+    if (query.cursor !== undefined) {
+      try {
+        const cursor = JSON.parse(Buffer.from(query.cursor, "base64url").toString("utf8"));
+        if (cursor.binding !== binding || typeof cursor.id !== "string") throw new Error("stale");
+        after = cursor.id;
+      } catch {
+        throw Object.assign(new Error("Invalid or stale mapping cursor"), {
+          code: "configuration_invalid",
+        });
+      }
+    }
+    const limit = Math.min(1000, Math.max(1, Math.floor(query.limit ?? 200)));
+    const selected = this.db
+      .prepare(`${cte} SELECT * FROM rows ${where} AND id>? ORDER BY id LIMIT ?`)
+      .all(...params, after, limit + 1);
+    const page = selected.slice(0, limit);
+    const rows: FileItemRow[] = page.map((row) => {
+      const mapping: NonNullable<FileItemRow["mapping"]> = JSON.parse(String(row.payload));
+      const pass: MappingPass | null = row.pass ? JSON.parse(String(row.pass)) : null;
+      return {
+        id: mapping.id,
+        jobType: "file_migration",
+        phase: query.phase,
+        revision: revision ?? 0,
+        mappingId: mapping.id,
+        sourceItemId: mapping.sourceItemId,
+        relativePath: mapping.sourceFolderPath ?? ".",
+        size: null,
+        destinationFileId: mapping.destFolderId,
+        provenanceState: "none",
+        code: String(row.code),
+        kind: row.kind as FileItemRow["kind"],
+        accepted: false,
+        mapping,
+        ...(pass ? { mappingPass: pass } : {}),
+      };
+    });
+    return {
+      facets: counts,
+      rows,
+      totalRows: counts.reduce((sum, count) => sum + count.count, 0),
+      nextCursor:
+        selected.length > limit
+          ? Buffer.from(canonicalJson({ binding, id: page.at(-1)!.id })).toString("base64url")
+          : null,
+    };
+  }
+
   rows(query: RowQuery): RowPage {
     return this.#snapshot(() => {
       const job = this.readJob();
       if (job === null) throw new Error("Job row missing");
       const revision = query.revision ?? job.planRevision;
+      if (query.view === "mappings" && job.type === "file_migration")
+        return this.#mappingRows(query, revision);
       if (revision === null) return { facets: [], rows: [], nextCursor: null, totalRows: 0 };
       const table = job.type === "file_migration" ? "item" : "conversation";
       const filters = ["rev=?", "phase=?"];
       const params: Array<string | number> = [revision, query.phase];
+      if (query.mappingId !== undefined && table === "item") {
+        filters.push("mapping_id=?");
+        params.push(query.mappingId);
+      }
       if (query.codes?.length) {
         filters.push(`code IN (${query.codes.map(() => "?").join(",")})`);
         params.push(...query.codes);
@@ -1710,7 +1849,7 @@ class StoreImpl implements Store {
       }
       const where = `WHERE ${filters.join(" AND ")}`;
       const counts =
-        query.search || query.codes?.length
+        query.search || query.codes?.length || query.mappingId !== undefined
           ? facets(
               this.db
                 .prepare(
@@ -1750,6 +1889,8 @@ class StoreImpl implements Store {
         sort,
         codes: query.codes ?? [],
         search: query.search ?? "",
+        view: query.view ?? "items",
+        mappingId: query.mappingId ?? null,
         run,
       });
       let continuation = "";
@@ -2015,6 +2156,7 @@ class StoreImpl implements Store {
               createdAt: plan.createdAt,
               sourceInventoryAt: plan.sourceInventoryAt,
               rowCount: plan.rowCount,
+              ...(plan.manifestDigest ? { manifestDigest: plan.manifestDigest } : {}),
               disclosures: plan.disclosures,
               sections: plan.sections,
             };
@@ -2224,8 +2366,10 @@ export function openStore(
       if (!tableExists(db, "job")) db.exec(schemaSql);
       else {
         const version = schemaVersion(db);
+        if (version !== null && version < 4) db.exec("DROP TABLE IF EXISTS mapping");
         if (version === 1) migrateVersion1(db);
         else if (version === 2) migrateVersion2(db);
+        else if (version === 3) migrateVersion3(db);
         else if (version !== null && version !== SCHEMA_VERSION)
           throw new Error("Job schema changed while opening");
       }

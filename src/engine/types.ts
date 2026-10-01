@@ -5,6 +5,7 @@
  */
 
 import type { CopyPassStats } from "./providers/port.ts";
+import type { FileMappingConfig } from "./drivers/file-migration.ts";
 
 export interface MappingPass {
   revision: number;
@@ -222,6 +223,7 @@ export interface PlanRevision {
   createdAt: string;
   sourceInventoryAt: string;
   rowCount: number;
+  manifestDigest?: string;
   disclosures: string[];
   sections: { id: string; title: string; body: string }[];
   review?: RowPage;
@@ -302,6 +304,8 @@ export interface FileItemRow extends RowBase {
   size: number | null;
   destinationFileId: string | null;
   provenanceState: "none" | "marked" | "verified" | "drifted";
+  mapping?: FileMappingConfig;
+  mappingPass?: MappingPass;
 }
 
 export interface ConversationRow extends RowBase {
@@ -317,6 +321,8 @@ export type Row = FileItemRow | ConversationRow;
 
 export interface RowQuery {
   revision?: number;
+  view?: "items" | "mappings";
+  mappingId?: string;
   phase: RowPhase;
   codes?: string[];
   search?: string;

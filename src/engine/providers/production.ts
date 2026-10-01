@@ -210,6 +210,9 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
           );
       }
     },
+    async resolveSourceFolder(value) {
+      return (await files()).resolveSourceFolder(value);
+    },
     async resolveSourceRoot(value) {
       return (await files()).resolveSourceRoot(value);
     },

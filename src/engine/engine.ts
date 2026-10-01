@@ -28,6 +28,7 @@ import type {
   RowQuery,
   VerificationRevision,
 } from "./types.ts";
+import type { LoadedManifest } from "./manifest.ts";
 
 export interface EngineOptions {
   /** Engine home. Holds the host identity file and one job folder per job. */
@@ -66,6 +67,10 @@ export interface Engine {
 
 /** Exists only inside `withWriter`, where the lease is provably held. */
 export interface JobWriter {
+  loadManifest(input: {
+    content: string;
+    format: "json" | "csv";
+  }): Promise<Outcome<LoadedManifest>>;
   /** Validate and persist typed references, then immediately run the proof probes. */
   onboard(config: unknown): Promise<Outcome<PreflightReport>>;
   doctor(): Promise<Outcome<PreflightReport>>;

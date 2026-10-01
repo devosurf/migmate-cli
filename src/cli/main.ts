@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { constants, realpathSync } from "node:fs";
+import { constants, realpathSync, readFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { extname } from "node:path";
 import { hostname, userInfo } from "node:os";
@@ -47,6 +47,7 @@ const HELP = `Migmate — one ten-verb lifecycle, two job types
 
 migmate init --type file_migration|teams_archive [--config job.toml|job.json]
 migmate creds init --job ID --config job.toml|job.json
+migmate manifest load --job ID --file manifest.json|manifest.csv
 migmate doctor|plan|execute|status|verify|report|close --job ID
 migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
 migmate approve --job ID                    # human terminal: review, then type yes
@@ -71,6 +72,8 @@ Review: plan|verify --review reads existing evidence without taking a writer lea
 --phase plan|execute|verify, --code CODE (repeatable), --search TEXT,
 --cursor CURSOR, --limit 1..1000, --sort natural|path|size, --revision N.
 status accepts the same row-query flags. Facets cover the whole matching set.
+--view mappings pages mapping definitions and their latest copy pass, ordered by id;
+--mapping ID selects one mapping (also works with item rows). Default --view items.
 JSONL streams durable events live during a verb. --from CURSOR resumes exclusively;
 without --from a writer streams only its new attempt. status --output jsonl replays
 the log and exits; it is not a watcher. Terminals are durable, never synthesized.
@@ -286,10 +289,12 @@ async function review(
     query.revision = status.planRevision;
   const page = await reader.rows(query);
   if (!page.ok) return page;
+  const summary: Record<string, unknown> = value && typeof value === "object" ? { ...value } : {};
+  if (query.view === "mappings") delete summary.mappingPasses;
   return {
     ok: true,
     value: {
-      ...(value && typeof value === "object" ? value : {}),
+      ...summary,
       planDigest: status.planDigest,
       verificationDigest: status.verificationDigest,
       review: buildReviewEnvelope(query, page.value),
@@ -418,6 +423,32 @@ async function executeCommand(
       return engine.reclaim(job, { confirm: true, stopWorker: invocation.stopWorker });
     return engine.withWriterResult(job, async (writer: JobWriter): Promise<Outcome<unknown>> => {
       switch (invocation.command) {
+        case "manifest load": {
+          const format = extname(invocation.file!).toLowerCase().slice(1);
+          if (format !== "json" && format !== "csv")
+            return {
+              ok: false,
+              refusal: {
+                code: "configuration_invalid",
+                message: "Manifest files must use .json or .csv.",
+                detail: { row: 0, field: "file" },
+              },
+            };
+          let content: string;
+          try {
+            content = readFileSync(invocation.file!, "utf8");
+          } catch {
+            return {
+              ok: false,
+              refusal: {
+                code: "configuration_invalid",
+                message: "The manifest file could not be read.",
+                detail: { row: 0, field: "file" },
+              },
+            };
+          }
+          return writer.loadManifest({ content, format });
+        }
         case "creds init":
           return writer.onboard(config);
         case "doctor":

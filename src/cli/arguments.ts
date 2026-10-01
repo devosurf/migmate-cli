@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { VERBS, type JobType, type RowQuery, type Verb } from "../engine/types.ts";
 
 export type OutputMode = "text" | "json" | "jsonl";
-export type CommandName = Verb | "creds init" | "accept" | "reclaim" | "web";
+export type CommandName = Verb | "creds init" | "manifest load" | "accept" | "reclaim" | "web";
 export interface Invocation {
   command: CommandName;
   output: OutputMode;
@@ -13,6 +13,7 @@ export interface Invocation {
   type?: JobType;
   label?: string;
   config?: string;
+  file?: string;
   approver?: string;
   planDigest?: string;
   verificationDigest?: string;
@@ -85,8 +86,8 @@ export function outputMode(argv: string[]): OutputMode {
 
 export function commandLabel(argv: string[]): string {
   const first = argv[0];
-  return first === "creds" && argv[1] === "init"
-    ? "creds init"
+  return (first === "creds" && argv[1] === "init") || (first === "manifest" && argv[1] === "load")
+    ? `${first} ${argv[1]}`
     : first && !first.startsWith("-")
       ? first
       : "help";
@@ -103,6 +104,7 @@ export function parseInvocation(argv: string[]): Invocation {
     "--type",
     "--label",
     "--config",
+    "--file",
     "--approver",
     "--plan-digest",
     "--verification-digest",
@@ -116,6 +118,8 @@ export function parseInvocation(argv: string[]): Invocation {
     "--search",
     "--sort",
     "--revision",
+    "--view",
+    "--mapping",
     "--schema-version",
   ];
   for (let index = 0; index < argv.length; index++) {
@@ -145,7 +149,7 @@ export function parseInvocation(argv: string[]): Invocation {
   const command = words.join(" ");
   if (
     !VERBS.includes(command as Verb) &&
-    !["creds init", "accept", "reclaim", "web"].includes(command) &&
+    !["creds init", "manifest load", "accept", "reclaim", "web"].includes(command) &&
     !(help && words.length === 0)
   ) {
     throw new UsageFailure("Supply a lifecycle command or creds init, accept, reclaim, or web.");
@@ -193,6 +197,14 @@ export function parseInvocation(argv: string[]): Invocation {
   if (search !== undefined) query.search = search;
   if (revision !== undefined) query.revision = revision;
   if (sort !== undefined) query.sort = sort;
+  const view = get("--view");
+  if (view !== undefined && view !== "items" && view !== "mappings")
+    throw new UsageFailure("Unsupported review view.");
+  if (view !== undefined) query.view = view;
+  if (view === "mappings" && sort !== undefined && sort !== "natural")
+    throw new UsageFailure("Mapping rows are ordered by mapping id; use --sort natural.");
+  const mapping = get("--mapping");
+  if (mapping !== undefined) query.mappingId = mapping;
   const invocation: Invocation = {
     command: (command || "status") as CommandName,
     output: output as OutputMode,
@@ -211,6 +223,7 @@ export function parseInvocation(argv: string[]): Invocation {
   const strings = {
     label: "--label",
     config: "--config",
+    file: "--file",
     approver: "--approver",
     planDigest: "--plan-digest",
     verificationDigest: "--verification-digest",
@@ -229,12 +242,15 @@ export function parseInvocation(argv: string[]): Invocation {
   } else if (!jobId) throw new UsageFailure("This command requires --job.");
   if (command === "creds init" && !invocation.config)
     throw new UsageFailure("creds init requires --config with typed file references.");
+  if (command === "manifest load" && !invocation.file)
+    throw new UsageFailure("manifest load requires --file manifest.json|manifest.csv.");
   const only = (flag: string, allowed: string[]) => {
     if ((values.has(flag) || switches.has(flag)) && !allowed.includes(command))
       throw new UsageFailure("Option is not valid for this command.");
   };
   for (const flag of ["--type", "--label"]) only(flag, ["init"]);
   only("--config", ["init", "creds init"]);
+  only("--file", ["manifest load"]);
   only("--approver", ["approve", "accept"]);
   only("--plan-digest", ["approve"]);
   only("--verification-digest", ["accept"]);
@@ -245,6 +261,8 @@ export function parseInvocation(argv: string[]): Invocation {
   only("--code", ["plan", "status", "verify", "accept"]);
   for (const flag of [
     "--review",
+    "--view",
+    "--mapping",
     "--phase",
     "--search",
     "--cursor",

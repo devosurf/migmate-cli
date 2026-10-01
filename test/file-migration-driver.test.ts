@@ -118,6 +118,190 @@ function multiMapping(ids = ["a", "b"]) {
 }
 
 describe("file migration through the engine", () => {
+  it("loads and plans 1000 mappings with bounded resources and pages filtered mapping rows", async (t) => {
+    const ids = Array.from({ length: 1000 }, (_, i) => `library-${String(i).padStart(4, "0")}`);
+    const { input, selected } = multiMapping(ids);
+    const h = await harness(t, input, selected);
+    const start = performance.now(),
+      memory = process.memoryUsage().rss;
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: ids.map((id) => ({
+              id,
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+              destination: {
+                type: "google_shared_drive",
+                driveId: "destination-drive",
+                folderId: `dest-${id}`,
+              },
+            })),
+          }),
+        }),
+      ),
+    );
+    value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = value(
+        await h.engine
+          .reader(h.ref)
+          .rows({ phase: "plan", view: "mappings", limit: 37, ...(cursor ? { cursor } : {}) }),
+      );
+      assert.equal(page.totalRows, 1000);
+      assert.ok(page.rows.length <= 37);
+      for (const row of page.rows) {
+        assert.equal(row.jobType, "file_migration");
+        if (row.jobType === "file_migration") seen.push(row.mappingId);
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    assert.deepEqual(seen, ids);
+    const filtered = value(
+      await h.engine
+        .reader(h.ref)
+        .rows({ phase: "plan", view: "mappings", search: "library-099", limit: 4 }),
+    );
+    assert.equal(filtered.totalRows, 10);
+    assert.ok(filtered.nextCursor);
+    assert.ok(performance.now() - start < 15000, "1000 mappings exceeded 15 seconds");
+    assert.ok(
+      process.memoryUsage().rss - memory < 256 * 1024 * 1024,
+      "1000 mappings exceeded 256 MiB additional RSS",
+    );
+  });
+
+  it("refuses equal or nested source and destination trees without replacing the approved mappings", async (t) => {
+    const { input, selected } = multiMapping();
+    const h = await harness(t, input, selected);
+    const digest = await approve(h);
+    for (const [side, root] of [
+      ["source", ""],
+      ["source", "b"],
+      ["destination", "destination-root"],
+      ["destination", "dest-b"],
+    ]) {
+      const mappings = ["a", "b"].map((id) => ({
+        id,
+        source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+        destination: {
+          type: "google_shared_drive",
+          driveId: "destination-drive",
+          folderId: `dest-${id}`,
+        },
+      }));
+      if (side === "source") mappings[0]!.source.folderPath = root!;
+      else mappings[0]!.destination.folderId = root!;
+      const result = await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          content: JSON.stringify({ version: 1, mappings }),
+          format: "json",
+        }),
+      );
+      assert.equal(result.ok, false);
+      if (result.ok) throw new Error("Overlapping manifest loaded");
+      assert.equal(result.refusal.code, "configuration_invalid");
+      assert.equal(result.refusal.detail?.field, side);
+      assert.match(result.refusal.message, /overlap/i);
+      assert.equal(value(await h.engine.reader(h.ref).status()).planDigest, digest);
+    }
+  });
+
+  it("freezes loaded mappings and requires new approval when a manifest is reloaded", async (t) => {
+    const { input, selected } = multiMapping();
+    const h = await harness(t, input, selected);
+    const manifest = (id: string) =>
+      JSON.stringify({
+        version: 1,
+        mappings: [
+          {
+            id,
+            source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+            destination: {
+              type: "google_shared_drive",
+              driveId: "destination-drive",
+              folderId: `dest-${id}`,
+            },
+          },
+        ],
+      });
+    const first = value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({ content: manifest("a"), format: "json" }),
+      ),
+    );
+    const digest = await approve(h);
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).currentPlan?.manifestDigest,
+      first.manifestDigest,
+    );
+    const second = value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({ content: manifest("b"), format: "json" }),
+      ),
+    );
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.state, "planned");
+    assert.equal(status.planRevision, 2);
+    assert.equal(status.currentPlan?.manifestDigest, second.manifestDigest);
+    assert.notEqual(status.planDigest, digest);
+    const old = value(await h.engine.reader(h.ref).rows({ revision: 1, phase: "plan" }));
+    assert.deepEqual(
+      [...new Set(old.rows.filter((r) => r.jobType === "file_migration").map((r) => r.mappingId))],
+      ["a"],
+    );
+    const execute = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+    assert.equal(execute.ok, false);
+    const persisted = await readFile(join(h.home, "jobs", h.ref.id, "job.toml"), "utf8");
+    assert.equal(persisted.includes("[[mappings]]"), false);
+  });
+
+  it("cannot execute or verify the old approval when manifest recollection fails", async (t) => {
+    const { input, selected } = multiMapping();
+    const h = await harness(t, input, selected);
+    await approve(h);
+    h.port.scriptEffect({
+      method: "preflight",
+      count: 1,
+      error: Object.assign(new Error("Tenant permission removed"), { code: "preflight_failed" }),
+    });
+    const loaded = await h.engine.withWriterResult(h.ref, (w) =>
+      w.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "b",
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: "b" },
+              destination: {
+                type: "google_shared_drive",
+                driveId: "destination-drive",
+                folderId: "dest-b",
+              },
+            },
+          ],
+        }),
+      }),
+    );
+    assert.equal(loaded.ok, false);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.planDigest, null);
+    assert.equal((await h.engine.withWriterResult(h.ref, (w) => w.execute())).ok, false);
+    assert.equal((await h.engine.withWriterResult(h.ref, (w) => w.verify())).ok, false);
+    const plan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    assert.equal(plan.revision, 2);
+    const page = value(await h.engine.reader(h.ref).rows({ phase: "plan", view: "mappings" }));
+    assert.deepEqual(
+      page.rows.map((row) => (row.jobType === "file_migration" ? row.mappingId : null)),
+      ["b"],
+    );
+  });
+
   it("refuses copy limits that are not positive safe integers before planning", async (t) => {
     const h = await harness(t);
     for (const name of ["mappingsInFlight", "transfersPerMapping"]) {

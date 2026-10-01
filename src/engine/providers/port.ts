@@ -166,6 +166,7 @@ export interface ProviderPort extends FilePassProvider {
     driveId: string;
     objectId: string;
   }): Promise<DestinationEntry | null>;
+  resolveSourceFolder(input: { driveId: string; folderPath: string }): Promise<SourceEntry | null>;
   resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;

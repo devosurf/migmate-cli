@@ -624,6 +624,23 @@ export class FakeFileMigrationPort implements ProviderPort {
     return rows;
   }
 
+  async resolveSourceFolder(input: {
+    driveId: string;
+    folderPath: string;
+  }): Promise<SourceEntry | null> {
+    let entry = Object.values(this.sourceById).find(
+      (item) => item.driveId === input.driveId && item.parentId === null,
+    );
+    for (const part of input.folderPath ? input.folderPath.split("/") : []) {
+      if (!entry) return null;
+      const parent = entry.id;
+      entry = Object.values(this.sourceById).find(
+        (item) => item.parentId === parent && item.name === part && item.driveId === input.driveId,
+      );
+    }
+    return entry ? cloneSource(entry) : null;
+  }
+
   async resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;

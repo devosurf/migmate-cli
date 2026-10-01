@@ -8,7 +8,7 @@ The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclo
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
 
-Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. There is no job-level mirror mode, manifest loader, or drive provisioning in this release. Keep the existing mappings configuration and pre-existing destination roots.
+Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Destinations must already exist. Job-level mirror, members, Google sources and drive provisioning remain unsupported and refuse explicitly.
 
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. An excluded source subtree gaining a new member still requires replanning.
 

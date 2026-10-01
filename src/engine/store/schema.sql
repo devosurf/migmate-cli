@@ -70,17 +70,6 @@ CREATE TABLE approval (
   payload     TEXT
 ) STRICT;
 
--- File migration: approved source root -> pre-existing destination folder.
-CREATE TABLE mapping (
-  id                TEXT PRIMARY KEY,
-  rev               INTEGER NOT NULL REFERENCES plan_revision(rev),
-  source_drive_id   TEXT NOT NULL,
-  source_item_id    TEXT NOT NULL,
-  dest_drive_id     TEXT NOT NULL,
-  dest_folder_id    TEXT NOT NULL,
-  exclusions        TEXT NOT NULL
-) STRICT;
-
 -- Teams archive: one frozen, expanded scope entry.
 CREATE TABLE scope_entry (
   id           TEXT PRIMARY KEY,
@@ -379,4 +368,14 @@ CREATE TABLE mapping_pass (
   status TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed','interrupted')),
   payload TEXT NOT NULL,
   PRIMARY KEY (rev, mapping_id, pass_number)
+) STRICT;
+
+-- Loaded mapping manifest; immutable revisions freeze its content in plan_input.
+CREATE TABLE mapping (
+  id TEXT PRIMARY KEY,
+  payload TEXT NOT NULL
+) STRICT;
+CREATE TABLE mapping_manifest (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  digest TEXT NOT NULL
 ) STRICT;

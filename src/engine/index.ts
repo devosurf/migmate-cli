@@ -19,6 +19,12 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { Engine, EngineOptions, JobReader, JobWriter, ReclaimDecision } from "./engine.ts";
 import {
+  ManifestError,
+  parseManifest,
+  validateMappingTrees,
+  type LoadedManifest,
+} from "./manifest.ts";
+import {
   ok,
   refuse,
   type ApprovalRecord,
@@ -154,6 +160,7 @@ interface CommonConfig {
 type FileConfig = CommonConfig & {
   mappings: Mapping[];
   options: NonNullable<FileMigrationConfig["options"]>;
+  manifestDigest?: string;
   rclone?: { config: FileReference; sourceRemote: string; destinationRemote: string };
 };
 type TeamsConfig = CommonConfig &
@@ -266,8 +273,9 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     common.transferBinary = { path, sha256, provenance };
   }
   if (type === "file_migration") {
-    if (!Array.isArray(input.mappings) || input.mappings.length === 0) configError("mappings");
-    const mappings = input.mappings
+    if (input.mappings !== undefined && !Array.isArray(input.mappings)) configError("mappings");
+    const mappings = (input.mappings ?? ([] as unknown[])) as unknown[];
+    const parsedMappings = mappings
       .map((raw, index): Mapping => {
         const m = object(raw, "mappings");
         keys(
@@ -313,7 +321,8 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         return mapping;
       })
       .sort((a, b) => compareText(a.id, b.id));
-    if (new Set(mappings.map((m) => m.id)).size !== mappings.length) configError("mappings");
+    if (new Set(parsedMappings.map((m) => m.id)).size !== parsedMappings.length)
+      configError("mappings");
     const options = input.options === undefined ? {} : object(input.options, "options");
     keys(options, ["verificationMode", "mappingsInFlight", "transfersPerMapping"], "options");
     if (
@@ -324,7 +333,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
       configError("options.verificationMode");
     const config: FileConfig = {
       ...common,
-      mappings,
+      mappings: parsedMappings,
       options:
         options.verificationMode === undefined
           ? {}
@@ -523,7 +532,7 @@ function persisted(value: unknown): unknown {
     Object.entries(value).filter(([key]) => !RETIRED_CONFIG_KEYS.includes(key)),
   );
 }
-function readConfig(paths: JobPaths, type: JobType): JobConfig {
+function readConfig(paths: JobPaths, type: JobType, store?: Store): JobConfig {
   if (!existsSync(paths.configPath)) configError("config_missing");
   let parsed: unknown;
   try {
@@ -531,7 +540,11 @@ function readConfig(paths: JobPaths, type: JobType): JobConfig {
   } catch {
     configError("job.toml");
   }
-  return parseConfig(persisted(parsed), type, paths);
+  const config = parseConfig(persisted(parsed), type, paths);
+  const loaded = store?.readMappings();
+  if ("mappings" in config && loaded)
+    return { ...config, mappings: loaded.mappings, manifestDigest: loaded.digest };
+  return config;
 }
 function migrateConfig(paths: JobPaths, type: JobType): void {
   const legacy = join(paths.dir, LEGACY_CONFIG_FILENAME);
@@ -548,8 +561,18 @@ function migrateConfig(paths: JobPaths, type: JobType): void {
   rmSync(legacy);
   syncDirectory(paths.dir);
 }
+function persistConfig(paths: JobPaths, config: JobConfig, store: Store): void {
+  if ("mappings" in config) {
+    if (config.mappings.length)
+      store.writeMappings({ mappings: config.mappings, digest: digestJson(config.mappings) });
+    const { mappings: _mappings, manifestDigest: _digest, ...settings } = config;
+    atomicFile(paths.configPath, stringifyToml(settings));
+  } else atomicFile(paths.configPath, stringifyToml(config));
+}
 function expectedFailure<T>(error: unknown): Outcome<T> | null {
   if (error instanceof EngineRefusalError) return { ok: false, refusal: error.refusal };
+  if (error instanceof ManifestError)
+    return refuse(error.code, error.message, { detail: error.detail });
   const code = errorCode(error);
   if (code && Object.hasOwn(REFUSAL_CODES, code))
     return refuse(code as RefusalCode, "The operation could not satisfy its required gate.");
@@ -634,7 +657,7 @@ async function initJob(deps: EngineDeps, spec: JobSpec): Promise<Outcome<JobRef>
     if (!opened.ok) return opened;
     const store = opened.value;
     try {
-      if (config) atomicFile(paths.configPath, stringifyToml(config));
+      if (config) persistConfig(paths, config, store);
       store.atomic(() => {
         store.writeJob({
           id: ref.id,
@@ -797,6 +820,16 @@ async function withWriter<T>(
         ownerUuid: acquired.value.row.ownerUuid,
       });
       migrateConfig(paths, job.type);
+      if (job.type === "file_migration" && existsSync(paths.configPath)) {
+        const config = readConfig(paths, job.type);
+        if ("mappings" in config && config.mappings.length) {
+          // Store wins if a crash happened after its commit but before config replacement.
+          if (!store.readMappings())
+            store.writeMappings({ mappings: config.mappings, digest: digestJson(config.mappings) });
+          const { mappings: _mappings, ...settings } = config;
+          atomicFile(paths.configPath, stringifyToml(settings));
+        }
+      }
       for (const [relative, prefixes] of [
         ["assets/.staging", ["file-", "package-"]],
         ["assets/staging", ["archive-"]],
@@ -981,6 +1014,7 @@ function inputFields(
       ? {
           mappings: config.mappings,
           options: config.options,
+          ...(config.manifestDigest ? { manifestDigest: config.manifestDigest } : {}),
           route: config.route,
         }
       : {
@@ -1619,10 +1653,84 @@ function makeWriter(
     });
   }
   const writer: JobWriter = {
+    async loadManifest(input) {
+      const loaded = await operation<LoadedManifest>("plan", async () => {
+        if (job().type !== "file_migration")
+          return refuse("unsupported_route", "Mapping manifests require a file migration job.");
+        const manifest = parseManifest(input.content, input.format);
+        const base = existsSync(paths.configPath)
+          ? readConfig(paths, job().type, store)
+          : parseConfig({}, job().type, paths);
+        if (!("mappings" in base)) throw new Error("Expected file configuration");
+        const pending = manifest.mappings.map((m) => ({
+          id: m.id,
+          sourceDriveId: m.source.driveId,
+          sourceFolderPath: m.source.folderPath,
+          destDriveId: m.destination.driveId,
+          destFolderId: m.destination.folderId,
+        }));
+        const p =
+          deps.provider ??
+          createProductionProvider({
+            jobType: "file_migration",
+            config: { ...base, mappings: pending },
+            jobDirectory: paths.dir,
+          });
+        providers.add(p);
+        const mappings: Mapping[] = [];
+        for (let index = 0; index < pending.length; index++) {
+          const mapping = pending[index]!,
+            source = manifest.mappings[index]!.source;
+          const root = await p.resolveSourceFolder({
+            driveId: source.driveId,
+            folderPath: source.folderPath,
+          });
+          if (!root || root.kind !== "folder" || root.driveId !== source.driveId)
+            throw new ManifestError(
+              index + 1,
+              "source.folderPath",
+              "Source folder does not resolve",
+            );
+          mappings.push({ ...mapping, sourceItemId: root.id });
+        }
+        await validateMappingTrees(p, mappings);
+        const previousRevision = job().planRevision;
+        store.atomic(() => {
+          store.writeMappings({ mappings, digest: manifest.digest });
+          // Even failed recollection must not leave the previous approval executable.
+          if (previousRevision !== null)
+            store.writeJob({
+              ...job(),
+              state: "new",
+              planRevision: null,
+              verificationRevision: null,
+              lastCheckpoint: null,
+            });
+        });
+        if (!existsSync(paths.configPath)) {
+          const { mappings: _mappings, manifestDigest: _digest, ...settings } = base;
+          atomicFile(paths.configPath, stringifyToml(settings));
+        }
+        store.appendEvent({
+          verb: "plan",
+          phase: "plan",
+          kind: "phase_completed",
+          payload: { manifestDigest: manifest.digest, mappingCount: mappings.length },
+        });
+        return ok({
+          mappingCount: mappings.length,
+          manifestDigest: manifest.digest,
+          planRevision: previousRevision,
+        });
+      });
+      if (!loaded.ok || loaded.value.planRevision === null) return loaded;
+      const plan = await writer.plan();
+      return plan.ok ? ok({ ...loaded.value, planRevision: plan.value.revision }) : plan;
+    },
     onboard: (raw) =>
       operation("doctor", async () => {
-        const config = parseConfig(raw, job().type, paths);
-        atomicFile(paths.configPath, stringifyToml(config));
+        persistConfig(paths, parseConfig(raw, job().type, paths), store);
+        const config = readConfig(paths, job().type, store);
         const p = provider(config),
           proof = await preflight(config, p);
         if (!proof.ok) return proof;
@@ -1641,7 +1749,7 @@ function makeWriter(
       }),
     doctor: () =>
       operation("doctor", async () => {
-        const config = readConfig(paths, job().type);
+        const config = readConfig(paths, job().type, store);
         return preflight(config, provider(config));
       }),
     plan: () =>
@@ -1651,7 +1759,7 @@ function makeWriter(
             "plan_revision_required",
             "A completed archive requires a new job with an optional lineage pointer.",
           );
-        let config = readConfig(paths, job().type);
+        let config = readConfig(paths, job().type, store);
         if (!("mappings" in config) && !config.window.to && job().planRevision !== null) {
           const previous = store.readResume(job().planRevision!).archivePlan;
           if (previous)
@@ -1699,6 +1807,7 @@ function makeWriter(
         const createdAt = deps.now().toISOString();
         const record = {
           revision,
+          ...("mappings" in config ? { manifestDigest: config.manifestDigest } : {}),
           planDigest,
           inputsDigest,
           createdAt,
@@ -1796,7 +1905,7 @@ function makeWriter(
             "verification_unaccepted",
             "The current execution must be assessed before another pass.",
           );
-        let config = readConfig(paths, job().type);
+        let config = readConfig(paths, job().type, store);
         const resume = store.readResume(plan.revision);
         if (!("mappings" in config) && !config.window.to && resume.archivePlan)
           config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
@@ -1879,7 +1988,7 @@ function makeWriter(
       operation("verify", async () => {
         if (!["verified", "needs_attention"].includes(job().state) || job().planRevision === null)
           return refuse("verification_unaccepted", "Verification requires completed execution.");
-        const config = readConfig(paths, job().type),
+        const config = readConfig(paths, job().type, store),
           p = provider(config, true),
           revision = job().planRevision!,
           plan = store.readPlanRevision(revision)!;
@@ -1989,7 +2098,7 @@ function makeWriter(
       operation("report", async () => {
         const revision = job().planRevision ?? 0,
           verification = currentVerification(store);
-        const config = revision > 0 ? readConfig(paths, job().type) : undefined;
+        const config = revision > 0 ? readConfig(paths, job().type, store) : undefined;
         const reportSections = config ? await sections(provider(config), config, revision) : [];
         const phase: RowPhase = verification ? "verify" : store.currentPhase(revision);
         const findings = store.readCurrentFindings(revision, phase),

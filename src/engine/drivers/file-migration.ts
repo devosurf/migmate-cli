@@ -18,6 +18,7 @@ export interface FileMappingConfig {
   id: string;
   sourceDriveId: string;
   sourceItemId: string;
+  sourceFolderPath?: string;
   destDriveId: string;
   destFolderId: string;
   exclusions?: FileExclusion[];

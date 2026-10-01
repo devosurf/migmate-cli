@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import { openEngine } from "../index.ts";
 import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -225,6 +227,122 @@ test("a job-contained credential is refused before a token request or secret dis
       !JSON.stringify(error).includes("credential-file-sentinel"),
   );
   assert.equal(contactedProvider, false);
+});
+
+test("loads manifest paths through Graph and ignores the remotes' seed roots", async (t) => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "migmate-manifest-provider-")));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const keyPath = join(directory, "google.json"),
+    configPath = join(directory, "rclone.conf");
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  await writeFile(
+    keyPath,
+    JSON.stringify({
+      type: "service_account",
+      project_id: "test",
+      private_key_id: "a".repeat(40),
+      private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      client_email: "migration@test.iam.gserviceaccount.com",
+      client_id: "123456789",
+      token_uri: "https://oauth2.googleapis.com/token",
+    }),
+    { mode: 0o600 },
+  );
+  const tenant = "11111111-1111-1111-1111-111111111111",
+    app = "22222222-2222-2222-2222-222222222222";
+  await writeFile(
+    configPath,
+    `[source]\ntype = onedrive\nclient_id = ${app}\nclient_secret = Abc8Q~tE1.vN-jK_pLq7zXyW4rS2mD6bH0uT9cVe\nclient_credentials = true\ntenant = ${tenant}\ndrive_type = documentLibrary\ndrive_id = seed-source\nroot_folder_id = seed-root\n[destination]\ntype = drive\nservice_account_file = ${keyPath}\nteam_drive = seed-drive\nroot_folder_id = seed-folder\n`,
+    { mode: 0o600 },
+  );
+  t.mock.method(globalThis, "fetch", async (target: string | URL | Request) => {
+    const url = new URL(String(target));
+    if (url.hostname === "login.microsoftonline.com") {
+      const claims = Buffer.from(
+        JSON.stringify({
+          aud: "https://graph.microsoft.com",
+          tid: tenant,
+          appid: app,
+          idtyp: "app",
+          roles: ["Sites.Selected"],
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      ).toString("base64url");
+      return Response.json({
+        access_token: `e30.${claims}.signature`,
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    }
+    if (url.hostname === "oauth2.googleapis.com")
+      return Response.json({ access_token: "google", token_type: "Bearer", expires_in: 3600 });
+    if (url.hostname === "graph.microsoft.com") {
+      if (url.pathname === "/v1.0/drives/source-drive/root:/Reports%20%23%25")
+        return Response.json({
+          id: "reports",
+          name: "Reports #%",
+          folder: {},
+          parentReference: { id: "root", driveId: "source-drive" },
+        });
+      if (url.pathname === "/v1.0/drives/source-drive/items/reports")
+        return Response.json({
+          id: "reports",
+          name: "Reports #%",
+          folder: {},
+          parentReference: { id: "root", driveId: "source-drive" },
+        });
+      if (url.pathname === "/v1.0/drives/source-drive/items/root")
+        return Response.json({ id: "root", name: "Documents", folder: {} });
+    }
+    if (url.pathname === "/drive/v3/files/destination-root")
+      return Response.json({
+        id: "destination-root",
+        driveId: "shared-drive",
+        name: "Archive",
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [],
+      });
+    throw new Error(`Unexpected request ${url.origin}${url.pathname}`);
+  });
+  const engine = openEngine({ home: join(directory, "home") });
+  t.after(() => engine.close());
+  const initialized = await engine.initJob({
+    type: "file_migration",
+    config: {
+      rclone: {
+        config: { resolver: "file", path: configPath, mode: "0600" },
+        sourceRemote: "source",
+        destinationRemote: "destination",
+      },
+    },
+  });
+  assert.equal(initialized.ok, true);
+  const loaded = await engine.withWriterResult(initialized.value, (w) =>
+    w.loadManifest({
+      format: "json",
+      content: JSON.stringify({
+        version: 1,
+        mappings: [
+          {
+            id: "reports",
+            source: { type: "sharepoint", driveId: "source-drive", folderPath: "Reports #%" },
+            destination: {
+              type: "google_shared_drive",
+              driveId: "shared-drive",
+              folderId: "destination-root",
+            },
+          },
+        ],
+      }),
+    }),
+  );
+  assert.equal(loaded.ok, true, JSON.stringify(loaded));
+  const page = await engine.reader(initialized.value).rows({ phase: "plan", view: "mappings" });
+  assert.equal(page.ok, true);
+  assert.deepEqual(
+    page.value.rows.map((row) => (row.jobType === "file_migration" ? row.sourceItemId : null)),
+    ["reports"],
+  );
 });
 
 /** A nested source item, as every real library has and no fake provider models. */

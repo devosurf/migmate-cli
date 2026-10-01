@@ -520,6 +520,7 @@ describe("windowless native protocol", () => {
         throw new Error("Unexpected mutation");
       };
       const writer: JobWriter = {
+        loadManifest: unsupported,
         onboard: unsupported,
         doctor: unsupported,
         plan: unsupported,

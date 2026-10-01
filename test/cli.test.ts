@@ -134,6 +134,162 @@ async function planned(t: TestContext) {
   return { ...h, id, plan: plan.value };
 }
 
+it("refuses unsupported manifest extensions and malformed CSV without replacing stored mappings", async (t) => {
+  const h = harness(t);
+  const initialized = await h.engine().initJob({ type: "file_migration", config: CLI_JOB_CONFIG });
+  assert.equal(initialized.ok, true);
+  const mapping = {
+    id: "library",
+    source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
+    destination: { type: "google_shared_drive", driveId: "dst-drive", folderId: "dst-root" },
+  };
+  const path = join(h.home, "invalid.json");
+  for (const [invalid, row, field] of [
+    [{ version: 1, mappings: [mapping], mirror: true }, 0, "mirror"],
+    [{ version: 1, mappings: [{ ...mapping, members: [] }] }, 1, "members"],
+    [
+      {
+        version: 1,
+        mappings: [{ ...mapping, destination: { ...mapping.destination, create: "New drive" } }],
+      },
+      1,
+      "destination.create",
+    ],
+    [
+      {
+        version: 1,
+        mappings: [{ ...mapping, source: { ...mapping.source, type: "google_shared_drive" } }],
+      },
+      1,
+      "source.type",
+    ],
+    [{ version: 1, mappings: [mapping, mapping] }, 2, "id"],
+    [
+      {
+        version: 1,
+        mappings: [{ ...mapping, source: { ...mapping.source, folderPath: "../outside" } }],
+      },
+      1,
+      "source.folderPath",
+    ],
+    [
+      { version: 1, mappings: [{ ...mapping, source: { ...mapping.source, driveId: "root" } }] },
+      1,
+      "source.driveId",
+    ],
+  ]) {
+    writeFileSync(path, JSON.stringify(invalid));
+    const result = await invoke(
+      ["manifest", "load", "--job", initialized.value.id, "--file", path, "--output", "json"],
+      h.engine(),
+    );
+    assert.equal(result.code, 2);
+    assert.deepEqual(document(result).refusal.detail, { row, field });
+  }
+  const csv = join(h.home, "invalid.csv");
+  writeFileSync(csv, "id,source.driveId,unexpected\nlibrary,src-drive,ignored\n");
+  const result = await invoke(
+    ["manifest", "load", "--job", initialized.value.id, "--file", csv, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(result.code, 2);
+  assert.deepEqual(document(result).refusal.detail, { row: 0, field: "header" });
+  const status = document<{ review: RowPage }>(
+    await invoke(
+      [
+        "status",
+        "--job",
+        initialized.value.id,
+        "--view",
+        "mappings",
+        "--mapping",
+        "map-1",
+        "--output",
+        "json",
+      ],
+      h.engine(),
+    ),
+  );
+  assert.equal(status.value.review.totalRows, 1);
+});
+
+it("loads JSON and CSV mapping manifests into the job and names invalid rows and fields", async (t) => {
+  const h = harness(t);
+  const init = document<{ id: string }>(
+    await invoke(["init", "--type", "file_migration", "--output", "json"], h.engine()),
+  );
+  const path = join(h.home, "manifest.json");
+  assert.equal(init.ok, true, JSON.stringify(init));
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      mappings: [
+        {
+          id: "library",
+          source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
+          destination: { type: "google_shared_drive", driveId: "dst-drive", folderId: "dst-root" },
+        },
+      ],
+    }),
+  );
+  const args = ["manifest", "load", "--job", init.value.id, "--file", path, "--output", "json"];
+  const loaded = await invoke(args, h.engine());
+  assert.equal(loaded.code, 0);
+  const result = document<{ mappingCount: number; manifestDigest: string }>(loaded);
+  assert.equal(result.command, "manifest load");
+  assert.equal(result.value.mappingCount, 1);
+  assert.match(result.value.manifestDigest, /^[a-f0-9]{64}$/u);
+  const pending = document<{ review: RowPage }>(
+    await invoke(
+      [
+        "status",
+        "--job",
+        init.value.id,
+        "--view",
+        "mappings",
+        "--search",
+        "library",
+        "--limit",
+        "1",
+        "--output",
+        "json",
+      ],
+      h.engine(),
+    ),
+  );
+  assert.equal(pending.value.review.totalRows, 1);
+  assert.equal(pending.value.review.rows[0]?.jobType, "file_migration");
+  const csv = join(h.home, "manifest.csv");
+  writeFileSync(
+    csv,
+    "id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId\r\nlibrary,sharepoint,src-drive,,google_shared_drive,dst-drive,dst-root\r\n",
+  );
+  const csvResult = document<{ manifestDigest: string }>(
+    await invoke(
+      ["manifest", "load", "--job", init.value.id, "--file", csv, "--output", "json"],
+      h.engine(),
+    ),
+  );
+  assert.equal(csvResult.value.manifestDigest, result.value.manifestDigest);
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      mappings: [
+        {
+          id: "bad",
+          source: { type: "sharepoint", driveId: "", folderPath: "" },
+          destination: { type: "google_shared_drive", driveId: "dst-drive", folderId: "dst-root" },
+        },
+      ],
+    }),
+  );
+  const invalid = await invoke(args, h.engine());
+  assert.equal(invalid.code, 2);
+  assert.deepEqual(document(invalid).refusal.detail, { row: 1, field: "source.driveId" });
+});
+
 it("emits one versioned stdout document for handled usage/configuration failures and help", async (t) => {
   const h = harness(t);
   const cases = [

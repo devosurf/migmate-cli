@@ -39,7 +39,8 @@ export interface CredentialSession {
 
 interface MappingIdentity {
   sourceDriveId: string;
-  sourceItemId: string;
+  sourceItemId?: string;
+  sourceFolderPath?: string;
   destDriveId: string;
   destFolderId: string;
   sourceSiteId?: string;
@@ -319,10 +320,13 @@ function parseMappings(value: unknown): MappingIdentity[] {
     const mapping = record(item);
     const result: MappingIdentity = {
       sourceDriveId: stableId(mapping.sourceDriveId),
-      sourceItemId: stableId(mapping.sourceItemId),
       destDriveId: stableId(mapping.destDriveId),
       destFolderId: stableId(mapping.destFolderId),
     };
+    if (mapping.sourceItemId !== undefined) result.sourceItemId = stableId(mapping.sourceItemId);
+    else if (typeof mapping.sourceFolderPath === "string")
+      result.sourceFolderPath = mapping.sourceFolderPath;
+    else throw refused("credential_mapping_invalid");
     if (mapping.sourceSiteId !== undefined) result.sourceSiteId = stableId(mapping.sourceSiteId);
     return result;
   });
@@ -526,19 +530,9 @@ async function loadCredentials(
         if (scopes.join(" ") !== Object.keys(FILE_ROLES).sort().join(" "))
           throw refused("credential_permissions_invalid");
       }
-      const sourceDriveId = stableId(source.get("drive_id"));
-      const sourceRoot = source.has("root_folder_id")
-        ? stableId(source.get("root_folder_id"))
-        : undefined;
-      if (
-        !mappings.some(
-          (mapping) =>
-            mapping.sourceDriveId === sourceDriveId &&
-            (sourceRoot === undefined || mapping.sourceItemId === sourceRoot),
-        )
-      ) {
-        throw refused("credential_mapping_mismatch");
-      }
+      // Remote roots are seed settings. Every pass overrides them with approved mapping roots.
+      stableId(source.get("drive_id"));
+      if (source.has("root_folder_id")) stableId(source.get("root_folder_id"));
       iniKeys(destination, [
         "type",
         "service_account_file",
@@ -560,15 +554,8 @@ async function loadCredentials(
       setting(destination, "metadata_owner", "off");
       setting(destination, "metadata_permissions", "off");
       setting(destination, "metadata_labels", "off");
-      const destDriveId = stableId(destination.get("team_drive"));
-      const destFolderId = stableId(destination.get("root_folder_id"));
-      if (
-        !mappings.some(
-          (mapping) => mapping.destDriveId === destDriveId && mapping.destFolderId === destFolderId,
-        )
-      ) {
-        throw refused("credential_mapping_mismatch");
-      }
+      stableId(destination.get("team_drive"));
+      stableId(destination.get("root_folder_id"));
       const tenantId = guid(source.get("tenant"));
       const clientId = guid(source.get("client_id"));
       graph = { tenantId, clientId, secret: clientSecret(source.get("client_secret")) };

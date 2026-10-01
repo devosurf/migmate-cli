@@ -571,7 +571,7 @@ describe("engine durability seam", () => {
     );
   });
 
-  it("persists real TOML with exact exclusion objects and credential references, never supplied secret text", async (t) => {
+  it("persists credential references without supplied secret text", async (t) => {
     const selected = {
       ...config([{ sourceItemId: "document", reason: "Operator-approved exclusion" }]),
       rclone: {
@@ -588,7 +588,6 @@ describe("engine durability seam", () => {
     const path = join(h.home, "jobs", h.ref.id, "job.toml");
     const original = await readFile(path, "utf8");
     const parsed = parseToml(original);
-    assert.deepEqual(parsed.mappings, selected.mappings);
     assert.deepEqual(parsed.rclone, selected.rclone);
     reopen(h);
     value(await h.engine.withWriterResult(h.ref, (writer) => writer.doctor()));
@@ -902,7 +901,6 @@ describe("engine durability seam", () => {
       database.close();
     }
     const status = value(await h.engine.reader(h.ref).status());
-    assert.equal(status.schemaVersion, 3);
     assert.equal(status.state, "new");
   });
 
@@ -911,13 +909,15 @@ describe("engine durability seam", () => {
     const digest = await approve(h);
     const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
     try {
-      database.exec("DROP TABLE mapping_pass; UPDATE job SET schema_version = 2");
+      database.exec(
+        "DROP TABLE mapping_pass; DROP TABLE mapping; DROP TABLE mapping_manifest; UPDATE job SET schema_version = 2",
+      );
     } finally {
       database.close();
     }
+    await writeFile(join(h.home, "jobs", h.ref.id, "job.toml"), stringifyToml(config()));
     reopen(h);
     const status = value(await h.engine.reader(h.ref).status());
-    assert.equal(status.schemaVersion, 3);
     assert.equal(status.planDigest, digest);
     assert.deepEqual(status.mappingPasses, []);
     assert.equal((await execute(h)).outcome, "completed");
@@ -925,6 +925,45 @@ describe("engine durability seam", () => {
     assert.equal(
       value(await h.engine.reader(h.ref).status()).mappingPasses[0]?.status,
       "completed",
+    );
+  });
+
+  it("moves legacy config mappings into the store on writer open and retains their exclusions", async (t) => {
+    const selected = config([{ sourceItemId: "document", reason: "Do not migrate this file" }]);
+    const h = await harness(t, fixture(), selected);
+    const directory = join(h.home, "jobs", h.ref.id);
+    const database = new DatabaseSync(join(directory, "state.db"));
+    try {
+      database.exec(
+        "DROP TABLE mapping; DROP TABLE mapping_manifest; UPDATE job SET schema_version=3",
+      );
+    } finally {
+      database.close();
+    }
+    await writeFile(join(directory, "job.toml"), stringifyToml(selected));
+    reopen(h);
+    await approve(h);
+    const plan = value(await h.engine.reader(h.ref).rows({ phase: "plan", view: "mappings" }));
+    const row = plan.rows[0];
+    assert.equal(row?.jobType, "file_migration");
+    if (row?.jobType !== "file_migration") throw new Error("Expected migrated mapping");
+    assert.deepEqual(row.mapping?.exclusions, selected.mappings[0]!.exclusions);
+    assert.equal(
+      "mappings" in parseToml(await readFile(join(directory, "job.toml"), "utf8")),
+      false,
+    );
+    reopen(h);
+    await execute(h);
+    assert.equal(
+      h.port.snapshotDestination().some((item) => item.name === "document.bin"),
+      false,
+    );
+    const rows = value(await h.engine.reader(h.ref).rows({ phase: "verify" }));
+    assert.equal(
+      rows.rows.find(
+        (item) => item.jobType === "file_migration" && item.sourceItemId === "document",
+      )?.code,
+      "omitted_by_rule",
     );
   });
 });

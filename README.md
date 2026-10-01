@@ -109,9 +109,77 @@ flowchart LR
 
 File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member, or an approved excluded item moving outside that subtree within the mapping, requires replanning before any copy starts. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
 
+### Mapping manifests
+
+Load a batch with `migmate manifest load --job "$ID" --file mappings.json --output json`.
+Configure the job's credential references first (`init --config job.toml`); load resolves
+source paths and both trees' ancestry through the providers. JSON is authoritative:
+
+```json
+{
+  "version": 1,
+  "mappings": [
+    {
+      "id": "finance",
+      "source": {
+        "type": "sharepoint",
+        "driveId": "sharepoint-library-id",
+        "folderPath": "Reports/2026"
+      },
+      "destination": {
+        "type": "google_shared_drive",
+        "driveId": "shared-drive-id",
+        "folderId": "existing-folder-id"
+      }
+    }
+  ]
+}
+```
+
+`folderPath` is a literal, unescaped path relative to the SharePoint drive root;
+`""` selects the whole library. Use `/` between segments, without leading/trailing
+slashes, empty segments, `.` or `..`. IDs are stable provider IDs, not URLs or the
+alias `root`; mapping IDs must be unique. Both roots must be ordinary folders.
+Mappings overlap if their source roots in the same drive are equal or one is an
+ancestor of the other, **or** their destination roots in the same Shared Drive are
+equal or nested. Sibling trees are allowed; exclusions do not make overlapping roots safe.
+
+CSV uses this exact header and column order, with no extra columns:
+
+```csv
+id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId
+finance,sharepoint,sharepoint-library-id,Reports/2026,google_shared_drive,shared-drive-id,existing-folder-id
+```
+
+Use UTF-8 and standard double-quoted CSV cells (double a quote inside a quoted cell);
+LF and CRLF are accepted. An empty source path is an empty cell. Validation refuses
+with `configuration_invalid` (exit 2), `refusal.detail.row` (one-based mapping/data
+record; 0 means document/header), and `refusal.detail.field`. JSON fields and CSV
+columns are strict: members, drives-to-create, Google sources, mirror, and every
+unknown field refuse rather than being ignored.
+
+A successful load replaces the entire mapping set in SQLite, not the credential
+settings. Legacy `[[mappings]]` configs move into SQLite on writer open, preserving
+stable IDs and exclusions; mappings no longer remain in `job.toml`. The plan freezes
+the resolved mappings and `manifestDigest` (SHA-256 of canonical versioned JSON,
+ordered by mapping ID). Editing the input file has no effect until another load.
+Loading after planning/approval collects a new revision requiring approval again.
+If recollection fails, the loaded set remains but the prior approval cannot run:
+correct the reported prerequisite and run `plan`, then approve its digest.
+
+For large jobs use `plan --review --view mappings --limit 50` or
+`status --view mappings --limit 50`, both with `--job "$ID" --output json`.
+Continue with `review.nextCursor` via `--cursor`; use `--search TEXT` for a substring
+filter, `--mapping ID` for an exact mapping, or `--code CODE`. Counts/facets cover
+the entire filtered set. Mapping rows are ordered by ID, include the frozen definition
+and latest `mappingPass` when planned, and are available before planning as loaded
+definitions. `--revision N` reviews earlier plans. Mapping view omits the unpaged
+top-level `mappingPasses`; default item view retains it. `--mapping` also filters
+item rows.
+
 ### File mapping copies and recovery
 
-Keep the existing `[[mappings]]` job configuration. Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Destinations must already exist; this release adds no manifest loader, provisioning, or mirror/delete mode.
+Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Destinations must already exist; provisioning and mirror/delete mode are not implemented.
 
 The job's `[options]` controls both limits, shown in the immutable plan's **Copy concurrency** section and the report:
 
@@ -136,8 +204,8 @@ File migration no longer stages file bytes locally or uses reserved destination 
 A minimal file-migration run:
 
 ```sh
-migmate init --type file_migration --output json          # -> job id
-migmate creds init --job "$ID" --config job.toml
+migmate init --type file_migration --config job.toml --output json  # -> job id
+migmate manifest load --job "$ID" --file mappings.json --output json
 migmate doctor --job "$ID" --output json
 migmate plan   --job "$ID" --output json                  # -> planDigest
 migmate approve --job "$ID" --approver "you@example.com" \
