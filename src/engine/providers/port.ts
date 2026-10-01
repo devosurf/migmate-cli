@@ -152,6 +152,7 @@ export interface DriveMember {
 export interface SharedDrive {
   id: string;
   name: string;
+  createdTime?: string;
 }
 /** Observations include unsupported public/domain grants so verification can report them. */
 export interface DriveMembership {

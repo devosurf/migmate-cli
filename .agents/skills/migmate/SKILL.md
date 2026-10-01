@@ -59,8 +59,10 @@ rerun `execute` using the same job: its request IDs, created drive IDs and grant
 are durable. Read `status.createdDrives` (a null drive ID is an unresolved intent)
 and `status.memberGrants`; the report retains both.
 
-On `drive_creation_ambiguous` (exit 4), surface the candidate IDs and stop: several
-visible drives have the exact planned name, so recovery cannot choose safely.
+On `drive_creation_ambiguous` (exit 4), surface candidate IDs and creation timestamps
+and stop: there may be several exact-name matches, or the sole match lacks a
+`createdTime` at or after the durable creation intent. Recovery never adopts an
+older drive or infers a missing creation timestamp.
 Keep a submitted creation name bound to its mapping ID; use an existing destination
 ID rather than changing that intent. On `drive_membership_mismatch`, surface expected
 and actual members for human review and acceptance. Google adds the creator as an
@@ -79,6 +81,12 @@ Choose dedicated destination roots: file copy never deletes, but can update exis
 Read back the plan's **Mirror** setting and delete limit before approval. Default copy passes never delete. Job `[options] mirror = true` requires a nonnegative safe-integer `deleteLimit` per mapping pass (`0` permits no file deletions); every manifest mapping must use `destination.create`, otherwise load refuses with row and `field: "destination"`. Keep the mapping ID and creation intent for later passes so the durable created drive is reused. Plan and approve a new revision to copy source changes; completed passes in the same revision are skipped.
 
 Mirror runs `sync/sync`. On a delete-limit failure, surface the mapping's rclone error from `status.mappingPasses` and the report; other mappings continue. Deletions within the cap are not rolled back and retrying gives a fresh per-pass cap. Successful mirror leaves no destination-only files; verification still reports any leftovers it observes, including outside writes after a pass.
+
+Mirror also requires `status.createdDrives` provenance: an own create response or
+timestamp-checked name recovery. A legacy record without this evidence fails that
+mapping before any mirror pass; surface the provenance error rather than treating
+the manifest's `create` label as ownership. Other mappings continue; copy mode can
+still retain existing content.
 
 ## Reading a refusal
 

@@ -247,8 +247,11 @@ the ID is durable **before** any member is added. Member grants use
 
 A lost creation response, including a replay returning HTTP 409, is recovered by
 listing drives visible to the acting account with exactly the planned name.
-One match is adopted; none retries the same creation request; several refuse with
-`drive_creation_ambiguous` (exit 4), including candidate IDs. Never guess a match.
+One match is adopted only if its Google `createdTime` is at or after the job's
+durably recorded creation intent. An older match, missing timestamp or legacy
+intent without a timestamp refuses with `drive_creation_ambiguous` (exit 4),
+including candidate evidence. None retries the same creation request; several
+matches also refuse. Never guess a match.
 After a crash, rerun `execute`: a stored drive ID is reused without name lookup,
 and an already-present matching member grant is recorded without submitting it again.
 Once creation has been submitted, its mapping ID cannot be reused with a different
@@ -263,7 +266,8 @@ repair already-checkpointed grants. Members removed from a later manifest are
 not revoked automatically; they appear as drift.
 
 `status.createdDrives` exposes mapping, request ID, nullable drive ID, planned name,
-and creator email; a null drive ID is an unresolved creation intent.
+creator email, intent timestamp and creation provenance (own create response or
+timestamp-checked name recovery); a null drive ID is an unresolved creation intent.
 `status.memberGrants` and the report retain completed grants. Existing destination
 memberships are neither managed nor verified. Provisioning is covered by fake
 provider and HTTP-transport contracts; this does not claim a live tenant run.
@@ -308,6 +312,9 @@ with `configuration_invalid`, the mapping row and `field: "destination"`, even i
 that ID names a drive created earlier. Keep the same mapping ID and `create` intent
 on later manifest loads so the job reuses its durable created-drive ID.
 The plan and report's **Mirror** section state whether mirror is on and its limit.
+Before submitting a mirror pass, Migmate also checks the created drive's durable
+provenance. Legacy records without this proof fail that mapping with a provenance
+error rather than deleting; other mappings continue. Copy mode remains available.
 
 Mirror runs rclone `sync/sync`; exceeding the limit fails that mapping with
 rclone's error without deleting beyond the cap, while other mappings continue.

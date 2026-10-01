@@ -12,6 +12,15 @@ Copy never deletes. A renamed or removed source file can leave a destination-onl
 
 Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back, and each retry has a fresh cap. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
 
+Creation recovery adopts a sole exact-name match only when Google's `createdTime`
+is at or after the durable creation-intent timestamp; older or missing evidence
+refuses `drive_creation_ambiguous`, as do multiple matches. The creation record
+distinguishes an own create response from timestamp-checked name recovery.
+Mirror refuses each mapping whose record lacks proven provenance, including
+legacy schema-5 records; it never infers ownership solely from the manifest's
+`create` label. These optional evidence fields live in the existing JSON payload;
+no schema migration fabricates proof for legacy drives.
+
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. An excluded source subtree gaining a new member still requires replanning.
 
 **Acting account.** File jobs may set top-level `impersonate = true` and `subject`.

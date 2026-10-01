@@ -28,6 +28,9 @@ export interface CreatedDrive {
   name: string;
   driveId: string | null;
   creatorEmail: string;
+  /** Absent on schema-5 records written before creation provenance was recorded. */
+  intentAt?: string;
+  provenance?: { kind: "create_response" } | { kind: "name_recovery"; createdTime: string };
 }
 export interface MemberGrant {
   mappingId: string;

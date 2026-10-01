@@ -5,6 +5,7 @@ import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it, type TestContext } from "node:test";
 import { openEngine, type Engine, type JobRef } from "../src/engine/index.ts";
 import {
@@ -123,6 +124,7 @@ async function provisioningHarness(
   options?: FileMigrationConfig["options"],
 ): Promise<Harness> {
   input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
+  input.now ??= () => new Date(now);
   const h = await harness(t, input, options ? { mappings: [], options } : config);
   value(
     await h.engine.withWriterResult(h.ref, (w) =>
@@ -147,6 +149,85 @@ async function provisioningHarness(
 }
 
 describe("file migration through the engine", () => {
+  it("refuses mirror on legacy created-drive records lacking provenance", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { mirror: true, deleteLimit: 2 });
+    await execute(h);
+    h.port.deleteSourceItem("binary");
+    const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+    try {
+      database.exec(
+        "UPDATE created_drive SET payload = json_remove(payload, '$.intentAt', '$.provenance')",
+      );
+    } finally {
+      database.close();
+    }
+    await approve(h);
+    await execute(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.mappingPasses[0]?.status, "failed");
+    assert.match(status.mappingPasses[0]!.error!, /provenance/i);
+    const driveId = status.createdDrives[0]!.driveId!;
+    assert.ok(
+      (await h.port.listDestinationChildren(driveId)).some((f) => f.name === "report.docx"),
+    );
+  });
+  it("recovers a newly created drive after a lost response and mirrors later deletions", async (t) => {
+    const input = fixture();
+    input.now = () => new Date("2026-09-01T00:00:01.000Z");
+    input.effects = [
+      {
+        method: "createSharedDrive",
+        timing: "after",
+        count: 1,
+        error: new TypeError("Lost response"),
+      },
+    ];
+    const h = await provisioningHarness(t, input, { mirror: true, deleteLimit: 1 });
+    await execute(h);
+    const first = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(first.createdDrives[0]?.provenance, {
+      kind: "name_recovery",
+      createdTime: "2026-09-01T00:00:01.000Z",
+    });
+    h.port.deleteSourceItem("binary");
+    await approve(h);
+    await execute(h);
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, true);
+    assert.deepEqual(verified.findings, []);
+    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+  });
+  it("refuses an older same-name drive after a lost creation response without deleting its files", async (t) => {
+    const input = fixture();
+    input.now = () => new Date("2020-01-01T00:00:00.000Z");
+    input.destinationItems.push({
+      id: "outside-file",
+      driveId: "drive-1",
+      parentId: "drive-1",
+      name: "outside.txt",
+      kind: "file",
+      content: "outside",
+    });
+    const h = await provisioningHarness(t, input, { mirror: true, deleteLimit: 10 });
+    const outside = (await h.port.createSharedDrive({ name: "Finance", requestId: "outside" }))!;
+    h.port.scriptEffect({
+      method: "createSharedDrive",
+      timing: "before",
+      count: 1,
+      error: new TypeError("Creation response unavailable"),
+    });
+    const result = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("An older same-name drive must not be adopted");
+    assert.equal(result.refusal.code, "drive_creation_ambiguous");
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.createdDrives[0]?.driveId, null);
+    assert.equal(status.mappingPasses[0]?.status, "pending");
+    assert.deepEqual(
+      (await h.port.listDestinationChildren(outside.id)).map((f) => f.name),
+      ["outside.txt"],
+    );
+  });
   it("caps deletions per mirror mapping and reports failure while other mappings finish", async (t) => {
     const input = multiMapping().input;
     input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };

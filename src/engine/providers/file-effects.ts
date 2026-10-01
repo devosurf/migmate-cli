@@ -447,7 +447,10 @@ export class FileEffects {
   }
 
   async createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null> {
-    const query = new URLSearchParams({ requestId: input.requestId, fields: "id,name" });
+    const query = new URLSearchParams({
+      requestId: input.requestId,
+      fields: "id,name,createdTime",
+    });
     const response = await this.#google(`/drive/v3/drives?${query}`, {
       method: "POST",
       body: JSON.stringify({ name: input.name }),
@@ -466,7 +469,7 @@ export class FileEffects {
       async (cursor) => {
         const query = new URLSearchParams({
           q: `name = '${name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`,
-          fields: "nextPageToken,drives(id,name)",
+          fields: "nextPageToken,drives(id,name,createdTime)",
           pageSize: "100",
         });
         if (cursor) query.set("pageToken", cursor);

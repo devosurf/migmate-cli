@@ -128,18 +128,33 @@ test("creates Shared Drives with a replayable request id and reads and grants ex
     const url = new URL(String(input));
     if (url.pathname === "/drive/v3/drives" && init?.method === "POST") {
       assert.equal(url.searchParams.get("requestId"), "job-mapping-request");
+      assert.equal(url.searchParams.get("fields"), "id,name,createdTime");
       assert.deepEqual(JSON.parse(String(init.body)), { name: "Finance's drive" });
       if (created) return new Response(null, { status: 409 });
       created = true;
-      return Response.json({ id: "new-drive", name: "Finance's drive" });
+      return Response.json({
+        id: "new-drive",
+        name: "Finance's drive",
+        createdTime: "2026-09-01T00:00:01.000Z",
+      });
     }
     if (url.pathname === "/drive/v3/drives") {
       assert.equal(url.searchParams.get("q"), "name = 'Finance\\'s drive'");
+      assert.equal(url.searchParams.get("fields"), "nextPageToken,drives(id,name,createdTime)");
       assert.equal(url.searchParams.has("useDomainAdminAccess"), false);
       return Response.json(
         url.searchParams.has("pageToken")
           ? { drives: [{ id: "other", name: "Different drive" }] }
-          : { drives: [{ id: "new-drive", name: "Finance's drive" }], nextPageToken: "next" },
+          : {
+              drives: [
+                {
+                  id: "new-drive",
+                  name: "Finance's drive",
+                  createdTime: "2026-09-01T00:00:01.000Z",
+                },
+              ],
+              nextPageToken: "next",
+            },
       );
     }
     assert.equal(url.pathname, "/drive/v3/files/new-drive/permissions");
@@ -176,14 +191,14 @@ test("creates Shared Drives with a replayable request id and reads and grants ex
   const files = effects();
   assert.deepEqual(
     await files.createSharedDrive({ name: "Finance's drive", requestId: "job-mapping-request" }),
-    { id: "new-drive", name: "Finance's drive" },
+    { id: "new-drive", name: "Finance's drive", createdTime: "2026-09-01T00:00:01.000Z" },
   );
   assert.equal(
     await files.createSharedDrive({ name: "Finance's drive", requestId: "job-mapping-request" }),
     null,
   );
   assert.deepEqual(await files.findSharedDrives("Finance's drive"), [
-    { id: "new-drive", name: "Finance's drive" },
+    { id: "new-drive", name: "Finance's drive", createdTime: "2026-09-01T00:00:01.000Z" },
   ]);
   assert.deepEqual(await files.listDriveMembers("new-drive"), [
     { email: "finance@example.com", type: "group", role: "fileOrganizer" },

@@ -101,6 +101,7 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
         name: mapping.createDrive.name,
         driveId: null,
         creatorEmail: (await ctx.provider.googleAbout()).user.emailAddress,
+        intentAt: ctx.now().toISOString(),
       };
       yield { ...unit("intent"), createdDrive: drive };
     }
@@ -112,6 +113,34 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
             code: "drive_creation_ambiguous",
             detail: { mappingId: mapping.id, name: drive!.name, candidates: matches },
           });
+        const match = matches[0];
+        if (
+          match &&
+          !(
+            drive!.intentAt &&
+            match.createdTime &&
+            Date.parse(match.createdTime) >= Date.parse(drive!.intentAt)
+          )
+        )
+          throw Object.assign(
+            new Error(
+              "The matching Shared Drive has no creation evidence after this job's intent.",
+            ),
+            {
+              code: "drive_creation_ambiguous",
+              detail: {
+                mappingId: mapping.id,
+                name: drive!.name,
+                intentAt: drive!.intentAt ?? null,
+                candidates: matches,
+              },
+            },
+          );
+        if (match)
+          drive = {
+            ...drive!,
+            provenance: { kind: "name_recovery", createdTime: match.createdTime! },
+          };
         return matches[0] ?? null;
       };
       let created = recovering ? await recover() : null;
@@ -121,6 +150,7 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
             name: drive.name,
             requestId: drive.requestId,
           });
+          if (created) drive = { ...drive, provenance: { kind: "create_response" } };
         } catch (error) {
           if (
             !(error instanceof TypeError) &&
@@ -129,11 +159,13 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
             throw error;
         }
         if (!created) created = await recover();
-        if (!created)
+        if (!created) {
           created = await ctx.provider.createSharedDrive({
             name: drive.name,
             requestId: drive.requestId,
           });
+          if (created) drive = { ...drive, provenance: { kind: "create_response" } };
+        }
         if (!created)
           throw Object.assign(
             new Error("Drive creation is not yet visible; retry the same request."),
@@ -591,6 +623,18 @@ async function* copyMapping(
   let reference: CopyPassReference | undefined;
   try {
     ctx.signal?.throwIfAborted();
+    if (ctx.config.options?.mirror) {
+      const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
+      const proven =
+        drive?.provenance?.kind === "create_response" ||
+        (drive?.provenance?.kind === "name_recovery" &&
+          drive.intentAt &&
+          Date.parse(drive.provenance.createdTime) >= Date.parse(drive.intentAt));
+      if (!mapping.createDrive || drive?.driveId !== mapping.destDriveId || !proven)
+        throw new Error(
+          "Mirror requires proven job-created drive provenance; this mapping cannot delete.",
+        );
+    }
     const sources = await sourceInventory(ctx, mapping);
     const excluded = new Set(
       expandedExclusions({ mapping, sources }).map((item) => item.sourceItemId),

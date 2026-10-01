@@ -136,6 +136,7 @@ export interface FakeFileMigrationFixture {
   effects?: FakeEffectRule[];
   applicationIdentity?: string;
   googleAbout?: GoogleAbout | Error;
+  now?: () => Date;
   checks?: CheckResult[];
   archive?: FakeArchiveFixture;
   copyPasses?: FakeCopyPassScenario[];
@@ -310,6 +311,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly checks: CheckResult[];
   private applicationId: string;
   private readonly about: GoogleAbout | Error;
+  private readonly now: () => Date;
   private readonly sharedDrives = new Map<string, SharedDrive>();
   private readonly driveRequests = new Map<string, string>();
   private readonly driveMembers = new Map<string, DriveMembership[]>();
@@ -324,6 +326,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly copyPassScenarios: FakeCopyPassScenario[];
 
   constructor(fixture: FakeFileMigrationFixture) {
+    this.now = fixture.now ?? (() => new Date());
     this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
     this.sourceDriveId = fixture.sourceDriveId;
     this.sourceRootId = fixture.sourceRootId;
@@ -426,7 +429,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.throwEffect("createSharedDrive", input.name, "before");
     if (this.driveRequests.has(input.requestId)) return null;
     const id = `drive-${this.sharedDrives.size + 1}`;
-    const drive = { id, name: input.name };
+    const drive = { id, name: input.name, createdTime: this.now().toISOString() };
     this.sharedDrives.set(id, drive);
     this.driveRequests.set(input.requestId, id);
     this.driveMembers.set(id, [
