@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release, and **not published to any registry** — there is no publish workflow, so merging to `main` does not release. Install from source.
 
-Two job types on **five supported routes**: file migration, and Teams archive with or without a Shared Drive destination, each with archive options off or only retained history enabled. Every job verifies each item it writes — size, SHA-256, created and modified time, MIME type and provenance — and any gap is a finding that blocks `close` until it is accepted. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so a supported configuration runs on any of the four platforms. A shape this build does not implement refuses with `unsupported_route` (exit 4), and so do `transcripts` and `attachmentBytes`, which have never run against a live tenant. The five routes last passed the optional live test on `darwin-arm64` with Node 24.21.0 and rclone v1.75.0, between 2026-09-16 and 2026-09-20. `docs/release-limits.md` states what is and is not claimed.
+Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. Every job verifies each item it writes — size, SHA-256, created and modified time, MIME type and provenance — and any gap is a finding that blocks `close` until it is accepted. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on any of the four platforms, including archive options without live-test evidence. A shape this build does not implement refuses with `unsupported_route` (exit 4). Five configurations last passed the optional live test on `darwin-arm64` with Node 24.21.0 and rclone v1.75.0, between 2026-09-16 and 2026-09-20. `docs/release-limits.md` states what is and is not claimed.
 
 ## Requirements
 
@@ -88,6 +88,8 @@ flowchart LR
 
 `init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any finding is unaccepted.
 
+File-migration approval binds the destination root, not unrelated folder contents: adding or removing an unrelated object does not require a new plan. A missing root or changed root identity, drive, or folder type still refuses. Per-item checks block unowned same-path objects and drift of prior copies before writes; an excluded source subtree gaining a new member still requires replanning.
+
 A minimal file-migration run:
 
 ```sh
@@ -103,7 +105,7 @@ migmate report  --job "$ID" --output json
 migmate close   --job "$ID" --output json
 ```
 
-Read `plan` and `verify` evidence without taking a writer lease by adding `--review`. Only one writer holds a job at a time; a stale lease is cleared with `reclaim --confirm`, never by deleting files.
+Read `plan` and `verify` evidence without taking a writer lease by adding `--review`. Only one writer holds a job at a time. The next writer automatically takes over a crashed writer's same-host lease once its heartbeat is 30 seconds stale and its process and worker are gone, recording recovery in the job's events. Use `reclaim --job ID --confirm --stop-worker` to stop a recorded orphan worker; explicit `reclaim --confirm` remains available for recovery without opening a writer. Never delete lease files by hand.
 
 In `migmate web`, tick the confirmation checkbox beside **Quit process safely**, then click the button to interrupt at a safe checkpoint and release the writer lease. This confirmation stays inside the page; it does not depend on a native JavaScript dialog. Closing only the window does not interrupt an active run.
 
@@ -115,14 +117,14 @@ Operator config carries **credential references** — typed pointers to operator
 
 ### Teams retained history
 
-Retained history uses channel and user-chats scopes with `retainedHistory = true`, while
-`transcripts` and `attachmentBytes` stay `false`.
+Retained history uses channel and user-chats scopes with `retainedHistory = true`.
+`transcripts` and `attachmentBytes` can also be enabled, subject to their permission and tenant checks.
 
 Private channels are collected too. Their retained versions are available only for
 edits/deletions after tenant storage migration completed and when an applicable retention
 policy captured them. An empty response is not proof of full historical coverage, and a
-missing migration completion timestamp remains unknown. See [release limits](docs/release-limits.md#5-five-routes-are-supported-and-every-job-verifies-itself)
-for the live sample and the refused options.
+missing migration completion timestamp remains unknown. See [release limits](docs/release-limits.md#5-supported-routes-and-every-job-verifies-itself)
+for the live sample and option prerequisites.
 
 ### Teams archive destination
 
@@ -168,8 +170,8 @@ and permits targeted retrieval without downloading the entire archive. The
 not separately to each job. See [archive destination limits](docs/release-limits.md#6-the-archive-destination-is-cold-storage-not-a-reading-surface)
 for the capacity accounting and protection boundary.
 
-**The destination works with all archive options off or with only `retainedHistory`
-enabled.** The last retained-destination live test proved that current and retained
+**The destination supports `retainedHistory`, `transcripts`, and `attachmentBytes`.**
+The last retained-destination live test proved that current and retained
 edited-text versions survive download and extraction into canonical records and offline
 HTML. It also proved download byte verification, lost-acknowledgement recovery, unchanged
 replay, timestamp-independent ZIPs, and refusal to overwrite unowned or drifted content.
@@ -195,7 +197,7 @@ Every command takes `--output text|json|jsonl` and answers with a versioned enve
 
 Exit codes are meaningful: `0` success, `1` internal defect or an unmappable code, `2` usage or configuration, `3` lease or recovery refusal, `4` a preflight, approval, route, or verification gate, `5` blocked at a checkpoint, `6`/`7` already closed or cancelled, `8` durable state written by a newer build; `130`, `141` and `143` are interrupt, broken stdout and terminate. `migmate --help` is the full reference for flags, row-query options, and the complete exit table — it is kept accurate, so read it rather than trusting a copy.
 
-Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Only fully-TTY text mode may prompt, and it has no default answer, so an agent can never approve a plan by accident.
+Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Text mode prompts only when stdin and stderr are terminals and those two flags were not both given; the prompt has no default answer and accepts only `yes`, so an agent can never approve a plan by accident.
 
 Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone.
 

@@ -488,10 +488,6 @@ async function* runPhase(ctx: FileContext, phase: Phase): AsyncIterable<CommitUn
     rootRow.destinationFileId = mapping.destFolderId;
     rootRow.fileScope = {
       exclusions: phase === "plan" ? exclusions : (scope?.exclusions ?? exclusions),
-      destinationBaseline: tree.destinations
-        .filter((entry) => !owners.has(entry.id))
-        .map((entry) => ({ driveId: entry.driveId, itemId: entry.id }))
-        .sort((a, b) => (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0)),
       sourceInventoryAt: ctx.now().toISOString(),
     };
     yield commit(

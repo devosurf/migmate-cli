@@ -322,34 +322,61 @@ it("machine approval requires both identity and read-back digest, regardless of 
   assert.match(approval.value.approvalDigest, /^[a-f0-9]{64}$/u);
 });
 
-it("human approval prompts only with all three TTYs and requires exact literal yes", async (t) => {
+it("human approval prompts on stdin and stderr TTYs, honors explicit flags, and requires yes", async (t) => {
   const h = await planned(t);
-  for (let mask = 0; mask < 7; mask++) {
-    const result = await invoke(["approve", "--job", h.id], h.engine(), {
-      tty: [Boolean(mask & 1), Boolean(mask & 2), Boolean(mask & 4)],
-      answer: "yes",
-    });
+  for (let mask = 0; mask < 8; mask++) {
+    const tty = [Boolean(mask & 1), Boolean(mask & 2), Boolean(mask & 4)];
+    if (tty[0] && tty[2]) continue;
+    const result = await invoke(["approve", "--job", h.id], h.engine(), { tty, answer: "yes" });
     assert.equal(result.code, 4);
     assert.equal(result.prompts, 0);
   }
-  for (const answer of ["", "y", "YES", " yes", "yes "]) {
+  for (const answer of ["", "y", "no", "yes please"]) {
     const result = await invoke(["approve", "--job", h.id], h.engine(), {
-      tty: [true, true, true],
+      tty: [true, false, true],
       answer,
     });
     assert.equal(result.code, 4);
     assert.equal(result.prompts, 1);
   }
-  const accepted = await invoke(
-    ["approve", "--job", h.id, "--approver", "not-the-os-user"],
-    h.engine(),
-    { tty: [true, true, true], answer: "yes" },
-  );
+  const accepted = await invoke(["approve", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answer: " YES ",
+  });
   assert.equal(accepted.code, 0);
   const approval: Document<ApprovalRecord> = JSON.parse(accepted.stdout);
   assert.equal(approval.value.mode, "interactive");
   assert.equal(approval.value.approver, `${userInfo().username}@${hostname()}`);
   for (const disclosure of h.plan.disclosures) assert.ok(accepted.stderr.includes(disclosure));
+
+  const named = await planned(t);
+  const claimed = await invoke(
+    ["approve", "--job", named.id, "--approver", "alice@example"],
+    named.engine(),
+    { tty: [true, true, true], answer: "yes" },
+  );
+  assert.equal(claimed.code, 0);
+  assert.equal(claimed.prompts, 1);
+  const claim: Document<ApprovalRecord> = JSON.parse(claimed.stdout);
+  assert.equal(claim.value.approver, "alice@example");
+
+  const explicit = await planned(t);
+  const flagged = await invoke(
+    [
+      "approve",
+      "--job",
+      explicit.id,
+      "--approver",
+      "alice@example",
+      "--plan-digest",
+      explicit.plan.planDigest,
+    ],
+    explicit.engine(),
+    { tty: [true, true, true] },
+  );
+  assert.equal(flagged.code, 0);
+  assert.equal(flagged.prompts, 0);
+  assert.equal(document<ApprovalRecord>(flagged).value.mode, "unattended");
 });
 
 it("maps stable refusal codes exactly and preserves unknown values fail-closed", async (t) => {

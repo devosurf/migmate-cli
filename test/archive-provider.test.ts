@@ -502,6 +502,44 @@ describe("production archive provider effects", () => {
     assert.equal("chatId" in transcript, false);
   });
 
+  for (const sample of ["empty scope", "text only", "empty bytes", "unreadable"]) {
+    it(`records hosted content preflight evidence for ${sample}`, async () => {
+      const provider = createArchiveProvider(
+        transport(
+          (url) => {
+            if (url.pathname === "/v1.0/users/user-a/chats")
+              return { value: sample === "empty scope" ? [] : [conversation.raw] };
+            if (url.pathname.endsWith("/getAllMessages"))
+              return { value: sample === "empty scope" ? [] : [message] };
+            if (url.pathname.endsWith("/hostedContents"))
+              return { value: sample === "text only" ? [] : [{ id: "image" }] };
+            throw new Error(`Unexpected preflight route: ${url.pathname}`);
+          },
+          async function* () {
+            if (sample === "unreadable")
+              throw Object.assign(new Error("unavailable"), { status: 403 });
+            yield new Uint8Array();
+          },
+        ),
+      );
+      const frozen =
+        sample === "empty scope"
+          ? { ...plan(), scopes: [{ ...scope, conversationIds: [] }], conversations: [] }
+          : plan();
+      const checks = await collect(provider.preflight(config, frozen));
+      const hosted = checks.find((check) => check.id === "archive_hosted_content:chat")!;
+      assert.equal(hosted.status, sample === "unreadable" ? "fail" : "skip");
+      if (sample !== "unreadable") {
+        assert.equal(hosted.code, "hosted_content_probe_unavailable");
+        assert.equal(hosted.evidence?.proof, "no_nonempty_hosted_content_sample_found");
+        assert.equal(
+          checks.some((check) => check.status === "fail"),
+          false,
+        );
+      }
+    });
+  }
+
   it("records a missing in-scope attachment sample without blocking otherwise proven preflight", async () => {
     const options = { ...config, attachmentBytes: true };
     const provider = createArchiveProvider(

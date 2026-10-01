@@ -8,14 +8,7 @@ import { fileURLToPath } from "node:url";
 import { it, type TestContext } from "node:test";
 import { stringify as stringifyToml } from "smol-toml";
 import { CLI_JOB_CONFIG, CLI_ARCHIVE_CONFIG, FIXTURE_TIME } from "./cli-fixture.ts";
-import type {
-  JobEvent,
-  JobStatus,
-  JobType,
-  PlanRevision,
-  RecoveryReport,
-  RowPage,
-} from "../src/engine/index.ts";
+import type { JobEvent, JobStatus, JobType, PlanRevision, RowPage } from "../src/engine/index.ts";
 
 interface WireEvent extends JobEvent {
   schemaVersion: number;
@@ -193,23 +186,19 @@ function setup(t: TestContext, type: JobType = "file_migration") {
       assert.deepEqual(durable.payload, event.payload);
       assert.equal(durable.kind, event.kind);
     }
-    const fresh = await start(["reclaim", "--job", id, "--confirm", "--output", "json"]).done;
+    const fresh = await start(["execute", "--job", id, "--output", "json"]).done;
     assert.equal(fresh.code, 3, fresh.stdout);
     assert.equal(JSON.parse(fresh.stdout).refusal.code, "lease_held");
     // Advance only the injected engine clock. The owner is a real dead process;
-    // production's thirty-second expiry and explicit-reclaim rules stay intact.
+    // production's thirty-second expiry remains required for automatic takeover.
     now += 30_001;
-    const refused = await start(["execute", "--job", id, "--output", "json"]).done;
-    assert.equal(refused.code, 3, refused.stdout);
-    assert.equal(JSON.parse(refused.stdout).refusal.code, "lease_held");
-    const unchanged = await command<JobStatus>(["status", "--job", id]);
-    assert.equal(unchanged.value.state, before.value.state);
-    assert.deepEqual(unchanged.value.ownership, before.value.ownership);
-    assert.equal(unchanged.value.lastCheckpoint, before.value.lastCheckpoint);
-    const reclaimed = await command<RecoveryReport>(["reclaim", "--job", id, "--confirm"]);
-    assert.equal(reclaimed.value.reclaimable, true);
-    assert.equal(reclaimed.value.workerAlive, false);
-    assert.equal(reclaimed.value.holder?.heartbeatAgeMs, 30_001);
+    await command(["report", "--job", id]);
+    const recovered = start(["status", "--job", id, "--output", "jsonl"]);
+    assert.equal((await recovered.done).code, 0);
+    assert.deepEqual(recovered.events.find((event) => event.payload.reclaimed === true)?.payload, {
+      reclaimed: true,
+      checkpoint: before.value.lastCheckpoint,
+    });
     const ready = await command<JobStatus>(["status", "--job", id]);
     assert.equal(ready.value.state, "interrupted");
     assert.equal(ready.value.resumable, true);

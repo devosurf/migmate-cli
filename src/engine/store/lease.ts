@@ -22,6 +22,8 @@ import { DatabaseSync } from "node:sqlite";
 import { ok, refuse } from "../types.ts";
 import type { JobState, Outcome, RecoveryReport, RefusalCode } from "../types.ts";
 import { withSocketPath } from "../providers/socket-path.ts";
+import { reconcileOnWriterOpen } from "../state-chart.ts";
+import { canonicalJson } from "./digest.ts";
 
 const HEARTBEAT_MS = 5_000;
 const LEASE_EXPIRY_MS = 30_000;
@@ -612,6 +614,29 @@ function rollback(db: DatabaseSync): void {
   }
 }
 
+/** Caller holds the write transaction after inspection authorizes recovery.
+ * Compare the snapshot before clearing it and recording durable recovery. */
+export function reclaimLease(db: DatabaseSync, lease: LeaseRow, now: () => Date): boolean {
+  const cleared = db
+    .prepare("DELETE FROM lease WHERE id = 1 AND owner_uuid = ? AND heartbeat_at = ?")
+    .run(lease.ownerUuid, lease.heartbeatAt);
+  if (cleared.changes !== 1) return false;
+  const job = readJobRow(db);
+  db.prepare("UPDATE job SET state = ?, host_id = COALESCE(host_id, ?) WHERE id = ?").run(
+    reconcileOnWriterOpen(job.state),
+    lease.hostId,
+    job.id,
+  );
+  const at = now().toISOString();
+  db.prepare(
+    "INSERT INTO projection_verb_state (verb,state,checkpoint,updated_at) VALUES ('status','done',NULL,?) ON CONFLICT(verb) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
+  ).run(at);
+  db.prepare(
+    "INSERT INTO event (at,verb,phase,kind,payload) VALUES (?,'status','status','phase_completed',?)",
+  ).run(at, canonicalJson({ reclaimed: true, checkpoint: job.lastCheckpoint }));
+  return true;
+}
+
 export async function acquire(
   db: DatabaseSync,
   identity: LeaseIdentity,
@@ -650,11 +675,19 @@ export async function acquire(
     if (existing !== null) {
       db.exec("ROLLBACK");
       const inspection = await inspectLease(existing, identity.hostId, opts);
-      return refuse(
-        inspection.decision.code ?? "lease_held",
-        "The existing lease requires explicit recovery",
-        { recovery: inspection.report },
-      );
+      if (!inspection.decision.reclaimable)
+        return refuse(
+          inspection.decision.code ?? "lease_held",
+          "The existing lease requires explicit recovery",
+          { recovery: inspection.report },
+        );
+      db.exec("BEGIN IMMEDIATE");
+      if (!reclaimLease(db, existing, now)) {
+        db.exec("ROLLBACK");
+        return refuse("lease_held", "Ownership changed during recovery.", {
+          recovery: inspection.report,
+        });
+      }
     }
     row = {
       ...identity,

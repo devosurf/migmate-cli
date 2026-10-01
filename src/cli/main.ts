@@ -49,7 +49,7 @@ migmate init --type file_migration|teams_archive [--config job.toml|job.json]
 migmate creds init --job ID --config job.toml|job.json
 migmate doctor|plan|execute|status|verify|report|close --job ID
 migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
-migmate approve --job ID                    # human terminal: review, then literal yes
+migmate approve --job ID                    # human terminal: review, then type yes
 migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code CODE [--note NOTE]
 migmate cancel --job ID [--reason TEXT]
 migmate reclaim --job ID --confirm [--stop-worker]
@@ -75,7 +75,8 @@ JSONL streams durable events live during a verb. --from CURSOR resumes exclusive
 without --from a writer streams only its new attempt. status --output jsonl replays
 the log and exits; it is not a watcher. Terminals are durable, never synthesized.
 json and jsonl write refusals to stdout; only text mode diverts them to stderr.
-Only text-mode approval with stdin/stdout/stderr all TTY may prompt, with no default.
+Text-mode approval prompts when stdin and stderr are TTYs, unless --approver and
+--plan-digest are both given; it has no default and accepts only yes.
 Machine approval always requires both explicit identity and read-back plan digest.
 
 Exit codes: 0 success; 1 internal defect or unknown code/enum; 2 usage/configuration
@@ -303,10 +304,12 @@ async function approve(
   reader: JobReader,
   status: JobStatus,
 ): Promise<AdapterOutcome> {
+  // Both flags are a complete read-back approval; prompting would only repeat it.
+  // The review and prompt go to stderr, so stdout may be redirected.
   const interactive =
+    (invocation.approver === undefined || invocation.planDigest === undefined) &&
     invocation.output === "text" &&
     output.io.stdin.isTTY &&
-    output.io.stdout.isTTY &&
     output.io.stderr.isTTY;
   let approver = invocation.approver;
   let planDigest = invocation.planDigest;
@@ -321,12 +324,10 @@ async function approve(
     await output.io.stderr.write(
       `${JSON.stringify(redact(preview.value), null, 2)}\nApprove plan ${planDigest}. Type yes to approve: `,
     );
-    if (
-      (await output.io.stdin.readLine(output.abort.signal)) !== "yes" ||
-      output.abort.signal.aborted
-    )
-      return refusal("approval_required", "Approval requires literal yes.");
-    approver = `${userInfo().username}@${hostname()}`;
+    const answer = await output.io.stdin.readLine(output.abort.signal);
+    if (answer?.trim().toLowerCase() !== "yes" || output.abort.signal.aborted)
+      return refusal("approval_required", "Approval requires typing yes.");
+    approver ??= `${userInfo().username}@${hostname()}`;
   }
   if (!approver?.trim() || !planDigest?.trim())
     return refusal(

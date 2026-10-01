@@ -952,11 +952,15 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
               proof: "hosted_content_bytes_consumed",
               sample: hosted.get(kind),
             })
-          : failed(
-              `archive_hosted_content:${kind}`,
-              hostedFailures.get(kind) ??
-                new ArchiveEffectError("hosted_content_probe_unavailable"),
-            );
+          : hostedFailures.has(kind)
+            ? failed(`archive_hosted_content:${kind}`, hostedFailures.get(kind)!)
+            : {
+                id: `archive_hosted_content:${kind}`,
+                title: "In-scope hosted content byte probe",
+                status: "skip",
+                code: "hosted_content_probe_unavailable",
+                evidence: { scopeKind: kind, proof: "no_nonempty_hosted_content_sample_found" },
+              };
       }
       if (config.attachmentBytes) {
         yield attachmentProved

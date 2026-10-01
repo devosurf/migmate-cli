@@ -427,26 +427,76 @@ describe("exact orphan termination", () => {
 });
 
 describe("writer ownership and reconciliation", () => {
-  it("does not acquire or reconcile a stale row until explicit reclaim", async (t) => {
+  it("takes over a proven-dead lease and records recovery at its checkpoint", async (t) => {
     const { db } = engineHome(t),
       row = staleRow();
     db.exec("UPDATE job SET state='executing'");
     seedLease(db, row);
-    const refused = await acquire(
+    const acquired = await acquire(
       db,
       { hostId: row.hostId, pid: process.pid, processStartTime: getProcessStartTime() },
       { kind: "cli", now: () => NOW },
     );
-    assert.equal(refused.ok, false);
-    if (refused.ok) throw new Error("stale lease silently stolen");
-    assert.equal(refused.refusal.recovery?.reclaimable, true);
-    const reconciled = await reconcileWriterOpen(db, reconcileOnWriterOpen, {
+    assert.ok(acquired.ok);
+    assert.equal(db.prepare("SELECT state FROM job").get()?.state, "interrupted");
+    assert.equal(
+      db.prepare("SELECT owner_uuid FROM lease").get()?.owner_uuid,
+      acquired.value.row.ownerUuid,
+    );
+    assert.deepEqual(
+      JSON.parse(
+        String(db.prepare("SELECT payload FROM event WHERE kind='phase_completed'").get()?.payload),
+      ),
+      { reclaimed: true, checkpoint: "checkpoint-7" },
+    );
+    release(db, acquired.value);
+  });
+
+  it("does not clear a lease whose heartbeat changed during inspection", async (t) => {
+    const { db } = engineHome(t),
+      row = staleRow();
+    seedLease(db, row);
+    const acquired = await acquire(
+      db,
+      { hostId: row.hostId, pid: process.pid, processStartTime: getProcessStartTime() },
+      {
+        kind: "cli",
+        now: () => NOW,
+        processAlive: () => {
+          db.prepare("UPDATE lease SET heartbeat_at = ?").run(NOW.toISOString());
+          return false;
+        },
+      },
+    );
+    assert.equal(acquired.ok, false);
+    if (acquired.ok) throw new Error("Refreshed lease was stolen");
+    assert.equal(acquired.refusal.code, "lease_held");
+    assert.equal(
+      db.prepare("SELECT heartbeat_at FROM lease").get()?.heartbeat_at,
+      NOW.toISOString(),
+    );
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM event").get()?.count, 0);
+  });
+
+  it("lets only one competing acquirer take over and record recovery", async (t) => {
+    const { db } = engineHome(t),
+      row = staleRow();
+    seedLease(db, row);
+    const identity = {
       hostId: row.hostId,
-      now: () => NOW,
-    });
-    assert.equal(reconciled.changed, false);
-    assert.equal(reconciled.state, "executing");
-    assert.equal(db.prepare("SELECT owner_uuid FROM lease").get()?.owner_uuid, row.ownerUuid);
+      pid: process.pid,
+      processStartTime: getProcessStartTime(),
+    };
+    const results = await Promise.all([
+      acquire(db, identity, { kind: "cli", now: () => NOW }),
+      acquire(db, identity, { kind: "cli", now: () => NOW }),
+    ]);
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM event").get()?.count, 1);
+    for (const result of results) {
+      if (result.ok) release(db, result.value);
+      else assert.equal(result.refusal.code, "lease_held");
+    }
   });
 
   it("reconciles only the acquired owner's executing state, preserving checkpoints and all other states", async (t) => {
@@ -537,7 +587,7 @@ describe("writer ownership and reconciliation", () => {
 });
 
 describe("engine recovery seam", () => {
-  it("requires explicit reclaim before opening an interrupted writer at the durable checkpoint", async (t) => {
+  it("automatically opens an interrupted writer at the durable checkpoint", async (t) => {
     const root = mkdtempSync(join(tmpdir(), "lease-engine-")),
       home = join(root, "home");
     const engine = openEngine({ home, now: () => NOW });
@@ -554,15 +604,6 @@ describe("engine recovery seam", () => {
     } finally {
       db.close();
     }
-    let entered = false;
-    const blocked = await engine.withWriter(created.value, async () => {
-      entered = true;
-    });
-    assert.equal(blocked.ok, false);
-    assert.equal(entered, false);
-    const recovered = await engine.reclaim(created.value, { confirm: true });
-    assert.ok(recovered.ok);
-    assert.equal(recovered.value.lastCheckpoint, "committed-page-3");
     const opened = await engine.withWriter(created.value, async () =>
       engine.reader(created.value).status(),
     );
@@ -570,6 +611,12 @@ describe("engine recovery seam", () => {
     assert.ok(opened.value.ok);
     assert.equal(opened.value.value.state, "interrupted");
     assert.equal(opened.value.value.lastCheckpoint, "committed-page-3");
+    const events = [];
+    for await (const event of engine.reader(created.value).events({})) events.push(event);
+    assert.deepEqual(events.find((event) => event.payload.reclaimed === true)?.payload, {
+      reclaimed: true,
+      checkpoint: "committed-page-3",
+    });
   });
 
   it("refuses a copied foreign-host job even after its original lease was released", async (t) => {

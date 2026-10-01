@@ -75,7 +75,6 @@ export interface FileState {
 
 export interface FileScope {
   exclusions: FileExclusion[];
-  destinationBaseline: Array<{ driveId: string; itemId: string }>;
   sourceInventoryAt: string;
 }
 

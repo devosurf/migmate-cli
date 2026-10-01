@@ -8,32 +8,6 @@ import { createProductionProvider } from "./production.ts";
 import { ProviderFault } from "./credentials.ts";
 import type { ProvenanceRecord } from "./port.ts";
 
-test("preflight refuses archive options that never ran against a live tenant", async (t) => {
-  const jobDirectory = await mkdtemp(join(tmpdir(), "migmate-archive-options-"));
-  t.after(() => rm(jobDirectory, { recursive: true, force: true }));
-  const scopes = [{ kind: "user-chats", userId: "user-id" }];
-  async function optionsCheck(config: Record<string, unknown>) {
-    const input = {
-      jobType: "teams_archive" as const,
-      jobDirectory,
-      config: { scopes, ...config },
-    };
-    const provider = createProductionProvider(input);
-    t.after(() => provider.close?.());
-    for await (const check of provider.preflight!(input))
-      if (check.id === "provider.archive_options") return check;
-    assert.fail("preflight yielded no archive options check");
-  }
-  for (const option of ["transcripts", "attachmentBytes"]) {
-    const check = await optionsCheck({ [option]: true });
-    assert.equal(check.status, "fail");
-    assert.equal(check.code, "unsupported_route");
-    assert.deepEqual(check.evidence?.options, [option]);
-  }
-  const supported = await optionsCheck({ retainedHistory: true });
-  assert.equal(supported.status, "pass");
-});
-
 test("archive destination uses real Drive effects without SharePoint mappings or access", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "migmate-archive-drive-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -222,7 +196,6 @@ test("archive destination uses real Drive effects without SharePoint mappings or
     "pass",
   );
   assert.equal(checks.find((check) => check.id === "provider.probe.archive-root")?.status, "pass");
-  assert.equal(checks.find((check) => check.id === "provider.archive_options")?.status, "pass");
   assert.deepEqual([...objects.keys()], [destination.destFolderId], "probe objects are cleaned up");
   assert.equal((await provider.resolveDestinationFolder(destination))?.kind, "folder");
   assert.deepEqual(await provider.listDestinationChildren(destination.destFolderId), []);

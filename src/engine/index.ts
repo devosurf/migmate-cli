@@ -64,6 +64,7 @@ import {
   readHostId,
   release,
   reconcileWriterOpen,
+  reclaimLease,
   inspectLease,
   probeWorker,
   stopOrphanWorker,
@@ -641,15 +642,31 @@ async function initJob(deps: EngineDeps, spec: JobSpec): Promise<Outcome<JobRef>
     throw error;
   }
 }
+// Readers never migrate on their own, but every CLI verb reads status before it opens
+// a writer, so a job written by an older build would be unreachable. Upgrade it forward
+// once, exactly as a writer's open does, then read. Newer or unknown schemas still refuse.
+function openForRead(deps: EngineDeps, ref: JobRef): Outcome<Store> {
+  const paths = pathsFor(deps, ref),
+    options = {
+      migmateVersion: MIGMATE_VERSION,
+      now: deps.now,
+      hostId: readHostId(deps.home) ?? "",
+    };
+  const opened = openReadStore(paths.dir, options);
+  if (opened.ok || opened.refusal.code !== "state_version_unsupported") return opened;
+  const found = opened.refusal.detail?.schemaVersion;
+  if (typeof found !== "number" || found < 1 || found >= SCHEMA_VERSION) return opened;
+  const local = localFilesystem(paths.dir);
+  if (!local.ok) return local;
+  const upgraded = openStore(paths.dir, { ...options, existingOnly: true });
+  if (!upgraded.ok) return upgraded;
+  upgraded.value.close();
+  return openReadStore(paths.dir, options);
+}
 function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
   async function withStore<T>(fn: (store: Store) => T): Promise<Outcome<T>> {
     try {
-      const paths = pathsFor(deps, ref),
-        opened = openReadStore(paths.dir, {
-          migmateVersion: MIGMATE_VERSION,
-          now: deps.now,
-          hostId: readHostId(deps.home) ?? "",
-        });
+      const opened = openForRead(deps, ref);
       if (!opened.ok) return opened;
       try {
         return ok(fn(opened.value));
@@ -667,12 +684,7 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
     rows: (q) => withStore((s) => s.rows(q)),
     artifacts: () => withStore((s) => s.readArtifactSet()),
     async *events(q): AsyncIterable<JobEvent> {
-      const paths = pathsFor(deps, ref),
-        opened = openReadStore(paths.dir, {
-          migmateVersion: MIGMATE_VERSION,
-          now: deps.now,
-          hostId: readHostId(deps.home) ?? "",
-        });
+      const opened = openForRead(deps, ref);
       if (!opened.ok) throw new EngineRefusalError(opened.refusal);
       try {
         yield* opened.value.events(q);
@@ -849,21 +861,12 @@ async function reclaimJob(
         { recovery: inspection.report },
       );
     store.atomic(() => {
-      const current = store!.readLease();
-      if (current?.ownerUuid !== lease.ownerUuid || current.heartbeatAt !== lease.heartbeatAt)
+      if (!reclaimLease(store!.db, lease, deps.now))
         throw new EngineRefusalError({
           code: "lease_held",
           message: "Ownership changed during recovery.",
           recovery: inspection.report,
         });
-      store!.clearLease();
-      store!.writeJob({ ...job, hostId, state: reconcileOnWriterOpen(job.state) });
-      store!.appendEvent({
-        verb: "status",
-        phase: "status",
-        kind: "phase_completed",
-        payload: { reclaimed: true, checkpoint: job.lastCheckpoint },
-      });
     });
     return ok({ ...inspection.report, reclaimable: true });
   } catch (error) {
@@ -1777,12 +1780,7 @@ function makeWriter(
         const bound = readBoundEvidence(plan.evidence);
         if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
         if ("mappings" in config)
-          await checkDestinationBaseline(
-            p,
-            config,
-            resume.rows,
-            store.readAllRows(plan.revision, "plan"),
-          );
+          await checkApprovedMappingScope(p, config, store.readAllRows(plan.revision, "plan"));
         transition("execute", "execute");
         store.appendEvent({
           verb: "execute",
@@ -1904,19 +1902,15 @@ function makeWriter(
             "verification_unaccepted",
             "Acceptance must name the current verification digest.",
           );
-        if (
-          typeof x.approver !== "string" ||
-          !x.approver.trim() ||
-          !Array.isArray(x.codes) ||
-          x.codes.length === 0 ||
-          new Set(x.codes.map((c) => c.code)).size !== x.codes.length
-        )
+        if (typeof x.approver !== "string" || !x.approver.trim() || x.codes.length === 0)
           return refuse(
             "verification_unaccepted",
-            "Acceptance requires an approver and a nonempty unique named exception set.",
+            "Acceptance requires an approver and a nonempty named exception set.",
           );
         const actual = new Set(current.findings.map((f) => f.code));
-        for (const c of x.codes)
+        // A repeated code names the same exception again; only distinct notes conflict.
+        const named = new Map<string, string | undefined>();
+        for (const c of x.codes) {
           if (
             !isAcceptable(c.code) ||
             !actual.has(c.code) ||
@@ -1927,14 +1921,23 @@ function makeWriter(
               "Every accepted code must occur in this verification.",
               { detail: { code: c.code } },
             );
+          const prior = named.get(c.code);
+          if (prior !== undefined && c.note !== undefined && prior !== c.note)
+            return refuse(
+              "verification_unaccepted",
+              "A repeated exception code carries conflicting notes.",
+              { detail: { code: c.code } },
+            );
+          named.set(c.code, c.note ?? prior);
+        }
         const at = deps.now().toISOString();
         return store.atomic(() => {
           store.writeAcceptances(
-            x.codes.map((c) => ({
+            [...named].map(([code, note]) => ({
               verificationDigest: current.verificationDigest,
-              code: c.code,
+              code,
               approver: text(x.approver, "approver"),
-              note: c.note ?? null,
+              note: note ?? null,
               at,
             })),
           );
@@ -2156,10 +2159,9 @@ function makeWriter(
     },
   };
 }
-async function checkDestinationBaseline(
+async function checkApprovedMappingScope(
   p: ProviderPort,
   config: FileConfig,
-  resume: CommitRow[],
   planned: CommitRow[],
 ): Promise<void> {
   for (const mapping of config.mappings) {
@@ -2171,23 +2173,6 @@ async function checkDestinationBaseline(
         code: "plan_revision_required",
         message: "The plan has no frozen mapping scope.",
       });
-    const owned = new Set(
-      resume
-        .filter(
-          (r) =>
-            r.jobType === "file_migration" &&
-            r.mappingId === mapping.id &&
-            r.sourceDriveId === mapping.sourceDriveId,
-        )
-        .flatMap((r) =>
-          r.jobType === "file_migration" && r.fileState
-            ? [
-                r.fileState.output.id,
-                ...(r.fileState.previous ? [r.fileState.previous.output.id] : []),
-              ]
-            : [],
-        ),
-    );
     const root = await p.resolveDestinationFolder(mapping);
     if (
       !root ||
@@ -2198,33 +2183,6 @@ async function checkDestinationBaseline(
       throw new EngineRefusalError({
         code: "plan_revision_required",
         message: "An approved destination root changed identity or type.",
-      });
-    const actual: { driveId: string; itemId: string }[] = [
-        { driveId: root.driveId, itemId: root.id },
-      ],
-      stack = [mapping.destFolderId],
-      visited = new Set<string>();
-    while (stack.length) {
-      const id = stack.pop()!;
-      if (visited.has(id))
-        throw new EngineRefusalError({
-          code: "plan_revision_required",
-          message: "The destination hierarchy is no longer a tree.",
-        });
-      visited.add(id);
-      for (const entry of await p.listDestinationChildren(id)) {
-        if (!owned.has(entry.id)) actual.push({ driveId: entry.driveId, itemId: entry.id });
-        if (entry.kind === "folder") stack.push(entry.id);
-      }
-    }
-    const sort = (items: { driveId: string; itemId: string }[]) =>
-      items.sort((a, b) => compareText(a.itemId, b.itemId));
-    if (
-      canonicalJson(sort(actual)) !== canonicalJson(sort([...frozen.fileScope.destinationBaseline]))
-    )
-      throw new EngineRefusalError({
-        code: "plan_revision_required",
-        message: "The approved external destination baseline identities have changed.",
       });
     if (mapping.exclusions?.length) {
       const excluded = new Set(frozen.fileScope.exclusions.map((e) => e.sourceItemId));

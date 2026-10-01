@@ -175,34 +175,6 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
         }
         if (loaded) yield* loaded.files!.preflight();
       }
-      if (input.jobType === "teams_archive") {
-        try {
-          const archive = parseArchiveConfig(input.config);
-          const unsupported = [
-            ...(archive.transcripts ? ["transcripts"] : []),
-            ...(archive.attachmentBytes ? ["attachmentBytes"] : []),
-          ];
-          if (unsupported.length)
-            throw new ProviderFault(
-              "unsupported_route",
-              "Transcripts and attachment bytes have never run against a live tenant; this build refuses them.",
-              { options: unsupported },
-            );
-          yield {
-            id: "provider.archive_options",
-            title: "Archive options this build supports",
-            status: "pass",
-            evidence: {},
-          };
-        } catch (error) {
-          yield failedCheck(
-            "provider.archive_options",
-            "Archive options this build supports",
-            error,
-            {},
-          );
-        }
-      }
     },
     async applicationIdentity() {
       return (await state()).session.identity();

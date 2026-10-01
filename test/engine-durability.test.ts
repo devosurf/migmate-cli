@@ -602,6 +602,48 @@ describe("engine durability seam", () => {
     );
   });
 
+  it("merges a repeated exception code and refuses only conflicting notes", async (t) => {
+    const h = await harness(
+      t,
+      fixture(),
+      config([{ sourceItemId: "document", reason: "Out of scope" }]),
+    );
+    await approve(h);
+    await execute(h);
+    const verification = await verify(h);
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.accept({
+          verificationDigest: verification.verificationDigest,
+          codes: [
+            { code: "omitted_by_rule", note: "first" },
+            { code: "omitted_by_rule", note: "second" },
+          ],
+          approver: "operator",
+        }),
+      ),
+      "verification_unaccepted",
+    );
+    const accepted = value(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.accept({
+          verificationDigest: verification.verificationDigest,
+          codes: [{ code: "omitted_by_rule" }, { code: "omitted_by_rule", note: "Out of scope" }],
+          approver: "operator",
+        }),
+      ),
+    );
+    assert.deepEqual(accepted.acceptedCodes, ["omitted_by_rule"]);
+    assert.equal(accepted.clean, true);
+    value(await h.engine.withWriterResult(h.ref, (writer) => writer.close()));
+    const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+    const json = report.artifacts.find((artifact) => artifact.name === "report.json");
+    assert.ok(json);
+    const exceptions = JSON.parse(await readFile(json.path, "utf8")).acceptedExceptions;
+    assert.equal(exceptions.length, 1);
+    assert.equal(exceptions[0].note, "Out of scope");
+  });
+
   it("keeps full-set facets and stable row pages and event cursors across engine reopening", async (t) => {
     const input = fixture();
     input.sourceItems.push(
@@ -976,6 +1018,26 @@ describe("engine durability seam", () => {
     const before = await diskSnapshot(h.home);
     await readerRefusals(h.engine, h.ref, "state_version_unsupported");
     assert.deepEqual(await diskSnapshot(h.home), before);
+  });
+
+  it("upgrades state written by schema version 1 when a reader opens it", async (t) => {
+    const h = await harness(t);
+    const path = join(h.home, "jobs", h.ref.id, "state.db");
+    for (const suffix of ["", "-wal", "-shm"]) await rm(`${path}${suffix}`, { force: true });
+    const database = new DatabaseSync(path);
+    try {
+      database.exec(await readFile(new URL("./fixtures/schema-v1.sql", import.meta.url), "utf8"));
+      database
+        .prepare(
+          "INSERT INTO job (id,type,state,schema_version,migmate_version,created_at) VALUES (?,?,?,?,?,?)",
+        )
+        .run(h.ref.id, "file_migration", "new", 1, "0.1.0-dev", new Date(0).toISOString());
+    } finally {
+      database.close();
+    }
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.schemaVersion, 2);
+    assert.equal(status.state, "new");
   });
 });
 

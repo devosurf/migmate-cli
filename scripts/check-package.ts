@@ -102,11 +102,7 @@ try {
   assert.equal(manifest.version, expected.version);
   assert.deepEqual(manifest.bin, { migmate: "dist/cli/main.js" });
   assert.deepEqual(manifest.exports, {}, "The CLI package must expose no public SDK");
-  assert.deepEqual(manifest.dependencies, {
-    "@webviewjs/webview": "0.4.5",
-    parse5: "8.0.0",
-    "smol-toml": "1.8.0",
-  });
+  assert.deepEqual(manifest.dependencies, expected.dependencies);
   assert.equal(existsSync(join(installed, "src")), false, "Unemitted source must not be shipped");
   assert.equal(
     existsSync(join(installed, "scripts")),

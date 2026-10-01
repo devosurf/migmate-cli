@@ -4,7 +4,7 @@ Four properties of the first release are **measured, not guaranteed**. Two of th
 
 Each limit says what was measured, what Migmate does about it, and the refusal code or report line that names it while you are running a job. Everything here is already enforced in code; nothing on this page is a future intention.
 
-Scope: five supported routes — file migration from a SharePoint document-library root to a Google Shared Drive folder, and Teams archive from Graph v1.0 Global to a local archive package with or without a Shared Drive destination, each with either all options off or only retained history enabled. The measurements below were taken on `darwin-arm64` against a live tenant on 2026-09-15–20 with the pinned transfer binary `v1.75.0`. Limits 1 to 4 describe the file route; the archive destination reuses its Drive concurrency and provenance stack. Limit 5 states what is supported; limit 6 bounds what the Drive archive copy provides.
+Scope: file migration from a SharePoint document-library root to a Google Shared Drive folder, and Teams archive from Graph v1.0 Global to a local archive package with or without a Shared Drive destination. The measurements below were taken on `darwin-arm64` against a live tenant on 2026-09-15–20 with the pinned transfer binary `v1.75.0`, with archive options off or only retained history enabled. Limits 1 to 4 describe the file route; the archive destination reuses its Drive concurrency and provenance stack. Limit 5 states what is supported; limit 6 bounds what the Drive archive copy provides.
 
 ## 1. The destination concurrency token is measured, not promised
 
@@ -26,7 +26,11 @@ Scope: five supported routes — file migration from a SharePoint document-libra
 
 **Nothing in Migmate claims otherwise.** The destination guarantee is a compare-then-write, not an atomic conditional update. An edit that lands inside the window surfaces as a verification finding — `content_mismatch`, `size_mismatch`, or `metadata_mismatch` — and blocks closure until it is remediated or explicitly accepted as an exception.
 
+**Approval is not a destination inventory freeze.** Unrelated destination additions and removals do not invalidate approval. Execution still checks the approved root's identity, drive, and folder type, rejects inconsistent destination enumeration, and checks each write for unowned path collisions and prior-copy drift immediately before mutation. These checks protect the objects the job writes without requiring replanning for other folder contents.
+
 **What bounds the exposure.** Migmate refuses to run two lifecycle writers against one job, so the race is always Migmate against an outside editor of the destination folder, never Migmate against itself. Verification is a timestamped point-in-time statement, not a source freeze or a future-drift guarantee.
+
+**Writer recovery keeps that boundary.** The next writer can automatically take over a same-host lease only after its heartbeat is 30 seconds stale and the owner process and worker are proven gone (including a silent worker socket). Recovery and acquisition commit atomically with a durable recovery event. A fresh heartbeat, live or unknown owner or worker, or foreign host still refuses; stopping a recorded orphan worker requires explicit `reclaim --confirm --stop-worker`.
 
 **Where you see it.** The "Measured release limits" section of every file migration plan and report; the verification findings above; the decision record is [ADR-0004](adr/0004-drive-revision-concurrency.md).
 
@@ -54,27 +58,27 @@ Scope: five supported routes — file migration from a SharePoint document-libra
 
 **Where you see it.** The `provider.credentials` preflight check and its recorded evidence — tenant id, client id, granted roles — and the `credential_permissions_invalid` refusal.
 
-## 5. Five routes are supported, and every job verifies itself
+## 5. Supported routes, and every job verifies itself
 
-**What is supported.** Five routes, on every platform the package installs on — macOS and Linux, x64 and arm64:
+**What is supported.** These routes, on every platform the package installs on — macOS and Linux, x64 and arm64:
 
-| Job type         | Route                                                                     | Archive options           |
-| ---------------- | ------------------------------------------------------------------------- | ------------------------- |
-| `file_migration` | SharePoint document library → Google Shared Drive folder                  | —                         |
-| `teams_archive`  | Graph v1.0 Global → local archive package                                 | all off                   |
-| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs | all off                   |
-| `teams_archive`  | Graph v1.0 Global → local archive package                                 | only `retainedHistory` on |
-| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs | only `retainedHistory` on |
+| Job type         | Route                                                                     | Archive options                                     |
+| ---------------- | ------------------------------------------------------------------------- | --------------------------------------------------- |
+| `file_migration` | SharePoint document library → Google Shared Drive folder                  | —                                                   |
+| `teams_archive`  | Graph v1.0 Global → local archive package                                 | `retainedHistory`, `transcripts`, `attachmentBytes` |
+| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs | `retainedHistory`, `transcripts`, `attachmentBytes` |
 
 `migmate web`'s native window has been inspected by an operator on `darwin-arm64` only; the other three platforms still need a person at a logged-in desktop ([#32](https://github.com/devosurf/migmate-cli/issues/32)). The CLI itself installs and passes its package smoke on all four in CI.
 
 **What every job proves about itself.** File verification re-hashes each source item's bytes and compares them with the destination's SHA-256, or with a full destination re-download when Drive withholds one, and checks size, created time, modified time to the second, MIME type, the private provenance marker, and drift on either side. An archive self-verifies its local package before anything leaves the machine, then byte-verifies every uploaded object and its provenance. Any gap is a finding, and `close` refuses `verification_unaccepted` until an operator accepts it by code.
 
-**What refuses.** `unsupported_route` (exit 4) names a shape this build does not implement: a destination outside the configured Shared Drive, a source that is not the named document library, a cloud other than Global, a mapping root that is not an ordinary folder, or a route name other than the two above. The `provider.archive_options` preflight check refuses `transcripts` and `attachmentBytes` the same way, because neither has ever run against a live tenant. Generic remotes and My Drive are not implemented: the credential loader accepts only an `onedrive` document-library source and a `drive` service-account destination, so any other backend refuses `credential_backend_unsupported`. That is a statement about what was built, not a gap in evidence.
+**What refuses.** `unsupported_route` (exit 4) names a shape this build does not implement: a destination outside the configured Shared Drive, a source that is not the named document library, a cloud other than Global, a mapping root that is not an ordinary folder, or a route name other than the two above. Generic remotes and My Drive are not implemented: the credential loader accepts only an `onedrive` document-library source and a `drive` service-account destination, so any other backend refuses `credential_backend_unsupported`. That is a statement about what was built, not a gap in evidence.
 
 **What a release no longer proves.** Nothing gates a job on published evidence any more ([ADR-0009](adr/0009-per-job-verification-replaces-route-qualification.md)). Crash and restart durability, rerun and move semantics, collision handling, and whether the source listing silently misses an item kind are covered by the offline suite, and against real providers only by the optional live test. Nothing requires that test to have run for a given build, and other architectures or new configurations run without it.
 
-**The last live test.** Between 2026-09-16 and 2026-09-20, on `darwin-arm64` with Node 24.21.0 and rclone `v1.75.0`, all five routes passed the live probe suite:
+`transcripts` and `attachmentBytes` are supported without live-test evidence, like other configurations under ADR-0009. Their permission and tenant probes remain required; per-job collection and verification findings disclose gaps. Hosted-content preflight skips a scope kind with no non-empty sample (`hosted_content_probe_unavailable`) instead of requiring operators to plant content. A found asset that cannot be read still fails the probe.
+
+**The last live test.** Between 2026-09-16 and 2026-09-20, on `darwin-arm64` with Node 24.21.0 and rclone `v1.75.0`, five configurations (file migration and each archive destination with options off or only retained history enabled) passed the live probe suite:
 
 - **File route.** All seven probes: zero-byte files and empty folders, stable-id rerun and move, metadata round trip, provenance marker round trip, checksum on fresh upload, the collision matrix, and route limits. Capability samples per [ADR-0006](adr/0006-capability-sample-proofs.md): a real OneNote notebook the driver omitted (`package`), a live HTTP 400 on reference creation (`reference`), and an undownloadable kind absent from the scanned scope.
 - **Local archive, retained history** (2026-09-17). 16 records in three conversations, including three retained versions — standard channel, private channel, and chat — three hosted assets, exhausted paging, durable restart, and byte-deterministic package regeneration with no local verification findings. System-message `identity_unresolved` and `render_downgraded` findings remain visible; they are not missing collection evidence.
@@ -112,7 +116,7 @@ npm run test:live -- --config "$PROBE_CONFIG"
 
 It prints `PASS` or `FAIL` per probe, exits 0 when every probe passed, and otherwise exits 4 with the refusal code `live_test_failed` and the blocking gate in `refusal.detail.gate`. Nothing it observes is written into the repository.
 
-**Where you see it.** The `unsupported_route` refusal and the `provider.archive_options` preflight check; verification findings and `verification_unaccepted`.
+**Where you see it.** The `unsupported_route` refusal; option-specific tenant and permission probes; verification findings and `verification_unaccepted`.
 
 ## 6. The archive destination is cold storage, not a reading surface
 
