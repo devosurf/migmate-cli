@@ -679,6 +679,30 @@ it("emits one versioned stdout document for handled usage/configuration failures
   assert.equal(existsSync(join(h.home, "jobs", "escape")), false);
 });
 
+it("reports the installed release from package.json in text and JSON, and only without a command", async () => {
+  const { version } = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  );
+  assert.deepEqual(await invoke(["--version"]), {
+    code: 0,
+    stdout: `${version}\n`,
+    stderr: "",
+    prompts: 0,
+  });
+  const json = document<{ version: string }>(await invoke(["--version", "--output", "json"]));
+  assert.equal(json.command, "version");
+  assert.deepEqual(json.value, { version });
+  for (const argv of [
+    ["status", "--job", "missing", "--version"],
+    ["--version", "--version"],
+  ]) {
+    const refused = await invoke([...argv, "--output", "json"]);
+    assert.equal(refused.code, 2);
+    assert.equal(document(refused).refusal.code, "usage");
+  }
+  assert.equal(document(await invoke(["--help", "--version", "--output", "json"])).command, "help");
+});
+
 it("parses TOML and JSON inputs but persists only typed TOML references through onboarding", async (t) => {
   const h = harness(t);
   const secret = join(h.home, "operator-secret");
@@ -1107,7 +1131,7 @@ it("keeps jobs across fresh processes and isolates nested workspaces unless over
   );
 });
 
-it("refuses invalid workspace markers without falling back, while explicit homes and help work", (t) => {
+it("refuses invalid workspace markers without falling back, while explicit homes, help and version work", (t) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "migmate-workspace-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const child = join(root, "inputs");
@@ -1124,6 +1148,7 @@ it("refuses invalid workspace markers without falling back, while explicit homes
     assert.equal(refused.code, 2);
     assert.equal(document(refused).refusal.code, "usage");
     assert.equal(invokeProcess(["--help"], child).code, 0);
+    assert.equal(invokeProcess(["--version"], child).code, 0);
     assert.equal(
       document<JobStatus>(
         invokeProcess(

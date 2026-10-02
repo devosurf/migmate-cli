@@ -8,6 +8,7 @@ import { hostname, userInfo } from "node:os";
 import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
 import {
+  MIGMATE_VERSION,
   openEngine,
   type Engine,
   type ExecuteResult,
@@ -56,6 +57,7 @@ migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code 
 migmate cancel --job ID [--reason TEXT]
 migmate reclaim --job ID --confirm [--stop-worker]
 migmate web --job ID
+migmate --version                           # installed release
 
 All commands: --home PATH, --output text|json|jsonl, --schema-version 1, --help
 Home selection: --home > MIGMATE_HOME > nearest .migmate directory in the current
@@ -524,6 +526,10 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     if (!invocation.help || output.command !== "help") output.command = invocation.command;
     if (invocation.jobId) output.job = { id: invocation.jobId, type: null };
     if (invocation.help) result = { ok: true, value: { help: HELP } };
+    // Answered before the Node floor and the store, like help, so a bug report can
+    // always name the release.
+    else if (invocation.command === "version")
+      result = { ok: true, value: { version: MIGMATE_VERSION } };
     else {
       // The durable store is node:sqlite, a release-candidate API. A runtime below
       // its floor refuses here rather than reaching the store, and --help still
@@ -551,6 +557,8 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     // JSONL has no synthetic cursor or synthetic terminal. A pre-lease refusal
     // still needs a result envelope when no matching durable refusal was logged.
     if (invocation?.help && output.mode === "text" && result.ok) await io.stdout.write(HELP);
+    else if (invocation?.command === "version" && output.mode === "text" && result.ok)
+      await io.stdout.write(`${MIGMATE_VERSION}\n`);
     else if (
       output.mode !== "jsonl" ||
       (!result.ok && output.lastRefusal !== result.refusal.code) ||

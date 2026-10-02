@@ -106,7 +106,7 @@ if (
   typeof packageMetadata.version !== "string"
 )
   throw new Error("Package version is missing");
-const MIGMATE_VERSION = packageMetadata.version;
+export const MIGMATE_VERSION = packageMetadata.version;
 const CONFIG_FILENAME = "job.toml";
 const LEGACY_CONFIG_FILENAME = "job.config.json";
 const SHA256 = /^[a-f0-9]{64}$/u;

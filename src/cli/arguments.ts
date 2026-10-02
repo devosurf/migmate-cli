@@ -5,7 +5,7 @@ import { VERBS, type JobType, type RowQuery, type Verb } from "../engine/types.t
 
 export type OutputMode = "text" | "json" | "jsonl";
 export type CommandName =
-  Verb | "creds init" | "manifest load" | "discover" | "accept" | "reclaim" | "web";
+  Verb | "creds init" | "manifest load" | "discover" | "accept" | "reclaim" | "web" | "version";
 export interface Invocation {
   command: CommandName;
   output: OutputMode;
@@ -91,7 +91,9 @@ export function commandLabel(argv: string[]): string {
     ? `${first} ${argv[1]}`
     : first && !first.startsWith("-")
       ? first
-      : "help";
+      : argv.includes("--version") && !argv.includes("--help") && !argv.includes("-h")
+        ? "version"
+        : "help";
 }
 
 export function parseInvocation(argv: string[]): Invocation {
@@ -129,7 +131,7 @@ export function parseInvocation(argv: string[]): Invocation {
       words.push(token);
       continue;
     }
-    if (["--help", "-h", "--review", "--confirm", "--stop-worker"].includes(token)) {
+    if (["--help", "-h", "--version", "--review", "--confirm", "--stop-worker"].includes(token)) {
       if (switches.has(token)) throw new UsageFailure("A switch was supplied more than once.");
       switches.add(token);
       continue;
@@ -147,16 +149,19 @@ export function parseInvocation(argv: string[]): Invocation {
     else values.set(flag, [value]);
   }
   const help = switches.has("--help") || switches.has("-h");
+  // --help wins over --version, as it does over every other option.
+  const version = !help && switches.has("--version");
   const command = words.join(" ");
   if (
     !VERBS.includes(command as Verb) &&
     !["creds init", "manifest load", "discover", "accept", "reclaim", "web"].includes(command) &&
-    !(help && words.length === 0)
+    !((help || version) && words.length === 0)
   ) {
     throw new UsageFailure(
       "Supply a lifecycle command, creds init, manifest load, discover, accept, reclaim, or web.",
     );
   }
+  if (version && words.length > 0) throw new UsageFailure("--version takes no command.");
   const get = (flag: string) => values.get(flag)?.[0];
   const output = get("--output") ?? "text";
   if (!["text", "json", "jsonl"].includes(output))
@@ -209,10 +214,10 @@ export function parseInvocation(argv: string[]): Invocation {
   const mapping = get("--mapping");
   if (mapping !== undefined) query.mappingId = mapping;
   const invocation: Invocation = {
-    command: (command || "status") as CommandName,
+    command: (version ? "version" : command || "status") as CommandName,
     output: output as OutputMode,
-    // Help never opens a store and must remain available with a broken workspace.
-    home: resolve(get("--home") ?? (help ? "." : defaultHome())),
+    // Help and version never open a store and must remain available with a broken workspace.
+    home: resolve(get("--home") ?? (help || version ? "." : defaultHome())),
     codes,
     notes: values.get("--note") ?? [],
     confirm: switches.has("--confirm"),
@@ -238,7 +243,7 @@ export function parseInvocation(argv: string[]): Invocation {
   }
   const from = integer("--from", 0);
   if (from !== undefined) invocation.from = from;
-  if (help) return invocation;
+  if (help || version) return invocation;
   if (command === "init") {
     if (!type) throw new UsageFailure("init requires an explicit --type.");
     if (jobId) throw new UsageFailure("init generates its job id.");
