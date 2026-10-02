@@ -163,7 +163,8 @@ For an already-configured SharePoint-source file job, run
 `discover --job ID --file draft.json --output json`. Read `value.sites` and
 `value.manifest`; the optional new private file contains only the manifest and
 refuses overwrite. Without `--file`, the same draft remains in the envelope.
-Review each proposed `Site name - Library name`, remove unwanted libraries, and
+Discovery covers subsites too. Review each proposed
+`Site name (host/site path) - Library name`, remove unwanted libraries, and
 fill in `members` before explicitly running `manifest load`. Discovery neither
 loads nor provisions; human plan approval still gates creation. Empty discovery
 produces an empty draft, which cannot be loaded until it has a mapping.

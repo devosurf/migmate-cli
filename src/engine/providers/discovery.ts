@@ -48,12 +48,28 @@ export async function discoverSharePoint(graph: GraphTransport): Promise<SharePo
       throw new ProviderFault("preflight_failed", "Graph omitted a discovery identifier or name.");
     return value;
   }
-  for await (const rawSite of entries("/v1.0/sites/getAllSites")) {
+  const seenSites = new Set<string>();
+  async function visit(rawSite: Record<string, unknown>): Promise<void> {
+    const id = text(rawSite.id);
+    if (seenSites.has(id)) return;
+    seenSites.add(id);
     const site: SharePointDiscovery["sites"][number] = {
-      id: text(rawSite.id),
+      id,
       name: text(rawSite.displayName ?? rawSite.name),
       libraries: [],
     };
+    // The site URL path distinguishes subsites sharing a display name and does not
+    // depend on whether tenant enumeration or the parent's subsite list came first.
+    let siteName = site.name;
+    if (rawSite.webUrl !== undefined) {
+      let url: URL;
+      try {
+        url = new URL(text(rawSite.webUrl));
+      } catch {
+        throw new ProviderFault("preflight_failed", "Graph returned an invalid site URL.");
+      }
+      siteName = `${site.name} (${url.hostname}${url.pathname})`;
+    }
     for await (const rawDrive of entries(`/v1.0/sites/${encodeURIComponent(site.id)}/drives`)) {
       if (rawDrive.driveType !== "documentLibrary") continue;
       const library = { id: text(rawDrive.id), name: text(rawDrive.name) };
@@ -61,11 +77,14 @@ export async function discoverSharePoint(graph: GraphTransport): Promise<SharePo
       result.manifest.mappings.push({
         id: library.id,
         source: { type: "sharepoint", driveId: library.id, folderPath: "" },
-        destination: { type: "google_shared_drive", create: `${site.name} - ${library.name}` },
+        destination: { type: "google_shared_drive", create: `${siteName} - ${library.name}` },
         members: [],
       });
     }
     result.sites.push(site);
+    for await (const child of entries(`/v1.0/sites/${encodeURIComponent(site.id)}/sites`))
+      await visit(child);
   }
+  for await (const rawSite of entries("/v1.0/sites/getAllSites")) await visit(rawSite);
   return result;
 }

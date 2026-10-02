@@ -117,13 +117,14 @@ One lifecycle writer holds a job. Automatic same-host takeover requires a heartb
 
 ### Tenant discovery boundary
 
-`discover --job ID [--file draft.json]` follows Graph `sites/getAllSites` and each
-site's `drives` paging links, selecting document libraries. It requires
+`discover --job ID [--file draft.json]` follows Graph `sites/getAllSites`, each
+site's `sites` (subsites, recursively) and `drives` paging links, visiting each site
+once and selecting document libraries. It requires
 `Sites.Read.All`; scoped discovery refuses with `preflight_failed`, detail check
 `discovery_requires_sites_read_all`, and required grant `Sites.Read.All`.
 The JSON envelope carries sites/libraries and a draft manifest, proposing one
-Shared Drive per library named from site and library with empty members for the
-operator. No access translation, automatic manifest load, or provisioning occurs.
+Shared Drive per library named from site name, site URL path and library with
+empty members for the operator. No access translation, automatic manifest load, or provisioning occurs.
 The optional private file contains only the draft and never overwrites an existing
 path. Review mappings, names and members, then explicitly load, plan and approve.
 An empty tenant returns an empty draft, not a loadable job manifest. Enumeration

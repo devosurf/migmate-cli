@@ -441,9 +441,11 @@ migmate discover --job "$ID" --file draft.json --output json
 migmate manifest load --job "$ID" --file draft.json --output json
 ```
 
-Discovery follows Graph's site and library pages. The envelope's `value.sites` lists
-sites and libraries; `value.manifest` proposes one new Shared Drive per library,
-named `Site name - Library name`, with `members: []` for operator review. Mapping
+Discovery follows Graph's site, subsite and library pages, descending into every
+subsite and listing each site once. The envelope's `value.sites` lists sites and
+libraries; `value.manifest` proposes one new Shared Drive per library, named
+`Site name (site URL host and path) - Library name` so equally named subsites stay
+distinct, with `members: []` for operator review. Mapping
 IDs use stable library drive IDs, not display names. No permissions are translated.
 The optional `--file` writes **only the manifest**, creates a private new file, and
 refuses to overwrite an existing path. Omit it to receive just the envelope.

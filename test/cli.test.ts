@@ -145,7 +145,21 @@ it("discover returns and writes an unloaded draft that manifest load accepts aft
     async request<T>(path: string): Promise<T> {
       if (path === "/v1.0/sites/getAllSites")
         return JSON.parse(JSON.stringify({ value: [{ id: "site", displayName: "Operations" }] }));
-      assert.equal(path, "/v1.0/sites/site/drives");
+      if (path === "/v1.0/sites/site/drives" || path === "/v1.0/sites/team/sites")
+        return JSON.parse('{"value":[]}');
+      if (path === "/v1.0/sites/site/sites")
+        return JSON.parse(
+          JSON.stringify({
+            value: [
+              {
+                id: "team",
+                displayName: "Team",
+                webUrl: "https://tenant.sharepoint.com/sites/operations/team",
+              },
+            ],
+          }),
+        );
+      assert.equal(path, "/v1.0/sites/team/drives");
       return JSON.parse(
         JSON.stringify({
           value: [{ id: "src-drive", name: "Documents", driveType: "documentLibrary" }],
@@ -176,7 +190,10 @@ it("discover returns and writes an unloaded draft that manifest load accepts aft
       {
         id: "src-drive",
         source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
-        destination: { type: "google_shared_drive", create: "Operations - Documents" },
+        destination: {
+          type: "google_shared_drive",
+          create: "Team (tenant.sharepoint.com/sites/operations/team) - Documents",
+        },
         members: [],
       },
     ],
