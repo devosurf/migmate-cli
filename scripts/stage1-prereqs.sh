@@ -211,7 +211,7 @@ if (( ! RESUME )); then
 banner "Migmate stage 1 prerequisites"
 
 stage "Microsoft Entra app registration"
-say "Official docs: register a single-tenant app, add the Microsoft Graph application permission Sites.Selected, then create one client secret."
+say "Official docs: register a single-tenant app, choose exactly one Microsoft Graph application read grant, then create one client secret."
 open_url "https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app"
 open_url "https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-credentials"
 open_url "https://learn.microsoft.com/en-us/graph/permissions-reference"
@@ -237,7 +237,15 @@ mkdir -p "$PREREQ_DIR/entra"
 write_env MIGMATE_PREREQ_DIR "$PREREQ_DIR"
 write_env MIGMATE_PREREQ_ENV_FILE "$ENV_FILE"
 say "Create the app as Migmate in Entra ID > App registrations > New registration."
-step "Use a single-tenant account type. Under Microsoft Graph application permissions, add Sites.Selected only; do not add tenant-wide Files.Read.All or Sites.Read.All."
+say "SharePoint source grants: Sites.Selected confines a leaked key to sites explicitly granted read access, but costs one grant per site and cannot discover the tenant."
+say "Sites.Read.All enables tenant discovery with one admin consent, but a leaked key reads every site in the tenant, even sites outside your job."
+ask MIGMATE_SHAREPOINT_SOURCE_GRANT "Choose exactly one source grant (Sites.Selected or Sites.Read.All):"
+case "$MIGMATE_SHAREPOINT_SOURCE_GRANT" in
+  Sites.Selected|Sites.Read.All) ;;
+  *) warn "Choose Sites.Selected or Sites.Read.All, not both."; exit 1 ;;
+esac
+write_env MIGMATE_SHAREPOINT_SOURCE_GRANT "$MIGMATE_SHAREPOINT_SOURCE_GRANT"
+step "Use a single-tenant account type. Under Microsoft Graph application permissions, add ${MIGMATE_SHAREPOINT_SOURCE_GRANT} only. Remove the other read grant, Files.Read.All, and every write or extra role."
 ask MIGMATE_TENANT_ID "Paste the Directory (tenant) ID:"
 ask MIGMATE_CLIENT_ID "Paste the Application (client) ID:"
 MIGMATE_ENTRA_TENANT_ID_FILE="$PREREQ_DIR/entra/tenant-id.txt"
@@ -302,17 +310,24 @@ open_url "https://learn.microsoft.com/en-us/graph/api/site-post-permissions?view
 open_url "https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/manage-application-permissions"
 open_url "https://entra.microsoft.com"
 note "Do not add a redirect URI just for consent; this client-credentials app does not need one."
-if ! confirm "Grant tenant-wide admin consent and the exact source-site read grant now?"; then
+if ! confirm "Grant admin consent for ${MIGMATE_SHAREPOINT_SOURCE_GRANT} and, only for Sites.Selected, the exact source-site read grant now?"; then
   warn "stopped before consent and site grant."
   exit 1
 fi
-step "In Entra ID > App registrations > All applications, open the app whose Application ID is ${MIGMATE_CLIENT_ID}, then select API permissions. Confirm Sites.Selected is the only Graph application permission, remove Files.Read.All if present, and select Grant admin consent."
+step "In Entra ID > App registrations > All applications, open the app whose Application ID is ${MIGMATE_CLIENT_ID}, then select API permissions. Confirm ${MIGMATE_SHAREPOINT_SOURCE_GRANT} is the only Graph application permission, then select Grant admin consent."
+if [[ "$MIGMATE_SHAREPOINT_SOURCE_GRANT" == "Sites.Selected" ]]; then
 step "In Graph Explorer, consent its delegated Sites.FullControl.All permission while signed in as SharePoint Administrator or higher."
 step "In Graph Explorer, select POST and put only https://graph.microsoft.com/v1.0/sites/${MIGMATE_SOURCE_SITE_ID}/permissions in the query bar."
 step "Under Request Headers, add Content-Type with value application/json. Under Request Body, paste the JSON shown next; require HTTP 201."
 note "{\"roles\":[\"read\"],\"grantedToIdentities\":[{\"application\":{\"id\":\"${MIGMATE_CLIENT_ID}\",\"displayName\":\"Migmate\"}}]}"
 step "After the 201 response, reopen Graph Explorer's permissions panel, search Sites.FullControl.All, and select Unconsent. If unavailable, revoke it in Entra ID > Enterprise apps > Graph Explorer > Permissions."
-pause "Press Enter once the consent and site grant are complete."
+pause "Press Enter once consent and the site read grant are complete; repeat the read grant for every source site."
+else
+  say "Sites.Read.All needs no per-site permission POST. After init, use migmate discover --job ID --file draft.json --output json."
+  say "Discovery returns sites, libraries and a draft manifest. Review proposed drive names and fill in members; it never loads the draft or creates drives."
+  say "Run manifest load explicitly after review, then plan and obtain human approval. The draft output path must not already exist."
+  pause "Press Enter once tenant-wide read consent is complete."
+fi
 
 stage "Google service account and Shared Drive share"
 say "Google docs confirm service-account creation, JSON key creation, Shared Drive member roles, and limited-access folder sharing. They do not confirm one universal folder-share click path for a service account, so stop if your UI differs rather than guessing."
@@ -486,7 +501,7 @@ say "Vendored rclone version verified: 1.75.0"
 fi
 
 stage "Operator job config"
-say "This is the config migmate init --config reads. It stores typed file-backed references, never secret values. Existing mappings run sequentially into existing destinations; there is no manifest loader or mapping-concurrency setting."
+say "This is the config migmate init --config reads. It stores typed file-backed references, never secret values. It seeds an existing mapping; use discover and manifest load for a reviewed batch."
 say "Use dedicated destination roots: rclone copy never deletes, but can update same-path content without collision protection. Status records mapping passes and errors; execute retries failed/interrupted passes and skips completed ones. Ctrl-C stops cooperatively with exit 130. JSONL streams mapping stats; verify hashes files separately."
 if ! confirm "Write the operator job config now?"; then
   warn "stopped before the job config."

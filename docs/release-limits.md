@@ -105,15 +105,30 @@ One lifecycle writer holds a job. Automatic same-host takeover requires a heartb
 
 ## 4. `Sites.Selected` sufficiency is proven for today's calls
 
-**The grant.** The file migration source app requires `Sites.Selected` and nothing else, granted on exactly the site the operator names. The role set is a closed set: a token carrying more — `Files.Read.All`, for instance, which is tenant-wide read of every file in the tenant — is refused with `credential_permissions_invalid` rather than silently accepted.
+**The source grants.** The file migration source app accepts exactly one of `Sites.Selected` or `Sites.Read.All`. `Sites.Selected` needs an explicit read grant on each named site; `Sites.Read.All` needs one tenant-wide admin consent and enables tenant discovery. Both together, `Files.Read.All`, all write roles, and every other extra role refuse with `credential_permissions_invalid`.
 
 **What was measured.** With a token carrying `roles: ["Sites.Selected"]` alone, against the granted site: `GET /v1.0/drives/{driveId}`, `GET /v1.0/drives/{driveId}/items/{itemId}/children`, and `GET /v1.0/drives/{driveId}/items/{itemId}/delta` each answered 200, and rclone's `onedrive` backend listed the library with the same credential. The live preflight passes `provider.credentials`, the source root resolution, and the destination write probe on that grant.
 
 **Sample size: the calls this release makes.** Sufficiency is proven for the Graph calls in the current file route, not promised for the route in general. Microsoft does not guarantee that these endpoints will never require a wider permission, and a Graph call added in a later release may need one.
 
-**Consequence.** A call requiring more permission fails closed. Migmate never requests a wider grant on your behalf. The current exclusive allowlist remains enforced; the tenant-wide grant amendment in [ADR-0003](adr/0003-site-scoped-file-route.md) records the broader migration design, not an additional credential mode shipped by this copy-execution cutover.
+**Consequence.** A call requiring more permission fails closed. Migmate never requests a wider grant on your behalf. The [ADR-0003 amendment](adr/0003-site-scoped-file-route.md) is implemented: `Sites.Selected` limits a leaked key to granted sites but costs one grant per site; `Sites.Read.All` avoids those grants but exposes every tenant site to a leaked source key, even sites absent from the manifest.
 
 **Where you see it.** The `provider.credentials` preflight check and its recorded evidence — tenant id, client id, granted roles — and the `credential_permissions_invalid` refusal.
+
+### Tenant discovery boundary
+
+`discover --job ID [--file draft.json]` follows Graph `sites/getAllSites` and each
+site's `drives` paging links, selecting document libraries. It requires
+`Sites.Read.All`; scoped discovery refuses with `preflight_failed`, detail check
+`discovery_requires_sites_read_all`, and required grant `Sites.Read.All`.
+The JSON envelope carries sites/libraries and a draft manifest, proposing one
+Shared Drive per library named from site and library with empty members for the
+operator. No access translation, automatic manifest load, or provisioning occurs.
+The optional private file contains only the draft and never overwrites an existing
+path. Review mappings, names and members, then explicitly load, plan and approve.
+An empty tenant returns an empty draft, not a loadable job manifest. Enumeration
+is a point-in-time observation, not a tenant snapshot or a guarantee against sites
+and libraries added after discovery.
 
 ## 5. Supported routes, and every job verifies itself
 

@@ -30,6 +30,8 @@ import {
 } from "../src/engine/index.ts";
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { cliFixture, CLI_JOB_CONFIG } from "./cli-fixture.ts";
+import { discoverSharePoint, type SharePointDiscovery } from "../src/engine/providers/discovery.ts";
+import type { GraphTransport } from "../src/engine/providers/http.ts";
 
 interface Capture {
   code: number;
@@ -133,6 +135,108 @@ async function planned(t: TestContext) {
   assert.equal(plan.ok, true);
   return { ...h, id, plan: plan.value };
 }
+
+it("discover returns and writes an unloaded draft that manifest load accepts after member review", async (t) => {
+  const h = harness(t);
+  const graph: GraphTransport = {
+    async evidence() {
+      return { grantedPermissions: ["Sites.Read.All"] };
+    },
+    async request<T>(path: string): Promise<T> {
+      if (path === "/v1.0/sites/getAllSites")
+        return JSON.parse(JSON.stringify({ value: [{ id: "site", displayName: "Operations" }] }));
+      assert.equal(path, "/v1.0/sites/site/drives");
+      return JSON.parse(
+        JSON.stringify({
+          value: [{ id: "src-drive", name: "Documents", driveType: "documentLibrary" }],
+        }),
+      );
+    },
+    async *stream() {
+      throw new Error("Discovery cannot read bytes");
+    },
+  };
+  Object.assign(h.provider, { discoverSharePoint: () => discoverSharePoint(graph) });
+  const initialized = await h.engine().initJob({ type: "file_migration", config: CLI_JOB_CONFIG });
+  assert.ok(initialized.ok);
+  const id = initialized.value.id;
+  const before = await h.engine().reader({ id }).status();
+  const file = join(h.home, "draft.json");
+  const capture = await invoke(
+    ["discover", "--job", id, "--file", file, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(capture.code, 0);
+  const result = document<SharePointDiscovery>(capture);
+  assert.equal(result.command, "discover");
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value.manifest, {
+    version: 1,
+    mappings: [
+      {
+        id: "src-drive",
+        source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
+        destination: { type: "google_shared_drive", create: "Operations - Documents" },
+        members: [],
+      },
+    ],
+  });
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), result.value.manifest);
+  const envelopeOnly = await invoke(["discover", "--job", id, "--output", "json"], h.engine());
+  assert.equal(envelopeOnly.code, 0);
+  assert.deepEqual(document<SharePointDiscovery>(envelopeOnly).value, result.value);
+  assert.deepEqual(
+    await h.engine().reader({ id }).status(),
+    before,
+    "discovery never loads its draft",
+  );
+  const reviewed = {
+    ...result.value.manifest,
+    mappings: result.value.manifest.mappings.map((mapping) => ({
+      ...mapping,
+      members: [{ email: "owners@example.com", type: "group", role: "organizer" }],
+    })),
+  };
+  writeFileSync(file, JSON.stringify(reviewed));
+  const loaded = await invoke(
+    ["manifest", "load", "--job", id, "--file", file, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(loaded.code, 0);
+  assert.equal(document<{ mappingCount: number }>(loaded).value.mappingCount, 1);
+});
+
+it("discover refuses site-scoped access in the JSON envelope without writing a draft", async (t) => {
+  const h = harness(t);
+  const graph: GraphTransport = {
+    async evidence() {
+      return { grantedPermissions: ["Sites.Selected"] };
+    },
+    async request() {
+      throw new Error("Site-scoped access cannot enumerate");
+    },
+    async *stream() {
+      throw new Error("Discovery cannot read bytes");
+    },
+  };
+  Object.assign(h.provider, { discoverSharePoint: () => discoverSharePoint(graph) });
+  const initialized = await h.engine().initJob({ type: "file_migration", config: CLI_JOB_CONFIG });
+  assert.ok(initialized.ok);
+  const file = join(h.home, "refused-draft.json");
+  const capture = await invoke(
+    ["discover", "--job", initialized.value.id, "--file", file, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(capture.code, 4);
+  const result = document<never>(capture);
+  assert.equal(result.ok, false);
+  assert.equal(result.refusal.code, "preflight_failed");
+  assert.deepEqual(result.refusal.detail, {
+    check: "discovery_requires_sites_read_all",
+    requiredGrant: "Sites.Read.All",
+  });
+  assert.equal(existsSync(file), false);
+});
 
 it("refuses unsupported manifest extensions and malformed CSV without replacing stored mappings", async (t) => {
   const h = harness(t);

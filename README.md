@@ -417,6 +417,45 @@ Operator config carries **credential references** — typed pointers to operator
 
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
 
+### SharePoint source grants and discovery
+
+Choose exactly one Microsoft Graph **application** permission on the source app:
+
+- `Sites.Selected`: least privilege for a few sites, with an explicit **read** grant
+  on every source site. A leaked key reaches only those granted sites. It cannot
+  enumerate the tenant for discovery.
+- `Sites.Read.All`: one admin consent covers all tenant sites and enables discovery,
+  avoiding a grant per site at migration scale. A leaked key can read **every site
+  in the tenant**, not just the mappings selected for this job.
+
+Both grants together, `Files.Read.All`, every write role, and all other extra roles
+refuse credential preflight. Replace the grant rather than adding the second one.
+The optional rclone `access_scopes` must likewise name exactly one of these grants.
+Migmate never upgrades permissions on the operator's behalf.
+
+After configuring a SharePoint-source file job, draft the tenant's document libraries:
+
+```sh
+migmate discover --job "$ID" --file draft.json --output json
+# Review draft.json: remove unwanted mappings, edit drive names, fill in members.
+migmate manifest load --job "$ID" --file draft.json --output json
+```
+
+Discovery follows Graph's site and library pages. The envelope's `value.sites` lists
+sites and libraries; `value.manifest` proposes one new Shared Drive per library,
+named `Site name - Library name`, with `members: []` for operator review. Mapping
+IDs use stable library drive IDs, not display names. No permissions are translated.
+The optional `--file` writes **only the manifest**, creates a private new file, and
+refuses to overwrite an existing path. Omit it to receive just the envelope.
+Discovery never loads mappings, creates drives, or changes the plan. Loading,
+planning and human approval remain explicit. A tenant without libraries yields an
+empty draft; `manifest load` still requires at least one mapping.
+
+With `Sites.Selected`, discovery returns `preflight_failed` (exit 4) with
+`refusal.detail.check: "discovery_requires_sites_read_all"` and
+`requiredGrant: "Sites.Read.All"`. Keep the scoped grant and supply a manifest
+manually, or have an administrator explicitly approve the tenant-wide exposure.
+
 ### Teams retained history
 
 Retained history uses channel and user-chats scopes with `retainedHistory = true`.

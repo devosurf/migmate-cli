@@ -11,6 +11,7 @@ import {
 import { createArchiveProvider } from "./archive-graph.ts";
 import type { ArchiveProvider } from "./archive.ts";
 import { parseArchiveConfig } from "../archive/config.ts";
+import { discoverSharePoint } from "./discovery.ts";
 
 export interface ProductionProviderInput {
   jobType: JobType;
@@ -147,6 +148,14 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     ...(input.jobType === "teams_archive"
       ? { archive: createArchiveProvider(archiveTransport) }
       : {}),
+    async discoverSharePoint() {
+      if (input.jobType !== "file_migration")
+        throw new ProviderFault(
+          "unsupported_route",
+          "Discovery requires a SharePoint source file job.",
+        );
+      return discoverSharePoint((await state()).graph);
+    },
     async *preflight(): AsyncIterable<CheckResult> {
       let loaded: ProviderState | undefined;
       try {

@@ -1,5 +1,6 @@
 import type { CheckResult, JobType } from "../types.ts";
 import type { ArchiveProvider } from "./archive.ts";
+import type { SharePointDiscovery } from "./discovery.ts";
 
 export type SourceItemKind = "file" | "folder" | "package" | "reference" | "undownloadable";
 export type DestinationItemKind = "file" | "folder" | "shortcut" | "document";
@@ -177,6 +178,7 @@ export interface ProviderPort extends FilePassProvider {
     destFolderId: string;
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
+  discoverSharePoint?(): Promise<SharePointDiscovery>;
   preflight?(input: {
     jobType: JobType;
     config: unknown;

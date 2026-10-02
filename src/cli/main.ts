@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { constants, realpathSync, readFileSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, writeFile } from "node:fs/promises";
 import { extname } from "node:path";
 import { hostname, userInfo } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -48,6 +48,7 @@ const HELP = `Migmate — one ten-verb lifecycle, two job types
 migmate init --type file_migration|teams_archive [--config job.toml|job.json]
 migmate creds init --job ID --config job.toml|job.json
 migmate manifest load --job ID --file manifest.json|manifest.csv
+migmate discover --job ID [--file draft.json]
 migmate doctor|plan|execute|status|verify|report|close --job ID
 migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
 migmate approve --job ID                    # human terminal: review, then type yes
@@ -385,6 +386,24 @@ async function executeCommand(
   if (!status.ok) return status;
   output.job.type = status.value.jobType;
   if (!knownContract(status.value)) return { ok: true, value: status.value };
+  if (invocation.command === "discover") {
+    const result = await reader.discover();
+    if (!result.ok) return result;
+    if (invocation.file) {
+      try {
+        await writeFile(invocation.file, `${JSON.stringify(result.value.manifest, null, 2)}\n`, {
+          mode: 0o600,
+          flag: "wx",
+        });
+      } catch {
+        return refusal(
+          "configuration_invalid",
+          "The draft file could not be created; choose a new writable path.",
+        );
+      }
+    }
+    return result;
+  }
   if (invocation.command === "web") {
     return launchWeb({ engine, job });
   }

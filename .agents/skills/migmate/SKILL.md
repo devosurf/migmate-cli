@@ -150,6 +150,28 @@ Read back the plan's acting account before approval, and hand the closing report
 open key/delegation deletion items to the administrator. With impersonation off,
 the service account acts as itself. See README's **Acting Google account**.
 
+### SharePoint source discovery
+
+Use exactly one source-app grant: `Sites.Selected` with a read grant per site for
+small jobs, or `Sites.Read.All` for tenant-scale reads and discovery. Both together,
+`Files.Read.All`, write roles and other extra roles refuse. A leaked scoped key
+reaches granted sites; a leaked tenant-read key reaches every site, including sites
+outside the job. Surface that tradeoff before asking an administrator to replace
+the grant; Migmate never widens it automatically.
+
+For an already-configured SharePoint-source file job, run
+`discover --job ID --file draft.json --output json`. Read `value.sites` and
+`value.manifest`; the optional new private file contains only the manifest and
+refuses overwrite. Without `--file`, the same draft remains in the envelope.
+Review each proposed `Site name - Library name`, remove unwanted libraries, and
+fill in `members` before explicitly running `manifest load`. Discovery neither
+loads nor provisions; human plan approval still gates creation. Empty discovery
+produces an empty draft, which cannot be loaded until it has a mapping.
+
+On `preflight_failed` with `detail.check: discovery_requires_sites_read_all`,
+surface `detail.requiredGrant: Sites.Read.All`. Keep `Sites.Selected` and author
+the manifest manually, or hand the tenant-wide grant decision to the administrator.
+
 ## Teams archive destination
 
 When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Both support `retainedHistory`, `transcripts`, and `attachmentBytes`, subject to option-specific permissions and tenant probes. Live-test evidence is not required; per-job verification findings are the signal. A hosted-content probe with no non-empty sample skips rather than blocking a text-only or empty scope; an unreadable found asset still fails. `docs/release-limits.md` limit 5 states the coverage and prerequisites.

@@ -80,6 +80,7 @@ import {
 } from "./store/lease.ts";
 import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
+import { ProviderFault } from "./providers/credentials.ts";
 import {
   fileMigrationDriver,
   unreadableSourceDrives,
@@ -791,6 +792,31 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
     }
   }
   return {
+    async discover() {
+      const input = await withStore((store) => {
+        const paths = pathsFor(deps, ref);
+        const type = store.status().jobType;
+        return { paths, type, config: readConfig(paths, type, store) };
+      });
+      if (!input.ok) return input;
+      const { paths, type, config } = input.value;
+      if (type !== "file_migration")
+        return refuse("unsupported_route", "Discovery requires a SharePoint source file job.");
+      const provider = providerFor(deps, paths, type, config);
+      try {
+        if (!provider.discoverSharePoint)
+          return refuse("unsupported_route", "The provider does not support SharePoint discovery.");
+        return ok(await provider.discoverSharePoint());
+      } catch (error) {
+        if (error instanceof ProviderFault && error.code === "preflight_failed")
+          return refuse("preflight_failed", error.message, { detail: error.evidence });
+        const failure = expectedFailure<never>(error);
+        if (failure) return failure;
+        throw error;
+      } finally {
+        if (!deps.provider) await provider.close?.();
+      }
+    },
     status: () => withStore((s) => s.status()),
     rows: (q) => withStore((s) => s.rows(q)),
     artifacts: () => withStore((s) => s.readArtifactSet()),

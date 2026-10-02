@@ -84,6 +84,9 @@ function readerEngine(
     refusal: refusal ?? { code: "lease_held", message: "Owned by another process." },
   };
   const reader = {
+    async discover() {
+      throw new Error("This window must not initiate tenant discovery");
+    },
     async status() {
       return { ok: true as const, value: projected };
     },

@@ -76,11 +76,10 @@ const MAX_TOKEN_BYTES = 128 * 1024;
 const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
 const GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-// ADR-0003: the file route is site-scoped. A granted site's drive answers every
-// call the route makes, so tenant-wide Files.Read.All is refused, not required.
-// https://learn.microsoft.com/en-us/graph/permissions-selected-overview
+// ADR-0003 amendment: source apps choose one read grant, never both or a write role.
 const FILE_ROLES: Record<string, true> = {
   "Sites.Selected": true,
+  "Sites.Read.All": true,
 };
 const ARCHIVE_ROLES: Record<string, true> = {
   // Metadata lookup grants; the archive provider enforces scope/option requirements.
@@ -576,7 +575,7 @@ async function loadCredentials(
         setting(source, "expose_onenote_files", "true");
         if (source.has("access_scopes")) {
           const scopes = text(source.get("access_scopes")).split(/ +/).sort();
-          if (scopes.join(" ") !== Object.keys(FILE_ROLES).sort().join(" "))
+          if (scopes.length !== 1 || !Object.hasOwn(FILE_ROLES, scopes[0]!))
             throw refused("credential_permissions_invalid");
         }
         // Remote roots are seed settings. Every pass overrides them with approved mapping roots.
@@ -816,9 +815,7 @@ function graphPermissions(
       : ARCHIVE_ROLES;
   if (
     roles.some((role) => !Object.hasOwn(permitted, role)) ||
-    (jobType === "file_migration" &&
-      !destination &&
-      Object.keys(FILE_ROLES).some((role) => !roles.includes(role))) ||
+    (jobType === "file_migration" && !destination && roles.length !== 1) ||
     (jobType === "teams_archive" &&
       !roles.includes("ChannelMessage.Read.All") &&
       !roles.includes("Chat.Read.All"))

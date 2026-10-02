@@ -4,7 +4,8 @@ import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { VERBS, type JobType, type RowQuery, type Verb } from "../engine/types.ts";
 
 export type OutputMode = "text" | "json" | "jsonl";
-export type CommandName = Verb | "creds init" | "manifest load" | "accept" | "reclaim" | "web";
+export type CommandName =
+  Verb | "creds init" | "manifest load" | "discover" | "accept" | "reclaim" | "web";
 export interface Invocation {
   command: CommandName;
   output: OutputMode;
@@ -149,10 +150,12 @@ export function parseInvocation(argv: string[]): Invocation {
   const command = words.join(" ");
   if (
     !VERBS.includes(command as Verb) &&
-    !["creds init", "manifest load", "accept", "reclaim", "web"].includes(command) &&
+    !["creds init", "manifest load", "discover", "accept", "reclaim", "web"].includes(command) &&
     !(help && words.length === 0)
   ) {
-    throw new UsageFailure("Supply a lifecycle command or creds init, accept, reclaim, or web.");
+    throw new UsageFailure(
+      "Supply a lifecycle command, creds init, manifest load, discover, accept, reclaim, or web.",
+    );
   }
   const get = (flag: string) => values.get(flag)?.[0];
   const output = get("--output") ?? "text";
@@ -250,7 +253,7 @@ export function parseInvocation(argv: string[]): Invocation {
   };
   for (const flag of ["--type", "--label"]) only(flag, ["init"]);
   only("--config", ["init", "creds init"]);
-  only("--file", ["manifest load"]);
+  only("--file", ["manifest load", "discover"]);
   only("--approver", ["approve", "accept"]);
   only("--plan-digest", ["approve"]);
   only("--verification-digest", ["accept"]);

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createCredentialSession, ProviderFault } from "./credentials.ts";
+import { createProductionProvider } from "./production.ts";
 
 const tenantId = "11111111-1111-1111-1111-111111111111";
 const clientId = "22222222-2222-2222-2222-222222222222";
@@ -140,15 +141,24 @@ function graphToken(roles: string[]): Record<string, unknown> {
   };
 }
 
-test("accepts the site-scoped grant and refuses a tenant-wide one", async (t) => {
-  // ADR-0003: Sites.Selected answers every call this route makes, so a token
-  // carrying tenant-wide Files.Read.All is more access than the route may hold.
+test("accepts exactly one SharePoint read grant and refuses broader source permissions", async (t) => {
   for (const [roles, expected] of [
     [["Sites.Selected"], "accepted"],
+    [["Sites.Read.All"], "accepted"],
+    [["Sites.Selected", "Sites.Read.All"], "credential_permissions_invalid"],
+    [["Sites.ReadWrite.All"], "credential_permissions_invalid"],
+    [["Sites.Read.All", "Sites.ReadWrite.All"], "credential_permissions_invalid"],
+    [["Sites.Read.All", "Files.Read.All"], "credential_permissions_invalid"],
     [["Sites.Selected", "Files.Read.All"], "credential_permissions_invalid"],
     [["Files.Read.All"], "credential_permissions_invalid"],
   ] as const) {
-    const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
+    const { jobDirectory, config } = await operatorFiles(
+      t,
+      [
+        ...source,
+        `access_scopes = ${roles.some((role) => role === "Sites.Read.All") ? "Sites.Read.All" : "Sites.Selected"}`,
+      ].join("\n"),
+    );
     const targets: string[] = [];
     t.mock.method(globalThis, "fetch", async (target: unknown) => {
       targets.push(String(target));
@@ -243,6 +253,28 @@ test("only jobs with Google-source mappings may hold the SharePoint write creden
   });
   t.after(() => mixed.dispose());
   assert.equal(mixed.sharepointDestinationRemote, "sharepoint-destination");
+});
+
+test("Sites.Read.All alone passes the production credential preflight", async (t) => {
+  const input = await operatorFiles(t, [...source, "access_scopes = Sites.Read.All"].join("\n"));
+  t.mock.method(globalThis, "fetch", async (target: unknown) => {
+    if (String(target).startsWith("https://login.microsoftonline.com/"))
+      return Response.json(graphToken(["Sites.Read.All"]));
+    assert.equal(String(target), "https://oauth2.googleapis.com/token");
+    return Response.json({ access_token: "google-token", token_type: "Bearer", expires_in: 3600 });
+  });
+  const provider = createProductionProvider({ ...input, jobType: "file_migration" });
+  t.after(() => provider.close?.());
+  for await (const check of provider.preflight!({ ...input, jobType: "file_migration" })) {
+    assert.equal(check.id, "provider.credentials");
+    assert.equal(check.status, "pass");
+    assert.deepEqual(
+      check.evidence?.graph && Reflect.get(check.evidence.graph, "grantedPermissions"),
+      ["Sites.Read.All"],
+    );
+    return;
+  }
+  assert.fail("Credential preflight did not report an outcome");
 });
 
 test("file impersonation requests a delegated subject with only the Drive scope", async (t) => {

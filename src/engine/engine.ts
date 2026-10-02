@@ -29,6 +29,7 @@ import type {
   VerificationRevision,
 } from "./types.ts";
 import type { LoadedManifest } from "./manifest.ts";
+import type { SharePointDiscovery } from "./providers/discovery.ts";
 
 export interface EngineOptions {
   /** Engine home. Holds the host identity file and one job folder per job. */
@@ -94,6 +95,8 @@ export interface JobWriter {
 
 /** Concurrent, cross-process, lease-free, read-only. */
 export interface JobReader {
+  /** Enumerate source libraries without loading or changing the job's manifest. */
+  discover(): Promise<Outcome<SharePointDiscovery>>;
   status(): Promise<Outcome<JobStatus>>;
   rows(q: RowQuery): Promise<Outcome<RowPage>>;
   events(q: { from?: number; follow?: boolean; signal?: AbortSignal }): AsyncIterable<JobEvent>;
