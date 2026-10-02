@@ -1136,7 +1136,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       ctx.config.options?.mirror
         ? `Mirror removes destination-only content in job-created drives, capped at ${ctx.config.options.deleteLimit} file deletions per mapping pass; exceeding the limit fails that mapping.`
         : "Destination-only content and source-deleted prior copies are retained, never deleted.",
-      "rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories. Owner, permission and label metadata are not copied.",
+      "rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories, which keep modification times only. Owner, permission and label metadata are not copied.",
       "Copy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.",
       "Verification is a timestamped point-in-time statement, not a source freeze, cutover, settled delta, or future-drift guarantee.",
     ].join("\n"),

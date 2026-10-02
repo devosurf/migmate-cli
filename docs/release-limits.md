@@ -103,7 +103,7 @@ One lifecycle writer holds a job. Automatic same-host takeover requires a heartb
 
 **Where you see it.** The `provider.transfer_binary` preflight check, which records the resolved path, SHA-256, and the exact version the binary reports; the `version_untested` and `version_below_floor` refusals; the live worker's version re-checked at execute time, where drift refuses `plan_revision_required`.
 
-**Copy behavior.** rclone's asynchronous `sync/copy` (or `sync/sync` with `MaxDelete` for mirror) copies empty source directories and uses metadata to preserve supported created and modified times and Google Drive content type; Drive created time applies to fresh uploads. Owner, permission and label metadata are off. File verification does not verify folders or metadata. Finished rclone jobs remain queryable for 24 hours by default, but a worker restart invalidates old handles; Migmate's mapping-pass records supply recovery.
+**Copy behavior.** rclone's asynchronous `sync/copy` (or `sync/sync` with `MaxDelete` for mirror) copies empty source directories and uses metadata to preserve supported created and modified times and Google Drive content type; Drive created time applies to fresh uploads. Folders receive modification times only: the worker runs with rclone's `--disable=WriteDirMetadata`, because v1.75.0's Drive backend turns a folder's source `inode/directory` content type into a 0-byte file of that type and fails the pass. Owner, permission and label metadata are off. File verification does not verify folders or metadata. Finished rclone jobs remain queryable for 24 hours by default, but a worker restart invalidates old handles; Migmate's mapping-pass records supply recovery.
 
 ## 4. `Sites.Selected` sufficiency is proven for today's calls
 

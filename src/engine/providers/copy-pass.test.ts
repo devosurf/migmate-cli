@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { it } from "node:test";
@@ -92,6 +92,67 @@ it(
         await supervisor.copyPassStatus({ socketPath: worker.socketPath, pass }),
         status,
       );
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  "creates destination folders with modification times only, never source folder metadata",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-dirs-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      // rclone v1.75.0's Drive backend applies a folder's `content-type` metadata
+      // (OneDrive reports `inode/directory`) to the folder it creates, which turns
+      // it into a 0-byte file and fails the pass. Folder metadata must never reach
+      // a destination; the local backend makes that observable through `mode`.
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(join(source, "full"), { recursive: true });
+      await mkdir(join(source, "empty"));
+      await mkdir(destination);
+      await writeFile(join(source, "full", "a.txt"), "a");
+      await chmod(join(source, "full", "a.txt"), 0o600);
+      const modified = new Date("2020-01-02T03:04:05Z");
+      for (const folder of ["full", "empty"]) {
+        await chmod(join(source, folder), 0o700);
+        await utimes(join(source, folder), modified, modified);
+      }
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      // A cached listing of the destination must not restore folder metadata.
+      await supervisor.listFileHashes({
+        socketPath: worker.socketPath,
+        root: { fs: destination, kind: "google_drive" },
+        hashType: "sha256",
+        download: false,
+      });
+      const pass = await supervisor.startCopyPass({
+        socketPath: worker.socketPath,
+        source: { fs: source, kind: "sharepoint" },
+        destination: { fs: destination, kind: "google_drive" },
+        mode: "copy",
+        transfers: 2,
+      });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass }), {
+        state: "completed",
+        error: null,
+      });
+      for (const folder of ["full", "empty"]) {
+        const copied = await stat(join(destination, folder));
+        assert.equal(copied.isDirectory(), true);
+        assert.equal(copied.mtime.toISOString(), modified.toISOString());
+        assert.notEqual(copied.mode & 0o777, 0o700, `${folder} received source folder metadata`);
+      }
+      // File metadata still applies.
+      assert.equal((await stat(join(destination, "full", "a.txt"))).mode & 0o777, 0o600);
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });

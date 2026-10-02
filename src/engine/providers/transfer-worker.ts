@@ -679,6 +679,12 @@ export function createTransferSupervisor(options: {
           "--drive-metadata-permissions=off",
           "--drive-metadata-labels=off",
           "--metadata=false",
+          // Passes enable metadata for files only. rclone v1.75.0's Drive backend
+          // applies a folder's `content-type` (OneDrive reports `inode/directory`)
+          // when creating it, which makes a 0-byte file instead of a folder and fails
+          // the pass. Worker-wide, unlike a per-call `_config`, this also binds remotes
+          // rclone has already cached. Folders still receive modification times.
+          "--disable=WriteDirMetadata",
           "--onedrive-disable-site-permission=true",
           "--onedrive-expose-onenote-files=true",
           "--retries=1",
