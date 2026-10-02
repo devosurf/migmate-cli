@@ -453,10 +453,15 @@ migmate manifest load --job "$ID" --file draft.json --output json
 ```
 
 Discovery follows Graph's site, subsite and library pages, descending into every
-subsite and listing each site once. The envelope's `value.sites` lists sites and
+subsite and listing each site once. It skips personal OneDrive sites
+(`isPersonalSite`, or a `-my.sharepoint.com` host) without requesting anything from
+them: their own drive is never a document library. The envelope's `value.sites` lists sites and
 libraries; `value.manifest` proposes one new Shared Drive per library, named
 `Site name (site URL host and path) - Library name` so equally named subsites stay
-distinct, with `members: []` for operator review. Mapping
+distinct, with `members: []` for operator review. A site Graph returns without a
+usable `displayName` or `name` (the classic Search Center at `/search`, for one) is
+labelled from the last segment of its URL path, then its host; a library without a
+usable name is labelled with its drive ID. Mapping
 IDs use stable library drive IDs, not display names. No permissions are translated.
 The optional `--file` writes **only the manifest**, creates a private new file, and
 refuses to overwrite an existing path. Omit it to receive just the envelope.
@@ -468,6 +473,14 @@ With `Sites.Selected`, discovery returns `preflight_failed` (exit 4) with
 `refusal.detail.check: "discovery_requires_sites_read_all"` and
 `requiredGrant: "Sites.Read.All"`. Keep the scoped grant and supply a manifest
 manually, or have an administrator explicitly approve the tenant-wide exposure.
+A Graph response discovery cannot trust (a site without a valid `id` or `webUrl`, a
+library without an `id`, a malformed, off-Graph or repeating page) also refuses
+`preflight_failed`, with `refusal.detail.check: "discovery_response_invalid"`,
+`object` (`site`, `drive` or `page`), `field`, and the `siteId`, `webUrl` or Graph
+`route` it was reading. A Graph request that fails (a site the app cannot read,
+throttling, an outage) refuses `preflight_failed` with
+`refusal.detail.check: "discovery_request_failed"`, the HTTP `status`, Graph's
+`providerCode` when it is a known one, and the `route` and `siteId`.
 
 ### Teams retained history
 

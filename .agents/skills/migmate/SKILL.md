@@ -169,15 +169,28 @@ For a SharePoint-source file job with no mappings, onboard the route/options and
 `discover --job ID --file draft.json --output json`. Read `value.sites` and
 `value.manifest`; the optional new private file contains only the manifest and
 refuses overwrite. Without `--file`, the same draft remains in the envelope.
-Discovery covers subsites too. Review each proposed
+Discovery covers subsites too, and skips personal OneDrive sites. Review each proposed
 `Site name (host/site path) - Library name`, remove unwanted libraries, and
-fill in `members` before explicitly running `manifest load`. Discovery neither
-loads nor provisions; human plan approval still gates creation. Empty discovery
-produces an empty draft, which cannot be loaded until it has a mapping.
+fill in `members` before explicitly running `manifest load`. A site Graph returns
+unnamed (the classic Search Center, for one) is labelled from its URL path segment or
+host, and an unnamed library by its drive ID.
+Discovery neither loads nor provisions; human plan approval still gates creation.
+Empty discovery produces an empty draft, which cannot be loaded until it has a mapping.
 
 On `preflight_failed` with `detail.check: discovery_requires_sites_read_all`,
 surface `detail.requiredGrant: Sites.Read.All`. Keep `Sites.Selected` and author
 the manifest manually, or hand the tenant-wide grant decision to the administrator.
+
+On `preflight_failed` with `detail.check: discovery_response_invalid`, Graph returned
+a site, library or page discovery cannot trust. It is a defect report, not a tenant
+prerequisite: hand `detail.object`, `detail.field` and the named `siteId`, `webUrl` or
+`route` to the Migmate maintainers together with `migmate --version`.
+
+On `preflight_failed` with `detail.check: discovery_request_failed`, read
+`detail.status`. `401`/`403` means the source app cannot read `detail.siteId` (or, without
+one, `detail.route`): hand it to the administrator. `429`, `5xx` or `0` means Graph throttled or was
+unreachable; discovery writes nothing, so rerun it later, and report a repeat with
+`migmate --version`.
 
 ## Teams archive destination
 

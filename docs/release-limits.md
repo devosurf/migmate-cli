@@ -121,9 +121,18 @@ One lifecycle writer holds a job. Automatic same-host takeover requires a heartb
 
 `discover --job ID [--file draft.json]` follows Graph `sites/getAllSites`, each
 site's `sites` (subsites, recursively) and `drives` paging links, visiting each site
-once and selecting document libraries. It requires
+once and selecting document libraries. Personal OneDrive sites (`isPersonalSite`, or a
+`-my.sharepoint.com` host) are skipped without a request; a document library someone
+added inside a OneDrive site is therefore never proposed. It requires
 `Sites.Read.All`; scoped discovery refuses with `preflight_failed`, detail check
-`discovery_requires_sites_read_all`, and required grant `Sites.Read.All`.
+`discovery_requires_sites_read_all`, and required grant `Sites.Read.All`. Site and
+library names only label the draft: a missing or unusable name falls back to the
+site's URL path segment or host, or the library's drive ID, and never refuses.
+Missing or invalid site and library identifiers, site URLs, and malformed, off-Graph
+or repeating pages refuse `preflight_failed` with detail check
+`discovery_response_invalid`, naming the `object`, `field`, and site or route. A failed
+Graph request is not retried: it refuses `preflight_failed` with detail check
+`discovery_request_failed`, its HTTP `status`, and the route and site it was reading.
 Credential onboarding, `doctor` and discovery accept a job with no mappings;
 mapping-specific access checks apply after load. `plan` requires at least one mapping
 and otherwise refuses `configuration_invalid`, field `mappings`, directing the operator
