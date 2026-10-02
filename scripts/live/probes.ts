@@ -5,6 +5,8 @@ export const fileProbeIds = [
   "mapping_interrupt_and_resume",
   "route_limits_and_version_gate",
 ] as const;
+/** A `shared_drive_to_sharepoint_library` job config runs this suite instead. */
+export const reverseFileProbeIds = ["shared_drive_to_sharepoint_copy_and_verification"] as const;
 /** Unusual source kinds the live file suite must account for, each with a proof value: ADR-0006. */
 export const sourceCapabilityKinds = ["package", "reference", "undownloadable"] as const;
 export type SourceCapabilityKind = (typeof sourceCapabilityKinds)[number];

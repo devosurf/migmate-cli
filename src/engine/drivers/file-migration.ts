@@ -8,6 +8,7 @@ import type {
   CopyPassReference,
   DestinationEntry,
   DriveMember,
+  ProviderPort,
   SourceEntry,
 } from "../providers/port.ts";
 import type { CommitFinding, CommitUnit, JobTypeDriver, ReportSection } from "./types.ts";
@@ -35,6 +36,8 @@ export interface FileMappingConfig {
 }
 
 export interface FileMigrationConfig {
+  /** Fixes the direction of every mapping; defaults to SharePoint → Google Shared Drive. */
+  route?: string;
   mappings: FileMappingConfig[];
   impersonate?: boolean;
   subject?: string;
@@ -51,6 +54,24 @@ const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
 /** PDF, Office and HTML files SharePoint may rewrite on upload (docs/research/provider-byte-integrity.md). */
 const SHAREPOINT_REWRITTEN_TYPES =
   /\.(pdf|docx?|docm|dotx?|dotm|xlsx?|xlsm|xlsb|xltx?|xltm|pptx?|pptm|potx?|potm|ppsx?|ppsm|html?|mhtml?)$/i;
+
+/** Google source drives the acting account cannot read, checked as that account. */
+export async function unreadableSourceDrives(
+  provider: Pick<ProviderPort, "readSharedDrive">,
+  mappings: { sourceType?: string; sourceDriveId: string }[],
+): Promise<string[]> {
+  const unreadable: string[] = [];
+  for (const driveId of new Set(
+    mappings.filter((m) => m.sourceType === "google_shared_drive").map((m) => m.sourceDriveId),
+  )) {
+    try {
+      if ((await provider.readSharedDrive(driveId))?.id !== driveId) unreadable.push(driveId);
+    } catch {
+      unreadable.push(driveId);
+    }
+  }
+  return unreadable;
+}
 
 type Phase = "plan" | "execute" | "verify";
 interface SourceView extends SourceEntry {
@@ -942,10 +963,9 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       const evidence = row(ctx, "verify", mapping, source, "destination_only_retained");
       evidence.destinationDriveId = mapping.destDriveId ?? null;
       evidence.destinationFileId = destination.id ?? null;
-      const stored =
-        destination.hash === null
-          ? (destinationMd5.get(destination.path) ?? destination)
-          : destination;
+      // MD5 labels the hash only when the MD5 fallback listing actually supplied it.
+      const md5 = destination.hash === null ? destinationMd5.get(destination.path) : undefined;
+      const stored = md5 ?? destination;
       evidence.destinationFingerprint = stored.hash;
       yield commit(
         ctx,
@@ -958,7 +978,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
             destinationSize: destination.size,
             sourceHash: null,
             destinationHash: stored.hash,
-            hashType: sizeOnly ? null : destination.hash === null ? "md5" : "sha256",
+            hashType: sizeOnly ? null : md5 ? "md5" : primaryHash,
           }),
         ],
         "retained",
@@ -1009,27 +1029,15 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
     };
     if (!canCreateDrives) return;
   }
-  const unreadableSourceDrives: string[] = [];
-  for (const driveId of new Set(
-    ctx.config.mappings
-      .filter((m) => m.sourceType === "google_shared_drive")
-      .map((m) => m.sourceDriveId),
-  )) {
-    try {
-      if ((await provider.readSharedDrive(driveId))?.id !== driveId)
-        unreadableSourceDrives.push(driveId);
-    } catch {
-      unreadableSourceDrives.push(driveId);
-    }
-  }
-  if (unreadableSourceDrives.length) {
+  const unreadable = await unreadableSourceDrives(provider, ctx.config.mappings);
+  if (unreadable.length) {
     yield {
       id: "google.source_drives",
       title: "Acting account can read every source Shared Drive",
       status: "fail",
       code: "preflight_failed",
       evidence: {
-        unreadableSourceDrives,
+        unreadableSourceDrives: unreadable,
         subject: ctx.config.subject ?? null,
         fix: "Add the acting account as a member of every named source Shared Drive.",
       },
@@ -1082,6 +1090,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         grants: ctx.resume.memberGrants ?? [],
       }),
     };
+  yield { title: "Route", format: "text", body: JSON.stringify({ route: ctx.config.route }) };
   yield {
     title: "Acting Google account",
     format: "text",

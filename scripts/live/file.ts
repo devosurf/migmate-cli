@@ -19,10 +19,13 @@ import {
 } from "./common.ts";
 import { FileFixtures, fixtureConfig, identifier, object } from "./file-fixtures.ts";
 import { fileWorkerLiveTest } from "./file-worker.ts";
+import { runReverseFileLiveTest } from "./file-reverse.ts";
 
 /** Real providers through the production engine: no private driver durability adapter. */
 export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestResult> {
   const jobConfig = object(input.config.jobConfig);
+  if (jobConfig.route === "shared_drive_to_sharepoint_library")
+    return runReverseFileLiveTest(input);
   if (!Array.isArray(jobConfig.mappings) || jobConfig.mappings.length !== 1)
     throw new LiveTestBlocked("file_one_disposable_mapping_required");
   const raw = object(jobConfig.mappings[0]);

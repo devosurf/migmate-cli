@@ -52,7 +52,10 @@ In mapping view, read each row's `mapping` and `mappingPass`, not top-level
 `mappingPasses` (omitted to keep the page bounded). Read back the new plan digest,
 not the old approval's digest.
 
-For Google Shared Drives into SharePoint, a mapping uses
+For Google Shared Drives into SharePoint, set top-level `route = "shared_drive_to_sharepoint_library"`
+in the job TOML before loading; one job copies in one direction, so a row in the other
+direction (or a mixed manifest) refuses `configuration_invalid` with `field: "source.type"`.
+A mapping uses
 `source: { type: "google_shared_drive", driveId, folderId }` and
 `destination: { type: "sharepoint", driveId, folderPath }`; the library and folder must
 already exist, so `create`, `members` and mirror refuse. CSV uses README's eleven-column
@@ -60,7 +63,7 @@ layout. The job's `[rclone]` needs `sharepointDestinationRemote`, a separate Sha
 app holding exactly `Sites.ReadWrite.All` (anything else refuses
 `credential_permissions_invalid`); `sourceRemote` is only for SharePoint sources.
 Sources are read as the acting account. On `preflight_failed` with
-`unreadableSourceDrives`, surface those drive IDs: a human must add the acting
+`unreadableSourceDrives` (from `manifest load` or `doctor`/`plan`), surface those drive IDs: a human must add the acting
 account as a member; Migmate never does. Verification compares quickXorHash computed
 from the source with SharePoint's. Surface `destination_rewrote_file` (PDF, Office
 or HTML that SharePoint rewrote, with both hashes and sizes) separately from

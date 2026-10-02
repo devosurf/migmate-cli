@@ -8,7 +8,7 @@ The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclo
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
 
-Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. Google Shared Drive sources map only to existing SharePoint destinations (below).
+Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. A job's route fixes one direction for every mapping: a row in the other direction, including any row of a mixed manifest, refuses at load with its row and `source.type`.
 
 Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back, and each retry has a fresh cap. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
 
@@ -52,12 +52,13 @@ Status and report retain the created IDs and member grants. Offline engine and
 HTTP contracts cover provisioning and crash recovery; no live tenant provisioning
 measurement is claimed.
 
-**Google Shared Drives to SharePoint.** A manifest mapping may read a Google Shared
-Drive folder (drive id and folder id) into an existing SharePoint document library
-or folder (drive id and library-relative path). Migmate creates no SharePoint sites,
+**Google Shared Drives to SharePoint.** A job with `route = "shared_drive_to_sharepoint_library"`
+reads Google Shared Drive folders (drive id and folder id) into existing SharePoint
+document libraries or folders (drive id and library-relative path); the route is frozen
+into the plan and report. Migmate creates no SharePoint sites,
 libraries or folders, and never adds the acting account to a source drive: it must
-already be a member. Preflight checks every source drive as the acting account and
-fails `preflight_failed`, naming each unreadable drive in `unreadableSourceDrives`.
+already be a member. Manifest load and preflight check every source drive as the acting
+account and refuse `preflight_failed`, naming each unreadable drive in `unreadableSourceDrives`.
 SharePoint is written only by a separate destination app, the optional third rclone
 remote `rclone.sharepointDestinationRemote`. Its token's roles must be exactly
 `Sites.ReadWrite.All`; anything else refuses `credential_permissions_invalid`, as does
@@ -72,8 +73,9 @@ with SharePoint's stored quickXorHash. A differing PDF, Office or HTML file rais
 `destination_rewrote_file`; any other differing file raises `content_mismatch`. Both
 carry `sourceHash`, `destinationHash`, `sourceSize` and `destinationSize` and block
 `close` until accepted. Mirror and drive provisioning remain Google-destination only.
-Engine, HTTP-transport and local-folder rclone tests cover this direction; no live
-tenant run is claimed.
+Engine, HTTP-transport and local-folder rclone tests cover this direction. The optional
+live suite runs a reverse probe for a reverse job config (copy, quickXorHash verification,
+and a replaced Office file and plain file); no credentialed run of it is claimed.
 
 ## 2. Mapping recovery is durable; rclone jobs are not
 
@@ -117,12 +119,12 @@ One lifecycle writer holds a job. Automatic same-host takeover requires a heartb
 
 **What is supported.** These routes, on every platform the package installs on — macOS and Linux, x64 and arm64:
 
-| Job type         | Route                                                                     | Archive options                                     |
-| ---------------- | ------------------------------------------------------------------------- | --------------------------------------------------- |
-| `file_migration` | SharePoint document library → Google Shared Drive folder                  | —                                                   |
-| `file_migration` | Google Shared Drive folder → SharePoint document library or folder        | —                                                   |
-| `teams_archive`  | Graph v1.0 Global → local archive package                                 | `retainedHistory`, `transcripts`, `attachmentBytes` |
-| `teams_archive`  | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs | `retainedHistory`, `transcripts`, `attachmentBytes` |
+| Job type         | Route name                           | Route                                                                     | Archive options                                     |
+| ---------------- | ------------------------------------ | ------------------------------------------------------------------------- | --------------------------------------------------- |
+| `file_migration` | `sharepoint_library_to_shared_drive` | SharePoint document library → Google Shared Drive folder                  | —                                                   |
+| `file_migration` | `shared_drive_to_sharepoint_library` | Google Shared Drive folder → SharePoint document library or folder        | —                                                   |
+| `teams_archive`  | `teams_global_archive`               | Graph v1.0 Global → local archive package                                 | `retainedHistory`, `transcripts`, `attachmentBytes` |
+| `teams_archive`  | `teams_global_archive`               | Graph v1.0 Global → local package + Google Shared Drive conversation ZIPs | `retainedHistory`, `transcripts`, `attachmentBytes` |
 
 `migmate web`'s native window has been inspected by an operator on `darwin-arm64` only; the other three platforms still need a person at a logged-in desktop ([#32](https://github.com/devosurf/migmate-cli/issues/32)). The CLI itself installs and passes its package smoke on all four in CI.
 
@@ -132,7 +134,7 @@ One lifecycle writer holds a job. Automatic same-host takeover requires a heartb
 
 **What the source serves is what gets copied.** SharePoint can rewrite PDF, Office and HTML files and list sizes that contradict downloaded bytes ([provider byte-integrity research](research/provider-byte-integrity.md)). rclone owns execution and its backend checks; Migmate no longer stages files or requires its old two-read agreement before uploading. Hash verification raises `source_size_inconsistent` when listed size contradicts served bytes, with `listedSize`, `servedSize` and hash evidence. When hashes differ, verification measures an additional source read and checks it against downloaded SHA-256 before attributing the discrepancy. A destination length differing from served length also raises `size_mismatch`. Size-only cannot make that distinction; blocking findings require acceptance.
 
-**What refuses.** `unsupported_route` (exit 4) names a shape this build does not implement: a destination outside the configured Shared Drive, a source that is not the named document library, a cloud other than Global, a mapping root that is not an ordinary folder, or a route name other than the two above. Generic remotes and My Drive are not implemented: the credential loader accepts only `onedrive` document-library remotes (the source and, for reverse mappings, the destination) and a `drive` service-account remote, so any other backend refuses `credential_backend_unsupported`. That is a statement about what was built, not a gap in evidence.
+**What refuses.** `unsupported_route` (exit 4) names a shape this build does not implement: a destination outside the configured Shared Drive, a source that is not the named document library, a cloud other than Global, a mapping root that is not an ordinary folder, or a route name not listed above. Generic remotes and My Drive are not implemented: the credential loader accepts only `onedrive` document-library remotes (the source and, for reverse mappings, the destination) and a `drive` service-account remote, so any other backend refuses `credential_backend_unsupported`. That is a statement about what was built, not a gap in evidence.
 
 **What a release no longer proves.** Published live evidence does not gate jobs ([ADR-0009](adr/0009-per-job-verification-replaces-route-qualification.md)). Engine tests cover mapping recovery and verification with the fake provider; opt-in real-binary checks exercise local-folder copy passes. Tenant execution is exercised only by the optional live suite. No live run is implied by a passing offline suite.
 

@@ -19,8 +19,10 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { Engine, EngineOptions, JobReader, JobWriter, ReclaimDecision } from "./engine.ts";
 import {
+  FILE_ROUTE_SOURCES,
   ManifestError,
   parseManifest,
+  validateMappingDirections,
   validateMappingTrees,
   validateMirrorDestinations,
   type LoadedManifest,
@@ -80,6 +82,7 @@ import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
 import {
   fileMigrationDriver,
+  unreadableSourceDrives,
   type FileMappingConfig,
   type FileMigrationConfig,
 } from "./drivers/file-migration.ts";
@@ -291,7 +294,6 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           m,
           [
             "id",
-            "sourceType",
             "sourceDriveId",
             "sourceItemId",
             "destDriveId",
@@ -308,11 +310,6 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           destDriveId: text(m.destDriveId, "destDriveId"),
           destFolderId: text(m.destFolderId, "destFolderId"),
         };
-        if (m.sourceType !== undefined) {
-          if (m.sourceType !== "sharepoint" && m.sourceType !== "google_shared_drive")
-            configError("sourceType");
-          mapping.sourceType = m.sourceType;
-        }
         if (m.sourceSiteId !== undefined)
           mapping.sourceSiteId = text(m.sourceSiteId, "sourceSiteId");
         if (m.exclusions !== undefined) {
@@ -603,6 +600,7 @@ function readConfig(paths: JobPaths, type: JobType, store?: Store): JobConfig {
   const loaded = store?.readMappings();
   if ("mappings" in config && loaded) {
     validateMirrorDestinations(loaded.mappings, config.options.mirror);
+    validateMappingDirections(loaded.mappings, config.route);
     return { ...config, mappings: loaded.mappings, manifestDigest: loaded.digest };
   }
   return config;
@@ -1392,10 +1390,9 @@ function makeWriter(
     const local = localFilesystem(paths.dir);
     if (!local.ok) return local;
     if (
-      config.route !==
-      (job().type === "file_migration"
-        ? "sharepoint_library_to_shared_drive"
-        : "teams_global_archive")
+      !(job().type === "file_migration"
+        ? Object.hasOwn(FILE_ROUTE_SOURCES, config.route)
+        : config.route === "teams_global_archive")
     )
       return refuse("unsupported_route", "The requested route is not implemented.");
     const checks: CheckResult[] = [];
@@ -1757,7 +1754,7 @@ function makeWriter(
           sourceDriveId: m.source.driveId,
           ...(m.source.type === "sharepoint"
             ? { sourceFolderPath: m.source.folderPath }
-            : { sourceType: m.source.type, sourceItemId: m.source.folderId }),
+            : { sourceType: "google_shared_drive" as const, sourceItemId: m.source.folderId }),
           ...("create" in m.destination
             ? { createDrive: { name: m.destination.create, members: m.members ?? [] } }
             : m.destination.type === "sharepoint"
@@ -1765,6 +1762,7 @@ function makeWriter(
               : { destDriveId: m.destination.driveId, destFolderId: m.destination.folderId }),
         }));
         validateMirrorDestinations(pending, base.options.mirror);
+        validateMappingDirections(pending, base.route);
         const p =
           deps.provider ??
           createProductionProvider({
@@ -1773,6 +1771,14 @@ function makeWriter(
             jobDirectory: paths.dir,
           });
         providers.add(p);
+        // Name every source drive the acting account cannot read, not just the first bad row.
+        const unreadable = await unreadableSourceDrives(p, pending);
+        if (unreadable.length)
+          return refuse(
+            "preflight_failed",
+            "The acting account cannot read every source Shared Drive.",
+            { detail: { unreadableSourceDrives: unreadable } },
+          );
         const mappings: Mapping[] = [];
         for (let index = 0; index < pending.length; index++) {
           const mapping = pending[index]!,

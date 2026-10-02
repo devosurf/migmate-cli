@@ -312,7 +312,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly checks: CheckResult[];
   private applicationId: string;
   private readonly about: GoogleAbout | Error;
-  private readonly unreadableSourceDrives: string[];
+  private readonly unreadableSourceDrives: Set<string>;
   private readonly now: () => Date;
   private readonly sharedDrives = new Map<string, SharedDrive>();
   private readonly driveRequests = new Map<string, string>();
@@ -329,7 +329,7 @@ export class FakeFileMigrationPort implements ProviderPort {
 
   constructor(fixture: FakeFileMigrationFixture) {
     this.now = fixture.now ?? (() => new Date());
-    this.unreadableSourceDrives = fixture.unreadableSourceDrives ?? [];
+    this.unreadableSourceDrives = new Set(fixture.unreadableSourceDrives);
     this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
     this.sourceDriveId = fixture.sourceDriveId;
     this.sourceRootId = fixture.sourceRootId;
@@ -486,7 +486,9 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.callLog.push(`readSourceItem:${input.itemId}`);
     this.throwRetryAfter("readSourceItem", input.itemId);
     const entry = this.sourceById[input.itemId];
-    return entry?.driveId === input.driveId ? cloneSource(entry) : null;
+    return entry?.driveId === input.driveId && !this.unreadableSourceDrives.has(input.driveId)
+      ? cloneSource(entry)
+      : null;
   }
 
   async readDestinationObject(input: {
@@ -684,8 +686,13 @@ export class FakeFileMigrationPort implements ProviderPort {
     return rows;
   }
 
+  /** The acting account loses its membership of a source Shared Drive after load. */
+  revokeSourceDriveAccess(driveId: string): void {
+    this.unreadableSourceDrives.add(driveId);
+  }
+
   async readSharedDrive(driveId: string): Promise<SharedDrive | null> {
-    if (this.unreadableSourceDrives.includes(driveId)) return null;
+    if (this.unreadableSourceDrives.has(driveId)) return null;
     const root = Object.values(this.sourceById).find(
       (item) => item.driveId === driveId && item.parentId === null,
     );
@@ -733,7 +740,11 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.callLog.push(`resolveSourceRoot:${input.sourceItemId}`);
     this.throwRetryAfter("resolveSourceRoot", input.sourceItemId);
     const entry = this.sourceById[input.sourceItemId];
-    if (!entry || entry.driveId !== input.sourceDriveId) {
+    if (
+      !entry ||
+      entry.driveId !== input.sourceDriveId ||
+      this.unreadableSourceDrives.has(input.sourceDriveId)
+    ) {
       return null;
     }
 

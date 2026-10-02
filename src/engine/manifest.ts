@@ -276,6 +276,28 @@ export function validateMirrorDestinations(
       );
 }
 
+/** Each file route reads one source type: a job's route fixes the direction of every mapping. */
+export const FILE_ROUTE_SOURCES: Record<string, "sharepoint" | "google_shared_drive"> = {
+  sharepoint_library_to_shared_drive: "sharepoint",
+  shared_drive_to_sharepoint_library: "google_shared_drive",
+};
+
+export function validateMappingDirections(
+  mappings: { sourceDriveId: string; sourceType?: "sharepoint" | "google_shared_drive" }[],
+  route: string,
+): void {
+  // An unknown route refuses at the route gate, before any mapping is read.
+  if (!Object.hasOwn(FILE_ROUTE_SOURCES, route)) return;
+  const expected = FILE_ROUTE_SOURCES[route];
+  for (const [index, mapping] of mappings.entries())
+    if ((mapping.sourceType ?? "sharepoint") !== expected)
+      throw new ManifestError(
+        index + 1,
+        "source.type",
+        "Mapping direction does not match the job route",
+      );
+}
+
 /** Compare stable ancestor identities, not display names or string prefixes. */
 export async function validateMappingTrees(
   provider: ProviderPort,

@@ -93,6 +93,11 @@ const ARCHIVE_ROLES: Record<string, true> = {
   "OnlineMeetingTranscript.Read.All": true,
   "Files.Read.All": true,
 };
+// ADR-0003 amendment: SharePoint destinations are written by a separate app with its
+// own exclusive allowlist, so the read-only source app never gains a write role.
+const SHAREPOINT_DESTINATION_ROLES: Record<string, true> = {
+  "Sites.ReadWrite.All": true,
+};
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const STABLE_ID = /^[A-Za-z0-9_!.,@-]{1,512}$/;
@@ -602,7 +607,11 @@ async function loadCredentials(
         setting(sharepointDestination, "region", "global");
         setting(sharepointDestination, "disable_site_permission", "true");
         setting(sharepointDestination, "expose_onenote_files", "true");
-        setting(sharepointDestination, "access_scopes", "Sites.ReadWrite.All");
+        if (sharepointDestination.has("access_scopes")) {
+          const scopes = text(sharepointDestination.get("access_scopes")).split(/ +/).sort();
+          if (scopes.join(" ") !== Object.keys(SHAREPOINT_DESTINATION_ROLES).sort().join(" "))
+            throw refused("credential_permissions_invalid");
+        }
         stableId(sharepointDestination.get("drive_id"));
         graphDestination = {
           tenantId: guid(sharepointDestination.get("tenant")),
@@ -801,7 +810,7 @@ function graphPermissions(
   }
   const roles = [...new Set<string>(claims.roles)].sort();
   const permitted = destination
-    ? { "Sites.ReadWrite.All": true }
+    ? SHAREPOINT_DESTINATION_ROLES
     : jobType === "file_migration"
       ? FILE_ROLES
       : ARCHIVE_ROLES;

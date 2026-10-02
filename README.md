@@ -238,8 +238,12 @@ item rows.
 
 ### Google Shared Drives to SharePoint
 
-A mapping may instead copy a Google Shared Drive folder into an existing SharePoint
-document library or folder:
+A job whose top-level TOML sets `route = "shared_drive_to_sharepoint_library"` copies
+Google Shared Drive folders into existing SharePoint document libraries or folders.
+The route (default `sharepoint_library_to_shared_drive`) fixes one direction for the
+whole job and is frozen into the plan and report: `manifest load` refuses any row in the
+other direction, including every row of a mixed manifest, with its row and `source.type`.
+Each reverse mapping looks like:
 
 ```json
 {
@@ -263,8 +267,7 @@ library and folder must already exist: Migmate creates no SharePoint sites,
 libraries or folders, so `create`, `members` and `mirror` refuse for these mappings.
 CSV uses the exact eleven-column layout, which appends `source.folderId` and
 `destination.folderPath`; leave `source.folderPath`, `destination.folderId`,
-`destination.create` and `members` empty on reverse rows, and the two added cells
-empty on forward rows:
+`destination.create` and `members` empty on reverse rows:
 
 ```csv
 id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members,source.folderId,destination.folderPath
@@ -272,9 +275,9 @@ archive,google_shared_drive,shared-drive-id,,sharepoint,sharepoint-library-id,,,
 ```
 
 Sources are read as the [acting Google account](#acting-google-account), which must
-already be a member of every source Shared Drive; Migmate never adds it. Preflight
-checks each source drive and fails `preflight_failed`, naming every drive it cannot
-read in `unreadableSourceDrives`.
+already be a member of every source Shared Drive; Migmate never adds it. `manifest load`
+and preflight check each source drive and refuse `preflight_failed`, naming every drive
+it cannot read in `unreadableSourceDrives`.
 
 SharePoint is written only by a separate destination app. Name its rclone remote as
 `sharepointDestinationRemote` in the job's `[rclone]` table, beside the Google
@@ -509,7 +512,7 @@ Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, d
 - `npm run check:worker` — opt-in locally, required in CI's four platform cells. Spawns the vendored `rclone` worker and proves authentication, lifecycle, asynchronous copy, per-pass status/stats, cooperative stop and resumable copy, capped mirror deletions, and stored/downloaded hash listings against disposable local folders.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.
 - `npm run check:install` — packs, serves the artifact as a local GitHub-shaped release, and drives `scripts/install.sh` through a fresh install, `migmate upgrade`, pruning, a tampered checksum, and a private Node download from nodejs.org. CI's four cells run it after `check:package`.
-- `npm run test:live -- --config <file>` — optional and credentialed. File probes use disposable mapping roots through the production engine for multi-mapping rclone copies, hash verification, cooperative interruption/reopen/resume, completed-pass skips, and source capability samples. An interruption that finishes too quickly is not claimed as proven. Archive probes remain separate. The wizards write its config, described by `scripts/live/config.schema.json`; it is not part of `npm test`, CI, or a release gate.
+- `npm run test:live -- --config <file>` — optional and credentialed. File probes use disposable mapping roots through the production engine for multi-mapping rclone copies, hash verification, cooperative interruption/reopen/resume, completed-pass skips, and source capability samples. An interruption that finishes too quickly is not claimed as proven. A `shared_drive_to_sharepoint_library` job config instead runs one reverse probe: a disposable Google source copied into a disposable SharePoint folder, quickXorHash verification, then replaced Office and plain files that must raise `destination_rewrote_file` and `content_mismatch`. Archive probes remain separate. The wizards write its config, described by `scripts/live/config.schema.json`; it is not part of `npm test`, CI, or a release gate.
 
 The real-binary suites are skipped by ordinary `npm test`. To run the copy-pass suite alone, supply `MIGMATE_TEST_RCLONE_BINARY` (path), `MIGMATE_TEST_RCLONE_SHA256`, and `MIGMATE_TEST_RCLONE_PROVENANCE`, then run `node --test src/engine/providers/copy-pass.test.ts`; `npm run check:worker` resolves these from the vendored manifest automatically. The hash test also uses an encrypted local-folder remote to prove downloading a hash the remote cannot supply.
 

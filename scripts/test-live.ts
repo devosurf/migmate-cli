@@ -9,7 +9,12 @@ import { unsupportedNode } from "../src/versions.ts";
 import { LIVE_TEST_ACKNOWLEDGEMENT, LiveTestBlocked } from "./live/common.ts";
 import { runFileLiveTest } from "./live/file.ts";
 import { runArchiveLiveTest } from "./live/archive.ts";
-import { fileProbeIds, probeFailures, type ProbeCapture } from "./live/probes.ts";
+import {
+  fileProbeIds,
+  probeFailures,
+  reverseFileProbeIds,
+  type ProbeCapture,
+} from "./live/probes.ts";
 
 const usage =
   "Usage: npm run test:live -- --config <file>\n" +
@@ -149,7 +154,9 @@ if (args.length === 1 && args[0] === "--help") {
       config.jobType === "teams_archive" && jobConfig.retainedHistory === true;
     const requiredProbes =
       config.jobType === "file_migration"
-        ? [...fileProbeIds]
+        ? jobConfig.route === "shared_drive_to_sharepoint_library"
+          ? [...reverseFileProbeIds]
+          : [...fileProbeIds]
         : [
             "graph_route_matrix",
             "hosted_content_bytes",

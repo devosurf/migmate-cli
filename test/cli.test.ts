@@ -333,8 +333,13 @@ it("loads JSON and CSV mapping manifests into the job and names invalid rows and
 
 it("loads reverse JSON and eleven-column CSV manifests with row-specific path errors", async (t) => {
   const h = harness(t);
+  const route = join(h.home, "reverse.toml");
+  writeFileSync(route, stringifyToml({ route: "shared_drive_to_sharepoint_library" }));
   const init = document<{ id: string }>(
-    await invoke(["init", "--type", "file_migration", "--output", "json"], h.engine()),
+    await invoke(
+      ["init", "--type", "file_migration", "--config", route, "--output", "json"],
+      h.engine(),
+    ),
   );
   const path = join(h.home, "reverse.json");
   writeFileSync(
@@ -384,6 +389,15 @@ it("loads reverse JSON and eleven-column CSV manifests with row-specific path er
     row: 1,
     field: "source.folderPath",
   });
+  writeFileSync(
+    csv,
+    header +
+      "reverse,google_shared_drive,src-drive,,sharepoint,dst-drive,,,,src-root,\n" +
+      "forward,sharepoint,src-drive,,google_shared_drive,dst-drive,dst-root,,,,\n",
+  );
+  const mixed = await invoke(args, h.engine());
+  assert.equal(mixed.code, 2);
+  assert.deepEqual(document(mixed).refusal.detail, { row: 2, field: "source.type" });
 });
 
 it("emits one versioned stdout document for handled usage/configuration failures and help", async (t) => {

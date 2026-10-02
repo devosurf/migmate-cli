@@ -18,9 +18,13 @@
       "type": "object",
       "description": "The same parsed operator configuration accepted by production. Credentials remain typed file references, never raw secrets.",
       "properties": {
+        "route": {
+          "enum": ["sharepoint_library_to_shared_drive", "shared_drive_to_sharepoint_library"],
+          "description": "shared_drive_to_sharepoint_library runs the reverse probe instead of the SharePoint-source suite."
+        },
         "rclone": {
           "type": "object",
-          "required": ["config", "sourceRemote", "destinationRemote"],
+          "required": ["config", "destinationRemote"],
           "properties": {
             "config": {
               "$ref": "#/$defs/fileReference"
@@ -32,6 +36,10 @@
             "destinationRemote": {
               "type": "string",
               "minLength": 1
+            },
+            "sharepointDestinationRemote": {
+              "type": "string",
+              "minLength": 1
             }
           }
         },
@@ -39,34 +47,42 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "type": "object",
-            "required": ["id", "sourceDriveId", "sourceItemId", "destDriveId", "destFolderId"],
-            "properties": {
-              "id": {
-                "type": "string",
-                "minLength": 1
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["id", "sourceDriveId", "sourceItemId", "destDriveId", "destFolderId"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "sourceDriveId": { "type": "string", "minLength": 1 },
+                  "sourceItemId": { "type": "string", "minLength": 1 },
+                  "destDriveId": { "type": "string", "minLength": 1 },
+                  "destFolderId": { "type": "string", "minLength": 1 },
+                  "sourceSiteId": { "type": "string", "minLength": 1 }
+                },
+                "not": { "required": ["sourceType"] }
               },
-              "sourceDriveId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "sourceItemId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "destDriveId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "destFolderId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "sourceSiteId": {
-                "type": "string",
-                "minLength": 1
+              {
+                "type": "object",
+                "description": "Google Shared Drive folder (stable ids) into a SharePoint library-relative folder path.",
+                "required": [
+                  "id",
+                  "sourceType",
+                  "sourceDriveId",
+                  "sourceItemId",
+                  "destDriveId",
+                  "destFolderPath"
+                ],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "sourceType": { "const": "google_shared_drive" },
+                  "sourceDriveId": { "type": "string", "minLength": 1 },
+                  "sourceItemId": { "type": "string", "minLength": 1 },
+                  "destDriveId": { "type": "string", "minLength": 1 },
+                  "destFolderPath": { "type": "string" }
+                },
+                "additionalProperties": false
               }
-            }
+            ]
           }
         },
         "graph": {
@@ -187,17 +203,11 @@
     },
     "fixtures": {
       "type": "object",
-      "description": "File route: explicit disposable roots and a separate scoped source-write application. Normal route credentials stay read-only on SharePoint. Only tool-created IDs are mutated or deleted. Archive uses actual in-scope samples, not supplied captured outputs.",
+      "description": "File route: explicit disposable roots. A SharePoint-source run also needs a separate scoped source-write application; normal route credentials stay read-only on SharePoint. A reverse run writes its disposable Google source as the acting account and its SharePoint copy root with the destination app. Only tool-created IDs are mutated or deleted. Archive uses actual in-scope samples, not supplied captured outputs.",
       "properties": {
         "disposableRoots": {
           "type": "object",
-          "required": [
-            "sourceDriveId",
-            "sourceItemId",
-            "destDriveId",
-            "destFolderId",
-            "acknowledged"
-          ],
+          "required": ["sourceDriveId", "sourceItemId", "destDriveId", "acknowledged"],
           "properties": {
             "sourceDriveId": {
               "type": "string",
@@ -214,6 +224,10 @@
             "destFolderId": {
               "type": "string",
               "minLength": 1
+            },
+            "destFolderPath": {
+              "type": "string",
+              "description": "Reverse runs: the existing SharePoint folder, relative to the library root, that receives the disposable copy root."
             },
             "acknowledged": {
               "const": true
@@ -293,7 +307,36 @@
             "required": ["rclone", "mappings"]
           },
           "fixtures": {
-            "required": ["disposableRoots", "graphMutation"]
+            "required": ["disposableRoots"]
+          }
+        },
+        "if": {
+          "properties": {
+            "jobConfig": {
+              "required": ["route"],
+              "properties": { "route": { "const": "shared_drive_to_sharepoint_library" } }
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "jobConfig": {
+              "properties": { "rclone": { "required": ["sharepointDestinationRemote"] } }
+            },
+            "fixtures": {
+              "properties": { "disposableRoots": { "required": ["destFolderPath"] } }
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "jobConfig": {
+              "properties": { "rclone": { "required": ["sourceRemote"] } }
+            },
+            "fixtures": {
+              "required": ["graphMutation"],
+              "properties": { "disposableRoots": { "required": ["destFolderId"] } }
+            }
           }
         }
       }

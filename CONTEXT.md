@@ -45,7 +45,7 @@ A known gap between what a job planned and what is verifiably present, explicitl
 _Avoid_: Error, warning, caveat
 
 **File mapping**:
-An approved relation from one stable source root to one stable destination root, such as a SharePoint document library and a Google Shared Drive, in either direction. Items keep their relative hierarchy inside the mapping, and mappings within a job never overlap.
+An approved relation from one stable source root to one stable destination root, such as a SharePoint document library and a Google Shared Drive, in either direction. A job's supported route fixes one direction for all its mappings. Items keep their relative hierarchy inside the mapping, and mappings within a job never overlap.
 _Avoid_: Route, mount, sync pair
 
 **Mapping manifest**:
