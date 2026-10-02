@@ -165,7 +165,12 @@ type FileConfig = CommonConfig & {
   subject?: string;
   options: NonNullable<FileMigrationConfig["options"]>;
   manifestDigest?: string;
-  rclone?: { config: FileReference; sourceRemote: string; destinationRemote: string };
+  rclone?: {
+    config: FileReference;
+    sourceRemote?: string;
+    destinationRemote: string;
+    sharepointDestinationRemote?: string;
+  };
 };
 type TeamsConfig = CommonConfig &
   ArchiveConfig & {
@@ -286,6 +291,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           m,
           [
             "id",
+            "sourceType",
             "sourceDriveId",
             "sourceItemId",
             "destDriveId",
@@ -302,6 +308,11 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           destDriveId: text(m.destDriveId, "destDriveId"),
           destFolderId: text(m.destFolderId, "destFolderId"),
         };
+        if (m.sourceType !== undefined) {
+          if (m.sourceType !== "sharepoint" && m.sourceType !== "google_shared_drive")
+            configError("sourceType");
+          mapping.sourceType = m.sourceType;
+        }
         if (m.sourceSiteId !== undefined)
           mapping.sourceSiteId = text(m.sourceSiteId, "sourceSiteId");
         if (m.exclusions !== undefined) {
@@ -381,17 +392,31 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     }
     if (input.rclone !== undefined) {
       const r = object(input.rclone, "rclone");
-      keys(r, ["config", "sourceRemote", "destinationRemote"], "rclone");
-      const sourceRemote = text(r.sourceRemote, "rclone.sourceRemote", 64),
-        destinationRemote = text(r.destinationRemote, "rclone.destinationRemote", 64);
+      keys(
+        r,
+        ["config", "sourceRemote", "destinationRemote", "sharepointDestinationRemote"],
+        "rclone",
+      );
+      const sourceRemote =
+        r.sourceRemote === undefined ? undefined : text(r.sourceRemote, "rclone.sourceRemote", 64);
+      const destinationRemote = text(r.destinationRemote, "rclone.destinationRemote", 64);
+      const sharepointDestinationRemote =
+        r.sharepointDestinationRemote === undefined
+          ? undefined
+          : text(r.sharepointDestinationRemote, "rclone.sharepointDestinationRemote", 64);
+      const names = [sourceRemote, destinationRemote, sharepointDestinationRemote].filter(
+        (name): name is string => name !== undefined,
+      );
       if (
-        ![sourceRemote, destinationRemote].every((s) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(s)) ||
-        sourceRemote.toLowerCase() === destinationRemote.toLowerCase()
+        !names.every((s) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(s)) ||
+        new Set(names.map((name) => name.toLowerCase())).size !== names.length ||
+        (!sourceRemote && !sharepointDestinationRemote)
       )
         configError("rclone");
       config.rclone = {
         config: fileReference(r.config, "rclone.config", paths.dir),
-        sourceRemote,
+        ...(sourceRemote ? { sourceRemote } : {}),
+        ...(sharepointDestinationRemote ? { sharepointDestinationRemote } : {}),
         destinationRemote,
       };
     }
@@ -1730,10 +1755,14 @@ function makeWriter(
         const pending = manifest.mappings.map((m) => ({
           id: m.id,
           sourceDriveId: m.source.driveId,
-          sourceFolderPath: m.source.folderPath,
+          ...(m.source.type === "sharepoint"
+            ? { sourceFolderPath: m.source.folderPath }
+            : { sourceType: m.source.type, sourceItemId: m.source.folderId }),
           ...("create" in m.destination
             ? { createDrive: { name: m.destination.create, members: m.members ?? [] } }
-            : { destDriveId: m.destination.driveId, destFolderId: m.destination.folderId }),
+            : m.destination.type === "sharepoint"
+              ? { destDriveId: m.destination.driveId, destFolderPath: m.destination.folderPath }
+              : { destDriveId: m.destination.driveId, destFolderId: m.destination.folderId }),
         }));
         validateMirrorDestinations(pending, base.options.mirror);
         const p =
@@ -1748,17 +1777,36 @@ function makeWriter(
         for (let index = 0; index < pending.length; index++) {
           const mapping = pending[index]!,
             source = manifest.mappings[index]!.source;
-          const root = await p.resolveSourceFolder({
-            driveId: source.driveId,
-            folderPath: source.folderPath,
-          });
+          const root =
+            source.type === "sharepoint"
+              ? await p.resolveSourceFolder({
+                  driveId: source.driveId,
+                  folderPath: source.folderPath,
+                })
+              : await p.resolveSourceRoot({
+                  sourceDriveId: source.driveId,
+                  sourceItemId: source.folderId,
+                });
           if (!root || root.kind !== "folder" || root.driveId !== source.driveId)
             throw new ManifestError(
               index + 1,
-              "source.folderPath",
+              source.type === "sharepoint" ? "source.folderPath" : "source.folderId",
               "Source folder does not resolve",
             );
-          mappings.push({ ...mapping, sourceItemId: root.id });
+          const destination = manifest.mappings[index]!.destination;
+          if (destination.type === "sharepoint") {
+            const folder = await p.resolveDestinationPath({
+              driveId: destination.driveId,
+              folderPath: destination.folderPath,
+            });
+            if (!folder || folder.kind !== "folder" || folder.driveId !== destination.driveId)
+              throw new ManifestError(
+                index + 1,
+                "destination.folderPath",
+                "Destination folder does not resolve",
+              );
+            mappings.push({ ...mapping, sourceItemId: root.id, destFolderId: folder.id });
+          } else mappings.push({ ...mapping, sourceItemId: root.id });
         }
         await validateMappingTrees(p, resolvedMappings(mappings));
         const previousRevision = job().planRevision;

@@ -169,14 +169,6 @@ it("refuses unsupported manifest extensions and malformed CSV without replacing 
       1,
       "destination.create",
     ],
-    [
-      {
-        version: 1,
-        mappings: [{ ...mapping, source: { ...mapping.source, type: "google_shared_drive" } }],
-      },
-      1,
-      "source.type",
-    ],
     [{ version: 1, mappings: [mapping, mapping] }, 2, "id"],
     [
       {
@@ -337,6 +329,61 @@ it("loads JSON and CSV mapping manifests into the job and names invalid rows and
   const invalid = await invoke(args, h.engine());
   assert.equal(invalid.code, 2);
   assert.deepEqual(document(invalid).refusal.detail, { row: 1, field: "source.driveId" });
+});
+
+it("loads reverse JSON and eleven-column CSV manifests with row-specific path errors", async (t) => {
+  const h = harness(t);
+  const init = document<{ id: string }>(
+    await invoke(["init", "--type", "file_migration", "--output", "json"], h.engine()),
+  );
+  const path = join(h.home, "reverse.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      mappings: [
+        {
+          id: "reverse",
+          source: { type: "google_shared_drive", driveId: "src-drive", folderId: "src-root" },
+          destination: { type: "sharepoint", driveId: "dst-drive", folderPath: "" },
+        },
+      ],
+    }),
+  );
+  const json = await invoke(
+    ["manifest", "load", "--job", init.value.id, "--file", path, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(json.code, 0, json.stdout);
+  const csv = join(h.home, "reverse.csv");
+  const header =
+    "id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members,source.folderId,destination.folderPath\n";
+  writeFileSync(
+    csv,
+    header + "reverse,google_shared_drive,src-drive,,sharepoint,dst-drive,,,,src-root,\n",
+  );
+  const args = ["manifest", "load", "--job", init.value.id, "--file", csv, "--output", "json"];
+  const loaded = await invoke(args, h.engine());
+  assert.equal(loaded.code, 0, loaded.stdout);
+  assert.equal(
+    document<{ manifestDigest: string }>(loaded).value.manifestDigest,
+    document<{ manifestDigest: string }>(json).value.manifestDigest,
+  );
+  writeFileSync(
+    csv,
+    header + "reverse,google_shared_drive,src-drive,,sharepoint,dst-drive,,,,src-root,../outside\n",
+  );
+  const invalid = await invoke(args, h.engine());
+  assert.equal(invalid.code, 2);
+  assert.deepEqual(document(invalid).refusal.detail, { row: 1, field: "destination.folderPath" });
+  writeFileSync(
+    csv,
+    header + "reverse,google_shared_drive,src-drive,ignored,sharepoint,dst-drive,,,,src-root,\n",
+  );
+  assert.deepEqual(document(await invoke(args, h.engine())).refusal.detail, {
+    row: 1,
+    field: "source.folderPath",
+  });
 });
 
 it("emits one versioned stdout document for handled usage/configuration failures and help", async (t) => {

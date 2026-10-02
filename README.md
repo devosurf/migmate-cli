@@ -4,7 +4,7 @@ Finite, one-way movement or preservation of organizational content. The authorit
 
 Two job types:
 
-- **File migration** — SharePoint document library to a Google Shared Drive folder.
+- **File migration** — SharePoint document library to a Google Shared Drive folder, and Google Shared Drive folder to an existing SharePoint document library or folder.
 - **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package, optionally retained as conversation ZIPs in a Google Shared Drive folder.
 
 `CONTEXT.md` is the glossary. It is the authority on what each term means; this README assumes it.
@@ -211,8 +211,7 @@ Use UTF-8 and standard double-quoted CSV cells (double a quote inside a quoted c
 LF and CRLF are accepted. An empty source path is an empty cell. Validation refuses
 with `configuration_invalid` (exit 2), `refusal.detail.row` (one-based mapping/data
 record; 0 means document/header), and `refusal.detail.field`. JSON fields and CSV
-columns are strict: Google sources and every unknown field refuse rather
-than being ignored.
+columns are strict: every unknown field refuses rather than being ignored.
 
 A successful load replaces the entire mapping set in SQLite, not the credential
 settings. Legacy `[[mappings]]` configs move into SQLite on writer open, preserving
@@ -236,6 +235,68 @@ and latest `mappingPass` when planned, and are available before planning as load
 definitions. `--revision N` reviews earlier plans. Mapping view omits the unpaged
 top-level `mappingPasses`; default item view retains it. `--mapping` also filters
 item rows.
+
+### Google Shared Drives to SharePoint
+
+A mapping may instead copy a Google Shared Drive folder into an existing SharePoint
+document library or folder:
+
+```json
+{
+  "id": "archive",
+  "source": {
+    "type": "google_shared_drive",
+    "driveId": "shared-drive-id",
+    "folderId": "folder-id"
+  },
+  "destination": {
+    "type": "sharepoint",
+    "driveId": "sharepoint-library-id",
+    "folderPath": "Imported/2026"
+  }
+}
+```
+
+`source.folderId` is the source folder's stable Drive ID. `destination.folderPath`
+follows the source `folderPath` rules above; `""` selects the library root. The
+library and folder must already exist: Migmate creates no SharePoint sites,
+libraries or folders, so `create`, `members` and `mirror` refuse for these mappings.
+CSV uses the exact eleven-column layout, which appends `source.folderId` and
+`destination.folderPath`; leave `source.folderPath`, `destination.folderId`,
+`destination.create` and `members` empty on reverse rows, and the two added cells
+empty on forward rows:
+
+```csv
+id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members,source.folderId,destination.folderPath
+archive,google_shared_drive,shared-drive-id,,sharepoint,sharepoint-library-id,,,,folder-id,Imported/2026
+```
+
+Sources are read as the [acting Google account](#acting-google-account), which must
+already be a member of every source Shared Drive; Migmate never adds it. Preflight
+checks each source drive and fails `preflight_failed`, naming every drive it cannot
+read in `unreadableSourceDrives`.
+
+SharePoint is written only by a separate destination app. Name its rclone remote as
+`sharepointDestinationRemote` in the job's `[rclone]` table, beside the Google
+`destinationRemote`; `sourceRemote` is needed only for SharePoint-source mappings.
+The rclone config file holds exactly the named remotes. The remote is an `onedrive`
+document-library remote with client credentials and the same strict key allowlist
+as the source remote, minus `root_folder_id`. Its app's token must carry exactly
+`Sites.ReadWrite.All`; any other role set, or the source app's client ID, refuses
+`credential_permissions_invalid`. The SharePoint source app keeps its own read-only
+allowlist, and a job whose mappings all read SharePoint refuses
+`credential_config_invalid` if it names `sharepointDestinationRemote`, so it never holds a
+write credential. `scripts/stage1-prereqs.sh` can write a separate reverse job config.
+
+Each pass addresses the destination as a path under the library pinned by
+`drive_id`, never `root_folder_id`, and runs with `--ignore-size --ignore-checksum`,
+because SharePoint may rewrite PDF, Office and HTML files on upload. Verification
+downloads each source file to compute its quickXorHash and compares it with the hash
+SharePoint stores. A differing PDF, Office or HTML file raises
+`destination_rewrote_file`; any other differing file raises `content_mismatch` (and
+`size_mismatch` when lengths differ). Both carry `sourceHash`, `destinationHash`,
+`sourceSize` and `destinationSize`, and block `close` until accepted by code, so
+rewritten documents can be accepted as a group without accepting corruption.
 
 ### Shared Drive provisioning and recovery
 

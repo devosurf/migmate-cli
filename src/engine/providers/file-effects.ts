@@ -3,6 +3,7 @@ import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { ProviderFault, type CredentialSession } from "./credentials.ts";
 import {
   authenticatedStream,
+  createGraphTransport,
   fetchProvider,
   googleUrl,
   responseJson,
@@ -28,6 +29,7 @@ interface DestinationRoot {
   destFolderId: string;
 }
 interface Mapping {
+  sourceType?: "sharepoint" | "google_shared_drive";
   sourceDriveId: string;
   sourceItemId?: string;
   sourceSiteId?: string;
@@ -198,9 +200,13 @@ function readMappings(config: unknown): Mapping[] {
       throw new ProviderFault("preflight_failed", "A file mapping is invalid.");
     const record = raw as Record<string, unknown>;
     const hasDestination = record.createDrive === undefined || record.destDriveId !== undefined;
-    for (const field of hasDestination
-      ? ["sourceDriveId", "destDriveId", "destFolderId"]
-      : ["sourceDriveId"]) {
+    // A SharePoint destination path resolves to its folder id while the manifest loads.
+    const required = [
+      "sourceDriveId",
+      ...(hasDestination ? ["destDriveId"] : []),
+      ...(hasDestination && typeof record.destFolderPath !== "string" ? ["destFolderId"] : []),
+    ];
+    for (const field of required) {
       if (
         typeof record[field] !== "string" ||
         !record[field] ||
@@ -211,13 +217,12 @@ function readMappings(config: unknown): Mapping[] {
     }
     return {
       sourceDriveId: String(record.sourceDriveId),
-      ...(typeof record.sourceItemId === "string" ? { sourceItemId: record.sourceItemId } : {}),
-      ...(hasDestination
-        ? {
-            destDriveId: String(record.destDriveId),
-            destFolderId: String(record.destFolderId),
-          }
+      ...(record.sourceType === "google_shared_drive"
+        ? { sourceType: "google_shared_drive" as const }
         : {}),
+      ...(typeof record.sourceItemId === "string" ? { sourceItemId: record.sourceItemId } : {}),
+      ...(typeof record.destDriveId === "string" ? { destDriveId: record.destDriveId } : {}),
+      ...(typeof record.destFolderId === "string" ? { destFolderId: record.destFolderId } : {}),
       ...(typeof record.sourceSiteId === "string" ? { sourceSiteId: record.sourceSiteId } : {}),
     };
   });
@@ -229,6 +234,7 @@ export class FileEffects {
   readonly #destinationRoots: DestinationRoot[];
   readonly #session: CredentialSession;
   readonly #graph: GraphTransport;
+  readonly #graphDestination: GraphTransport;
   readonly #worker: SourceWorker;
   readonly #sourceDrive = new Map<string, string>();
   readonly #destDrive = new Map<string, string>();
@@ -250,6 +256,12 @@ export class FileEffects {
         );
     this.#session = input.session;
     this.#graph = input.graph;
+    // The write app is paced and authenticated as itself, never as the read-only source app.
+    this.#graphDestination = createGraphTransport({
+      ...input.session,
+      graphToken: () => input.session.graphDestinationToken(),
+      evidence: async () => ({ graph: (await input.session.evidence()).graphDestination }),
+    });
     this.#worker = input.worker;
     for (const mapping of this.mappings) {
       if (mapping.sourceItemId) this.#sourceDrive.set(mapping.sourceItemId, mapping.sourceDriveId);
@@ -296,6 +308,55 @@ export class FileEffects {
         contentType: raw.file?.mimeType ?? null,
         retentionLabel: raw.retentionLabel ?? null,
       },
+    };
+  }
+
+  #googleSource(raw: GoogleFile, driveId: string): SourceEntry {
+    if (raw.driveId !== driveId)
+      throw new ProviderFault("unsupported_route", "The source is not in the exact Shared Drive.");
+    this.#sourceDrive.set(raw.id, driveId);
+    const kind =
+      raw.mimeType === FOLDER_MIME
+        ? "folder"
+        : raw.mimeType === "application/vnd.google-apps.shortcut"
+          ? "reference"
+          : raw.mimeType.startsWith("application/vnd.google-apps.") ||
+              raw.capabilities?.canDownload === false
+            ? "undownloadable"
+            : "file";
+    return {
+      id: raw.id,
+      driveId,
+      parentId: raw.parents?.[0] ?? null,
+      name: raw.name,
+      kind,
+      size: raw.size === undefined ? null : Number(raw.size),
+      etag: raw.headRevisionId ?? null,
+      createdAt: raw.createdTime,
+      modifiedAt: raw.modifiedTime,
+      mimeType: raw.mimeType,
+      identity: `${driveId}:${raw.id}`,
+      downloadable: kind === "file",
+    };
+  }
+
+  #sharepointDestination(raw: GraphItem, driveId: string): DestinationEntry {
+    if (raw.parentReference?.driveId && raw.parentReference.driveId !== driveId)
+      throw new ProviderFault("unsupported_route", "The destination belongs to another library.");
+    this.#destDrive.set(raw.id, driveId);
+    return {
+      id: raw.id,
+      driveId,
+      parentId: raw.parentReference?.id ?? null,
+      name: raw.name,
+      kind: raw.folder ? "folder" : raw.file ? "file" : "document",
+      size: raw.size ?? null,
+      revision: raw.cTag ?? raw.eTag ?? null,
+      createdAt: raw.createdDateTime ?? "",
+      modifiedAt: raw.lastModifiedDateTime ?? "",
+      mimeType: raw.file?.mimeType ?? null,
+      reportedChecksum: raw.file?.hashes?.quickXorHash ?? null,
+      provenance: null,
     };
   }
 
@@ -378,6 +439,12 @@ export class FileEffects {
         "The source drive is outside the explicit mappings.",
       );
     try {
+      if (
+        this.mappings.some(
+          (m) => m.sourceDriveId === input.driveId && m.sourceType === "google_shared_drive",
+        )
+      )
+        return this.#googleSource((await this.#getRaw(input.itemId)).file, input.driveId);
       const item = await this.#graph.request<GraphItem>(
         `/v1.0/drives/${encodeURIComponent(input.driveId)}/items/${encodeURIComponent(input.itemId)}?$expand=listItem($expand=fields)`,
       );
@@ -431,6 +498,20 @@ export class FileEffects {
         "The source path does not address the source item.",
       );
     return path;
+  }
+
+  async readSharedDrive(driveId: string): Promise<SharedDrive | null> {
+    try {
+      return await responseJson<SharedDrive>(
+        await this.#google(
+          `/drive/v3/drives/${encodeURIComponent(driveId)}?fields=id,name,createdTime`,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof HttpProviderFault && (error.status === 403 || error.status === 404))
+        return null;
+      throw error;
+    }
   }
 
   async googleAbout(): Promise<GoogleAbout> {
@@ -537,15 +618,66 @@ export class FileEffects {
     );
   }
 
-  async resolveFilePass(input: {
-    sourceDriveId: string;
-    sourceItemId: string;
-    destDriveId: string;
-    destFolderId: string;
-  }) {
+  async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
     const source = await this.resolveSourceRoot(input);
     if (!source || source.kind !== "folder")
       throw new ProviderFault("unsupported_route", "The source root is not an ordinary folder.");
+    if (
+      this.mappings.some(
+        (m) => m.sourceDriveId === input.sourceDriveId && m.sourceType === "google_shared_drive",
+      )
+    ) {
+      const destination = await this.resolveDestinationFolder(input);
+      if (!destination || destination.kind !== "folder")
+        throw new ProviderFault(
+          "unsupported_route",
+          "The destination root is not an ordinary folder.",
+        );
+      const root = await this.#graphDestination.request<GraphItem>(
+        `/v1.0/drives/${encodeURIComponent(input.destDriveId)}/root?$select=id`,
+      );
+      let path = "";
+      if (root.id !== destination.id) {
+        const raw = await this.#graphDestination.request<GraphItem>(
+          `/v1.0/drives/${encodeURIComponent(input.destDriveId)}/items/${encodeURIComponent(destination.id)}?$select=id,name,eTag,parentReference`,
+        );
+        const reference = raw.parentReference?.path;
+        if (typeof reference !== "string" || !reference.includes("/root:"))
+          throw new ProviderFault(
+            "unsupported_route",
+            "The destination exposes no library-relative path.",
+          );
+        const parts = [
+          ...reference
+            .slice(reference.indexOf("/root:") + 6)
+            .split("/")
+            .filter(Boolean)
+            .map(decodeURIComponent),
+          raw.name,
+        ];
+        if (
+          parts.some((part) => !part || part === "." || part === ".." || /[\/\\\u0000]/u.test(part))
+        )
+          throw new ProviderFault("unsupported_route", "The destination path is not addressable.");
+        path = parts.join("/");
+        const bound = await this.#graphDestination.request<GraphItem>(
+          `/v1.0/drives/${encodeURIComponent(input.destDriveId)}/root:/${parts.map(encodeURIComponent).join("/")}:/?$select=id`,
+        );
+        if (bound.id !== destination.id)
+          throw new ProviderFault("unsupported_route", "The destination path changed identity.");
+      }
+      const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+      return {
+        source: {
+          fs: `${this.#session.destinationRemote},team_drive=${quote(input.sourceDriveId)},root_folder_id=${quote(input.sourceItemId)}${this.#session.delegatedSubject ? `,impersonate=${quote(this.#session.delegatedSubject)}` : ""}:`,
+          kind: "google_drive" as const,
+        },
+        destination: {
+          fs: `${this.#session.sharepointDestinationRemote},drive_id=${quote(input.destDriveId)},encoding=Slash:${path}`,
+          kind: "sharepoint" as const,
+        },
+      };
+    }
     const root = await this.#graph.request<GraphItem>(
       `/v1.0/drives/${encodeURIComponent(input.sourceDriveId)}/root?$select=id`,
     );
@@ -587,6 +719,38 @@ export class FileEffects {
     }
   }
 
+  async resolveDestinationPath(input: {
+    driveId: string;
+    folderPath: string;
+  }): Promise<DestinationEntry | null> {
+    if (
+      !this.mappings.some(
+        (m) => m.sourceType === "google_shared_drive" && m.destDriveId === input.driveId,
+      )
+    )
+      throw new ProviderFault("unsupported_route", "Destination is outside the explicit mappings.");
+    const suffix = input.folderPath
+      ? `root:/${input.folderPath.split("/").map(encodeURIComponent).join("/")}`
+      : "root";
+    try {
+      const raw = await this.#graphDestination.request<GraphItem>(
+        `/v1.0/drives/${encodeURIComponent(input.driveId)}/${suffix}`,
+      );
+      const folder = this.#sharepointDestination(raw, input.driveId);
+      if (
+        folder.kind === "folder" &&
+        !this.#destinationRoots.some(
+          (root) => root.destDriveId === input.driveId && root.destFolderId === folder.id,
+        )
+      )
+        this.#destinationRoots.push({ destDriveId: input.driveId, destFolderId: folder.id });
+      return folder;
+    } catch (error) {
+      if (error instanceof HttpProviderFault && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   async resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;
@@ -602,6 +766,39 @@ export class FileEffects {
         "The source parent has not been resolved by stable ID.",
       );
     const items: SourceEntry[] = [];
+    if (
+      this.mappings.some(
+        (m) => m.sourceDriveId === driveId && m.sourceType === "google_shared_drive",
+      )
+    ) {
+      for await (const files of cursorPages(
+        null,
+        async (token) => {
+          const query = new URLSearchParams({
+            corpora: "drive",
+            driveId,
+            supportsAllDrives: "true",
+            includeItemsFromAllDrives: "true",
+            q: `'${sourceItemId.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}' in parents and trashed = false`,
+            pageSize: "1000",
+            fields: `nextPageToken,incompleteSearch,files(${FILE_FIELDS})`,
+            ...(token ? { pageToken: token } : {}),
+          });
+          const page = await responseJson<{
+            files: GoogleFile[];
+            nextPageToken?: string;
+            incompleteSearch?: boolean;
+          }>(await this.#google(`/drive/v3/files?${query}`));
+          if (page.incompleteSearch)
+            throw new ProviderFault("source_read_failed", "Source listing was incomplete.");
+          return { value: page.files, next: page.nextPageToken };
+        },
+        () => new ProviderFault("source_read_failed", "Source paging repeated a cursor."),
+      )) {
+        for (const file of files) items.push(this.#googleSource(file, driveId));
+      }
+      return items;
+    }
     const initial = `/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(sourceItemId)}/children?$top=200&$expand=listItem($expand=fields)`;
     for await (const page of cursorPages(
       initial,
@@ -623,6 +820,27 @@ export class FileEffects {
     if (!driveId)
       throw new ProviderFault("source_read_failed", "The source identity has not been resolved.");
     const before = await this.readSourceItem({ driveId, itemId: sourceItemId });
+    if (
+      this.mappings.some(
+        (m) => m.sourceDriveId === driveId && m.sourceType === "google_shared_drive",
+      )
+    ) {
+      if (!before?.downloadable || !before.etag)
+        throw new ProviderFault("source_read_failed", "Source is not a stable downloadable file.");
+      yield* authenticatedStream(
+        googleUrl(
+          `/drive/v3/files/${encodeURIComponent(sourceItemId)}?alt=media&supportsAllDrives=true`,
+        ),
+        await this.#session.googleToken(),
+      );
+      const after = await this.readSourceItem({ driveId, itemId: sourceItemId });
+      if (!after || after.etag !== before.etag || after.size !== before.size)
+        throw new ProviderFault(
+          "source_changed_during_transfer",
+          "The source changed during its content read.",
+        );
+      return;
+    }
     if (!before?.downloadable || !before.etag || !before.parentId || !this.#session.sourceRemote)
       throw new ProviderFault(
         "source_read_failed",
@@ -655,6 +873,16 @@ export class FileEffects {
         "The destination drive is outside the configured roots.",
       );
     try {
+      if (
+        this.mappings.some(
+          (m) => m.destDriveId === input.driveId && m.sourceType === "google_shared_drive",
+        )
+      ) {
+        const raw = await this.#graphDestination.request<GraphItem>(
+          `/v1.0/drives/${encodeURIComponent(input.driveId)}/items/${encodeURIComponent(input.objectId)}`,
+        );
+        return this.#sharepointDestination(raw, input.driveId);
+      }
       const { file } = await this.#getRaw(input.objectId);
       if (file.driveId !== input.driveId)
         throw new ProviderFault(
@@ -678,6 +906,25 @@ export class FileEffects {
 
   async listDestinationChildren(destFolderId: string): Promise<DestinationEntry[]> {
     let driveId = this.#destDrive.get(destFolderId);
+    if (
+      driveId &&
+      this.mappings.some((m) => m.destDriveId === driveId && m.sourceType === "google_shared_drive")
+    ) {
+      const items: DestinationEntry[] = [];
+      for await (const page of cursorPages(
+        `/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(destFolderId)}/children?$top=200`,
+        async (cursor) => {
+          const page = await this.#graphDestination.request<{
+            value: GraphItem[];
+            "@odata.nextLink"?: string;
+          }>(cursor!);
+          return { value: page.value, next: page["@odata.nextLink"] };
+        },
+        () => new ProviderFault("provider_request_failed", "Destination paging repeated a cursor."),
+      ))
+        for (const raw of page) items.push(this.#sharepointDestination(raw, driveId));
+      return items;
+    }
     if (!driveId) {
       const parent = await this.#getRaw(destFolderId);
       driveId = parent.file.driveId;
@@ -887,6 +1134,47 @@ export class FileEffects {
         ? `provider.roots.${mapping.sourceDriveId}.${mapping.sourceItemId}`
         : `provider.roots.${root.destDriveId}.${root.destFolderId}`;
       const title = mapping ? "Exact source and destination access" : "Exact destination access";
+      if (mapping?.sourceType === "google_shared_drive") {
+        try {
+          if (!(await this.readSharedDrive(mapping.sourceDriveId)))
+            throw new ProviderFault(
+              "preflight_failed",
+              "The acting account cannot read this source Shared Drive.",
+              { unreadableSourceDrives: [mapping.sourceDriveId] },
+            );
+          if (!mapping.sourceItemId || !root.destDriveId || !root.destFolderId)
+            throw new ProviderFault(
+              "preflight_failed",
+              "Load exact mapping roots before planning.",
+            );
+          const source = await this.resolveSourceRoot({
+            sourceDriveId: mapping.sourceDriveId,
+            sourceItemId: mapping.sourceItemId,
+          });
+          if (!source || source.kind !== "folder")
+            throw new ProviderFault("preflight_failed", "The source folder is inaccessible.");
+          await this.listSourceChildren(source.id);
+          const drive = await this.#graphDestination.request<{ id: string; driveType: string }>(
+            `/v1.0/drives/${encodeURIComponent(root.destDriveId)}`,
+          );
+          if (drive.id !== root.destDriveId || drive.driveType !== "documentLibrary")
+            throw new ProviderFault(
+              "unsupported_route",
+              "The destination is not the exact SharePoint document library.",
+            );
+          const destination = await this.resolveDestinationFolder({
+            destDriveId: root.destDriveId,
+            destFolderId: root.destFolderId,
+          });
+          if (!destination || destination.kind !== "folder")
+            throw new ProviderFault("preflight_failed", "The destination folder is inaccessible.");
+          await this.listDestinationChildren(destination.id);
+          yield { id: checkId, title, status: "pass", evidence };
+        } catch (error) {
+          yield failedCheck(checkId, title, error, evidence);
+        }
+        continue;
+      }
       try {
         let sourceEvidence = {};
         if (mapping) {

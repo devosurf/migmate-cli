@@ -176,6 +176,75 @@ test("accepts the site-scoped grant and refuses a tenant-wide one", async (t) =>
   }
 });
 
+test("SharePoint destination credentials accept only Sites.ReadWrite.All, never as a source", async (t) => {
+  for (const roles of [
+    ["Sites.ReadWrite.All"],
+    ["Sites.Selected"],
+    ["Sites.ReadWrite.All", "Sites.Read.All"],
+    ["Files.ReadWrite.All"],
+  ]) {
+    const { config, jobDirectory } = await operatorFiles(
+      t,
+      source.filter((line) => !line.startsWith("root_folder_id")).join("\n"),
+    );
+    const reverse = {
+      ...config,
+      mappings: [{ ...mapping, sourceType: "google_shared_drive" }],
+      rclone: {
+        config: config.rclone.config,
+        destinationRemote: "google-destination",
+        sharepointDestinationRemote: "sharepoint-source",
+      },
+    };
+    t.mock.method(globalThis, "fetch", async () => Response.json(graphToken(roles)));
+    const session = await createCredentialSession({
+      jobType: "file_migration",
+      config: reverse,
+      jobDirectory,
+    });
+    t.after(() => session.dispose());
+    if (roles.length === 1 && roles[0] === "Sites.ReadWrite.All") {
+      assert.equal(await session.graphDestinationToken(), graphToken(roles).access_token);
+      await assert.rejects(session.graphToken(), { code: "credential_graph_unavailable" });
+    } else
+      await assert.rejects(session.graphDestinationToken(), {
+        code: "credential_permissions_invalid",
+      });
+  }
+});
+
+test("only jobs with Google-source mappings may hold the SharePoint write credential", async (t) => {
+  const { config, jobDirectory } = await operatorFiles(t, source.join("\n"));
+  await appendFile(
+    config.rclone.config.path,
+    `\n[sharepoint-destination]\ntype = onedrive\nclient_id = 33333333-3333-3333-3333-333333333333\nclient_secret = ${entraSecret}\nclient_credentials = true\ntenant = ${tenantId}\ndrive_type = documentLibrary\ndrive_id = b!destination-library\n`,
+  );
+  const rclone = { ...config.rclone, sharepointDestinationRemote: "sharepoint-destination" };
+  t.mock.method(globalThis, "fetch", async () => Response.json(graphToken(["Sites.Selected"])));
+  await assert.rejects(
+    createCredentialSession({
+      jobType: "file_migration",
+      config: { ...config, rclone },
+      jobDirectory,
+    }),
+    { code: "credential_config_invalid" },
+  );
+  const mixed = await createCredentialSession({
+    jobType: "file_migration",
+    config: {
+      ...config,
+      rclone,
+      mappings: [
+        mapping,
+        { ...mapping, id: "reverse", sourceType: "google_shared_drive", sourceDriveId: "0Asource" },
+      ],
+    },
+    jobDirectory,
+  });
+  t.after(() => mixed.dispose());
+  assert.equal(mixed.sharepointDestinationRemote, "sharepoint-destination");
+});
+
 test("file impersonation requests a delegated subject with only the Drive scope", async (t) => {
   const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
   t.mock.method(globalThis, "fetch", async (_target: unknown, init?: RequestInit) => {

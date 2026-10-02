@@ -5,10 +5,14 @@ import { ProviderFault } from "./providers/credentials.ts";
 
 export interface ManifestMapping {
   id: string;
-  source: { type: "sharepoint"; driveId: string; folderPath: string };
-  destination: { type: "google_shared_drive" } & (
-    { driveId: string; folderId: string } | { create: string }
-  );
+  source:
+    | { type: "sharepoint"; driveId: string; folderPath: string }
+    | { type: "google_shared_drive"; driveId: string; folderId: string };
+  destination:
+    | ({ type: "google_shared_drive" } & (
+        { driveId: string; folderId: string } | { create: string }
+      ))
+    | { type: "sharepoint"; driveId: string; folderPath: string };
   members?: DriveMember[];
 }
 export interface LoadedManifest {
@@ -38,6 +42,8 @@ const columns = [
   "destination.folderId",
   "destination.create",
   "members",
+  "source.folderId",
+  "destination.folderPath",
 ];
 function csv(text: string): unknown {
   const rows: string[][] = [];
@@ -75,7 +81,8 @@ function csv(text: string): unknown {
   const header = rows.shift();
   if (
     JSON.stringify(header) !== JSON.stringify(columns) &&
-    JSON.stringify(header) !== JSON.stringify(columns.slice(0, 7))
+    JSON.stringify(header) !== JSON.stringify(columns.slice(0, 7)) &&
+    JSON.stringify(header) !== JSON.stringify(columns.slice(0, 9))
   )
     throw new ManifestError(0, "header");
   return {
@@ -92,12 +99,20 @@ function csv(text: string): unknown {
       }
       return {
         id: r[0],
-        source: { type: r[1], driveId: r[2], folderPath: r[3] },
+        source:
+          r[1] === "google_shared_drive"
+            ? { type: r[1], driveId: r[2], folderId: r[9], ...(r[3] ? { folderPath: r[3] } : {}) }
+            : { type: r[1], driveId: r[2], folderPath: r[3], ...(r[9] ? { folderId: r[9] } : {}) },
         destination: {
           type: r[4],
           ...(r[7] ? { create: r[7] } : {}),
           ...(r[5] || !r[7] ? { driveId: r[5] } : {}),
-          ...(r[6] || !r[7] ? { folderId: r[6] } : {}),
+          ...(r[4] === "sharepoint"
+            ? { folderPath: r[10], ...(r[6] ? { folderId: r[6] } : {}) }
+            : {
+                ...(r[6] || !r[7] ? { folderId: r[6] } : {}),
+                ...(r[10] ? { folderPath: r[10] } : {}),
+              }),
         },
         ...(members !== undefined ? { members } : {}),
       };
@@ -167,54 +182,78 @@ export function parseManifest(
       if (!(m.destination && typeof m.destination === "object" && "create" in m.destination))
         throw new ManifestError(row, "members", "Members require a drive to create");
     }
-    const s = object(m.source, row, "source", ["type", "driveId", "folderPath"]);
-    const d = object(m.destination, row, "destination", ["type", "driveId", "folderId", "create"]);
-    if (d.create !== undefined && (d.driveId !== undefined || d.folderId !== undefined))
-      throw new ManifestError(
-        row,
-        "destination.create",
-        "Choose an existing destination or create",
-      );
-    if (s.type !== "sharepoint") throw new ManifestError(row, "source.type");
-    if (d.type !== "google_shared_drive") throw new ManifestError(row, "destination.type");
-    for (const [value, field] of [
-      [s.driveId, "source.driveId"],
-      ...(d.create === undefined
-        ? [
-            [d.driveId, "destination.driveId"] as const,
-            [d.folderId, "destination.folderId"] as const,
-          ]
-        : []),
-    ] as const) {
+    const s = object(m.source, row, "source", ["type", "driveId", "folderPath", "folderId"]);
+    const d = object(m.destination, row, "destination", [
+      "type",
+      "driveId",
+      "folderId",
+      "folderPath",
+      "create",
+    ]);
+    if (s.type !== "sharepoint" && s.type !== "google_shared_drive")
+      throw new ManifestError(row, "source.type");
+    if (d.type !== (s.type === "sharepoint" ? "google_shared_drive" : "sharepoint"))
+      throw new ManifestError(row, "destination.type");
+    function stable(value: unknown, field: string): string {
       if (
         typeof value !== "string" ||
         !/^[A-Za-z0-9_!.,@-]{1,512}$/u.test(value) ||
         [".", "..", "root"].includes(value)
       )
         throw new ManifestError(row, field);
+      return value;
     }
-    const path = text(s.folderPath, row, "source.folderPath", true);
-    if (
-      path.startsWith("/") ||
-      path.endsWith("/") ||
-      path.includes("\\") ||
-      (path && path.split("/").some((p) => !p || p === "." || p === ".."))
-    )
-      throw new ManifestError(row, "source.folderPath");
+    function path(value: unknown, field: string): string {
+      const result = text(value, row, field, true);
+      if (
+        result.startsWith("/") ||
+        result.endsWith("/") ||
+        result.includes("\\") ||
+        (result && result.split("/").some((p) => !p || p === "." || p === ".."))
+      )
+        throw new ManifestError(row, field);
+      return result;
+    }
+    if (s.type === "google_shared_drive") {
+      if (s.folderPath !== undefined) throw new ManifestError(row, "source.folderPath");
+      if (d.create !== undefined) throw new ManifestError(row, "destination.create");
+      if (d.folderId !== undefined) throw new ManifestError(row, "destination.folderId");
+      return {
+        id,
+        source: {
+          type: s.type,
+          driveId: stable(s.driveId, "source.driveId"),
+          folderId: stable(s.folderId, "source.folderId"),
+        },
+        destination: {
+          type: "sharepoint",
+          driveId: stable(d.driveId, "destination.driveId"),
+          folderPath: path(d.folderPath, "destination.folderPath"),
+        },
+      };
+    }
+    if (s.folderId !== undefined) throw new ManifestError(row, "source.folderId");
+    if (d.folderPath !== undefined) throw new ManifestError(row, "destination.folderPath");
+    if (d.create !== undefined && (d.driveId !== undefined || d.folderId !== undefined))
+      throw new ManifestError(
+        row,
+        "destination.create",
+        "Choose an existing destination or create",
+      );
     return {
       id,
       source: {
         type: "sharepoint",
-        driveId: text(s.driveId, row, "source.driveId"),
-        folderPath: path,
+        driveId: stable(s.driveId, "source.driveId"),
+        folderPath: path(s.folderPath, "source.folderPath"),
       },
       destination:
         d.create !== undefined
           ? { type: "google_shared_drive", create: text(d.create, row, "destination.create") }
           : {
               type: "google_shared_drive",
-              driveId: text(d.driveId, row, "destination.driveId"),
-              folderId: text(d.folderId, row, "destination.folderId"),
+              driveId: stable(d.driveId, "destination.driveId"),
+              folderId: stable(d.folderId, "destination.folderId"),
             },
       ...(d.create !== undefined ? { members } : {}),
     };

@@ -38,7 +38,7 @@ To provision, use `destination: { type: "google_shared_drive", create: "Drive na
 and optional mapping-level `members: [{ email, type, role }]`. Read README's
 **Mapping manifests** for member roles and the seven-/nine-column CSV layouts.
 `folderPath` is literal drive-relative text (`""` for the root), not URL-encoded.
-Extra fields, Google sources, and `anyone`/`domain` members refuse.
+Extra fields and `anyone`/`domain` members refuse.
 On `configuration_invalid`, fix `refusal.detail.row` and `.field`; row 0 means the
 document/header, other rows are one-based mapping records. Equal or nested source
 roots within one drive, or destination roots within one Shared Drive, overlap and refuse.
@@ -51,6 +51,20 @@ with `--limit`, `--cursor`, `--search`, or `--mapping ID`; counts cover all matc
 In mapping view, read each row's `mapping` and `mappingPass`, not top-level
 `mappingPasses` (omitted to keep the page bounded). Read back the new plan digest,
 not the old approval's digest.
+
+For Google Shared Drives into SharePoint, a mapping uses
+`source: { type: "google_shared_drive", driveId, folderId }` and
+`destination: { type: "sharepoint", driveId, folderPath }`; the library and folder must
+already exist, so `create`, `members` and mirror refuse. CSV uses README's eleven-column
+layout. The job's `[rclone]` needs `sharepointDestinationRemote`, a separate SharePoint
+app holding exactly `Sites.ReadWrite.All` (anything else refuses
+`credential_permissions_invalid`); `sourceRemote` is only for SharePoint sources.
+Sources are read as the acting account. On `preflight_failed` with
+`unreadableSourceDrives`, surface those drive IDs: a human must add the acting
+account as a member; Migmate never does. Verification compares quickXorHash computed
+from the source with SharePoint's. Surface `destination_rewrote_file` (PDF, Office
+or HTML that SharePoint rewrote, with both hashes and sizes) separately from
+`content_mismatch`, which is genuine corruption; let a human accept each code.
 
 Before approving provisioning, read back every planned drive name, member and role.
 `doctor` requires `about.canCreateDrives` for these manifests. Creation and member

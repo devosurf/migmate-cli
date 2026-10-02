@@ -213,6 +213,12 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async resolveSourceFolder(value) {
       return (await files()).resolveSourceFolder(value);
     },
+    async resolveDestinationPath(value) {
+      return (await files()).resolveDestinationPath(value);
+    },
+    async readSharedDrive(driveId) {
+      return (await files()).readSharedDrive(driveId);
+    },
     async resolveSourceRoot(value) {
       return (await files()).resolveSourceRoot(value);
     },

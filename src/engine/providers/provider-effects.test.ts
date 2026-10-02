@@ -21,6 +21,9 @@ const session: CredentialSession = {
   async graphToken() {
     return "secret-bearer-canary";
   },
+  async graphDestinationToken() {
+    return "secret-destination-canary";
+  },
   async googleToken() {
     return "secret-google-canary";
   },
@@ -106,6 +109,84 @@ test("delegated Google copies carry a per-mapping impersonation override", async
     'destination,team_drive="shared-drive",root_folder_id="destination-root",impersonate="files@example.com":',
   );
   assert.equal(pass.source.fs, 'source,drive_id="source-drive",root_folder_id=,encoding=Slash:');
+});
+
+test("reverse mappings read Google bytes as the actor and address SharePoint destinations by path", async (t) => {
+  const reverse = { ...mapping, sourceType: "google_shared_drive" as const };
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const auth = new Headers(init?.headers).get("Authorization");
+    if (url.hostname === "www.googleapis.com") {
+      assert.equal(auth, "Bearer secret-google-canary");
+      if (url.searchParams.get("alt") === "media") return new Response("source bytes");
+      return Response.json({
+        id: url.pathname.endsWith("source-root") ? "source-root" : "source-file",
+        driveId: "source-drive",
+        name: "source",
+        parents: ["source-drive"],
+        mimeType: url.pathname.endsWith("source-root")
+          ? "application/vnd.google-apps.folder"
+          : "application/octet-stream",
+        size: "12",
+        headRevisionId: "revision",
+        createdTime: "",
+        modifiedTime: "",
+      });
+    }
+    assert.equal(auth, "Bearer secret-destination-canary");
+    if (url.pathname.endsWith("/root")) return Response.json({ id: "library-root" });
+    return Response.json({
+      id: "destination-root",
+      name: "Sub #folder",
+      folder: {},
+      eTag: "etag",
+      parentReference: {
+        id: "library-root",
+        driveId: "shared-drive",
+        path: "/drives/shared-drive/root:/Parent%20folder",
+      },
+    });
+  });
+  const files = new FileEffects({
+    config: { mappings: [reverse] },
+    // A reverse-only job holds no SharePoint source app: only the destination app may reach Graph.
+    session: {
+      ...session,
+      sourceRemote: null,
+      delegatedSubject: "files@example.com",
+      sharepointDestinationRemote: "sp-write",
+      async graphToken() {
+        throw new Error("Reverse jobs must not use the SharePoint source app");
+      },
+      async evidence() {
+        return {
+          graphDestination: {
+            tenantId: "tenant",
+            clientId: "writer",
+            grantedPermissions: ["Sites.ReadWrite.All"],
+          },
+        };
+      },
+    },
+    graph,
+    worker: {
+      async *read() {
+        throw new Error("Google must not use the SharePoint reader");
+      },
+    },
+  });
+  const pass = await files.resolveFilePass(reverse);
+  assert.equal(
+    pass.source.fs,
+    'destination,team_drive="source-drive",root_folder_id="source-root",impersonate="files@example.com":',
+  );
+  assert.equal(
+    pass.destination.fs,
+    'sp-write,drive_id="shared-drive",encoding=Slash:Parent folder/Sub #folder',
+  );
+  const file = await files.readSourceItem({ driveId: "source-drive", itemId: "source-file" });
+  assert.equal(file?.driveId, "source-drive");
+  assert.equal((await bytes(files.openSourceContent("source-file"))).toString(), "source bytes");
 });
 
 test("Google about proves the acting email and exposes drive creation capability", async (t) => {

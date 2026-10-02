@@ -241,6 +241,63 @@ it(
 );
 
 it(
+  "passes into SharePoint skip size and checksum, comparing modification times only",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-sp-dest-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(source);
+      await mkdir(destination);
+      // SharePoint rewrites Office/PDF/HTML bytes, so its size and hash never match the
+      // source: a pass into SharePoint must not re-copy such a file on every repeat.
+      await writeFile(join(source, "report.docx"), "source bytes");
+      await writeFile(join(destination, "report.docx"), "rewritten by SharePoint");
+      const modified = new Date("2020-01-02T03:04:05Z");
+      for (const root of [source, destination])
+        await utimes(join(root, "report.docx"), modified, modified);
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: source, kind: "google_drive" as const },
+        mode: "copy" as const,
+        transfers: 1,
+      };
+      const intoSharePoint = await supervisor.startCopyPass({
+        ...input,
+        destination: { fs: destination, kind: "sharepoint" },
+      });
+      assert.deepEqual(
+        await finish(supervisor, { socketPath: worker.socketPath, pass: intoSharePoint }),
+        { state: "completed", error: null },
+      );
+      assert.equal(
+        await readFile(join(destination, "report.docx"), "utf8"),
+        "rewritten by SharePoint",
+      );
+      const elsewhere = await supervisor.startCopyPass({
+        ...input,
+        destination: { fs: destination, kind: "local" },
+      });
+      assert.deepEqual(
+        await finish(supervisor, { socketPath: worker.socketPath, pass: elsewhere }),
+        { state: "completed", error: null },
+      );
+      assert.equal(await readFile(join(destination, "report.docx"), "utf8"), "source bytes");
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
   "lists relative paths, sizes and requested hashes, downloading hashes absent from the remote",
   { skip: !enabled },
   async () => {

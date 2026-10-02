@@ -83,6 +83,144 @@ function hash(content: string | Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+it("copies a Shared Drive folder into SharePoint and verifies quickXorHash", async (t) => {
+  const h = await harness(t, fixture(), { mappings: [] });
+  value(
+    value(
+      await h.engine.withWriter(h.ref, (writer) =>
+        writer.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "reverse",
+                source: {
+                  type: "google_shared_drive",
+                  driveId: "source-drive",
+                  folderId: "source-root",
+                },
+                destination: { type: "sharepoint", driveId: "destination-drive", folderPath: "" },
+              },
+            ],
+          }),
+        }),
+      ),
+    ),
+  );
+  await approve(h);
+  await execute(h);
+  assert.equal(
+    value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify()))).clean,
+    true,
+  );
+  // SharePoint's rewrite of an Office file changes its length as well as its bytes.
+  const office = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
+  h.port.mutateDestinationContent(office.id, new Uint8Array([1, 1, 1, 1, 1, 1]));
+  const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+  assert.deepEqual(
+    verified.findings.map((entry) => entry.code),
+    ["destination_rewrote_file"],
+  );
+  const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
+  const json = report.artifacts.find((artifact) => artifact.name === "report.json")!;
+  const mismatch = JSON.parse(await readFile(json.path, "utf8")).findings[0];
+  assert.deepEqual(mismatch.evidence, {
+    path: "report.docx",
+    sourceSize: 4,
+    destinationSize: 6,
+    hashType: "quickxor",
+    sourceHash: "00f8470100000000000000000400000000000000",
+    destinationHash: "0108400002108000000000000600000000000000",
+  });
+});
+
+it("preflight names every unreadable source Shared Drive before planning", async (t) => {
+  const input = fixture();
+  input.unreadableSourceDrives = ["source-drive", "second-drive"];
+  input.sourceItems.push({
+    id: "second-root",
+    driveId: "second-drive",
+    parentId: null,
+    name: "second",
+    kind: "folder",
+  });
+  input.destinationItems.push({
+    id: "second-destination",
+    driveId: "second-library",
+    parentId: null,
+    name: "second",
+    kind: "folder",
+  });
+  const h = await harness(t, input, { mappings: [] });
+  value(
+    value(
+      await h.engine.withWriter(h.ref, (writer) =>
+        writer.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "first",
+                source: {
+                  type: "google_shared_drive",
+                  driveId: "source-drive",
+                  folderId: "source-root",
+                },
+                destination: { type: "sharepoint", driveId: "destination-drive", folderPath: "" },
+              },
+              {
+                id: "second",
+                source: {
+                  type: "google_shared_drive",
+                  driveId: "second-drive",
+                  folderId: "second-root",
+                },
+                destination: { type: "sharepoint", driveId: "second-library", folderPath: "" },
+              },
+            ],
+          }),
+        }),
+      ),
+    ),
+  );
+  const result = value(await h.engine.withWriter(h.ref, (writer) => writer.plan()));
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("Unreadable source drives must refuse");
+  assert.equal(result.refusal.code, "preflight_failed");
+  assert.match(JSON.stringify(result.refusal.detail), /source-drive/);
+  assert.match(JSON.stringify(result.refusal.detail), /second-drive/);
+});
+
+it("keeps corrupted plain SharePoint files separate from rewrite findings", async (t) => {
+  const input = fixture();
+  input.sourceItems.push({
+    id: "plain",
+    parentId: "source-root",
+    name: "plain.txt",
+    kind: "file",
+    content: "original",
+  });
+  const h = await harness(t, input, {
+    mappings: config.mappings.map((mapping) => ({ ...mapping, sourceType: "google_shared_drive" })),
+  });
+  await approve(h);
+  await execute(h);
+  const plain = h.port.snapshotDestination().find((entry) => entry.path === "plain.txt")!;
+  h.port.mutateDestinationContent(plain.id, "corrupt!");
+  h.port.blockDestinationStream(plain.id);
+  const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
+  assert.deepEqual(
+    verified.findings.map((entry) => entry.code),
+    ["content_mismatch"],
+  );
+  const closed = value(await h.engine.withWriter(h.ref, (writer) => writer.close()));
+  assert.equal(closed.ok, false);
+  if (closed.ok) throw new Error("Corruption must block close");
+  assert.equal(closed.refusal.code, "verification_unaccepted");
+});
+
 function multiMapping(ids = ["a", "b"]) {
   const input = fileFixture(
     ids.flatMap((id, index) => [

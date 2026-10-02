@@ -136,6 +136,7 @@ export interface FakeFileMigrationFixture {
   effects?: FakeEffectRule[];
   applicationIdentity?: string;
   googleAbout?: GoogleAbout | Error;
+  unreadableSourceDrives?: string[];
   now?: () => Date;
   checks?: CheckResult[];
   archive?: FakeArchiveFixture;
@@ -311,6 +312,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly checks: CheckResult[];
   private applicationId: string;
   private readonly about: GoogleAbout | Error;
+  private readonly unreadableSourceDrives: string[];
   private readonly now: () => Date;
   private readonly sharedDrives = new Map<string, SharedDrive>();
   private readonly driveRequests = new Map<string, string>();
@@ -327,6 +329,7 @@ export class FakeFileMigrationPort implements ProviderPort {
 
   constructor(fixture: FakeFileMigrationFixture) {
     this.now = fixture.now ?? (() => new Date());
+    this.unreadableSourceDrives = fixture.unreadableSourceDrives ?? [];
     this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
     this.sourceDriveId = fixture.sourceDriveId;
     this.sourceRootId = fixture.sourceRootId;
@@ -681,6 +684,14 @@ export class FakeFileMigrationPort implements ProviderPort {
     return rows;
   }
 
+  async readSharedDrive(driveId: string): Promise<SharedDrive | null> {
+    if (this.unreadableSourceDrives.includes(driveId)) return null;
+    const root = Object.values(this.sourceById).find(
+      (item) => item.driveId === driveId && item.parentId === null,
+    );
+    return root ? { id: driveId, name: root.name } : null;
+  }
+
   async resolveSourceFolder(input: {
     driveId: string;
     folderPath: string;
@@ -696,6 +707,23 @@ export class FakeFileMigrationPort implements ProviderPort {
       );
     }
     return entry ? cloneSource(entry) : null;
+  }
+
+  async resolveDestinationPath(input: {
+    driveId: string;
+    folderPath: string;
+  }): Promise<DestinationEntry | null> {
+    let entry = Object.values(this.destinationById).find(
+      (item) => item.driveId === input.driveId && item.parentId === null,
+    );
+    for (const part of input.folderPath ? input.folderPath.split("/") : []) {
+      if (!entry) return null;
+      const parent = entry.id;
+      entry = Object.values(this.destinationById).find(
+        (item) => item.parentId === parent && item.name === part && item.driveId === input.driveId,
+      );
+    }
+    return entry ? cloneDestination(entry) : null;
   }
 
   async resolveSourceRoot(input: {
@@ -1050,8 +1078,20 @@ export class FakeFileMigrationPort implements ProviderPort {
     if (!this.workerState?.alive) throw destinationFault("worker_exited", 500);
     return {
       socketPath: this.workerState.socketPath,
-      source: { fs: input.sourceItemId, kind: "sharepoint" as const },
-      destination: { fs: input.destFolderId, kind: "google_drive" as const },
+      source: {
+        fs: input.sourceItemId,
+        kind:
+          input.sourceType === "google_shared_drive"
+            ? ("google_drive" as const)
+            : ("sharepoint" as const),
+      },
+      destination: {
+        fs: input.destFolderId,
+        kind:
+          input.sourceType === "google_shared_drive"
+            ? ("sharepoint" as const)
+            : ("google_drive" as const),
+      },
     };
   }
 

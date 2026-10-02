@@ -73,6 +73,7 @@ export const CODES: readonly CodeEntry[] = [
   entry("source_size_inconsistent", "finding", "verify", FILE),
   entry("size_mismatch", "finding", "verify", FILE),
   entry("content_mismatch", "finding", "verify", FILE),
+  entry("destination_rewrote_file", "finding", "verify", FILE),
   entry("metadata_mismatch", "finding", "verify", FILE),
 
   // ---- teams archive: policy outcomes --------------------------------------

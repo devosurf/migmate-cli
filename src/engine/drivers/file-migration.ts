@@ -23,11 +23,13 @@ import {
 
 export interface FileMappingConfig {
   id: string;
+  sourceType?: "sharepoint" | "google_shared_drive";
   sourceDriveId: string;
   sourceItemId: string;
   sourceFolderPath?: string;
   destDriveId?: string;
   destFolderId?: string;
+  destFolderPath?: string;
   createDrive?: { name: string; members: DriveMember[] };
   exclusions?: FileExclusion[];
 }
@@ -46,6 +48,9 @@ export interface FileMigrationConfig {
 }
 
 const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
+/** PDF, Office and HTML files SharePoint may rewrite on upload (docs/research/provider-byte-integrity.md). */
+const SHAREPOINT_REWRITTEN_TYPES =
+  /\.(pdf|docx?|docm|dotx?|dotm|xlsx?|xlsm|xlsb|xltx?|xltm|pptx?|pptm|potx?|potm|ppsx?|ppsm|html?|mhtml?)$/i;
 
 type Phase = "plan" | "execute" | "verify";
 interface SourceView extends SourceEntry {
@@ -766,12 +771,13 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       );
     }
     const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+    const primaryHash = mapping.sourceType === "google_shared_drive" ? "quickxor" : "sha256";
     const sourceHashes = new Map(
       (
         await ctx.provider.listFileHashes({
           socketPath: pass.socketPath,
           root: pass.source,
-          hashType: "sha256",
+          hashType: primaryHash,
           download: !sizeOnly,
         })
       ).map((entry) => [entry.path, entry]),
@@ -781,13 +787,15 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         await ctx.provider.listFileHashes({
           socketPath: pass.socketPath,
           root: pass.destination,
-          hashType: "sha256",
+          hashType: primaryHash,
           download: false,
         })
       ).map((entry) => [entry.path, entry]),
     );
     const needsMd5 =
-      !sizeOnly && [...destinationHashes.values()].some((entry) => entry.hash === null);
+      !sizeOnly &&
+      primaryHash === "sha256" &&
+      [...destinationHashes.values()].some((entry) => entry.hash === null);
     const sourceMd5 = new Map(
       needsMd5
         ? (
@@ -836,7 +844,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       }
       if (source.kind === "folder") continue;
       const hashType =
-        !sizeOnly && destinationHashes.get(source.path)?.hash === null ? "md5" : "sha256";
+        needsMd5 && destinationHashes.get(source.path)?.hash === null ? "md5" : primaryHash;
       const downloaded = (hashType === "md5" ? sourceMd5 : sourceHashes).get(source.path);
       const destination = (hashType === "md5" ? destinationMd5 : destinationHashes).get(
         source.path,
@@ -844,6 +852,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       const codes: string[] = [];
       let servedSize = downloaded?.size ?? source.size;
       if (
+        primaryHash === "sha256" &&
         !sizeOnly &&
         downloaded?.hash &&
         destination &&
@@ -871,11 +880,23 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       if (!destination) codes.push("destination_missing");
       if (!sizeOnly && !downloaded?.hash) codes.push("source_read_failed");
       if (destination && downloaded) {
-        if (servedSize !== destination.size) codes.push("size_mismatch");
-        if (!sizeOnly) {
-          if (destination.hash === null) codes.push("content_verification_degraded");
-          else if (downloaded.hash && destination.hash !== downloaded.hash)
-            codes.push("content_mismatch");
+        // SharePoint may rewrite these types, changing length and hash together: one
+        // reviewable finding, so accepting it never also accepts a corrupted file's size_mismatch.
+        const rewritten =
+          !sizeOnly &&
+          mapping.sourceType === "google_shared_drive" &&
+          SHAREPOINT_REWRITTEN_TYPES.test(source.path) &&
+          destination.hash !== null &&
+          !!downloaded.hash &&
+          destination.hash !== downloaded.hash;
+        if (rewritten) codes.push("destination_rewrote_file");
+        else {
+          if (servedSize !== destination.size) codes.push("size_mismatch");
+          if (!sizeOnly) {
+            if (destination.hash === null) codes.push("content_verification_degraded");
+            else if (downloaded.hash && destination.hash !== downloaded.hash)
+              codes.push("content_mismatch");
+          }
         }
       }
       const evidence = row(ctx, "verify", mapping, source, codes[0] ?? "unchanged");
@@ -987,6 +1008,33 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
       evidence: { canCreateDrives },
     };
     if (!canCreateDrives) return;
+  }
+  const unreadableSourceDrives: string[] = [];
+  for (const driveId of new Set(
+    ctx.config.mappings
+      .filter((m) => m.sourceType === "google_shared_drive")
+      .map((m) => m.sourceDriveId),
+  )) {
+    try {
+      if ((await provider.readSharedDrive(driveId))?.id !== driveId)
+        unreadableSourceDrives.push(driveId);
+    } catch {
+      unreadableSourceDrives.push(driveId);
+    }
+  }
+  if (unreadableSourceDrives.length) {
+    yield {
+      id: "google.source_drives",
+      title: "Acting account can read every source Shared Drive",
+      status: "fail",
+      code: "preflight_failed",
+      evidence: {
+        unreadableSourceDrives,
+        subject: ctx.config.subject ?? null,
+        fix: "Add the acting account as a member of every named source Shared Drive.",
+      },
+    };
+    return;
   }
   for (const mapping of ctx.config.mappings) {
     const source = await provider.resolveSourceRoot(mapping);

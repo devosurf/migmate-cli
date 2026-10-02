@@ -163,12 +163,14 @@ export interface DriveMembership {
 
 export interface ProviderPort extends FilePassProvider {
   googleAbout(): Promise<GoogleAbout>;
+  readSharedDrive(driveId: string): Promise<SharedDrive | null>;
   /** A 409 replay returns null: the caller must reconcile by exact name. */
   createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null>;
   findSharedDrives(name: string): Promise<SharedDrive[]>;
   listDriveMembers(driveId: string): Promise<DriveMembership[]>;
   addDriveMember(driveId: string, member: DriveMember): Promise<void>;
   resolveFilePass(input: {
+    sourceType?: "sharepoint" | "google_shared_drive";
     sourceDriveId: string;
     sourceItemId: string;
     destDriveId: string;
@@ -195,6 +197,10 @@ export interface ProviderPort extends FilePassProvider {
     objectId: string;
   }): Promise<DestinationEntry | null>;
   resolveSourceFolder(input: { driveId: string; folderPath: string }): Promise<SourceEntry | null>;
+  resolveDestinationPath(input: {
+    driveId: string;
+    folderPath: string;
+  }): Promise<DestinationEntry | null>;
   resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;

@@ -28,17 +28,20 @@ export interface FileCredentialReference {
 
 export interface CredentialSession {
   graphToken(): Promise<string>;
+  graphDestinationToken(): Promise<string>;
   googleToken(): Promise<string>;
   identity(): Promise<string>;
   evidence(): Promise<Record<string, unknown>>;
   readonly rcloneConfigPath: string | null;
   readonly sourceRemote: string | null;
   readonly destinationRemote: string | null;
+  readonly sharepointDestinationRemote?: string | null;
   readonly delegatedSubject?: string | undefined;
   dispose(): void;
 }
 
 interface MappingIdentity {
+  sourceType?: "sharepoint" | "google_shared_drive";
   sourceDriveId: string;
   sourceItemId?: string;
   sourceFolderPath?: string;
@@ -322,10 +325,16 @@ function parseMappings(value: unknown): MappingIdentity[] {
     const mapping = record(item);
     const result: MappingIdentity = {
       sourceDriveId: stableId(mapping.sourceDriveId),
+      ...(mapping.sourceType === "google_shared_drive"
+        ? { sourceType: "google_shared_drive" as const }
+        : {}),
       ...(mapping.createDrive === undefined || mapping.destDriveId !== undefined
         ? {
             destDriveId: stableId(mapping.destDriveId),
-            destFolderId: stableId(mapping.destFolderId),
+            // A SharePoint destination path resolves to its folder id while the manifest loads.
+            ...(mapping.destFolderId !== undefined || typeof mapping.destFolderPath !== "string"
+              ? { destFolderId: stableId(mapping.destFolderId) }
+              : {}),
           }
         : {}),
     };
@@ -399,7 +408,9 @@ function googleCredential(bytes: Buffer): GoogleCredential {
 
 interface CredentialState {
   jobType: JobType;
-  graph: GraphCredential;
+  graph: GraphCredential | undefined;
+  graphDestination?: GraphCredential;
+  sharepointDestinationRemote?: string;
   google: GoogleCredential | undefined;
   mappings: MappingIdentity[];
   configPath: string | null;
@@ -417,6 +428,7 @@ async function loadCredentials(
   if (mode && (jobType !== "teams_archive" || input.destination === undefined))
     throw refused("credential_config_unsupported");
   let graph: GraphCredential | undefined;
+  let graphDestination: GraphCredential | undefined;
   try {
     if (jobType === "teams_archive") {
       const fields = record(input.graph);
@@ -482,16 +494,34 @@ async function loadCredentials(
     if (input.graph !== undefined) throw refused("credential_config_unsupported");
     const mappings = parseMappings(input.mappings);
     const rclone = record(input.rclone);
-    allowedKeys(rclone, ["config", "sourceRemote", "destinationRemote"]);
-    const sourceRemote = text(rclone.sourceRemote);
+    allowedKeys(rclone, [
+      "config",
+      "sourceRemote",
+      "destinationRemote",
+      "sharepointDestinationRemote",
+    ]);
+    const sourceRemote = rclone.sourceRemote === undefined ? null : text(rclone.sourceRemote);
     const destinationRemote = text(rclone.destinationRemote);
+    const sharepointDestinationRemote =
+      rclone.sharepointDestinationRemote === undefined
+        ? undefined
+        : text(rclone.sharepointDestinationRemote);
+    const names = [sourceRemote, destinationRemote, sharepointDestinationRemote].filter(
+      (name): name is string => !!name,
+    );
     if (
-      !REMOTE_NAME.test(sourceRemote) ||
-      !REMOTE_NAME.test(destinationRemote) ||
-      sourceRemote.toLowerCase() === destinationRemote.toLowerCase()
-    ) {
+      names.some((name) => !REMOTE_NAME.test(name)) ||
+      new Set(names.map((name) => name.toLowerCase())).size !== names.length
+    )
       throw refused("credential_config_invalid");
-    }
+    if (mappings.some((m) => m.sourceType !== "google_shared_drive") && !sourceRemote)
+      throw refused("credential_config_invalid");
+    // Exactly the jobs that write into SharePoint hold the SharePoint write credential.
+    if (
+      mappings.some((m) => m.sourceType === "google_shared_drive") !==
+      (sharepointDestinationRemote !== undefined)
+    )
+      throw refused("credential_config_invalid");
     const loaded = await readCredentialFile(fileReference(rclone.config), jobDirectory);
     const sections = (() => {
       try {
@@ -501,44 +531,90 @@ async function loadCredentials(
       }
     })();
     try {
-      const source = sections.get(sourceRemote);
+      const source = sourceRemote ? sections.get(sourceRemote) : undefined;
       const destination = sections.get(destinationRemote);
-      // A dedicated operator config avoids global sections and uninspected remotes.
-      if (!source || !destination || sections.size !== 2)
+      const sharepointDestination = sharepointDestinationRemote
+        ? sections.get(sharepointDestinationRemote)
+        : undefined;
+      if (
+        (sourceRemote && !source) ||
+        !destination ||
+        (sharepointDestinationRemote && !sharepointDestination) ||
+        sections.size !== names.length
+      )
         throw refused("credential_backend_unsupported");
-      iniKeys(source, [
-        "type",
-        "client_id",
-        "client_secret",
-        "tenant",
-        "client_credentials",
-        "drive_id",
-        "drive_type",
-        "root_folder_id",
-        "access_scopes",
-        "region",
-        "disable_site_permission",
-        "expose_onenote_files",
-        // rclone writes its own client-credentials token cache back into the
-        // operator config the managed worker runs with, so a config that has
-        // ever executed a transfer contains this key. The engine never reads
-        // it: onboarding derives every credential from the explicit settings.
-        "token",
-      ]);
-      setting(source, "type", "onedrive", true);
-      setting(source, "client_credentials", "true", true);
-      setting(source, "drive_type", "documentLibrary", true);
-      setting(source, "region", "global");
-      setting(source, "disable_site_permission", "true");
-      setting(source, "expose_onenote_files", "true");
-      if (source.has("access_scopes")) {
-        const scopes = text(source.get("access_scopes")).split(/ +/).sort();
-        if (scopes.join(" ") !== Object.keys(FILE_ROLES).sort().join(" "))
+      if (source) {
+        iniKeys(source, [
+          "type",
+          "client_id",
+          "client_secret",
+          "tenant",
+          "client_credentials",
+          "drive_id",
+          "drive_type",
+          "root_folder_id",
+          "access_scopes",
+          "region",
+          "disable_site_permission",
+          "expose_onenote_files",
+          // rclone writes its own client-credentials token cache back into the
+          // operator config the managed worker runs with, so a config that has
+          // ever executed a transfer contains this key. The engine never reads
+          // it: onboarding derives every credential from the explicit settings.
+          "token",
+        ]);
+        setting(source, "type", "onedrive", true);
+        setting(source, "client_credentials", "true", true);
+        setting(source, "drive_type", "documentLibrary", true);
+        setting(source, "region", "global");
+        setting(source, "disable_site_permission", "true");
+        setting(source, "expose_onenote_files", "true");
+        if (source.has("access_scopes")) {
+          const scopes = text(source.get("access_scopes")).split(/ +/).sort();
+          if (scopes.join(" ") !== Object.keys(FILE_ROLES).sort().join(" "))
+            throw refused("credential_permissions_invalid");
+        }
+        // Remote roots are seed settings. Every pass overrides them with approved mapping roots.
+        stableId(source.get("drive_id"));
+        if (source.has("root_folder_id")) stableId(source.get("root_folder_id"));
+        const tenantId = guid(source.get("tenant"));
+        const clientId = guid(source.get("client_id"));
+        graph = { tenantId, clientId, secret: clientSecret(source.get("client_secret")) };
+      }
+      if (sharepointDestination) {
+        iniKeys(sharepointDestination, [
+          "type",
+          "client_id",
+          "client_secret",
+          "tenant",
+          "client_credentials",
+          "drive_id",
+          "drive_type",
+          "access_scopes",
+          "region",
+          "disable_site_permission",
+          "expose_onenote_files",
+          "token",
+        ]);
+        setting(sharepointDestination, "type", "onedrive", true);
+        setting(sharepointDestination, "client_credentials", "true", true);
+        setting(sharepointDestination, "drive_type", "documentLibrary", true);
+        setting(sharepointDestination, "region", "global");
+        setting(sharepointDestination, "disable_site_permission", "true");
+        setting(sharepointDestination, "expose_onenote_files", "true");
+        setting(sharepointDestination, "access_scopes", "Sites.ReadWrite.All");
+        stableId(sharepointDestination.get("drive_id"));
+        graphDestination = {
+          tenantId: guid(sharepointDestination.get("tenant")),
+          clientId: guid(sharepointDestination.get("client_id")),
+          secret: clientSecret(sharepointDestination.get("client_secret")),
+        };
+        if (
+          graph?.clientId === graphDestination.clientId &&
+          graph.tenantId === graphDestination.tenantId
+        )
           throw refused("credential_permissions_invalid");
       }
-      // Remote roots are seed settings. Every pass overrides them with approved mapping roots.
-      stableId(source.get("drive_id"));
-      if (source.has("root_folder_id")) stableId(source.get("root_folder_id"));
       iniKeys(destination, [
         "type",
         "service_account_file",
@@ -562,9 +638,6 @@ async function loadCredentials(
       setting(destination, "metadata_labels", "off");
       stableId(destination.get("team_drive"));
       stableId(destination.get("root_folder_id"));
-      const tenantId = guid(source.get("tenant"));
-      const clientId = guid(source.get("client_id"));
-      graph = { tenantId, clientId, secret: clientSecret(source.get("client_secret")) };
       const serviceAccount = await readCredentialFile(
         fileReference({ resolver: "file", path: destination.get("service_account_file") }),
         jobDirectory,
@@ -583,6 +656,8 @@ async function loadCredentials(
       return {
         jobType,
         graph,
+        ...(graphDestination ? { graphDestination } : {}),
+        ...(sharepointDestinationRemote ? { sharepointDestinationRemote } : {}),
         google,
         mappings,
         configPath: loaded.path,
@@ -595,6 +670,7 @@ async function loadCredentials(
     }
   } catch (error) {
     graph?.secret?.fill(0);
+    graphDestination?.secret?.fill(0);
     if (error instanceof ProviderFault) throw error;
     throw refused("credential_config_invalid");
   }
@@ -676,7 +752,12 @@ function parseToken(value: Record<string, unknown>, requestedAt: number): Token 
   };
 }
 
-function graphPermissions(token: Token, credential: GraphCredential, jobType: JobType): void {
+function graphPermissions(
+  token: Token,
+  credential: GraphCredential,
+  jobType: JobType,
+  destination = false,
+): void {
   // These are evidence from a fresh HTTPS token response, NOT local authorization.
   // Microsoft Graph itself validates the token during the parent's real probes.
   // An opaque token cannot provide the required granted-role evidence: fail closed.
@@ -719,10 +800,15 @@ function graphPermissions(token: Token, credential: GraphCredential, jobType: Jo
     throw refused("credential_permission_evidence_unavailable");
   }
   const roles = [...new Set<string>(claims.roles)].sort();
-  const permitted = jobType === "file_migration" ? FILE_ROLES : ARCHIVE_ROLES;
+  const permitted = destination
+    ? { "Sites.ReadWrite.All": true }
+    : jobType === "file_migration"
+      ? FILE_ROLES
+      : ARCHIVE_ROLES;
   if (
     roles.some((role) => !Object.hasOwn(permitted, role)) ||
     (jobType === "file_migration" &&
+      !destination &&
       Object.keys(FILE_ROLES).some((role) => !roles.includes(role))) ||
     (jobType === "teams_archive" &&
       !roles.includes("ChannelMessage.Read.All") &&
@@ -749,6 +835,8 @@ export async function createCredentialSession(input: {
   );
   let graphCache: Token | undefined;
   let googleCache: Token | undefined;
+  let destinationCache: Token | undefined;
+  let destinationPending: Promise<string> | undefined;
   let graphPending: Promise<string> | undefined;
   let googlePending: Promise<string> | undefined;
   const controller = new AbortController();
@@ -765,7 +853,7 @@ export async function createCredentialSession(input: {
     graphCache = undefined;
     graphPending = (async () => {
       const current = active();
-      if (!current.graph.secret) throw refused("credential_graph_unavailable");
+      if (!current.graph?.secret) throw refused("credential_graph_unavailable");
       const requestedAt = Date.now();
       const response = await tokenResponse(
         `https://login.microsoftonline.com/${current.graph.tenantId}/oauth2/v2.0/token`,
@@ -788,6 +876,38 @@ export async function createCredentialSession(input: {
       return await graphPending;
     } finally {
       graphPending = undefined;
+    }
+  }
+
+  async function graphDestinationToken(): Promise<string> {
+    const credential = active().graphDestination;
+    if (!credential?.secret) throw refused("credential_graph_unavailable");
+    if (destinationCache && destinationCache.expiresAt > Date.now() + 60_000)
+      return destinationCache.value;
+    if (destinationPending) return destinationPending;
+    destinationPending = (async () => {
+      const requestedAt = Date.now();
+      const response = await tokenResponse(
+        `https://login.microsoftonline.com/${credential.tenantId}/oauth2/v2.0/token`,
+        new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: credential.clientId,
+          client_secret: credential.secret!.toString("utf8"),
+          scope: GRAPH_SCOPE,
+        }),
+        controller.signal,
+        "microsoft",
+      );
+      active();
+      const token = parseToken(response, requestedAt);
+      graphPermissions(token, credential, "file_migration", true);
+      destinationCache = token;
+      return token.value;
+    })();
+    try {
+      return await destinationPending;
+    } finally {
+      destinationPending = undefined;
     }
   }
 
@@ -851,12 +971,17 @@ export async function createCredentialSession(input: {
 
   async function authenticate(): Promise<CredentialState> {
     const current = active();
-    await Promise.all([graphToken(), ...(current.google ? [googleToken()] : [])]);
+    await Promise.all([
+      ...(current.graph ? [graphToken()] : []),
+      ...(current.graphDestination ? [graphDestinationToken()] : []),
+      ...(current.google ? [googleToken()] : []),
+    ]);
     return active();
   }
 
   return {
     graphToken,
+    graphDestinationToken,
     get delegatedSubject() {
       return active().google?.delegatedSubject;
     },
@@ -867,7 +992,17 @@ export async function createCredentialSession(input: {
       const current = active();
       // Key/secret rotation changes no identity. SA principal/client drift does.
       const identity = {
-        graph: { tenantId: current.graph.tenantId, clientId: current.graph.clientId },
+        graph: current.graph
+          ? { tenantId: current.graph.tenantId, clientId: current.graph.clientId }
+          : null,
+        ...(current.graphDestination
+          ? {
+              graphDestination: {
+                tenantId: current.graphDestination.tenantId,
+                clientId: current.graphDestination.clientId,
+              },
+            }
+          : {}),
         google: current.google
           ? {
               clientId: current.google.clientId,
@@ -883,13 +1018,28 @@ export async function createCredentialSession(input: {
     async evidence() {
       const current = await authenticate();
       return {
-        graph: {
-          tenantId: current.graph.tenantId,
-          clientId: current.graph.clientId,
-          grantedPermissions: [...graphCache!.permissions],
-          permissionEvidence: "token_roles",
-          authenticatedAt: graphCache!.authenticatedAt,
-        },
+        ...(current.graph
+          ? {
+              graph: {
+                tenantId: current.graph.tenantId,
+                clientId: current.graph.clientId,
+                grantedPermissions: [...graphCache!.permissions],
+                permissionEvidence: "token_roles",
+                authenticatedAt: graphCache!.authenticatedAt,
+              },
+            }
+          : {}),
+        ...(current.graphDestination
+          ? {
+              graphDestination: {
+                tenantId: current.graphDestination.tenantId,
+                clientId: current.graphDestination.clientId,
+                grantedPermissions: [...destinationCache!.permissions],
+                permissionEvidence: "token_roles",
+                authenticatedAt: destinationCache!.authenticatedAt,
+              },
+            }
+          : {}),
         ...(current.google
           ? {
               google: {
@@ -922,9 +1072,15 @@ export async function createCredentialSession(input: {
     get destinationRemote() {
       return active().destinationRemote;
     },
+    get sharepointDestinationRemote() {
+      return active().sharepointDestinationRemote ?? null;
+    },
     dispose() {
       controller.abort();
-      state?.graph.secret?.fill(0);
+      state?.graph?.secret?.fill(0);
+      state?.graphDestination?.secret?.fill(0);
+      destinationCache = undefined;
+      destinationPending = undefined;
       state = undefined;
       graphCache = undefined;
       googleCache = undefined;

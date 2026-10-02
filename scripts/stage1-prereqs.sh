@@ -184,12 +184,12 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=8
+TOTAL_STAGES=9
 
 umask 077
 ENV_FILE="${TMPDIR:-/tmp}/migmate-stage1-prereqs.env"
 
-# --resume <env-file> skips every browser stage and re-runs only the two config
+# --resume <env-file> skips every browser stage and re-runs only the config
 # stages, for an operator whose earlier run already captured the values.
 RESUME=0
 if [[ "${1:-}" == "--resume" ]]; then
@@ -532,6 +532,90 @@ chmod 600 "$MIGMATE_JOB_CONFIG"
 write_env MIGMATE_JOB_CONFIG "$MIGMATE_JOB_CONFIG"
 write_env MIGMATE_MAPPING_ID "$MIGMATE_MAPPING_ID"
 note "Onboard it with: migmate init --type file_migration --config $MIGMATE_JOB_CONFIG"
+
+stage "Optional reverse direction: Google Shared Drives to SharePoint"
+say "Reverse jobs copy Google Shared Drive folders into existing SharePoint libraries or folders. SharePoint is written only by a separate destination app whose Graph application permissions are exactly Sites.ReadWrite.All; the read-only source app above never gains a write role, and preflight refuses anything else with credential_permissions_invalid."
+say "The reverse job gets its own rclone.conf and job.toml, so forward jobs never hold the write credential. Sources are read as the acting Google account; Migmate never adds it to a source drive."
+open_url "https://learn.microsoft.com/en-us/graph/permissions-reference#sitesreadwriteall"
+if confirm "Set up a SharePoint destination app and reverse job config now?"; then
+  step "In Entra ID > App registrations > New registration, create a second single-tenant app (for example Migmate SharePoint writer)."
+  step "Under API permissions add only the Microsoft Graph application permission Sites.ReadWrite.All, select Grant admin consent, then create one client secret and copy its Value."
+  ask MIGMATE_SP_DEST_CLIENT_ID "Paste the destination app's Application (client) ID:"
+  if [[ "$MIGMATE_SP_DEST_CLIENT_ID" == "$MIGMATE_CLIENT_ID" ]]; then
+    warn "the destination app must be a different app from the read-only source app."
+    exit 1
+  fi
+  mkdir -p "$PREREQ_DIR/entra" "$PREREQ_DIR/rclone"
+  MIGMATE_SP_DEST_SECRET_FILE="${MIGMATE_SP_DEST_SECRET_FILE:-$PREREQ_DIR/entra/sharepoint-destination-client-secret.txt}"
+  if [[ -s "$MIGMATE_SP_DEST_SECRET_FILE" ]]; then
+    say "Reusing the client secret already stored at $MIGMATE_SP_DEST_SECRET_FILE."
+  else
+    ask_secret MIGMATE_SP_DEST_SECRET "Paste the destination app's client secret Value:"
+    if [[ -z "$MIGMATE_SP_DEST_SECRET" ]]; then
+      warn "no client secret was supplied."
+      exit 1
+    fi
+    printf '%s' "$MIGMATE_SP_DEST_SECRET" > "$MIGMATE_SP_DEST_SECRET_FILE"
+    unset MIGMATE_SP_DEST_SECRET
+  fi
+  chmod 600 "$MIGMATE_SP_DEST_SECRET_FILE"
+  note "Fetch a destination library's drive id with GET /sites/{site-id}/drives. Every mapping overrides it; the remote only needs a valid seed."
+  ask MIGMATE_SP_DEST_DRIVE_ID "Paste one destination document-library drive id:"
+  step "Add the acting Google account (the impersonation subject, or the service account when impersonation is off) as a member of every source Shared Drive. Preflight names each source drive it cannot read."
+  ask MIGMATE_REVERSE_SOURCE_DRIVE_ID "Paste one source Shared Drive id (seed only; every mapping overrides it):"
+  MIGMATE_REVERSE_RCLONE_CONF_FILE="$PREREQ_DIR/rclone/reverse-rclone.conf"
+  MIGMATE_SP_DEST_CLIENT_SECRET=$(<"$MIGMATE_SP_DEST_SECRET_FILE")
+  cat > "$MIGMATE_REVERSE_RCLONE_CONF_FILE" <<EOF
+[google-drive]
+type = drive
+scope = drive
+service_account_file = $MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE
+team_drive = $MIGMATE_REVERSE_SOURCE_DRIVE_ID
+root_folder_id = $MIGMATE_REVERSE_SOURCE_DRIVE_ID
+
+[sharepoint-destination]
+type = onedrive
+client_id = $MIGMATE_SP_DEST_CLIENT_ID
+client_secret = $MIGMATE_SP_DEST_CLIENT_SECRET
+client_credentials = true
+tenant = $MIGMATE_TENANT_ID
+drive_type = documentLibrary
+drive_id = $MIGMATE_SP_DEST_DRIVE_ID
+EOF
+  unset MIGMATE_SP_DEST_CLIENT_SECRET
+  chmod 600 "$MIGMATE_REVERSE_RCLONE_CONF_FILE"
+  ask MIGMATE_REVERSE_JOB_CONFIG "Choose the reverse job config path outside the repo (reverse-job.toml):"
+  case "$MIGMATE_REVERSE_JOB_CONFIG" in
+    /*) ;;
+    *) warn "Use an absolute path outside the repo."; exit 1 ;;
+  esac
+  case "$MIGMATE_REVERSE_JOB_CONFIG" in
+    "$PWD"|"$PWD"/*) warn "Pick a path outside the repo."; exit 1 ;;
+  esac
+  mkdir -p "$(dirname "$MIGMATE_REVERSE_JOB_CONFIG")"
+  cat > "$MIGMATE_REVERSE_JOB_CONFIG" <<EOF
+# Migmate Google Shared Drive -> SharePoint job. References only; no secret values live here.
+# Add top-level impersonate = true and subject = "files@example.com" here to act as that account.
+# Mappings come from a manifest: migmate manifest load --job ID --file mappings.json
+
+[options]
+
+[rclone]
+destinationRemote = "google-drive"
+sharepointDestinationRemote = "sharepoint-destination"
+config = { resolver = "file", path = "$MIGMATE_REVERSE_RCLONE_CONF_FILE", mode = "0600" }
+EOF
+  chmod 600 "$MIGMATE_REVERSE_JOB_CONFIG"
+  write_env MIGMATE_SP_DEST_CLIENT_ID "$MIGMATE_SP_DEST_CLIENT_ID"
+  write_env MIGMATE_SP_DEST_SECRET_FILE "$MIGMATE_SP_DEST_SECRET_FILE"
+  write_env MIGMATE_SP_DEST_DRIVE_ID "$MIGMATE_SP_DEST_DRIVE_ID"
+  write_env MIGMATE_REVERSE_SOURCE_DRIVE_ID "$MIGMATE_REVERSE_SOURCE_DRIVE_ID"
+  write_env MIGMATE_REVERSE_RCLONE_CONF_FILE "$MIGMATE_REVERSE_RCLONE_CONF_FILE"
+  write_env MIGMATE_REVERSE_JOB_CONFIG "$MIGMATE_REVERSE_JOB_CONFIG"
+  note "Onboard it with: migmate init --type file_migration --config $MIGMATE_REVERSE_JOB_CONFIG, then load a manifest of google_shared_drive -> sharepoint mappings (README: Google Shared Drives to SharePoint)."
+else
+  note "Skipped the reverse direction; forward jobs do not need it."
+fi
 
 stage "Optional live test config"
 say "The optional live test exercises the route with real operations, so it needs disposable roots it may create and delete inside, and a second same-tenant app that may write to the disposable source folder. The normal route credential stays read-only. Jobs do not need it."
