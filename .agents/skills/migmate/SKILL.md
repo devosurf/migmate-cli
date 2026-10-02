@@ -29,8 +29,11 @@ Ten verbs on one rail: `init`, `doctor`, `plan`, `approve`, `execute`, `status`,
 
 `status` is safe at any point. `cancel` is terminal and exits 0 on success.
 
-For file migration batches, initialize with credential config, then run
-`manifest load --job ID --file mappings.json --output json` before `doctor`.
+For file migration batches, initialize with credential config; `[[mappings]]` may
+be omitted. `creds init` and `doctor` can prove credentials before mappings exist.
+Run `manifest load --job ID --file mappings.json --output json` before `plan`,
+then rerun `doctor` to prove mapping-specific access. An empty job's `plan` refuses
+`configuration_invalid` with `detail.field: "mappings"`: load the reviewed manifest.
 JSON uses `{ "version": 1, "mappings": [...] }`; each mapping has `id`,
 `source: { type: "sharepoint", driveId, folderPath }`, and
 `destination: { type: "google_shared_drive", driveId, folderId }` for existing roots.
@@ -61,7 +64,9 @@ A mapping uses
 already exist, so `create`, `members` and mirror refuse. CSV uses README's eleven-column
 layout. The job's `[rclone]` needs `sharepointDestinationRemote`, a separate SharePoint
 app holding exactly `Sites.ReadWrite.All` (anything else refuses
-`credential_permissions_invalid`); `sourceRemote` is only for SharePoint sources.
+`credential_permissions_invalid`). Before mappings exist, the explicit reverse
+route already requires this write remote and needs no `sourceRemote`; the default
+SharePoint-source route requires `sourceRemote` and refuses the write remote.
 Sources are read as the acting account. On `preflight_failed` with
 `unreadableSourceDrives` (from `manifest load` or `doctor`/`plan`), surface those drive IDs: a human must add the acting
 account as a member; Migmate never does. Verification compares quickXorHash computed
@@ -159,7 +164,8 @@ reaches granted sites; a leaked tenant-read key reaches every site, including si
 outside the job. Surface that tradeoff before asking an administrator to replace
 the grant; Migmate never widens it automatically.
 
-For an already-configured SharePoint-source file job, run
+For a SharePoint-source file job with no mappings, onboard the route/options and
+`[rclone]` config with `creds init --job ID --config job.toml --output json`, then run
 `discover --job ID --file draft.json --output json`. Read `value.sites` and
 `value.manifest`; the optional new private file contains only the manifest and
 refuses overwrite. Without `--file`, the same draft remains in the envelope.

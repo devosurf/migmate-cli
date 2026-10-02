@@ -324,30 +324,36 @@ function setting(
 }
 
 function parseMappings(value: unknown): MappingIdentity[] {
-  if (!Array.isArray(value) || value.length === 0) throw refused("credential_mapping_invalid");
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw refused("credential_mapping_invalid");
   return value.map((item: unknown) => {
-    const mapping = record(item);
-    const result: MappingIdentity = {
-      sourceDriveId: stableId(mapping.sourceDriveId),
-      ...(mapping.sourceType === "google_shared_drive"
-        ? { sourceType: "google_shared_drive" as const }
-        : {}),
-      ...(mapping.createDrive === undefined || mapping.destDriveId !== undefined
-        ? {
-            destDriveId: stableId(mapping.destDriveId),
-            // A SharePoint destination path resolves to its folder id while the manifest loads.
-            ...(mapping.destFolderId !== undefined || typeof mapping.destFolderPath !== "string"
-              ? { destFolderId: stableId(mapping.destFolderId) }
-              : {}),
-          }
-        : {}),
-    };
-    if (mapping.sourceItemId !== undefined) result.sourceItemId = stableId(mapping.sourceItemId);
-    else if (typeof mapping.sourceFolderPath === "string")
-      result.sourceFolderPath = mapping.sourceFolderPath;
-    else throw refused("credential_mapping_invalid");
-    if (mapping.sourceSiteId !== undefined) result.sourceSiteId = stableId(mapping.sourceSiteId);
-    return result;
+    try {
+      const mapping = record(item);
+      const result: MappingIdentity = {
+        sourceDriveId: stableId(mapping.sourceDriveId),
+        ...(mapping.sourceType === "google_shared_drive"
+          ? { sourceType: "google_shared_drive" as const }
+          : {}),
+        ...(mapping.createDrive === undefined || mapping.destDriveId !== undefined
+          ? {
+              destDriveId: stableId(mapping.destDriveId),
+              // A SharePoint destination path resolves to its folder id while the manifest loads.
+              ...(mapping.destFolderId !== undefined || typeof mapping.destFolderPath !== "string"
+                ? { destFolderId: stableId(mapping.destFolderId) }
+                : {}),
+            }
+          : {}),
+      };
+      if (mapping.sourceItemId !== undefined) result.sourceItemId = stableId(mapping.sourceItemId);
+      else if (typeof mapping.sourceFolderPath === "string")
+        result.sourceFolderPath = mapping.sourceFolderPath;
+      else throw refused("credential_mapping_invalid");
+      if (mapping.sourceSiteId !== undefined) result.sourceSiteId = stableId(mapping.sourceSiteId);
+      return result;
+    } catch (error) {
+      if (error instanceof ProviderFault) throw refused("credential_mapping_invalid");
+      throw error;
+    }
   });
 }
 
@@ -518,13 +524,16 @@ async function loadCredentials(
       new Set(names.map((name) => name.toLowerCase())).size !== names.length
     )
       throw refused("credential_config_invalid");
-    if (mappings.some((m) => m.sourceType !== "google_shared_drive") && !sourceRemote)
-      throw refused("credential_config_invalid");
+    // Before manifest load, the route fixes which credentials the job needs.
+    const readsSharePoint = mappings.length
+      ? mappings.some((m) => m.sourceType !== "google_shared_drive")
+      : input.route === undefined || input.route === "sharepoint_library_to_shared_drive";
+    const writesSharePoint = mappings.length
+      ? mappings.some((m) => m.sourceType === "google_shared_drive")
+      : input.route === "shared_drive_to_sharepoint_library";
+    if (readsSharePoint && !sourceRemote) throw refused("credential_config_invalid");
     // Exactly the jobs that write into SharePoint hold the SharePoint write credential.
-    if (
-      mappings.some((m) => m.sourceType === "google_shared_drive") !==
-      (sharepointDestinationRemote !== undefined)
-    )
+    if (writesSharePoint !== (sharepointDestinationRemote !== undefined))
       throw refused("credential_config_invalid");
     const loaded = await readCredentialFile(fileReference(rclone.config), jobDirectory);
     const sections = (() => {

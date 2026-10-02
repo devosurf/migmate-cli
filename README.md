@@ -139,8 +139,12 @@ Shared Drives also requires `about.canCreateDrives = true` in preflight.
 ### Mapping manifests
 
 Load a batch with `migmate manifest load --job "$ID" --file mappings.json --output json`.
-Configure the job's credential references first (`init --config job.toml`); load resolves
-source paths and both trees' ancestry through the providers. JSON is authoritative:
+Configure the job's credential references first (`init --config job.toml` or
+`creds init --job "$ID" --config job.toml`). The config may omit `[[mappings]]`;
+credential onboarding and `doctor` work before the manifest exists. Load resolves
+source paths and both trees' ancestry through the providers. Until mappings are
+loaded, `plan` refuses `configuration_invalid` (exit 2), with `detail.field: "mappings"`
+and guidance to run `manifest load`. JSON is authoritative:
 
 ```json
 {
@@ -287,9 +291,13 @@ document-library remote with client credentials and the same strict key allowlis
 as the source remote, minus `root_folder_id`. Its app's token must carry exactly
 `Sites.ReadWrite.All`; any other role set, or the source app's client ID, refuses
 `credential_permissions_invalid`. The SharePoint source app keeps its own read-only
-allowlist, and a job whose mappings all read SharePoint refuses
-`credential_config_invalid` if it names `sharepointDestinationRemote`, so it never holds a
-write credential. `scripts/stage1-prereqs.sh` can write a separate reverse job config.
+allowlist. Before mappings exist, the configured route determines the remotes:
+the default SharePoint-source route requires `sourceRemote` and refuses
+`sharepointDestinationRemote`; the explicit reverse route requires
+`sharepointDestinationRemote` and needs no `sourceRemote`. Once loaded, each mapping
+must have the credentials its direction needs. A job that only reads SharePoint
+never holds its write credential; an unnecessary destination remote refuses
+`credential_config_invalid`. `scripts/stage1-prereqs.sh` can write a separate reverse job config.
 
 Each pass addresses the destination as a path under the library pinned by
 `drive_id`, never `root_folder_id`, and runs with `--ignore-size --ignore-checksum`,
@@ -433,9 +441,12 @@ refuse credential preflight. Replace the grant rather than adding the second one
 The optional rclone `access_scopes` must likewise name exactly one of these grants.
 Migmate never upgrades permissions on the operator's behalf.
 
-After configuring a SharePoint-source file job, draft the tenant's document libraries:
+After configuring a SharePoint-source file job, draft the tenant's document libraries.
+No seed `[[mappings]]` row is needed: keep the route, options and `[rclone]` references
+in `job.toml`, then onboard and discover:
 
 ```sh
+migmate creds init --job "$ID" --config job.toml --output json
 migmate discover --job "$ID" --file draft.json --output json
 # Review draft.json: remove unwanted mappings, edit drive names, fill in members.
 migmate manifest load --job "$ID" --file draft.json --output json

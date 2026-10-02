@@ -97,6 +97,94 @@ test("onboards the operator config rclone itself runs with", async (t) => {
   assert.equal(contactedProvider, false);
 });
 
+test("loads file credentials before mappings are supplied by a manifest", async (t) => {
+  const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
+  t.mock.method(globalThis, "fetch", async (target: unknown) => {
+    if (String(target).startsWith("https://login.microsoftonline.com/"))
+      return Response.json(graphToken(["Sites.Read.All"]));
+    assert.equal(String(target), "https://oauth2.googleapis.com/token");
+    return Response.json({ access_token: "google-token", token_type: "Bearer", expires_in: 3600 });
+  });
+  for (const mappings of [undefined, []]) {
+    const session = await createCredentialSession({
+      jobType: "file_migration",
+      config: { ...config, mappings },
+      jobDirectory,
+    });
+    t.after(() => session.dispose());
+    const evidence = await session.evidence();
+    assert.deepEqual(evidence.mappings, []);
+    assert.equal(await session.googleToken(), "google-token");
+    assert.deepEqual(Reflect.get(evidence.graph!, "grantedPermissions"), ["Sites.Read.All"]);
+  }
+});
+
+test("uses the configured route for credential privileges before mappings exist", async (t) => {
+  const { config, jobDirectory } = await operatorFiles(
+    t,
+    source.filter((line) => !line.startsWith("root_folder_id")).join("\n"),
+  );
+  const rclone = {
+    config: config.rclone.config,
+    destinationRemote: config.rclone.destinationRemote,
+    sharepointDestinationRemote: config.rclone.sourceRemote,
+  };
+  t.mock.method(globalThis, "fetch", async () =>
+    Response.json(graphToken(["Sites.ReadWrite.All"])),
+  );
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    config: { route: "shared_drive_to_sharepoint_library", rclone },
+    jobDirectory,
+  });
+  t.after(() => session.dispose());
+  assert.equal(
+    await session.graphDestinationToken(),
+    graphToken(["Sites.ReadWrite.All"]).access_token,
+  );
+  await assert.rejects(session.graphToken(), { code: "credential_graph_unavailable" });
+  for (const route of [undefined, "sharepoint_library_to_shared_drive"]) {
+    for (const remotes of [rclone, { ...config.rclone, sourceRemote: undefined }]) {
+      await assert.rejects(
+        createCredentialSession({
+          jobType: "file_migration",
+          config: { route, mappings: [], rclone: remotes },
+          jobDirectory,
+        }),
+        { code: "credential_config_invalid" },
+      );
+    }
+  }
+  await assert.rejects(
+    createCredentialSession({
+      jobType: "file_migration",
+      config: { route: "shared_drive_to_sharepoint_library", rclone: config.rclone },
+      jobDirectory,
+    }),
+    { code: "credential_config_invalid" },
+  );
+});
+
+test("refuses malformed mappings even beside a valid credential mapping", async (t) => {
+  const { config, jobDirectory } = await operatorFiles(t, source.join("\n"));
+  for (const mappings of [
+    [mapping, { ...mapping, sourceDriveId: "" }],
+    [mapping, { ...mapping, sourceItemId: undefined }],
+    [mapping, null],
+    null,
+    {},
+  ]) {
+    await assert.rejects(
+      createCredentialSession({
+        jobType: "file_migration",
+        config: { ...config, mappings },
+        jobDirectory,
+      }),
+      { code: "credential_mapping_invalid" },
+    );
+  }
+});
+
 test("refuses an uninspected backend option beside the supported settings", async (t) => {
   const { jobDirectory, config } = await operatorFiles(
     t,

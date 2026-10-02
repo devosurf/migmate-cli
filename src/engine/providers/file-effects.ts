@@ -186,15 +186,11 @@ function requireName(name: string): void {
 }
 
 function readMappings(config: unknown): Mapping[] {
-  if (
-    !config ||
-    typeof config !== "object" ||
-    !("mappings" in config) ||
-    !Array.isArray(config.mappings) ||
-    config.mappings.length === 0
-  ) {
-    throw new ProviderFault("preflight_failed", "At least one explicit file mapping is required.");
-  }
+  if (!config || typeof config !== "object")
+    throw new ProviderFault("preflight_failed", "The file mapping configuration is invalid.");
+  if (!("mappings" in config) || config.mappings === undefined) return [];
+  if (!Array.isArray(config.mappings))
+    throw new ProviderFault("preflight_failed", "The file mapping configuration is invalid.");
   return config.mappings.map((raw: unknown) => {
     if (!raw || typeof raw !== "object")
       throw new ProviderFault("preflight_failed", "A file mapping is invalid.");

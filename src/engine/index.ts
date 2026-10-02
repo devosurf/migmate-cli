@@ -606,6 +606,15 @@ function readConfig(paths: JobPaths, type: JobType, store?: Store): JobConfig {
   }
   return config;
 }
+
+function requireFileMappings(config: JobConfig): void {
+  if ("mappings" in config && config.mappings.length === 0)
+    throw new EngineRefusalError({
+      code: "configuration_invalid",
+      message: "At least one file mapping is required. Run manifest load before planning.",
+      detail: { field: "mappings" },
+    });
+}
 function migrateConfig(paths: JobPaths, type: JobType): void {
   const legacy = join(paths.dir, LEGACY_CONFIG_FILENAME);
   if (!existsSync(legacy)) return;
@@ -1907,6 +1916,7 @@ function makeWriter(
             "A completed archive requires a new job with an optional lineage pointer.",
           );
         let config = readConfig(paths, job().type, store);
+        requireFileMappings(config);
         if (!("mappings" in config) && !config.window.to && job().planRevision !== null) {
           const previous = store.readResume(job().planRevision!).archivePlan;
           if (previous)
@@ -2053,6 +2063,7 @@ function makeWriter(
             "The current execution must be assessed before another pass.",
           );
         let config = readConfig(paths, job().type, store);
+        requireFileMappings(config);
         // Migration adds a store digest, not a new input to an immutable older approval.
         // Only a newly collected plan can bind that additional manifest identity.
         if ("mappings" in config && plan.manifestDigest === undefined) delete config.manifestDigest;
@@ -2138,8 +2149,9 @@ function makeWriter(
       operation("verify", async () => {
         if (!["verified", "needs_attention"].includes(job().state) || job().planRevision === null)
           return refuse("verification_unaccepted", "Verification requires completed execution.");
-        const config = readConfig(paths, job().type, store),
-          p = provider(config, true),
+        const config = readConfig(paths, job().type, store);
+        requireFileMappings(config);
+        const p = provider(config, true),
           revision = job().planRevision!,
           plan = store.readPlanRevision(revision)!;
         let worker: TransferWorkerHandle | undefined;

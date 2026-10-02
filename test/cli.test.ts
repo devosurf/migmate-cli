@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import assert from "node:assert/strict";
 import {
   mkdirSync,
@@ -32,6 +33,7 @@ import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { cliFixture, CLI_JOB_CONFIG } from "./cli-fixture.ts";
 import { discoverSharePoint, type SharePointDiscovery } from "../src/engine/providers/discovery.ts";
 import type { GraphTransport } from "../src/engine/providers/http.ts";
+import { createProductionProvider } from "../src/engine/providers/production.ts";
 
 interface Capture {
   code: number;
@@ -110,10 +112,10 @@ function invokeProcess(argv: string[], cwd: string, environment: NodeJS.ProcessE
   assert.notEqual(result.status, null);
   return { code: result.status!, stdout: result.stdout, stderr: result.stderr, prompts: 0 };
 }
-function harness(t: TestContext) {
+function harness(t: TestContext, fixture = cliFixture()) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "migmate-cli-contract-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const provider = new FakeFileMigrationPort(cliFixture());
+  const provider = new FakeFileMigrationPort(fixture);
   const engine = () => openEngine({ home, provider, adapter: "cli" });
   return { home, provider, engine };
 }
@@ -136,8 +138,32 @@ async function planned(t: TestContext) {
   return { ...h, id, plan: plan.value };
 }
 
-it("discover returns and writes an unloaded draft that manifest load accepts after member review", async (t) => {
+it("refuses a plan without mappings with manifest-load guidance, not a credential error", async (t) => {
   const h = harness(t);
+  const initialized = await h.engine().initJob({ type: "file_migration", config: {} });
+  assert.ok(initialized.ok);
+  const id = initialized.value.id;
+  const plan = await invoke(["plan", "--job", id, "--output", "json"], h.engine());
+  assert.equal(plan.code, 2);
+  const refusal = document<never>(plan).refusal;
+  assert.equal(refusal.code, "configuration_invalid");
+  assert.deepEqual(refusal.detail, { field: "mappings" });
+  assert.match(Reflect.get(refusal, "message"), /manifest load/u);
+  for (const [command, code] of [
+    ["execute", "approval_required"],
+    ["verify", "verification_unaccepted"],
+  ]) {
+    const result = await invoke([command!, "--job", id, "--output", "json"], h.engine());
+    assert.equal(result.code, 4);
+    assert.equal(document<never>(result).refusal.code, code);
+  }
+});
+
+it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed manifest", async (t) => {
+  const h = harness(t, {
+    ...cliFixture(),
+    googleAbout: { user: { emailAddress: "files@example.com" }, canCreateDrives: true },
+  });
   const graph: GraphTransport = {
     async evidence() {
       return { grantedPermissions: ["Sites.Read.All"] };
@@ -180,10 +206,100 @@ it("discover returns and writes an unloaded draft that manifest load accepts aft
       throw new Error("Discovery cannot read bytes");
     },
   };
-  Object.assign(h.provider, { discoverSharePoint: () => discoverSharePoint(graph) });
-  const initialized = await h.engine().initJob({ type: "file_migration", config: CLI_JOB_CONFIG });
-  assert.ok(initialized.ok);
+  const keyPath = join(h.home, "google.json");
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  writeFileSync(
+    keyPath,
+    JSON.stringify({
+      type: "service_account",
+      project_id: "migmate-test",
+      private_key_id: "a".repeat(40),
+      private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      client_email: "migmate@migmate-test.iam.gserviceaccount.com",
+      client_id: "123456789012345678901",
+      token_uri: "https://oauth2.googleapis.com/token",
+    }),
+    { mode: 0o600 },
+  );
+  const tenantId = "11111111-1111-1111-1111-111111111111";
+  const clientId = "22222222-2222-2222-2222-222222222222";
+  const rclonePath = join(h.home, "rclone.conf");
+  writeFileSync(
+    rclonePath,
+    `[sharepoint]\ntype = onedrive\nclient_id = ${clientId}\nclient_secret = test-secret\nclient_credentials = true\ntenant = ${tenantId}\ndrive_type = documentLibrary\ndrive_id = src-drive\n\n[google]\ntype = drive\nscope = drive\nservice_account_file = ${keyPath}\nteam_drive = dst-drive\nroot_folder_id = dst-root\n`,
+    { mode: 0o600 },
+  );
+  const config = {
+    route: "sharepoint_library_to_shared_drive",
+    options: { verificationMode: "hash" },
+    rclone: {
+      config: { resolver: "file", path: rclonePath, mode: "0600" },
+      sourceRemote: "sharepoint",
+      destinationRemote: "google",
+    },
+  };
+  const configPath = join(h.home, "operator.toml");
+  writeFileSync(configPath, stringifyToml(config));
+  t.mock.method(globalThis, "fetch", async (target: string | URL | Request) => {
+    const url = new URL(typeof target === "string" || target instanceof URL ? target : target.url);
+    if (url.hostname === "login.microsoftonline.com") {
+      const claims = {
+        tid: tenantId,
+        appid: clientId,
+        aud: "https://graph.microsoft.com",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        roles: ["Sites.Read.All"],
+      };
+      return Response.json({
+        access_token: `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`,
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    }
+    if (url.hostname === "oauth2.googleapis.com")
+      return Response.json({
+        access_token: "google-token",
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    assert.equal(url.hostname, "graph.microsoft.com");
+    return Response.json(await graph.request(url.pathname));
+  });
+  const initialized = document<{ id: string }>(
+    await invoke(["init", "--type", "file_migration", "--output", "json"], h.engine()),
+  );
+  assert.equal(initialized.ok, true);
   const id = initialized.value.id;
+  // Exercise real credential/preflight and discovery effects, keeping transfer
+  // workers and mapping trees at the existing fake-provider seam.
+  h.provider.preflight = async function* (input) {
+    const production = createProductionProvider(input);
+    try {
+      for await (const check of production.preflight!(input)) {
+        assert.equal(check.id, "provider.credentials");
+        yield check;
+        break;
+      }
+    } finally {
+      await production.close?.();
+    }
+  };
+  const discovery = createProductionProvider({
+    jobType: "file_migration",
+    config,
+    jobDirectory: join(h.home, "jobs", id),
+  });
+  t.after(() => discovery.close?.());
+  Object.assign(h.provider, { discoverSharePoint: () => discovery.discoverSharePoint!() });
+  const onboard = await invoke(
+    ["creds", "init", "--job", id, "--config", configPath, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(onboard.code, 0, onboard.stdout);
+  assert.equal(document<{ passed: boolean }>(onboard).value.passed, true);
+  const doctor = await invoke(["doctor", "--job", id, "--output", "json"], h.engine());
+  assert.equal(doctor.code, 0, doctor.stdout);
+  assert.equal(document<{ passed: boolean }>(doctor).value.passed, true);
   const before = await h.engine().reader({ id }).status();
   const file = join(h.home, "draft.json");
   const capture = await invoke(
@@ -231,6 +347,11 @@ it("discover returns and writes an unloaded draft that manifest load accepts aft
   );
   assert.equal(loaded.code, 0);
   assert.equal(document<{ mappingCount: number }>(loaded).value.mappingCount, 1);
+  const plan = await invoke(["plan", "--job", id, "--output", "json"], h.engine());
+  assert.equal(plan.code, 0, plan.stdout);
+  const proposal = document<PlanRevision>(plan);
+  assert.equal(proposal.ok, true);
+  assert.match(proposal.value.planDigest, /^[a-f0-9]{64}$/u);
 });
 
 it("discover refuses site-scoped access in the JSON envelope without writing a draft", async (t) => {

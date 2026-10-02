@@ -62,10 +62,12 @@ account and refuse `preflight_failed`, naming each unreadable drive in `unreadab
 SharePoint is written only by a separate destination app, the optional third rclone
 remote `rclone.sharepointDestinationRemote`. Its token's roles must be exactly
 `Sites.ReadWrite.All`; anything else refuses `credential_permissions_invalid`, as does
-reusing the source app's client id. The source app never gains a write role, and a job
-without Google-source mappings refuses `credential_config_invalid` if it names this
-remote, so a job that only reads SharePoint never holds a write credential. A job with only reverse
-mappings needs no SharePoint source remote. Destinations are paths under a library
+reusing the source app's client id. The source app never gains a write role. Before
+manifest load, only the explicit reverse route may name the write remote (and requires
+it); the default SharePoint-source route requires `rclone.sourceRemote` instead.
+With mappings loaded, only Google-source mappings may hold the write remote;
+an unnecessary write remote refuses `credential_config_invalid`. Reverse jobs need
+no SharePoint source remote. Destinations are paths under a library
 pinned by `drive_id`, never `root_folder_id`, and passes into SharePoint run with
 `--ignore-size --ignore-checksum` because SharePoint may rewrite PDF, Office and HTML
 bytes. Verification computes quickXorHash by downloading the source and compares it
@@ -122,6 +124,11 @@ site's `sites` (subsites, recursively) and `drives` paging links, visiting each 
 once and selecting document libraries. It requires
 `Sites.Read.All`; scoped discovery refuses with `preflight_failed`, detail check
 `discovery_requires_sites_read_all`, and required grant `Sites.Read.All`.
+Credential onboarding, `doctor` and discovery accept a job with no mappings;
+mapping-specific access checks apply after load. `plan` requires at least one mapping
+and otherwise refuses `configuration_invalid`, field `mappings`, directing the operator
+to `manifest load`. A fresh job still refuses `execute` with `approval_required` and
+`verify` with `verification_unaccepted`; neither can migrate an empty job.
 The JSON envelope carries sites/libraries and a draft manifest, proposing one
 Shared Drive per library named from site name, site URL path and library with
 empty members for the operator. No access translation, automatic manifest load, or provisioning occurs.
