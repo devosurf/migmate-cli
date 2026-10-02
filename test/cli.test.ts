@@ -144,7 +144,17 @@ it("discover returns and writes an unloaded draft that manifest load accepts aft
     },
     async request<T>(path: string): Promise<T> {
       if (path === "/v1.0/sites/getAllSites")
-        return JSON.parse(JSON.stringify({ value: [{ id: "site", displayName: "Operations" }] }));
+        return JSON.parse(
+          JSON.stringify({
+            value: [
+              {
+                id: "site",
+                displayName: "Operations",
+                webUrl: "https://tenant.sharepoint.com/sites/operations",
+              },
+            ],
+          }),
+        );
       if (path === "/v1.0/sites/site/drives" || path === "/v1.0/sites/team/sites")
         return JSON.parse('{"value":[]}');
       if (path === "/v1.0/sites/site/sites")

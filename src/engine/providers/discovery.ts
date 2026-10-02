@@ -60,16 +60,19 @@ export async function discoverSharePoint(graph: GraphTransport): Promise<SharePo
     };
     // The site URL path distinguishes subsites sharing a display name and does not
     // depend on whether tenant enumeration or the parent's subsite list came first.
-    let siteName = site.name;
-    if (rawSite.webUrl !== undefined) {
-      let url: URL;
-      try {
-        url = new URL(text(rawSite.webUrl));
-      } catch {
-        throw new ProviderFault("preflight_failed", "Graph returned an invalid site URL.");
-      }
-      siteName = `${site.name} (${url.hostname}${url.pathname})`;
+    let url: URL;
+    try {
+      url = new URL(text(rawSite.webUrl));
+    } catch {
+      throw new ProviderFault("preflight_failed", "Graph omitted or returned an invalid site URL.");
     }
+    let path = url.pathname;
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // Keep Graph's encoded path when it is not valid percent-encoding.
+    }
+    const siteName = `${site.name} (${url.hostname}${path})`;
     for await (const rawDrive of entries(`/v1.0/sites/${encodeURIComponent(site.id)}/drives`)) {
       if (rawDrive.driveType !== "documentLibrary") continue;
       const library = { id: text(rawDrive.id), name: text(rawDrive.name) };

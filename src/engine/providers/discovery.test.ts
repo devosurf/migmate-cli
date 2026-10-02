@@ -6,12 +6,22 @@ import type { GraphTransport } from "./http.ts";
 test("discovery follows site, subsite and library pages and drafts every library once", async () => {
   const pages: Record<string, unknown> = {
     "/v1.0/sites/getAllSites": {
-      value: [{ id: "site-a", displayName: "Research" }],
+      value: [
+        {
+          id: "site-a",
+          displayName: "Research",
+          webUrl: "https://tenant.sharepoint.com/sites/research",
+        },
+      ],
       "@odata.nextLink": "https://graph.microsoft.com/v1.0/sites/getAllSites?$skiptoken=sites-2",
     },
     "https://graph.microsoft.com/v1.0/sites/getAllSites?$skiptoken=sites-2": {
       value: [
-        { id: "site-b", displayName: "Operations" },
+        {
+          id: "site-b",
+          displayName: "Operations",
+          webUrl: "https://tenant.sharepoint.com/sites/F%C3%B6rs%C3%A4ljning/Team%20A",
+        },
         {
           id: "site-d",
           displayName: "Research",
@@ -60,7 +70,11 @@ test("discovery follows site, subsite and library pages and drafts every library
           displayName: "Archive",
           webUrl: "https://tenant.sharepoint.com/sites/research/labs/archive",
         },
-        { id: "site-a", displayName: "Research" },
+        {
+          id: "site-a",
+          displayName: "Research",
+          webUrl: "https://tenant.sharepoint.com/sites/research",
+        },
       ],
     },
     "/v1.0/sites/site-b/sites": { value: [] },
@@ -109,13 +123,19 @@ test("discovery follows site, subsite and library pages and drafts every library
       {
         id: "drive-a",
         source: { type: "sharepoint", driveId: "drive-a", folderPath: "" },
-        destination: { type: "google_shared_drive", create: "Research - Documents" },
+        destination: {
+          type: "google_shared_drive",
+          create: "Research (tenant.sharepoint.com/sites/research) - Documents",
+        },
         members: [],
       },
       {
         id: "drive-b",
         source: { type: "sharepoint", driveId: "drive-b", folderPath: "" },
-        destination: { type: "google_shared_drive", create: "Research - Evidence" },
+        destination: {
+          type: "google_shared_drive",
+          create: "Research (tenant.sharepoint.com/sites/research) - Evidence",
+        },
         members: [],
       },
       {
@@ -148,11 +168,30 @@ test("discovery follows site, subsite and library pages and drafts every library
       {
         id: "drive-c",
         source: { type: "sharepoint", driveId: "drive-c", folderPath: "" },
-        destination: { type: "google_shared_drive", create: "Operations - Documents" },
+        destination: {
+          type: "google_shared_drive",
+          create: "Operations (tenant.sharepoint.com/sites/Försäljning/Team A) - Documents",
+        },
         members: [],
       },
     ],
   });
+});
+
+test("discovery refuses a site Graph returns without a URL", async () => {
+  const graph: GraphTransport = {
+    async request<T>(path: string): Promise<T> {
+      assert.equal(path, "/v1.0/sites/getAllSites");
+      return JSON.parse(JSON.stringify({ value: [{ id: "site-a", displayName: "Research" }] }));
+    },
+    async *stream() {
+      throw new Error("Discovery must not read bytes");
+    },
+    async evidence() {
+      return { grantedPermissions: ["Sites.Read.All"] };
+    },
+  };
+  await assert.rejects(discoverSharePoint(graph), { code: "preflight_failed" });
 });
 
 test("site-scoped discovery refuses with the missing tenant-wide grant before enumeration", async () => {
