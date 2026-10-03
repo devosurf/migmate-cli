@@ -48,7 +48,18 @@ export interface FileMigrationConfig {
     transfersPerMapping?: number;
     mirror?: boolean;
     deleteLimit?: number;
+    /** ADR-0012 A1: the job runs prestage, deltas and a final revision before go-live. */
+    staged?: boolean;
+    /** ADR-0012 A6: when manifest members are granted. Default follows `staged`. */
+    memberGrants?: "before_copy" | "after_verification";
   };
+}
+
+/** ADR-0012 A6: staged jobs grant at go-live (`close`) unless the plan says otherwise. */
+export function memberGrantTiming(
+  options: FileMigrationConfig["options"],
+): "before_copy" | "after_verification" {
+  return options?.memberGrants ?? (options?.staged ? "after_verification" : "before_copy");
 }
 
 const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };

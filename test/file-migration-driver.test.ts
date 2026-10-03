@@ -575,6 +575,26 @@ describe("OneNote notebook policy", () => {
   });
 });
 
+describe("staged migration options (ADR-0012)", () => {
+  it("strictly validates staged intent and member grant timing", async (t) => {
+    const h = await harness(t);
+    for (const [field, invalid] of [
+      ["staged", ["yes", 1, null]],
+      ["memberGrants", ["later", "after_copy", true, null]],
+    ] as const)
+      for (const value of invalid) {
+        const result = await h.engine.initJob({
+          type: "file_migration",
+          config: { ...config, options: { [field]: value } },
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) throw new Error(`Invalid ${field} must refuse`);
+        assert.equal(result.refusal.code, "configuration_invalid");
+        assert.deepEqual(result.refusal.detail, { field: `options.${field}` });
+      }
+  });
+});
+
 describe("file migration through the engine", () => {
   it("refuses mirror on legacy created-drive records lacking provenance", async (t) => {
     const h = await provisioningHarness(t, fixture(), { mirror: true, deleteLimit: 2 });

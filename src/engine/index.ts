@@ -346,6 +346,8 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         "transfersPerMapping",
         "mirror",
         "deleteLimit",
+        "staged",
+        "memberGrants",
       ],
       "options",
     );
@@ -388,6 +390,15 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     }
     if (options.mirror === true && options.deleteLimit === undefined)
       configError("options.deleteLimit");
+    if (options.staged !== undefined) {
+      if (typeof options.staged !== "boolean") configError("options.staged");
+      config.options.staged = options.staged;
+    }
+    if (options.memberGrants !== undefined) {
+      if (options.memberGrants !== "before_copy" && options.memberGrants !== "after_verification")
+        configError("options.memberGrants");
+      config.options.memberGrants = options.memberGrants;
+    }
     if (input.impersonate !== undefined) {
       if (typeof input.impersonate !== "boolean") configError("impersonate");
       config.impersonate = input.impersonate;
