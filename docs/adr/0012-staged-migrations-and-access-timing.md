@@ -1,12 +1,12 @@
 # ADR-0012: Staged migrations and destination access timing
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-03
-- Acceptance: Morgan must accept or change this ADR and its glossary before implementation.
+- Accepted: Morgan, 2026-10-04, as written. Implementation is tracked in #58 and #59.
 - Issues: [#58](https://github.com/devosurf/migmate-cli/issues/58), [#59](https://github.com/devosurf/migmate-cli/issues/59); downstream [#60](https://github.com/devosurf/migmate-cli/issues/60)
-- Amends, if accepted: [ADR-0010](0010-rclone-executes-file-transfers.md), for staged verification scope and provisioning timing only.
+- Amends: [ADR-0010](0010-rclone-executes-file-transfers.md), for staged verification scope and provisioning timing only.
 
-A staged file migration remains one finite job: prestage, approved deltas, freeze, settled final delta, full verification, then go-live. We propose explicit stages and deferred member grants at `close`, because a successful bulk copy is neither a completed cutover nor permission to expose a still-mirrored destination. This is a decision proposal, not documentation of shipped commands or guarantees.
+A staged file migration remains one finite job: prestage, approved deltas, freeze, settled final delta, full verification, then go-live. We decide on explicit stages and deferred member grants at `close`, because a successful bulk copy is neither a completed cutover nor permission to expose a still-mirrored destination. The commands and guarantees described here ship with #58 and #59; until then they are decisions, not documented behaviour.
 
 ## Context
 
@@ -14,7 +14,7 @@ The [product design's cutover lifecycle](../design/migration-product-session.md#
 
 Scope is file migration, not Teams archive. OneNote section files opted into by #57 participate as ordinary files; this ADR does not invent a second notebook transfer mechanism. Existing grants outside Migmate's control, provider consistency, and concurrent writers still constrain what can be claimed.
 
-## Proposed decisions
+## Decisions
 
 ### A1 — Staged intent and the final revision
 
@@ -44,7 +44,7 @@ Alternatives: automatic locking would require write privileges and provider-spec
 
 ### A4 — Bounded settled confirmation before verification
 
-After the final copy, wait the connector's consistency interval and re-inventory completely against what was copied through the frozen bound. If approved content has not settled, run a catch-up pass within the same final revision, wait, and repeat. One complete confirmation with no unprocessed change is required before full verification starts. Bound the additional passes (proposed default: **three**) and record the configured bound, actual settle-pass count, observations and outcome in the report. Exhaustion leaves cutover incomplete; it is not a successful verification or an infinite retry.
+After the final copy, wait the connector's consistency interval and re-inventory completely against what was copied through the frozen bound. If approved content has not settled, run a catch-up pass within the same final revision, wait, and repeat. One complete confirmation with no unprocessed change is required before full verification starts. Bound the additional passes (default: **three**) and record the configured bound, actual settle-pass count, observations and outcome in the report. Exhaustion leaves cutover incomplete; it is not a successful verification or an infinite retry.
 
 Settling does not enlarge approval. New paths or deletions outside the approved preview require `plan_revision_required`; never silently approve new destructive work inside a retry. Keep the original deletion authorization and its cumulative limit across settle passes. A change discovered during full verification still blocks completion: the settle loop is not a snapshot or a way to suppress verification findings.
 
@@ -176,7 +176,7 @@ Conclusion: delta acquisition and replay are demonstrably readable under the sou
 
 ## Consequences and acceptance gates
 
-- **Morgan's decisions:** accept or change A1's intent/finality shape, A2's listing-derived preview, A3's attestation and claim limits, A4's bounded settling (including the proposed three-pass bound), A5's conditional delta fence and full-comparison fallback, A6's staged default and close-time go-live, A7's opt-in partial intermediate proof, and A8's single-job boundary. The glossary is proposed alongside these decisions.
+- **Accepted as written** (A1–A8, including the three-pass settle bound, A5's conditional delta fence with full-comparison fallback, and close-time go-live), together with the glossary terms.
 - **#60's guided skill:** strategy rounds decide staged intent, mirror/limit, grant timing and verification scope before manifest load. Approval reads back inventory age and all previewed deletions; the digest stands alone and the confirmed approver identity is reused deliberately. The agent observes human edits and freeze read-only, distinguishes observation from attestation, and explains findings with a recommendation rather than silently accepting them. Questions remain short and decisions stay human-owned.
 - **Go-live/close ordering in #60 changes:** review the pre-close report and settle findings **before** authorizing close. The go-live round authorizes the same close operation that grants members; do not teach a separate grant command or ask the human to fill a group before final verification. Confirm membership/drift and final report afterward, then hand over cleanup. Each round has an empty decision frontier and human confirmation before action; resume from durable status after interruption.
 - Implementation must split drive creation from grants, extend immutable approvals/reports, fence transfer resumption once go-live starts, and add scope-aware verification baselines without weakening ADR-0010's default proof. README, release limits and skill changes belong to the implementation waves; this proposal does not advertise unshipped behavior.
