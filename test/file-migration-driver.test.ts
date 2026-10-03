@@ -1910,16 +1910,15 @@ describe("file migration through the engine", () => {
           parentId: "source-root",
           name: "photo.heic",
           kind: "file",
-          content: "still frame",
-          size: 999,
+          content: Buffer.alloc(100),
+          size: 100,
           mimeType: "image/heic",
         },
       ]),
     );
     await approve(h);
     await execute(h);
-    const copied = h.port.snapshotDestination().find((entry) => entry.path === "photo.heic")!;
-    h.port.mutateDestinationContent(copied.id, Buffer.alloc(999));
+    h.port.mutateSourceItem("still", { content: Buffer.alloc(120, 1), size: 100 });
     const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
     assert.deepEqual(verified.findings.map((entry) => entry.code).sort(), [
       "content_mismatch",
@@ -1934,15 +1933,31 @@ describe("file migration through the engine", () => {
         .evidence,
       {
         path: "photo.heic",
-        sourceSize: 999,
-        destinationSize: 999,
-        listedSize: 999,
-        servedSize: 11,
+        sourceSize: 120,
+        destinationSize: 100,
+        listedSize: 100,
+        servedSize: 120,
         hashType: "sha256",
-        sourceHash: hash("still frame"),
-        destinationHash: hash(Buffer.alloc(999)),
+        sourceHash: hash(Buffer.alloc(120, 1)),
+        destinationHash: hash(Buffer.alloc(100)),
       },
     );
+    for (const code of ["size_mismatch", "content_mismatch"]) {
+      assert.deepEqual(findings.find((entry: { code: string }) => entry.code === code).evidence, {
+        path: "photo.heic",
+        sourceSize: 120,
+        destinationSize: 100,
+        listedSize: 100,
+        sourceHash: hash(Buffer.alloc(120, 1)),
+        destinationHash: hash(Buffer.alloc(100)),
+        hashType: "sha256",
+        cause: "source_size_inconsistent",
+      });
+    }
+    const closed = value(await h.engine.withWriter(h.ref, (writer) => writer.close()));
+    assert.equal(closed.ok, false);
+    if (closed.ok) throw new Error("Source changes must block close");
+    assert.equal(closed.refusal.code, "verification_unaccepted");
   });
 
   it("copies what the source serves when its listed size disagrees, and names that for acceptance", async (t) => {
@@ -2010,7 +2025,7 @@ describe("file migration through the engine", () => {
       path: "photo.heic",
       listedSize: 999,
       servedSize: 11,
-      sourceSize: 999,
+      sourceSize: 11,
       destinationSize: 11,
       sourceHash: hash("still frame"),
       destinationHash: hash("still frame"),
