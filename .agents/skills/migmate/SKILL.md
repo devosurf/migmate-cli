@@ -22,10 +22,10 @@ Ten verbs on one rail: `init`, `doctor`, `plan`, `approve`, `execute`, `status`,
 2. `creds init --job ID --config job.toml` onboards the operator config; `init --config job.toml` does the same at creation. Until it is onboarded the job is unconfigured and `doctor` refuses.
 3. `doctor` runs preflight — conditions only an administrator can satisfy. A failure here is a **tenant prerequisite**, so the finishing move is to name the failing check and hand it to a human.
 4. `plan` returns a `planDigest` binding an immutable proposal.
-5. `approve` needs `--approver IDENTITY` and `--plan-digest DIGEST`. Both belong to the human: carry the identity they gave you and the digest they read back. When either is missing, stop and ask — approval is the one gate that exists to require a person.
+5. `approve` needs `--approver IDENTITY` and `--plan-digest DIGEST`. Both belong to the human: carry the identity they gave you and the digest they read back. When either is missing, stop and ask — approval requires a person.
 6. `execute`, then `verify`.
 7. `verify` raises findings. Each one a human chooses to accept becomes an **exception** via `accept --job ID --verification-digest DIGEST --approver IDENTITY --code CODE`, repeating `--code` per finding, recorded permanently in the report. Omitting the digest refuses `verification_unaccepted`; omitting the approver or the codes is `usage`. `close` refuses while any blocking finding is unaccepted; `destination_only_retained` is a nonblocking policy outcome.
-8. `report`, then `close`.
+8. Review `report`, then confirm `close`; with deferred grants this confirmation authorizes go-live. Review membership/drift checks and the final report afterward.
 
 `status` is safe at any point. `cancel` is terminal and exits 0 on success.
 
@@ -74,12 +74,20 @@ from the source with SharePoint's. Surface `destination_rewrote_file` (PDF, Offi
 or HTML that SharePoint rewrote, with both hashes and sizes) separately from
 `content_mismatch`, which is genuine corruption; let a human accept each code.
 
-Before approving provisioning, read back every planned drive name, member and role.
-`doctor` requires `about.canCreateDrives` for these manifests. Creation and member
-grants finish before copying; notification emails are suppressed. After a crash,
-rerun `execute` using the same job: its request IDs, created drive IDs and grants
-are durable. Read `status.createdDrives` (a null drive ID is an unresolved intent)
-and `status.memberGrants`; the report retains both.
+Before approving provisioning, read back every planned drive name, member, role and
+grant timing. `[options] memberGrants` defaults to `before_copy` for unstaged jobs
+and `after_verification` for staged jobs; either can be explicitly overridden.
+`doctor` requires `about.canCreateDrives`. Deferred execute creates and copies
+without manifest grants (`status.memberGrants` stays empty); otherwise grants
+precede copying. Notification emails are suppressed. Before go-live, rerun `execute`
+after a crash using the same job's durable request IDs and created drive IDs.
+Read `status.createdDrives` (a null drive ID is an unresolved intent) and
+`status.memberGrants`; the report retains both.
+Deferred `close` requires verification and accepted blocking findings (plus staged
+finality), fences further copy/mirror before grants, then checks membership and
+destination drift. After a failed close, access may already exist: resolve drift
+manually and repeat `close`, not transfers. Plan/report disclose the mode and warn
+that mirror can overwrite/delete existing writers' files in either mode.
 
 On `drive_creation_ambiguous` (exit 4), surface candidate IDs and creation timestamps
 and stop: there may be several exact-name matches, or the sole match lacks a
@@ -87,10 +95,12 @@ and stop: there may be several exact-name matches, or the sole match lacks a
 older drive or infers a missing creation timestamp.
 Keep a submitted creation name bound to its mapping ID; use an existing destination
 ID rather than changing that intent. On `drive_membership_mismatch`, surface expected
-and actual members for human review and acceptance. Google adds the creator as an
-implicit organizer; verification includes it unless explicitly listed in the manifest.
-Verify and execute replay leave checkpointed grants alone. Removing a manifest member
-does not revoke access. Existing destination memberships are outside this feature.
+and actual members for human review; a failed post-grant check is not successful
+go-live. Google adds the creator as an implicit organizer; membership checks include
+it unless explicitly listed in the manifest. Deferred pre-close verification does
+not require manifest grants yet. Removing a manifest member does not revoke access.
+External access, administrators, existing-drive members and pre-populated group
+members are outside the deferred-access guarantee.
 
 For file migrations, read the plan's verification mode before approval. The default `"hash"` re-downloads source bytes and compares each relative file path to Drive's stored SHA-256, falling back per file to MD5 without downloading the destination. `[options] verificationMode = "size_only"` trades content proof for listed-size comparison and always requires acceptance of `content_verification_degraded`, even for an empty mapping. Missing, size-differing, corrupt, and unreadable files carry their path, both sizes, and available hashes in the report. Surface those exact paths and evidence. Leftovers (`destination_only_retained`) are retained and reported without blocking close. Both modes verify folder existence, including empty folders, on both file routes; file and folder metadata remain unverified. Surface a missing folder's `destination_missing` (`itemType: "folder"`) or a file at its path's `destination_type_conflict` as blocking findings, not retained leftovers. Excluded and omitted folders and their descendants are outside the folder check.
 

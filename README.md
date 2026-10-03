@@ -105,7 +105,7 @@ flowchart LR
   cancel
 ```
 
-`init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any finding is unaccepted.
+`init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any blocking finding is unaccepted. With deferred member grants, confirming `close` also authorizes go-live.
 
 For file verification, a source that changed between copy and verify can raise three findings for one path: `source_size_inconsistent`, `size_mismatch`, and `content_mismatch`. `sourceSize` reports the size actually compared with `destinationSize`; when the listing contradicts served bytes, `listedSize` preserves the listing and the inconsistency finding also carries `servedSize`. The dependent size and content findings carry `cause: "source_size_inconsistent"` so they can be reviewed together. All three still block `close` until explicitly accepted; accepting the cause alone does not accept the other findings.
 
@@ -195,6 +195,48 @@ to create may coexist in one manifest. Members apply only to drives the job
 creates; types are `user` or `group`, and roles are `organizer`, `fileOrganizer`,
 `writer`, `commenter`, or `reader`. `anyone` and `domain` refuse at load, naming
 the row and `members.N.type`. Emails are case-insensitive and duplicates refuse.
+
+**Member grant timing.**
+
+File jobs bind `[options] memberGrants` into the approved plan. Unstaged jobs
+default to `"before_copy"` (unchanged); staged jobs default to
+`"after_verification"`. Either default can be explicitly overridden:
+
+```toml
+[options]
+staged = true
+memberGrants = "after_verification" # or "before_copy"
+```
+
+Plan and report disclose the effective mode beside Mirror and Copy concurrency.
+With `before_copy`, execute creates drives and grants manifest members before
+copying. With `after_verification`, execute creates drives and copies without
+granting manifest members; `status.memberGrants` stays empty through execution.
+A verified prestage or intermediate delta does not grant access.
+
+Verify, review the pre-close report, and explicitly accept any blocking findings
+before confirming `close`. For staged jobs, the latest revision must also be final,
+settled and fully verified. Close is the go-live authorization: it durably fences
+further copy/mirror work for each affected drive **before the first grant request**,
+grants the approved members, checks membership and destination-content/permission
+drift, and writes timestamped grant evidence and the final report before closing.
+
+If close fails or is interrupted, repeat `close` to resume grants, checks and
+reporting, not transfers. **Some access may already exist after a failed close.**
+Resolve membership or destination drift manually; another copy/mirror pass against
+an affected drive is not a recovery path. Go-live is not successful until its
+post-grant checks pass.
+`execute` against a fenced drive refuses `go_live_started` (exit 4). The short
+destination drift check compares file paths, sizes, stored hashes and IDs plus
+folder paths with verification; it is not another content download or a guarantee
+against later writes. Its permission check covers explicit drive membership, not
+inherited permissions or effective group membership.
+
+In either mode, plan/report warn that mirror can overwrite or delete existing
+writers' files. Deferring manifest grants does not revoke or exclude external
+access, administrators, existing drive members or members of pre-populated groups.
+The acting account needs organizer access; restricting other access is an operator
+precondition, not a Migmate isolation guarantee.
 
 For existing destinations, CSV accepts this exact seven-column header:
 
