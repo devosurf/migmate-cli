@@ -35,22 +35,56 @@ the service-account key and delegation entry as open operator tasks. Per-mapping
 rclone overrides inject impersonation; setting it in the operator's rclone file
 refuses. With impersonation off, the service account continues acting as itself.
 
-**Provisioning.** The plan lists each new drive and its explicit user/group members
-and roles. Execute checkpoints a deterministic job-and-mapping request ID, creates
-the drive, records its ID before granting members, and suppresses notification
-emails. Lost responses recover by exact visible name: one candidate is adopted,
+**Provisioning and grant timing.** The plan lists each new drive and its explicit
+user/group members and roles. Execute checkpoints a deterministic job-and-mapping
+request ID, creates the drive and records its ID before any member grant.
+Lost responses recover by exact visible name with the timestamp evidence above:
 none retries the same request, several refuse `drive_creation_ambiguous` (exit 4).
 Creation names cannot change after submission for that mapping ID. Schema version 5
 adds job-scoped created drives and member grants without revising earlier approvals.
+Grant notification emails are suppressed.
 
-Verification compares created-drive membership against the manifest plus Google's
-implicit creator-organizer grant. Missing, additional, or changed grants raise
-blocking `drive_membership_mismatch` with both memberships as evidence.
-It does not translate source permissions, repair drift, revoke removed members,
-or manage existing-drive permissions. `anyone` and `domain` refuse at manifest load.
-Status and report retain the created IDs and member grants. Offline engine and
-HTTP contracts cover provisioning and crash recovery; no live tenant provisioning
-measurement is claimed.
+The approval-bound `[options] memberGrants` defaults to `before_copy` for unstaged
+jobs and `after_verification` for staged jobs; an explicit value overrides either
+default. Plan and report show the effective mode beside Mirror and Copy concurrency.
+`before_copy` retains execute-time grants. With `after_verification`, execute creates
+and copies without manifest grants, and `status.memberGrants` remains empty through
+execution. Verified prestages and intermediate deltas do not grant access.
+
+Deferred go-live is authorized by confirming `close`, after the latest required
+verification and acceptance of all blocking findings (`verification_unaccepted`
+otherwise). Staged finality, settling and full verification are required before any
+grant. Close durably fences future copy/mirror work for each affected drive before
+the first grant request, grants approved members, checks membership and destination
+content/permission drift, records grant evidence after the verification timestamp,
+then produces the final report and closes. A crash, ambiguous response, partial
+grant or failed check leaves that fence in place. Repeating `close` resumes grants,
+checks and reporting, not transfers. Some access may already exist after a failed
+close; resolve drift manually without another transfer pass against that drive,
+and do not treat failed post-grant checks as successful go-live.
+
+The short drift check re-lists destination file paths, sizes, stored hashes and
+object IDs, plus folder paths, against the listing recorded by verification. It
+does not re-download content or prove inherited permissions, effective group
+membership or absence of later writes. Post-grant mismatches refuse
+`verification_unaccepted` with `detail.accessMayExist = true` and a named check;
+`execute` against a fenced drive refuses `go_live_started` (exit 4).
+
+Membership checks include Google's implicit creator-organizer grant; deferred
+pre-close verification does not require manifest grants that are not yet due.
+Missing, additional, or changed grants raise blocking `drive_membership_mismatch`
+with both memberships as evidence. Migmate does not translate source permissions,
+repair drift, revoke removed members, or manage existing-drive permissions.
+`anyone` and `domain` refuse at manifest load. Status and report retain created IDs
+and member grants.
+
+The deferred go-live fence does not apply to legacy `before_copy` timing.
+In either mode, plan/report warn that mirror can overwrite or delete existing
+writers' files. Deferred grants do not exclude external access, administrators,
+existing drive members or members of pre-populated groups. The acting account
+requires organizer access; operators must restrict all other access to claim staged
+isolation. Offline engine and HTTP contracts cover provisioning and crash recovery;
+no live tenant provisioning measurement is claimed.
 
 **Google Shared Drives to SharePoint.** A job with `route = "shared_drive_to_sharepoint_library"`
 reads Google Shared Drive folders (drive id and folder id) into existing SharePoint

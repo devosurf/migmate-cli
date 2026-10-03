@@ -1196,6 +1196,7 @@ export class FakeFileMigrationPort implements ProviderPort {
 
   async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
     this.assertPassWorker(input.socketPath);
+    this.throwEffect("listFileHashes", input.root.fs, "before");
     this.throwRetryAfter("listFileHashes", input.root.fs);
     const hashes: FileHashEntry[] = [];
     const selected = input.paths === undefined ? null : new Set(input.paths);
