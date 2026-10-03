@@ -83,6 +83,106 @@ function hash(content: string | Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+describe("destination folder verification", () => {
+  for (const reverse of [false, true]) {
+    for (const conflict of [false, true]) {
+      it(`blocks ${conflict ? "a file at" : "a missing"} empty folder (${reverse ? "SharePoint" : "Shared Drive"})`, async (t) => {
+        const h = await harness(
+          t,
+          fixture(),
+          reverse
+            ? {
+                route: "shared_drive_to_sharepoint_library",
+                mappings: [],
+              }
+            : config,
+        );
+        if (reverse)
+          value(
+            await h.engine.withWriterResult(h.ref, (writer) =>
+              writer.loadManifest({
+                format: "json",
+                content: JSON.stringify({
+                  version: 1,
+                  mappings: [
+                    {
+                      id: "mapping",
+                      source: {
+                        type: "google_shared_drive",
+                        driveId: "source-drive",
+                        folderId: "source-root",
+                      },
+                      destination: {
+                        type: "sharepoint",
+                        driveId: "destination-drive",
+                        folderPath: "",
+                      },
+                    },
+                  ],
+                }),
+              }),
+            ),
+          );
+        await approve(h);
+        await execute(h);
+        const empty = h.port.snapshotDestination().find((entry) => entry.path === "nested/empty")!;
+        h.port.removeDestinationItem(empty.id);
+        if (conflict)
+          await h.port.uploadDestinationContent({
+            parentFolderId: empty.parentId!,
+            name: empty.name,
+            content: new Uint8Array(),
+            createdAt: now,
+            modifiedAt: now,
+            mimeType: "inode/directory",
+          });
+        const verified = value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
+        assert.equal(verified.clean, false);
+        const code = conflict ? "destination_type_conflict" : "destination_missing";
+        assert.deepEqual(
+          verified.findings.map((entry) => entry.code),
+          [code],
+        );
+        assert.deepEqual(
+          value(
+            await h.engine.reader(h.ref).rows({
+              phase: "verify",
+              codes: ["destination_only_retained"],
+            }),
+          ).rows,
+          [],
+        );
+        const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+        const json = JSON.parse(
+          await readFile(
+            report.artifacts.find((artifact) => artifact.name === "report.json")!.path,
+            "utf8",
+          ),
+        );
+        const evidence = json.findings.find(
+          (entry: { code: string }) => entry.code === code,
+        ).evidence;
+        assert.deepEqual(
+          evidence,
+          conflict
+            ? {
+                path: "nested/empty",
+                destinationId: h.port
+                  .snapshotDestination()
+                  .find((entry) => entry.path === "nested/empty")!.id,
+                destinationSize: 0,
+                destinationHash: reverse ? "0000000000000000000000000000000000000000" : hash(""),
+              }
+            : { path: "nested/empty", itemType: "folder" },
+        );
+        const closed = await h.engine.withWriterResult(h.ref, (writer) => writer.close());
+        assert.equal(closed.ok, false);
+        if (!closed.ok) assert.equal(closed.refusal.code, "verification_unaccepted");
+      });
+    }
+  }
+});
+
 describe("Google Shared Drives to SharePoint", () => {
   const reverse = { mappings: [], route: "shared_drive_to_sharepoint_library" };
   function reverseMapping(id: string, sourceDrive: string, sourceRoot: string, library: string) {

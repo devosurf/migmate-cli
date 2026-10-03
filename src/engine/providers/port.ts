@@ -120,6 +120,8 @@ export interface FilePassProvider {
   copyPassStatus(input: CopyPassReference): Promise<CopyPassStatus>;
   copyPassStats(input: CopyPassReference): Promise<CopyPassStats>;
   stopCopyPass(input: CopyPassReference): Promise<void>;
+  /** Sorted recursive relative folder paths, excluding the root. */
+  listFolders(input: { socketPath: string; root: FilePassRoot }): Promise<string[]>;
   listFileHashes(input: {
     socketPath: string;
     root: FilePassRoot;

@@ -1106,6 +1106,15 @@ export class FakeFileMigrationPort implements ProviderPort {
     };
   }
 
+  async listFolders(input: Parameters<ProviderPort["listFolders"]>[0]): Promise<string[]> {
+    this.assertPassWorker(input.socketPath);
+    this.throwRetryAfter("listFolders", input.root.fs);
+    return [...this.tree(input.root.fs)]
+      .filter(([, entry]) => entry.kind === "folder")
+      .map(([path]) => path)
+      .sort();
+  }
+
   async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFileHashes", input.root.fs);
