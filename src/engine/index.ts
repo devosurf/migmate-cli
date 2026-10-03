@@ -83,6 +83,9 @@ import { createProductionProvider } from "./providers/production.ts";
 import { ProviderFault } from "./providers/credentials.ts";
 import {
   fileMigrationDriver,
+  goLive,
+  GoLiveCheckError,
+  memberGrantTiming,
   unreadableSourceDrives,
   type FileMappingConfig,
   type FileMigrationConfig,
@@ -125,6 +128,7 @@ const REFUSAL_CODES: Record<string, true> = Object.fromEntries(
     "plan_revision_required",
     "unsupported_route",
     "drive_creation_ambiguous",
+    "go_live_started",
     "verification_unaccepted",
     "job_closed",
     "job_cancelled",
@@ -1786,6 +1790,115 @@ function makeWriter(
       ...(outcome === "blocked" ? { budget: budget.summary() } : {}),
     });
   }
+  async function createReport(): Promise<Outcome<ArtifactSet>> {
+    const revision = job().planRevision ?? 0,
+      verification = currentVerification(store);
+    const config = revision > 0 ? readConfig(paths, job().type, store) : undefined;
+    const reportSections = config ? await sections(provider(config), config, revision) : [];
+    const phase: RowPhase = verification ? "verify" : store.currentPhase(revision);
+    const findings = store.readCurrentFindings(revision, phase),
+      rows = store.readAllRows(revision);
+    const accepted = verification
+      ? store.readAcceptances(verification.verificationDigest).map((a) => ({
+          ...a,
+          evidenceDigest: verification.evidenceDigest ?? verification.verificationDigest,
+          items: findings
+            .filter((f) => f.code === a.code)
+            .map((f) => ({
+              subjectKind: f.subjectKind,
+              subjectId: f.subjectId,
+              phase: f.phase,
+              evidence: f.evidence,
+              consequence: consequence(f.code),
+            })),
+        }))
+      : [];
+    const acceptedCodes = new Set(accepted.map((a) => a.code));
+    const report = {
+      schemaVersion: 1,
+      job: { id: job().id, type: job().type, label: job().label, state: job().state },
+      plan: revision ? store.readPlanRevision(revision) : null,
+      approval: revision ? store.readApproval(revision) : null,
+      verification,
+      sections: reportSections,
+      disclosures: [
+        "Permissions and ownership were neither assessed nor migrated.",
+        "Same-user processes are not isolated; local state has no application-level at-rest encryption.",
+      ],
+      checks: store.readCheckResults(),
+      rows: rows.map((r) => ({ ...r, accepted: acceptedCodes.has(r.code) })),
+      findings,
+      acceptedExceptions: accepted,
+      archive: store.readResume(revision).archivePlan ?? null,
+    };
+    const json = `${canonicalJson(report)}\n`;
+    const jsonl =
+      [
+        canonicalJson({ kind: "report", ...report, rows: undefined, findings: undefined }),
+        ...report.rows.map((row) => canonicalJson({ kind: "row", row })),
+        ...findings.map((finding) => canonicalJson({ kind: "finding", finding })),
+      ].join("\n") + "\n";
+    const html = reportHtml(report),
+      contents = [
+        { name: "report.json", format: "json" as const, body: json },
+        { name: "report.jsonl", format: "jsonl" as const, body: jsonl },
+        { name: "report.html", format: "html" as const, body: html },
+      ];
+    const archiveArtifacts: Artifact[] = [];
+    if (job().type === "teams_archive")
+      for (const [name, format] of [
+        ["index.html", "html"],
+        ["index.csv", "csv"],
+        ["manifest.json", "json"],
+      ] as const) {
+        const path = join(paths.dir, "archive", name);
+        if (existsSync(path))
+          archiveArtifacts.push({
+            name: `archive/${name}`,
+            format,
+            path,
+            digest: createHash("sha256").update(readFileSync(path)).digest("hex"),
+          });
+      }
+    const manifest = [
+      ...contents.map((c) => ({
+        name: c.name,
+        format: c.format,
+        digest: createHash("sha256").update(c.body).digest("hex"),
+      })),
+      ...archiveArtifacts.map(({ name, format, digest }) => ({ name, format, digest })),
+    ];
+    const reportDigest = digestJson(manifest),
+      dir = join(
+        paths.artifactsDir,
+        `report-${revision}-${verification?.revision ?? 0}-${reportDigest}`,
+      );
+    const artifacts: Artifact[] = [];
+    for (const c of contents) {
+      const path = join(dir, c.name);
+      if (!existsSync(path)) atomicFile(path, c.body);
+      else if (readFileSync(path, "utf8") !== c.body)
+        throw new Error("Immutable report artifact was modified");
+      artifacts.push({
+        name: c.name,
+        format: c.format,
+        path,
+        digest: createHash("sha256").update(c.body).digest("hex"),
+      });
+    }
+    artifacts.push(...archiveArtifacts);
+    const result = { reportDigest, artifacts };
+    store.atomic(() => {
+      store.writeArtifactSet(result);
+      store.appendEvent({
+        verb: "report",
+        phase: "report",
+        kind: "phase_completed",
+        payload: { reportDigest, artifacts: artifacts.length },
+      });
+    });
+    return ok(result);
+  }
   const writer: JobWriter = {
     async loadManifest(input) {
       const loaded = await operation<LoadedManifest>("plan", async () => {
@@ -2061,6 +2174,27 @@ function makeWriter(
       }),
     execute: (opts) =>
       operation("execute", async () => {
+        const configured = readConfig(paths, job().type, store);
+        if ("mappings" in configured) {
+          const fenced = store
+            .readCreatedDrives()
+            .filter(
+              (drive) =>
+                drive.goLive &&
+                configured.mappings.some(
+                  (mapping) =>
+                    mapping.id === drive.mappingId || mapping.destDriveId === drive.driveId,
+                ),
+            );
+          if (fenced.length)
+            return refuse(
+              "go_live_started",
+              "Go-live has permanently fenced transfers to these drives. Resume close; some access may already exist.",
+              {
+                detail: { driveIds: fenced.map((drive) => drive.driveId) },
+              },
+            );
+        }
         executionInterrupt = new AbortController();
         const signal = opts?.signal
           ? AbortSignal.any([opts.signal, executionInterrupt.signal])
@@ -2284,116 +2418,7 @@ function makeWriter(
           return ok({ ...current, clean, acceptedCodes });
         });
       }),
-    report: () =>
-      operation("report", async () => {
-        const revision = job().planRevision ?? 0,
-          verification = currentVerification(store);
-        const config = revision > 0 ? readConfig(paths, job().type, store) : undefined;
-        const reportSections = config ? await sections(provider(config), config, revision) : [];
-        const phase: RowPhase = verification ? "verify" : store.currentPhase(revision);
-        const findings = store.readCurrentFindings(revision, phase),
-          rows = store.readAllRows(revision);
-        const accepted = verification
-          ? store.readAcceptances(verification.verificationDigest).map((a) => ({
-              ...a,
-              evidenceDigest: verification.evidenceDigest ?? verification.verificationDigest,
-              items: findings
-                .filter((f) => f.code === a.code)
-                .map((f) => ({
-                  subjectKind: f.subjectKind,
-                  subjectId: f.subjectId,
-                  phase: f.phase,
-                  evidence: f.evidence,
-                  consequence: consequence(f.code),
-                })),
-            }))
-          : [];
-        const acceptedCodes = new Set(accepted.map((a) => a.code));
-        const report = {
-          schemaVersion: 1,
-          job: { id: job().id, type: job().type, label: job().label, state: job().state },
-          plan: revision ? store.readPlanRevision(revision) : null,
-          approval: revision ? store.readApproval(revision) : null,
-          verification,
-          sections: reportSections,
-          disclosures: [
-            "Permissions and ownership were neither assessed nor migrated.",
-            "Same-user processes are not isolated; local state has no application-level at-rest encryption.",
-          ],
-          checks: store.readCheckResults(),
-          rows: rows.map((r) => ({ ...r, accepted: acceptedCodes.has(r.code) })),
-          findings,
-          acceptedExceptions: accepted,
-          archive: store.readResume(revision).archivePlan ?? null,
-        };
-        const json = `${canonicalJson(report)}\n`;
-        const jsonl =
-          [
-            canonicalJson({ kind: "report", ...report, rows: undefined, findings: undefined }),
-            ...report.rows.map((row) => canonicalJson({ kind: "row", row })),
-            ...findings.map((finding) => canonicalJson({ kind: "finding", finding })),
-          ].join("\n") + "\n";
-        const html = reportHtml(report),
-          contents = [
-            { name: "report.json", format: "json" as const, body: json },
-            { name: "report.jsonl", format: "jsonl" as const, body: jsonl },
-            { name: "report.html", format: "html" as const, body: html },
-          ];
-        const archiveArtifacts: Artifact[] = [];
-        if (job().type === "teams_archive")
-          for (const [name, format] of [
-            ["index.html", "html"],
-            ["index.csv", "csv"],
-            ["manifest.json", "json"],
-          ] as const) {
-            const path = join(paths.dir, "archive", name);
-            if (existsSync(path))
-              archiveArtifacts.push({
-                name: `archive/${name}`,
-                format,
-                path,
-                digest: createHash("sha256").update(readFileSync(path)).digest("hex"),
-              });
-          }
-        const manifest = [
-          ...contents.map((c) => ({
-            name: c.name,
-            format: c.format,
-            digest: createHash("sha256").update(c.body).digest("hex"),
-          })),
-          ...archiveArtifacts.map(({ name, format, digest }) => ({ name, format, digest })),
-        ];
-        const reportDigest = digestJson(manifest),
-          dir = join(
-            paths.artifactsDir,
-            `report-${revision}-${verification?.revision ?? 0}-${reportDigest}`,
-          );
-        const artifacts: Artifact[] = [];
-        for (const c of contents) {
-          const path = join(dir, c.name);
-          if (!existsSync(path)) atomicFile(path, c.body);
-          else if (readFileSync(path, "utf8") !== c.body)
-            throw new Error("Immutable report artifact was modified");
-          artifacts.push({
-            name: c.name,
-            format: c.format,
-            path,
-            digest: createHash("sha256").update(c.body).digest("hex"),
-          });
-        }
-        artifacts.push(...archiveArtifacts);
-        const result = { reportDigest, artifacts };
-        store.atomic(() => {
-          store.writeArtifactSet(result);
-          store.appendEvent({
-            verb: "report",
-            phase: "report",
-            kind: "phase_completed",
-            payload: { reportDigest, artifacts: artifacts.length },
-          });
-        });
-        return ok(result);
-      }),
+    report: () => operation("report", createReport),
     close: () =>
       operation("close", async () => {
         const verification = currentVerification(store),
@@ -2409,6 +2434,70 @@ function makeWriter(
             "verification_unaccepted",
             "Closure requires current verification with every exception explicitly accepted.",
           );
+        // A6: go-live is a distinct step after every closure gate, before reporting.
+        const config = readConfig(paths, job().type, store);
+        if ("mappings" in config) {
+          const plan = store.readPlanRevision(revision)!;
+          if (plan.manifestDigest === undefined) delete config.manifestDigest;
+          // Bind timing and members before choosing a mode: an operator-file edit
+          // must not turn deferred go-live into a legacy close that skips grants.
+          if (
+            digestJson(
+              inputFields(
+                config,
+                readBoundEvidence(plan.evidence),
+                store.readAllRows(revision, "plan"),
+                undefined,
+              ),
+            ) !== plan.inputsDigest
+          )
+            return refuse("plan_revision_required", "The approved close inputs have changed.");
+        }
+        if ("mappings" in config && memberGrantTiming(config.options) === "after_verification") {
+          const p = provider(config, true);
+          let worker: TransferWorkerHandle | undefined;
+          try {
+            if (needsTransferWorker(config)) {
+              const evidence = await boundEvidence(p, config);
+              const plan = store.readPlanRevision(revision)!;
+              const bound = readBoundEvidence(plan.evidence);
+              if (
+                digestJson(
+                  inputFields(config, evidence, store.readAllRows(revision, "plan"), undefined),
+                ) !== plan.inputsDigest
+              )
+                return refuse(
+                  "plan_revision_required",
+                  "The approved inputs or authenticated route identity have changed.",
+                );
+              if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+              worker = await startWorker(p, evidence.binaryPath);
+              const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
+              if (
+                version !== worker.version ||
+                (bound.binaryVersion && version !== bound.binaryVersion)
+              )
+                return refuse(
+                  "plan_revision_required",
+                  "The live worker version changed after approval.",
+                );
+            }
+            for await (const unit of goLive(context(p, config, revision), verification.at)) {
+              guard("close");
+              store.commit(unit);
+            }
+          } catch (error) {
+            if (error instanceof GoLiveCheckError)
+              return refuse("verification_unaccepted", error.message, { detail: error.detail });
+            throw error;
+          } finally {
+            if (worker) await stopWorker(p, worker);
+          }
+        }
+        if ("mappings" in config && memberGrantTiming(config.options) === "after_verification") {
+          const report = await createReport();
+          if (!report.ok) return report;
+        }
         const acceptedExceptions = store
           .readAcceptances(verification.verificationDigest)
           .map((a) => a.code);

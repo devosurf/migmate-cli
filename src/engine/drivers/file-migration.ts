@@ -8,6 +8,8 @@ import type {
   CopyPassReference,
   DestinationEntry,
   DriveMember,
+  DriveMembership,
+  FileHashEntry,
   ProviderPort,
   SourceEntry,
 } from "../providers/port.ts";
@@ -217,6 +219,31 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
       // The engine commits this yield before requesting the first permission.
       yield { ...unit("created"), createdDrive: drive };
     }
+    ctx.resume.createdDrives = [
+      ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== mapping.id),
+      drive,
+    ];
+    if (memberGrantTiming(ctx.config.options) === "before_copy")
+      yield* grantMembers(ctx, [mapping]);
+  }
+}
+
+async function* grantMembers(
+  ctx: FileContext,
+  mappings = ctx.config.mappings,
+): AsyncIterable<CommitUnit> {
+  for (const mapping of mappings) {
+    if (!mapping.createDrive) continue;
+    const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
+    if (!drive?.driveId) throw new Error("Member grants require a durable created drive");
+    const unit = (key: string): CommitUnit => ({
+      rev: ctx.revision,
+      phase: "execute",
+      unitKey: JSON.stringify(["provision", mapping.id, key]),
+      checkpoint: mapping.id,
+      rows: [],
+      findings: [],
+    });
     for (const member of mapping.createDrive.members) {
       if (
         ctx.resume.memberGrants?.some(
@@ -245,13 +272,163 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
           mappingId: mapping.id,
           driveId: drive.driveId!,
           member,
+          ...(memberGrantTiming(ctx.config.options) === "after_verification"
+            ? { at: ctx.now().toISOString() }
+            : {}),
         },
       };
     }
-    ctx.resume.createdDrives = [
-      ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== mapping.id),
-      drive,
-    ];
+  }
+}
+
+export class GoLiveCheckError extends Error {
+  readonly detail: Record<string, unknown>;
+  constructor(detail: Record<string, unknown>) {
+    super(
+      "Go-live checks failed. Some access may already exist; resolve the evidence with an operator and retry close, never a copy or mirror pass.",
+    );
+    this.detail = detail;
+  }
+}
+
+function membershipIdentities(members: DriveMembership[]): string[] {
+  return members
+    .map((member) => JSON.stringify([member.email.toLowerCase(), member.type, member.role]))
+    .sort();
+}
+
+function destinationDigest(
+  files: Iterable<FileHashEntry>,
+  md5: Iterable<FileHashEntry>,
+  folders: Iterable<string>,
+): string {
+  const entries = (items: Iterable<FileHashEntry>) =>
+    [...items]
+      .map((item) => [item.path, item.size, item.hash, item.id ?? null])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return digest([entries(files), entries(md5), [...folders].sort()]);
+}
+
+/** Close is the explicit authorization to open verified destinations to members. */
+export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIterable<CommitUnit> {
+  // Every affected drive is fenced before the first permission request, including
+  // drives later in the batch when an earlier grant crashes or has an ambiguous response.
+  for (const mapping of ctx.config.mappings) {
+    if (!mapping.createDrive) continue;
+    const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
+    if (!drive?.driveId) throw new Error("Go-live requires a durable created drive");
+    if (drive.goLive) continue;
+    drive.goLive = { startedAt: ctx.now().toISOString(), revision: ctx.revision, verificationAt };
+    yield {
+      rev: ctx.revision,
+      phase: "execute",
+      unitKey: JSON.stringify(["go-live-fence", drive.driveId]),
+      checkpoint: mapping.id,
+      rows: [],
+      findings: [],
+      createdDrive: drive,
+    };
+  }
+  yield* grantMembers({
+    ...ctx,
+    now: () => new Date(Math.max(ctx.now().getTime(), Date.parse(verificationAt) + 1)),
+  });
+  for (const mapping of ctx.config.mappings) {
+    if (!mapping.createDrive) continue;
+    const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+    const expected = [...mapping.createDrive.members];
+    if (
+      !expected.some(
+        (member) =>
+          member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
+      )
+    )
+      expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
+    let check: NonNullable<NonNullable<typeof drive.goLive>["check"]>;
+    try {
+      const actual = await ctx.provider.listDriveMembers(drive.driveId!);
+      if (
+        JSON.stringify(membershipIdentities(expected)) !==
+        JSON.stringify(membershipIdentities(actual))
+      ) {
+        check = {
+          at: ctx.now().toISOString(),
+          status: "failed",
+          check: "drive_membership_mismatch",
+          evidence: { expected, actual },
+        };
+      } else {
+        const baseline = drive.verifiedDestination;
+        const pass = await ctx.provider.resolveFilePass(
+          destinationMapping(provisionedMapping(ctx, mapping)),
+        );
+        const files = await ctx.provider.listFileHashes({
+          socketPath: pass.socketPath,
+          root: pass.destination,
+          hashType: baseline?.hashType ?? "sha256",
+          download: false,
+        });
+        const md5 = baseline?.md5
+          ? await ctx.provider.listFileHashes({
+              socketPath: pass.socketPath,
+              root: pass.destination,
+              hashType: "md5",
+              download: false,
+            })
+          : [];
+        const folders = await ctx.provider.listFolders({
+          socketPath: pass.socketPath,
+          root: pass.destination,
+        });
+        const observed = destinationDigest(files, md5, folders);
+        const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
+        check = {
+          at: ctx.now().toISOString(),
+          status: matches ? "passed" : "failed",
+          check: matches ? "membership_and_destination" : "destination_drift",
+          evidence: {
+            expected,
+            actual,
+            expectedDestinationDigest: baseline?.digest ?? null,
+            observedDestinationDigest: observed,
+          },
+        };
+      }
+    } catch (error) {
+      if (
+        !(error instanceof TypeError) &&
+        !(error instanceof HttpProviderFault) &&
+        !terminalUnavailable(error)
+      )
+        throw error;
+      check = {
+        at: ctx.now().toISOString(),
+        status: "failed",
+        check: "go_live_check_unavailable",
+        evidence: {
+          expected,
+          ...(error instanceof HttpProviderFault ? { status: error.status } : {}),
+        },
+      };
+    }
+    drive.goLive = { ...drive.goLive!, check };
+    yield {
+      rev: ctx.revision,
+      phase: "execute",
+      unitKey: JSON.stringify(["go-live-check", drive.driveId, digest(check)]),
+      checkpoint: mapping.id,
+      rows: [],
+      findings: [],
+      createdDrive: drive,
+    };
+    if (check.status === "failed")
+      throw new GoLiveCheckError({
+        accessMayExist: true,
+        mappingId: mapping.id,
+        driveId: drive.driveId,
+        check: check.check,
+        ...check.evidence,
+      });
   }
 }
 
@@ -786,7 +963,10 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
     if (mapping.createDrive) {
       const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
       if (!drive?.driveId) throw new Error("Verification requires the durable created drive");
-      const expected = [...mapping.createDrive.members];
+      const expected =
+        memberGrantTiming(ctx.config.options) === "before_copy" || drive.goLive
+          ? [...mapping.createDrive.members]
+          : [];
       if (
         !expected.some(
           (member) =>
@@ -796,11 +976,10 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       )
         expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
       const actual = await ctx.provider.listDriveMembers(drive.driveId);
-      const identities = (members: typeof actual) =>
-        members
-          .map((member) => JSON.stringify([member.email.toLowerCase(), member.type, member.role]))
-          .sort();
-      if (JSON.stringify(identities(expected)) !== JSON.stringify(identities(actual))) {
+      if (
+        JSON.stringify(membershipIdentities(expected)) !==
+        JSON.stringify(membershipIdentities(actual))
+      ) {
         const evidence = row(ctx, "verify", mapping, sources[0]!, "drive_membership_mismatch");
         evidence.destinationDriveId = drive.driveId;
         evidence.destinationFileId = drive.driveId;
@@ -1097,6 +1276,31 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         ++done,
       );
     }
+    if (mapping.createDrive && memberGrantTiming(ctx.config.options) === "after_verification") {
+      const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+      // A new verification must never erase the original go-live content fence.
+      if (!drive.goLive) {
+        drive.verifiedDestination = {
+          revision: ctx.revision,
+          hashType: primaryHash,
+          md5: needsMd5,
+          digest: destinationDigest(
+            destinationHashes.values(),
+            destinationMd5.values(),
+            destinationFolders,
+          ),
+        };
+        yield {
+          rev: ctx.revision,
+          phase: "verify",
+          unitKey: JSON.stringify(["verified-destination", mapping.id]),
+          checkpoint: mapping.id,
+          rows: [],
+          findings: [],
+          createdDrive: drive,
+        };
+      }
+    }
   }
 }
 
@@ -1239,6 +1443,67 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       deleteLimit: ctx.config.options?.mirror ? ctx.config.options.deleteLimit : null,
     }),
   };
+  const timing = memberGrantTiming(ctx.config.options);
+  const mirrorWarnings = [];
+  if (ctx.config.options?.mirror)
+    for (const mapping of ctx.config.mappings) {
+      const driveId = provisionedMapping(ctx, mapping).destDriveId;
+      const members = new Map(
+        (ctx.resume.memberGrants ?? [])
+          .filter((grant) => grant.mappingId === mapping.id || grant.driveId === driveId)
+          .map((grant) => [
+            JSON.stringify([grant.member.email.toLowerCase(), grant.member.type]),
+            grant.member,
+          ]),
+      );
+      if (timing === "before_copy")
+        for (const member of mapping.createDrive?.members ?? [])
+          members.set(JSON.stringify([member.email.toLowerCase(), member.type]), member);
+      const writableMembers = [...members.values()].filter(
+        (member) => member.role !== "reader" && member.role !== "commenter",
+      ).length;
+      if (writableMembers)
+        mirrorWarnings.push({
+          mappingId: mapping.id,
+          driveId: driveId ?? null,
+          writableMembers,
+          warning: `${writableMembers} manifest members have or will receive write access before this mirror pass; mirror may overwrite or delete their files.`,
+        });
+    }
+  yield {
+    title: "Member grants",
+    format: "text",
+    body: JSON.stringify({
+      memberGrants: timing,
+      authorization:
+        timing === "after_verification"
+          ? "Close authorizes go-live after verification and accepted findings; transfers are permanently fenced before grants."
+          : "Execute grants manifest members before copying.",
+      mirrorWarnings,
+      isolation:
+        "External grants, administrators and group membership are outside Migmate's control; restrict other access before claiming staged isolation.",
+    }),
+  };
+  const goLiveDrives = (ctx.resume.createdDrives ?? []).filter((drive) => drive.goLive);
+  if (goLiveDrives.length)
+    yield {
+      title: "Go-live",
+      format: "text",
+      body: JSON.stringify({
+        accessMayExist: true,
+        transfersFenced: true,
+        checksPassed: goLiveDrives.every((drive) => drive.goLive?.check?.status === "passed"),
+        resolution:
+          "If close fails or is interrupted, some access may already exist. Resolve membership or destination drift with an operator and retry close; do not run another copy or mirror pass.",
+        drives: goLiveDrives.map((drive) => ({
+          mappingId: drive.mappingId,
+          driveId: drive.driveId,
+          ...drive.goLive,
+        })),
+        driftScope:
+          "Destination file paths, sizes, stored hashes and identities plus folder paths are compared with verification. This is a point-in-time listing check, not downloaded content, inherited permissions, effective group membership, or a future-write guarantee.",
+      }),
+    };
   yield {
     title: "Copy concurrency",
     format: "text",

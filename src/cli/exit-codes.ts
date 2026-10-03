@@ -15,6 +15,7 @@ export const EXIT_CODE_BY_REFUSAL_CODE: Record<string, number> = {
   plan_revision_required: 4,
   unsupported_route: 4,
   drive_creation_ambiguous: 4,
+  go_live_started: 4,
   verification_unaccepted: 4,
   job_closed: 6,
   job_cancelled: 7,
