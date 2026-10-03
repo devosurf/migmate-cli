@@ -4,6 +4,7 @@
 - Date: 2026-10-01
 - Supersedes in part: [spec #17](https://github.com/devosurf/migmate-cli/issues/17) (per-item destination writes, private provenance markers, reserved destination ids, move-by-id, and the provisioning boundary), [ADR-0004](0004-drive-revision-concurrency.md) (Migmate no longer writes file content, so it needs no compare-then-write token)
 - Implementation: [spec #45](https://github.com/devosurf/migmate-cli/issues/45)
+- Amended by: [ADR-0012](0012-staged-migrations-and-access-timing.md) (staged verification scope and provisioning timing)
 
 ## Context
 
