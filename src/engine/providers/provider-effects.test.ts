@@ -87,7 +87,7 @@ async function bytes(content: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(result);
 }
 
-test("SharePoint notebook sources retain their web URL and count immediate section files across pages", async (t) => {
+test("SharePoint notebook sources retain their web URL and count sections across pages and section groups", async (t) => {
   const notebook = {
     id: "notebook",
     name: "Team notebook",
@@ -104,7 +104,8 @@ test("SharePoint notebook sources retain their web URL and count immediate secti
         return Response.json({
           value: [
             { id: "section-2", name: "Roadmap.one", file: {} },
-            { id: "section-group", name: "Group.one", folder: { childCount: 4 } },
+            { id: "section-group", name: "Group.one", folder: { childCount: 2 } },
+            { id: "recycle-bin", name: "OneNote_RecycleBin", folder: { childCount: 1 } },
           ],
         });
       return Response.json({
@@ -117,6 +118,18 @@ test("SharePoint notebook sources retain their web URL and count immediate secti
           "https://graph.microsoft.com/v1.0/drives/source-drive/items/notebook/children?$skiptoken=next",
       });
     }
+    // Section groups nest; deleted sections in the recycle bin are not sections.
+    if (url.pathname.endsWith("/items/section-group/children"))
+      return Response.json({
+        value: [
+          { id: "section-3", name: "Plans.one", file: {} },
+          { id: "nested-group", name: "Archive", folder: { childCount: 1 } },
+        ],
+      });
+    if (url.pathname.endsWith("/items/nested-group/children"))
+      return Response.json({ value: [{ id: "section-4", name: "2025.one", file: {} }] });
+    if (url.pathname.endsWith("/items/recycle-bin/children"))
+      return Response.json({ value: [{ id: "deleted", name: "Old.one", file: {} }] });
     if (url.pathname.endsWith("/items/notebook")) return Response.json(notebook);
     throw new Error(`Unexpected Graph request: ${url.pathname}`);
   });
@@ -133,7 +146,7 @@ test("SharePoint notebook sources retain their web URL and count immediate secti
   const source = await files.readSourceItem({ driveId: "source-drive", itemId: "notebook" });
   assert.equal(source?.webUrl, notebook.webUrl);
   assert.equal(source?.kind, "package");
-  assert.equal(source?.packageSections, 2);
+  assert.equal(source?.packageSections, 4);
   const children = await files.listSourceChildren("source-root");
   assert.deepEqual(children, [source]);
 });

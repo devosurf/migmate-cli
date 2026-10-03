@@ -294,23 +294,30 @@ export class FileEffects {
     let packageSections: number | null = null;
     if (kind === "package" && raw.package?.type === "oneNote") {
       packageSections = 0;
-      for await (const children of cursorPages(
-        `/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(raw.id)}/children?$top=200&$select=id,name,file`,
-        async (cursor) => {
-          const page = await this.#graph.request<{
-            value: GraphItem[];
-            "@odata.nextLink"?: string;
-          }>(cursor!);
-          return { value: page.value, next: page["@odata.nextLink"] };
-        },
-        () =>
-          new ProviderFault(
-            "provider_request_failed",
-            "Notebook section paging repeated a cursor.",
-          ),
-      )) {
-        for (const child of children) {
-          if (child.file && child.name.endsWith(".one")) packageSections++;
+      // Section groups are folders inside the notebook and nest; the recycle bin
+      // holds deleted sections, which are not part of the notebook.
+      const folders = [raw.id];
+      while (folders.length) {
+        const folderId = folders.pop()!;
+        for await (const children of cursorPages(
+          `/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(folderId)}/children?$top=200&$select=id,name,file,folder`,
+          async (cursor) => {
+            const page = await this.#graph.request<{
+              value: GraphItem[];
+              "@odata.nextLink"?: string;
+            }>(cursor!);
+            return { value: page.value, next: page["@odata.nextLink"] };
+          },
+          () =>
+            new ProviderFault(
+              "provider_request_failed",
+              "Notebook section paging repeated a cursor.",
+            ),
+        )) {
+          for (const child of children) {
+            if (child.file && child.name.endsWith(".one")) packageSections++;
+            else if (child.folder && child.name !== "OneNote_RecycleBin") folders.push(child.id);
+          }
         }
       }
     }
