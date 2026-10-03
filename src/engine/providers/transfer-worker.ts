@@ -12,6 +12,7 @@ import type {
   CopyPassHandle,
   CopyPassReference,
   FilePassProvider,
+  FilePassPreview,
   ProviderPort,
   TransferWorkerHandle,
   TransferWorkerProbe,
@@ -374,6 +375,47 @@ function quoteOption(value: string): string {
   if (!value || /[\[\]\u0000-\u001f\u007f/\\]/u.test(value))
     throw fail("preflight_failed", "source_identity_invalid");
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+function literalFilterPath(path: string): string {
+  // Whitespace must survive rclone's rule trimming and splitting.
+  return path
+    .replace(/[\\*?[\]{}]/g, "\\$&")
+    .replace(/\s/g, (character) => `{{\\x{${character.codePointAt(0)!.toString(16)}}}}`);
+}
+
+function passFilter(excludePaths?: string[]): Record<string, unknown> {
+  return excludePaths?.length
+    ? {
+        _filter: {
+          ExcludeRule: excludePaths.flatMap((path) => {
+            const literal = literalFilterPath(path);
+            return [`/${literal}`, `/${literal}/**`];
+          }),
+        },
+      }
+    : {};
+}
+
+function modTimeNs(value: unknown): bigint {
+  if (typeof value !== "string") throw fail("provider_failed", "worker_response_invalid");
+  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)$/.exec(value);
+  if (!match) throw fail("provider_failed", "worker_response_invalid");
+  const seconds = Date.parse(`${match[1]}${match[3]}`);
+  if (!Number.isFinite(seconds)) throw fail("provider_failed", "worker_response_invalid");
+  return BigInt(seconds) * 1_000_000n + BigInt((match[2] ?? "").padEnd(9, "0"));
+}
+
+function durationNs(value: unknown): bigint {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw fail("provider_failed", "worker_response_invalid");
+  return BigInt(value);
+}
+
+interface PreviewFile {
+  path: string;
+  size: number;
+  modified: bigint;
 }
 
 export function createTransferSupervisor(options: {
@@ -842,6 +884,158 @@ export function createTransferSupervisor(options: {
 
   return {
     proveBinary,
+    async previewCopyPass(input) {
+      const worker = owned(input.socketPath);
+      const [sourceInfo, destinationInfo, options] = await Promise.all([
+        authenticated(worker, "operations/fsinfo", { fs: input.source.fs }),
+        input.destination
+          ? authenticated(worker, "operations/fsinfo", { fs: input.destination.fs })
+          : Promise.resolve({ Precision: 0, Hashes: [] }),
+        authenticated(worker, "options/get", {}),
+      ]);
+      if (
+        !record(sourceInfo) ||
+        !record(destinationInfo) ||
+        !record(options) ||
+        !record(options.main)
+      )
+        throw fail("provider_failed", "worker_response_invalid");
+      const main = options.main;
+      if (
+        !Array.isArray(sourceInfo.Hashes) ||
+        !sourceInfo.Hashes.every((hash) => typeof hash === "string") ||
+        !Array.isArray(destinationInfo.Hashes) ||
+        !destinationInfo.Hashes.every((hash) => typeof hash === "string")
+      )
+        throw fail("provider_failed", "worker_response_invalid");
+      // fsinfo emits hashes in rclone's priority order (the first overlap is GetOne).
+      const destinationHashTypes = destinationInfo.Hashes;
+      const commonHash: string | undefined = sourceInfo.Hashes.find((hash: string) =>
+        destinationHashTypes.includes(hash),
+      );
+      const window = [
+        durationNs(sourceInfo.Precision),
+        durationNs(destinationInfo.Precision),
+        durationNs(main.ModifyWindow),
+      ].reduce((largest, value) => (value > largest ? value : largest));
+      const list = async (fs: string): Promise<PreviewFile[]> => {
+        const result = await authenticated(worker, "operations/list", {
+          fs,
+          remote: "",
+          opt: { recurse: true, filesOnly: true, noMimeType: true },
+          ...passFilter(input.excludePaths),
+        });
+        if (!record(result) || !Array.isArray(result.list))
+          throw fail("provider_failed", "worker_response_invalid");
+        return result.list.map((file: unknown) => {
+          if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
+            throw fail("provider_failed", "worker_response_invalid");
+          return { path: file.Path, size: file.Size, modified: modTimeNs(file.ModTime) };
+        });
+      };
+      const [source, destination] = await Promise.all([
+        list(input.source.fs),
+        input.destination ? list(input.destination.fs) : Promise.resolve([]),
+      ]);
+      const key = (path: string) => {
+        const normalized = main.NoUnicodeNormalization === true ? path : path.normalize("NFC");
+        return main.IgnoreCaseSync === true ? normalized.toLowerCase() : normalized;
+      };
+      const remaining = new Map(destination.map((file) => [key(file.path), file]));
+      const preview: FilePassPreview = {
+        new: [],
+        changed: [],
+        unchanged: [],
+        deleted: [],
+        retained: [],
+        timestampOnly: [],
+        modifyWindowNs: window.toString(),
+      };
+      const hashCandidates: { source: PreviewFile; destination: PreviewFile }[] = [];
+      for (const file of source) {
+        const entry = { path: file.path, size: file.size };
+        const previous = remaining.get(key(file.path));
+        remaining.delete(key(file.path));
+        if (!previous) {
+          preview.new.push(entry);
+          continue;
+        }
+        const difference = file.modified - previous.modified;
+        const sizeDiffers =
+          input.destination?.kind !== "sharepoint" &&
+          file.size >= 0 &&
+          previous.size >= 0 &&
+          file.size !== previous.size;
+        if (sizeDiffers) preview.changed.push(entry);
+        else if (difference < window && difference > -window) preview.unchanged.push(entry);
+        else if (commonHash) hashCandidates.push({ source: file, destination: previous });
+        else preview.changed.push(entry);
+      }
+      if (commonHash && input.destination && hashCandidates.length > 0) {
+        const hashes = async (fs: string, paths: string[]) => {
+          const result = await authenticated(worker, "operations/list", {
+            fs,
+            remote: "",
+            opt: {
+              recurse: true,
+              filesOnly: true,
+              noModTime: true,
+              noMimeType: true,
+              showHash: true,
+              hashTypes: [commonHash],
+            },
+            _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) },
+          });
+          if (!record(result) || !Array.isArray(result.list))
+            throw fail("provider_failed", "worker_response_invalid");
+          const byPath = new Map<string, string>();
+          for (const file of result.list) {
+            if (!record(file) || typeof file.Path !== "string" || !record(file.Hashes))
+              throw fail("provider_failed", "worker_response_invalid");
+            const hash = file.Hashes[commonHash];
+            if (typeof hash === "string" && hash !== "") byPath.set(file.Path, hash);
+          }
+          return byPath;
+        };
+        const [sourceHashes, destinationHashes] = await Promise.all([
+          hashes(
+            input.source.fs,
+            hashCandidates.map((pair) => pair.source.path),
+          ),
+          hashes(
+            input.destination.fs,
+            hashCandidates.map((pair) => pair.destination.path),
+          ),
+        ]);
+        for (const pair of hashCandidates) {
+          const hash = sourceHashes.get(pair.source.path);
+          // IgnoreChecksum controls post-copy validation, not rclone's Equal hash
+          // branch. SharePoint still uses that branch if a common hash exists.
+          const timestampOnly =
+            hash !== undefined && hash === destinationHashes.get(pair.destination.path);
+          preview[timestampOnly ? "timestampOnly" : "changed"].push({
+            path: pair.source.path,
+            size: pair.source.size,
+          });
+        }
+      }
+      for (const file of remaining.values()) {
+        preview[input.mode === "mirror" ? "deleted" : "retained"].push({
+          path: file.path,
+          size: file.size,
+        });
+      }
+      for (const entries of [
+        preview.new,
+        preview.changed,
+        preview.unchanged,
+        preview.deleted,
+        preview.retained,
+        preview.timestampOnly,
+      ])
+        entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      return preview;
+    },
     async listFolders({ socketPath, root }) {
       const listing = await authenticated(owned(socketPath), "operations/list", {
         fs: root.fs,
@@ -859,12 +1053,18 @@ export function createTransferSupervisor(options: {
         .filter((path: string) => path !== "" && path !== ".")
         .sort();
     },
-    async listFileHashes({ socketPath, root, hashType, download }) {
+    async listFileHashes({ socketPath, root, hashType, download, paths }) {
       const worker = owned(socketPath);
+      if (paths?.length === 0) return [];
+      const filter =
+        paths === undefined
+          ? {}
+          : { _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) } };
       const listing = await authenticated(worker, "operations/list", {
         fs: root.fs,
         remote: "",
         opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true },
+        ...filter,
       });
       const hashes = await authenticated(
         worker,
@@ -874,6 +1074,7 @@ export function createTransferSupervisor(options: {
           hashType,
           download,
           base64: false,
+          ...filter,
         },
         60 * 60 * 1_000,
       );
@@ -919,22 +1120,7 @@ export function createTransferSupervisor(options: {
           createEmptySrcDirs: true,
           _async: true,
           _group: group,
-          ...(input.excludePaths?.length
-            ? {
-                _filter: {
-                  ExcludeRule: input.excludePaths.flatMap((path) => {
-                    // Encode whitespace so rule parsing cannot trim or split literal names.
-                    const literal = path
-                      .replace(/[\\*?[\]{}]/g, "\\$&")
-                      .replace(
-                        /\s/g,
-                        (character) => `{{\\x{${character.codePointAt(0)!.toString(16)}}}}`,
-                      );
-                    return [`/${literal}`, `/${literal}/**`];
-                  }),
-                },
-              }
-            : {}),
+          ...passFilter(input.excludePaths),
           _config: {
             Transfers: input.transfers,
             Metadata: true,
