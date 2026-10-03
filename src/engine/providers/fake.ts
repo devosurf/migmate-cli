@@ -1121,7 +1121,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFolders", input.root.fs);
     return [...this.tree(input.root.fs)]
-      .filter(([, entry]) => entry.kind === "folder")
+      .filter(([, entry]) => sourceDirectory(entry))
       .map(([path]) => path)
       .sort();
   }

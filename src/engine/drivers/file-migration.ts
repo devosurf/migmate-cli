@@ -493,7 +493,7 @@ function expectedDestinationFolders(
     sources
       .filter(
         (source) =>
-          source.kind === "folder" &&
+          (source.kind === "folder" || copiedNotebook(ctx, source)) &&
           source.path !== "." &&
           !omittedPaths.some(
             (path) => path === "." || source.path === path || source.path.startsWith(`${path}/`),
@@ -1205,14 +1205,16 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       format: "text",
       body: "Delete the service-account key after the job.\nDelete the domain-wide delegation entry after the job.",
     };
-  yield {
-    title: "OneNote notebooks",
-    format: "text",
-    body:
-      ctx.config.options?.oneNoteNotebooks === "copy"
-        ? "OneNote notebooks are copied as folders of section files: a read-only reference copy, not a working notebook in Google. Download the folder and open Open Notebook.onetoc2 in OneNote for Windows; it cannot open on Mac or in Drive. Editing through Drive for desktop is unsafe: notebooks must sync through OneNote, not file-sync clients."
-        : "OneNote notebooks are omitted by default: Google Drive cannot open them. Each omission records the source link and section count. Open the notebook in OneNote for Windows, export the notebook (.onepkg) or PDF, and upload that export to the destination drive.",
-  };
+  // Only SharePoint sources hold OneNote notebooks; the reverse route refuses "copy".
+  if (ctx.config.route !== "shared_drive_to_sharepoint_library")
+    yield {
+      title: "OneNote notebooks",
+      format: "text",
+      body:
+        ctx.config.options?.oneNoteNotebooks === "copy"
+          ? "OneNote notebooks are copied as folders of section files: a read-only reference copy, not a working notebook in Google. Download the folder and open Open Notebook.onetoc2 in OneNote for Windows; it cannot open on Mac or in Drive. Editing through Drive for desktop is unsafe: notebooks must sync through OneNote, not file-sync clients."
+          : "OneNote notebooks are omitted by default: Google Drive cannot open them. Each omission records the source link and section count. Open the notebook in OneNote for Windows, export the notebook (.onepkg) or PDF, and upload that export to the destination drive.",
+    };
   yield {
     title: "Verification mode",
     format: "text",

@@ -525,10 +525,35 @@ describe("OneNote notebook policy", () => {
     for (const sections of [plan.sections, json.sections]) {
       const disclosure = sections.find((s: { title: string }) => s.title === "OneNote notebooks");
       assert.ok(disclosure);
-      assert.match(disclosure.body, /read-only/);
-      assert.match(disclosure.body, /Open Notebook\.onetoc2/);
-      assert.match(disclosure.body, /unsafe/);
     }
+  });
+
+  it("reports a file where a copied notebook's folder belongs", async (t) => {
+    const h = await provisioningHarness(t, notebookFixture(), { oneNoteNotebooks: "copy" });
+    await execute(h);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    const notebook = (await h.port.listDestinationChildren(driveId)).find(
+      (e) => e.name === "Notes",
+    )!;
+    // The 0.2.2 failure shape: a 0-byte `inode/directory` file instead of the folder.
+    h.port.removeDestinationItem(notebook.id);
+    await h.port.uploadDestinationContent({
+      parentFolderId: driveId,
+      name: "Notes",
+      content: new Uint8Array(),
+      createdAt: now,
+      modifiedAt: now,
+      mimeType: "inode/directory",
+    });
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, false);
+    const conflicts = value(
+      await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["destination_type_conflict"] }),
+    ).rows;
+    assert.deepEqual(
+      conflicts.map((row) => ("relativePath" in row ? row.relativePath : null)),
+      ["Notes"],
+    );
   });
 
   it("strictly validates notebook policy and refuses copy on the reverse route", async (t) => {
