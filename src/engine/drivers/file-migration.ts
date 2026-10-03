@@ -936,13 +936,19 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
           .map((code) =>
             finding(ctx, "verify", code, source.id, {
               path: source.path,
-              sourceSize: downloaded?.size ?? source.size,
+              sourceSize: servedSize,
               destinationSize: destination?.size ?? null,
               sourceHash: downloaded?.hash ?? null,
               destinationHash: destination?.hash ?? null,
               hashType: sizeOnly ? null : hashType,
-              ...(code === "source_size_inconsistent"
-                ? { listedSize: downloaded?.size, servedSize }
+              ...(codes.includes("source_size_inconsistent")
+                ? {
+                    listedSize: downloaded?.size,
+                    ...(code === "source_size_inconsistent" ? { servedSize } : {}),
+                    ...(code === "size_mismatch" || code === "content_mismatch"
+                      ? { cause: "source_size_inconsistent" }
+                      : {}),
+                  }
                 : {}),
             }),
           )
