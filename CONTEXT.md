@@ -32,6 +32,34 @@ _Avoid_: End user
 An immutable, digest-bound proposal of everything a job will do, produced from evidence collected about the source. A plan is approved as a whole or not at all; changing what a job will do produces a new revision, never an edit.
 _Avoid_: Inventory, run, batch, dry run
 
+**Revision**:
+One immutable proposal within a job, with its own approval and evidence. A later revision replaces the proposal, not the history of earlier revisions.
+_Avoid_: Version, pass, job
+
+**Pass**:
+One attempt to bring a file mapping's destination up to date with its source. A revision may include several passes.
+_Avoid_: Revision, job, migration
+
+**Prestage**:
+The initial bulk movement of a staged migration, before the source is frozen and the destination is opened to its intended users.
+_Avoid_: Initial sync, completed migration
+
+**Delta**:
+An incremental movement that brings a prestaged destination up to date with its source. A delta is not a declaration that the destination is ready for use.
+_Avoid_: Sync, replication, cutover
+
+**Freeze**:
+A declared halt to changes in the authoritative source for cutover, with an accountable person, time, and method. Observed quiet alone is not a freeze.
+_Avoid_: Quiescence, snapshot, pause
+
+**Final delta**:
+The last incremental movement and settled confirmation before final verification and go-live. It is a cutover stage, not necessarily a single pass.
+_Avoid_: Last sync, go-live
+
+**Go-live**:
+The deliberate opening of the verified destination to its intended users. It is distinct from finishing a copy or observing a quiet source.
+_Avoid_: Final delta, copy complete
+
 **Preflight**:
 The set of checks that must pass before a job may be planned, covering prerequisites only an administrator can satisfy. Preflight failures are refusals, never retries.
 _Avoid_: Health check, validation
