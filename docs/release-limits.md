@@ -121,6 +121,8 @@ manifest load; a closed job is terminal and a replacement job does not inherit
 its mirror provenance. `close` refuses `cutover_incomplete` unless the latest
 revision is final, settled and fully verified; an earlier final result is not
 authority for a later revision.
+An approved staged revision permanently establishes that intent for the job,
+including after manifest reloads clear the current plan pointer.
 
 Plans expose listing-derived new, changed, unchanged and mirror deletion paths
 and byte totals. Every proposed deletion is reviewable against its mapping's
@@ -159,6 +161,9 @@ incomplete. Changes during verification still block completion.
 `deltaVerification = "full"` is the default. Opt-in `"changed"` gives intermediate
 deltas **partial proof**, recording the last verified baseline and covered paths,
 including creations, changes and deletions, while preserving earlier exceptions.
+Baseline evidence is bound to source/destination roots, expanded exclusions,
+OneNote policy and verification mode; a changed or missing binding forces full
+verification for that mapping instead of reusing another destination's proof.
 Failed or unverified revisions do not advance the baseline. Prestage, missing
 baselines and final revisions use full verification; this option is independent
 of `verificationMode = "size_only"`. Partial proof does not recheck independent

@@ -2110,7 +2110,11 @@ function makeWriter(
         requireFileMappings(config);
         const previousPlan =
           job().planRevision === null ? null : store.readPlanRevision(job().planRevision!);
-        if ("mappings" in config && previousPlan?.stage && !config.options?.staged)
+        if (
+          "mappings" in config &&
+          (previousPlan?.stage || store.hasApprovedStagedPlan()) &&
+          !config.options?.staged
+        )
           return refuse(
             "configuration_invalid",
             "Staging remains within this open job; restore options.staged before planning.",
@@ -2554,7 +2558,10 @@ function makeWriter(
           revision = job().planRevision;
         const closeConfig = readConfig(paths, job().type, store);
         const finalPlan = revision === null ? null : store.readPlanRevision(revision);
-        if ("mappings" in closeConfig && (closeConfig.options?.staged || finalPlan?.stage)) {
+        if (
+          "mappings" in closeConfig &&
+          (closeConfig.options?.staged || finalPlan?.stage || store.hasApprovedStagedPlan())
+        ) {
           const watermarks = revision === null ? {} : store.readResume(revision).watermarks;
           const settled = closeConfig.mappings.every((mapping) => {
             const raw = watermarks[`file-settle:${mapping.id}`];

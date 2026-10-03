@@ -151,6 +151,8 @@ deltaVerification = "full" # or "changed" for intermediate partial proof
    authorizing `close`. A staged job refuses `cutover_incomplete` unless its
    latest revision is final, settled and fully verified. A verified earlier
    revision cannot authorize closing a newer one.
+   Approved staged intent belongs to the job's history: changing configuration
+   or reloading a manifest cannot turn that job into an unstaged migration.
 
 Planning and approval show `sourceInventoryAt` and `sourceInventoryAgeMs`; the web
 plan/approval views show the timestamp and age in seconds. Age is information,
@@ -176,6 +178,9 @@ establish observed quiescence.
 `deltaVerification = "changed"` selects explicitly labelled **partial proof** for
 intermediate deltas, naming the last successfully verified baseline revision and
 covered paths. Failed or unverified revisions do not advance that baseline.
+Reuse also requires the same source and destination roots, expanded exclusions,
+OneNote policy and content-verification mode. A repointed mapping, changed scope
+or older evidence without that binding falls back to full verification.
 Prestage, missing baselines and final revisions always use full verification;
 `"full"` remains the default. Verification scope is separate from opting into
 `verificationMode = "size_only"` and its degraded-content finding.

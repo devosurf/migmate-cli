@@ -168,6 +168,7 @@ export interface Store {
   readPlanRevision(revision: number): PlanRevisionRecord | null;
   writePlanRevision(record: PlanRevisionRecord): void;
   readApproval(revision: number): ApprovalRecord | null;
+  hasApprovedStagedPlan(): boolean;
   writeApproval(record: ApprovalRecord): void;
   readVerificationRevision(revision: number): VerificationRevisionRecord | null;
   writeVerificationRevision(record: VerificationRevisionRecord): void;
@@ -883,6 +884,18 @@ class StoreImpl implements Store {
         )
         .run();
     });
+  }
+  hasApprovedStagedPlan(): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 FROM plan_revision AS plan
+       JOIN approval ON approval.rev=plan.rev AND approval.plan_digest=plan.plan_digest
+       WHERE json_extract(plan.payload, '$.stage') IN ('prestage','delta','final')
+       LIMIT 1`,
+        )
+        .get() !== undefined
+    );
   }
   readApproval(revision: number): ApprovalRecord | null {
     const row = this.db

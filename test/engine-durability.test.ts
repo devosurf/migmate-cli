@@ -350,6 +350,126 @@ describe("engine durability seam", () => {
     );
   });
 
+  it("retains approved staged intent when manifest reload clears the current plan", async (t) => {
+    const h = await harness(t, fixture(), { ...config(), options: { staged: true } });
+    await approve(h);
+    await execute(h);
+    await writeFile(
+      join(h.home, "jobs", h.ref.id, "job.toml"),
+      stringifyToml({ ...config(), options: { staged: false } }),
+    );
+    const loaded = await h.engine.withWriterResult(h.ref, (writer) =>
+      writer.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "mapping",
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+              destination: {
+                type: "google_shared_drive",
+                driveId: "destination-drive",
+                folderId: "destination-root",
+              },
+            },
+          ],
+        }),
+      }),
+    );
+    if (loaded.ok) {
+      const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
+      value(
+        await h.engine.withWriterResult(h.ref, (writer) =>
+          writer.approve({
+            approver: "operator",
+            mode: "unattended",
+            planDigest: plan.planDigest,
+          }),
+        ),
+      );
+      await execute(h);
+    } else {
+      assert.equal(loaded.refusal.code, "configuration_invalid");
+    }
+    reopen(h);
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.close()),
+      "cutover_incomplete",
+    );
+  });
+
+  it("fully verifies a repointed destination instead of borrowing partial proof from the old root", async (t) => {
+    const input = fixture();
+    input.destinationItems.push({
+      id: "other-root",
+      parentId: null,
+      name: "other",
+      kind: "folder",
+    });
+    const h = await harness(t, input, {
+      ...config(),
+      options: { staged: true, deltaVerification: "changed" },
+    });
+    await approve(h);
+    await execute(h);
+    value(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "mapping",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+                destination: {
+                  type: "google_shared_drive",
+                  driveId: "destination-drive",
+                  folderId: "other-root",
+                },
+              },
+            ],
+          }),
+        }),
+      ),
+    );
+    const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
+    value(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.approve({
+          approver: "operator",
+          mode: "unattended",
+          planDigest: plan.planDigest,
+        }),
+      ),
+    );
+    const original = h.port.copyPassStatus.bind(h.port);
+    let corrupted = false;
+    t.mock.method(h.port, "copyPassStatus", async (input: Parameters<typeof original>[0]) => {
+      const status = await original(input);
+      if (!corrupted && status.state === "completed") {
+        const destination = (await h.port.listDestinationChildren("other-root"))[0]!;
+        h.port.mutateDestinationContent(destination.id, Buffer.from("corrupted"));
+        corrupted = true;
+      }
+      return status;
+    });
+    await execute(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.ok(status.outstandingFindings.some((finding) => finding.code === "content_mismatch"));
+    const artifacts = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+    const report = JSON.parse(
+      await readFile(artifacts.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+    );
+    const coverage = JSON.parse(
+      report.sections.find((section: { title: string }) => section.title === "Verification scope")
+        .body,
+    );
+    assert.equal(coverage.proof, "full");
+    assert.equal(coverage.mappings[0].baselineRevision, null);
+  });
+
   it("keeps identical exception evidence stable when a new plan stores fresh finding records", async (t) => {
     const h = await harness(
       t,
