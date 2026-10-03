@@ -666,6 +666,41 @@ describe("deferred member go-live", () => {
     assert.ok(Date.parse(closed.memberGrants[0]!.at!) > Date.parse(verification.at));
     assert.equal((await h.port.listDriveMembers(driveId)).length, 2);
   });
+  it("lets a staged job's early close neither fence nor grant, and goes live only after the final revision", async (t) => {
+    // ADR-0012: the A1 finality gate runs before A6 go-live. A habitual close after
+    // prestage must leave the drive unfenced and its members without access.
+    const h = await provisioningHarness(t, fixture(), { staged: true, consistencyIntervalMs: 0 });
+    await execute(h);
+    const prestaged = value(await h.engine.reader(h.ref).status());
+    assert.equal(prestaged.currentPlan?.stage, "prestage");
+    const driveId = prestaged.createdDrives[0]!.driveId!;
+    const early = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(early.ok, false);
+    if (!early.ok) assert.equal(early.refusal.code, "cutover_incomplete");
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
+    assert.equal((await h.port.listDriveMembers(driveId)).length, 1);
+    // Not fenced: a delta still runs against the drive.
+    await approve(h);
+    await execute(h);
+    const final = value(await h.engine.withWriterResult(h.ref, (w) => w.plan({ final: true })));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          approver: "operator@example.com",
+          mode: "unattended",
+          planDigest: final.planDigest,
+          freeze: { by: "operator@example.com", at: now, how: "Editors locked out at source" },
+        }),
+      ),
+    );
+    await execute(h);
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.state, "closed");
+    assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
+    assert.equal((await h.port.listDriveMembers(driveId)).length, 2);
+  });
   for (const timing of ["before", "after"] as const)
     it(`fences copy before grants and resumes close after a ${timing}-grant crash`, async (t) => {
       const h = await provisioningHarness(t, fixture(), {
