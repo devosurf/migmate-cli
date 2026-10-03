@@ -2592,11 +2592,17 @@ function makeWriter(
           );
         // A6: go-live is a distinct step after every closure gate, before reporting.
         const config = readConfig(paths, job().type, store);
-        if ("mappings" in config) {
-          const plan = store.readPlanRevision(revision)!;
+        const plan = store.readPlanRevision(revision)!;
+        // Read timing from the immutable approval, not the editable operator file.
+        // Legacy before-copy plans may bind retired input fields and close as before.
+        const deferredGrants =
+          "mappings" in config &&
+          memberGrantTiming(
+            (JSON.parse(plan.inputs.configuration!) as FileMigrationConfig).options,
+          ) === "after_verification";
+        if ("mappings" in config && deferredGrants) {
           if (plan.manifestDigest === undefined) delete config.manifestDigest;
-          // Bind timing and members before choosing a mode: an operator-file edit
-          // must not turn deferred go-live into a legacy close that skips grants.
+          // A changed operator file cannot bypass the approved deferred grants.
           if (
             digestJson(
               inputFields(
@@ -2609,13 +2615,12 @@ function makeWriter(
           )
             return refuse("plan_revision_required", "The approved close inputs have changed.");
         }
-        if ("mappings" in config && memberGrantTiming(config.options) === "after_verification") {
+        if ("mappings" in config && deferredGrants) {
           const p = provider(config, true);
           let worker: TransferWorkerHandle | undefined;
           try {
             if (needsTransferWorker(config)) {
               const evidence = await boundEvidence(p, config);
-              const plan = store.readPlanRevision(revision)!;
               const bound = readBoundEvidence(plan.evidence);
               if (
                 digestJson(
@@ -2650,7 +2655,7 @@ function makeWriter(
             if (worker) await stopWorker(p, worker);
           }
         }
-        if ("mappings" in config && memberGrantTiming(config.options) === "after_verification") {
+        if (deferredGrants) {
           const report = await createReport();
           if (!report.ok) return report;
         }

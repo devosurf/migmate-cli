@@ -25,6 +25,7 @@ import {
 } from "../src/engine/providers/fake.ts";
 import { fileConfig as config, fileFixture, value, approve } from "./engine-fixture.ts";
 import type { ConversationManifest, PackageManifest } from "../src/engine/archive/package.ts";
+import { canonicalJson, digestJson } from "../src/engine/store/digest.ts";
 
 const NOW = "2026-09-01T00:00:00.000Z";
 
@@ -1002,6 +1003,48 @@ describe("engine durability seam", () => {
     assert.equal(status.planDigest, digest);
     assert.equal(status.mappingPasses[0]?.status, "completed");
     assert.equal((await verify(h)).clean, true);
+  });
+
+  it("closes an already-verified legacy plan whose approved inputs retain retired fields", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    await execute(h);
+    assert.equal((await verify(h)).clean, true);
+    const before = value(await h.engine.reader(h.ref).status());
+    // Restore the configuration/identity encoding persisted before ADR-0009.
+    // This is a verified historical job, not a request to replay its transfers.
+    const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+    try {
+      const inputs = Object.fromEntries(
+        database
+          .prepare("SELECT key,value FROM plan_input WHERE rev=1")
+          .all()
+          .map((row) => [String(row.key), String(row.value)]),
+      );
+      inputs.configuration = canonicalJson({
+        ...JSON.parse(inputs.configuration!),
+        guarantees: "default",
+      });
+      inputs.identity = canonicalJson({
+        ...JSON.parse(inputs.identity!),
+        qualificationDigest: "a".repeat(64),
+        qualificationTuple: { route: "sharepoint_library_to_shared_drive" },
+      });
+      for (const [key, value] of Object.entries(inputs))
+        database.prepare("UPDATE plan_input SET value=? WHERE rev=1 AND key=?").run(value, key);
+      database
+        .prepare("UPDATE plan_revision SET inputs_digest=? WHERE rev=1")
+        .run(digestJson(inputs));
+    } finally {
+      database.close();
+    }
+    reopen(h);
+    const closed = value(await h.engine.withWriterResult(h.ref, (writer) => writer.close()));
+    assert.equal(closed.state, "closed");
+    const after = value(await h.engine.reader(h.ref).status());
+    assert.equal(after.planDigest, before.planDigest);
+    assert.equal(after.verificationDigest, before.verificationDigest);
+    assert.deepEqual(after.mappingPasses, before.mappingPasses);
   });
 
   it("resumes pre-manifest approvals without changing frozen inputs and binds the digest only on replanning", async (t) => {
