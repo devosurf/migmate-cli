@@ -42,6 +42,7 @@ import {
   type JobSpec,
   type JobType,
   type Outcome,
+  type PlanRevision,
   type PreflightReport,
   type RecoveryReport,
   type Refusal,
@@ -83,6 +84,7 @@ import { createProductionProvider } from "./providers/production.ts";
 import { ProviderFault } from "./providers/credentials.ts";
 import {
   fileMigrationDriver,
+  assertSourceInventoryFresh,
   unreadableSourceDrives,
   type FileMappingConfig,
   type FileMigrationConfig,
@@ -123,6 +125,8 @@ const REFUSAL_CODES: Record<string, true> = Object.fromEntries(
     "approval_required",
     "approval_digest_stale",
     "plan_revision_required",
+    "cutover_incomplete",
+    "delete_limit_exceeded",
     "unsupported_route",
     "drive_creation_ambiguous",
     "verification_unaccepted",
@@ -145,6 +149,7 @@ export class EngineRefusalError extends Error {
 interface EngineDeps {
   home: string;
   now: () => Date;
+  waitForConsistency?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   adapter: "cli" | "web";
   provider?: ProviderPort;
   closed: boolean;
@@ -156,6 +161,8 @@ interface JobPaths {
 }
 export interface ProvidedEngineOptions extends EngineOptions {
   provider?: ProviderPort;
+  /** Injected wait for deterministic connector-consistency scenarios. */
+  waitForConsistency?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 }
 type FileReference = { resolver: "file"; path: string; mode: "0600" };
 type Mapping = FileMappingConfig & { sourceSiteId?: string };
@@ -348,6 +355,9 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         "deleteLimit",
         "staged",
         "memberGrants",
+        "deltaVerification",
+        "consistencyIntervalMs",
+        "settleMaxPasses",
       ],
       "options",
     );
@@ -398,6 +408,18 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
       if (options.memberGrants !== "before_copy" && options.memberGrants !== "after_verification")
         configError("options.memberGrants");
       config.options.memberGrants = options.memberGrants;
+    }
+    if (options.deltaVerification !== undefined) {
+      if (options.deltaVerification !== "full" && options.deltaVerification !== "changed")
+        configError("options.deltaVerification");
+      config.options.deltaVerification = options.deltaVerification;
+    }
+    for (const key of ["consistencyIntervalMs", "settleMaxPasses"] as const) {
+      if (options[key] !== undefined) {
+        if (!Number.isSafeInteger(options[key]) || Number(options[key]) < 0)
+          configError(`options.${key}`);
+        config.options[key] = Number(options[key]);
+      }
     }
     if (input.impersonate !== undefined) {
       if (typeof input.impersonate !== "boolean") configError("impersonate");
@@ -723,6 +745,7 @@ export function openEngine(opts: ProvidedEngineOptions): Engine {
     now: opts.now ?? (() => new Date()),
     adapter: opts.adapter ?? "cli",
     ...(opts.provider ? { provider: opts.provider } : {}),
+    ...(opts.waitForConsistency ? { waitForConsistency: opts.waitForConsistency } : {}),
     closed: false,
   };
   return {
@@ -1387,6 +1410,7 @@ function makeWriter(
         } finally {
           busy = false;
           executionInterrupt = undefined;
+          if (verb === "plan") pendingStage = undefined;
           finish?.();
         }
         if (progressFailure) throw progressFailure;
@@ -1407,19 +1431,45 @@ function makeWriter(
     providers.add(p);
     return p;
   }
+  let pendingStage: PlanRevision["stage"];
   function context(
     p: ProviderPort,
     config: JobConfig,
     revision: number,
     signal?: AbortSignal,
   ): DriverContext<never> {
+    let verificationBaseline: DriverContext<never>["verificationBaseline"];
+    if ("mappings" in config && config.options?.deltaVerification === "changed") {
+      const considered = new Set<number>();
+      for (let run = store.nextVerificationRun() - 1; run > 0; run--) {
+        const verified = store.readVerificationRevision(run);
+        if (!verified || considered.has(verified.planRev)) continue;
+        considered.add(verified.planRev);
+        if (verified && verified.planRev < revision && verified.clean) {
+          verificationBaseline = {
+            revision: verified.planRev,
+            rows: store.readAllRows(verified.planRev),
+            findings: store.readFindings(verified.planRev).map((finding) => ({
+              ...finding,
+              evidence: object(finding.evidence, "verification.evidence"),
+            })),
+            acceptedCodes: verified.acceptedCodes,
+          };
+          break;
+        }
+      }
+    }
+    const stage = store.readPlanRevision(revision)?.stage ?? pendingStage;
     return {
       config: config as never,
       revision,
+      ...(stage ? { stage } : {}),
+      ...(verificationBaseline ? { verificationBaseline } : {}),
       jobDirectory: paths.dir,
       resume: { ...store.readResume(revision), checkpoint: job().lastCheckpoint },
       provider: p,
       now: deps.now,
+      ...(deps.waitForConsistency ? { waitForConsistency: deps.waitForConsistency } : {}),
       ...(signal ? { signal } : {}),
     };
   }
@@ -1936,7 +1986,7 @@ function makeWriter(
         const config = readConfig(paths, job().type, store);
         return preflight(config, provider(config));
       }),
-    plan: () =>
+    plan: (input) =>
       operation("plan", async () => {
         if (job().type === "teams_archive" && job().executionCompleted)
           return refuse(
@@ -1945,6 +1995,23 @@ function makeWriter(
           );
         let config = readConfig(paths, job().type, store);
         requireFileMappings(config);
+        const previousPlan =
+          job().planRevision === null ? null : store.readPlanRevision(job().planRevision!);
+        if ("mappings" in config && previousPlan?.stage && !config.options?.staged)
+          return refuse(
+            "configuration_invalid",
+            "Staging remains within this open job; restore options.staged before planning.",
+            {
+              detail: { field: "options.staged" },
+            },
+          );
+        if (input?.final !== undefined && typeof input.final !== "boolean")
+          return refuse("configuration_invalid", "Final intent must be a boolean.");
+        if (input?.final && (!("mappings" in config) || !config.options?.staged))
+          return refuse(
+            "configuration_invalid",
+            "Final revisions require a staged file migration.",
+          );
         if (!("mappings" in config) && !config.window.to && job().planRevision !== null) {
           const previous = store.readResume(job().planRevision!).archivePlan;
           if (previous)
@@ -1954,13 +2021,37 @@ function makeWriter(
           ready = await preflight(config, p);
         if (!ready.ok) return ready;
         const revision = store.nextPlanRevision();
+        const stage =
+          "mappings" in config && config.options?.staged
+            ? input?.final
+              ? ("final" as const)
+              : revision === 1
+                ? ("prestage" as const)
+                : ("delta" as const)
+            : undefined;
+        pendingStage = stage;
+        const sourceInventoryAt = deps.now().toISOString();
         store.appendEvent({
           verb: "plan",
           phase: "plan",
           kind: "phase_started",
           payload: { revision },
         });
-        const drained = await drain(p, config, revision, "plan", new RetryBudget(200));
+        let planWorker: TransferWorkerHandle | undefined;
+        let drained: { committed: number; interrupted: boolean; blocked: boolean };
+        try {
+          if (needsTransferWorker(config)) planWorker = await startWorker(p);
+          drained = await drain(p, config, revision, "plan", new RetryBudget(200));
+          if (
+            "mappings" in config &&
+            !drained.blocked &&
+            !drained.interrupted &&
+            !store.readFindings(revision, "plan").some((finding) => finding.kind === "finding")
+          )
+            await assertSourceInventoryFresh(context(p, config, revision));
+        } finally {
+          if (planWorker) await stopWorker(p, planWorker);
+        }
         if (drained.interrupted)
           return refuse(
             "retry_budget_exhausted",
@@ -1982,6 +2073,7 @@ function makeWriter(
           .flatMap((s) => s.body.split("\n"));
         const planDigest = digestJson({
           inputsDigest,
+          stage,
           rows: contentDigest(rows),
           findings: contentDigest(
             store.readFindings(revision).map(({ id: _id, ...finding }) => finding),
@@ -1992,11 +2084,12 @@ function makeWriter(
         const createdAt = deps.now().toISOString();
         const record = {
           revision,
+          ...(stage ? { stage } : {}),
           ...("mappings" in config ? { manifestDigest: config.manifestDigest } : {}),
           planDigest,
           inputsDigest,
           createdAt,
-          sourceInventoryAt: createdAt,
+          sourceInventoryAt,
           rowCount: rows.length,
           inputs,
           evidence: { binding: evidence, reportSections },
@@ -2033,9 +2126,37 @@ function makeWriter(
           return refuse("approval_digest_stale", "The digest is not the current plan.", {
             detail: { expected: plan.planDigest },
           });
+        if (
+          a.freeze !== undefined &&
+          (plan.stage !== "final" ||
+            !a.freeze ||
+            typeof a.freeze.by !== "string" ||
+            !a.freeze.by.trim() ||
+            typeof a.freeze.how !== "string" ||
+            !a.freeze.how.trim() ||
+            typeof a.freeze.at !== "string" ||
+            !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/u.test(a.freeze.at) ||
+            !Number.isFinite(Date.parse(a.freeze.at)))
+        )
+          return refuse(
+            "configuration_invalid",
+            "A final freeze attestation requires who, when and how.",
+          );
         const blockers = store
           .readFindings(plan.revision, "plan")
           .filter((f) => f.kind === "finding");
+        if (blockers.some((finding) => finding.code === "delete_limit_exceeded"))
+          return refuse(
+            "delete_limit_exceeded",
+            "Previewed deletions exceed the approved mapping deletion limit; this plan is not executable.",
+            {
+              detail: {
+                mappings: blockers
+                  .filter((finding) => finding.code === "delete_limit_exceeded")
+                  .map((finding) => finding.evidence),
+              },
+            },
+          );
         if (blockers.length)
           return refuse("preflight_failed", "The plan contains unresolved blockers.", {
             detail: { codes: [...new Set(blockers.map((f) => f.code))] },
@@ -2048,6 +2169,12 @@ function makeWriter(
           approver: text(a.approver, "approver"),
           mode: a.mode,
           at: deps.now().toISOString(),
+          ...(a.freeze ? { freeze: a.freeze } : {}),
+          sourceInventoryAt: plan.sourceInventoryAt,
+          sourceInventoryAgeMs: Math.max(
+            0,
+            deps.now().getTime() - Date.parse(plan.sourceInventoryAt),
+          ),
         };
         const record: ApprovalRecord = { ...approval, approvalDigest: digestJson(approval) };
         store.atomic(() => {
@@ -2115,6 +2242,8 @@ function makeWriter(
         if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
         if ("mappings" in config)
           await checkApprovedMappingScope(p, config, store.readAllRows(plan.revision, "plan"));
+        if ("mappings" in config)
+          await assertSourceInventoryFresh(context(p, config, plan.revision), true);
         transition("execute", "execute");
         store.appendEvent({
           verb: "execute",
@@ -2398,6 +2527,33 @@ function makeWriter(
       operation("close", async () => {
         const verification = currentVerification(store),
           revision = job().planRevision;
+        const closeConfig = readConfig(paths, job().type, store);
+        const finalPlan = revision === null ? null : store.readPlanRevision(revision);
+        if ("mappings" in closeConfig && (closeConfig.options?.staged || finalPlan?.stage)) {
+          const watermarks = revision === null ? {} : store.readResume(revision).watermarks;
+          const settled = closeConfig.mappings.every((mapping) => {
+            const raw = watermarks[`file-settle:${mapping.id}`];
+            if (!raw) return false;
+            const state = JSON.parse(raw) as { revision: number; outcome: string };
+            return state.revision === revision && state.outcome === "settled";
+          });
+          if (
+            finalPlan?.stage !== "final" ||
+            !settled ||
+            !verification ||
+            verification.planRev !== revision
+          )
+            return refuse(
+              "cutover_incomplete",
+              "Plan, approve, settle and fully verify the latest final revision before go-live.",
+              {
+                detail: {
+                  missingStep: "settled_final_verification",
+                  stage: finalPlan?.stage ?? null,
+                },
+              },
+            );
+        }
         if (
           !verification ||
           revision === null ||

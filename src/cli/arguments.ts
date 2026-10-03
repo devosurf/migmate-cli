@@ -17,6 +17,8 @@ export interface Invocation {
   file?: string;
   approver?: string;
   planDigest?: string;
+  final?: boolean;
+  freeze?: { by: string; at: string; how: string };
   verificationDigest?: string;
   codes: string[];
   notes: string[];
@@ -110,6 +112,9 @@ export function parseInvocation(argv: string[]): Invocation {
     "--file",
     "--approver",
     "--plan-digest",
+    "--freeze-by",
+    "--freeze-at",
+    "--freeze-how",
     "--verification-digest",
     "--code",
     "--note",
@@ -131,7 +136,11 @@ export function parseInvocation(argv: string[]): Invocation {
       words.push(token);
       continue;
     }
-    if (["--help", "-h", "--version", "--review", "--confirm", "--stop-worker"].includes(token)) {
+    if (
+      ["--help", "-h", "--version", "--review", "--confirm", "--stop-worker", "--final"].includes(
+        token,
+      )
+    ) {
       if (switches.has(token)) throw new UsageFailure("A switch was supplied more than once.");
       switches.add(token);
       continue;
@@ -261,6 +270,29 @@ export function parseInvocation(argv: string[]): Invocation {
   only("--file", ["manifest load", "discover"]);
   only("--approver", ["approve", "accept"]);
   only("--plan-digest", ["approve"]);
+  only("--final", ["plan"]);
+  for (const flag of ["--freeze-by", "--freeze-at", "--freeze-how"]) only(flag, ["approve"]);
+  if (switches.has("--final")) {
+    if (invocation.review)
+      throw new UsageFailure("--final makes a new plan; it cannot review an existing revision.");
+    invocation.final = true;
+  }
+  const freezeBy = get("--freeze-by");
+  const freezeAt = get("--freeze-at");
+  const freezeHow = get("--freeze-how");
+  if (freezeBy !== undefined || freezeAt !== undefined || freezeHow !== undefined) {
+    if (
+      !freezeBy?.trim() ||
+      !freezeAt?.trim() ||
+      !freezeHow?.trim() ||
+      !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/u.test(freezeAt) ||
+      !Number.isFinite(Date.parse(freezeAt))
+    )
+      throw new UsageFailure(
+        "Freeze attestation requires --freeze-by, --freeze-at (timestamp with timezone), and --freeze-how.",
+      );
+    invocation.freeze = { by: freezeBy, at: freezeAt, how: freezeHow };
+  }
   only("--verification-digest", ["accept"]);
   only("--reason", ["cancel"]);
   only("--note", ["accept"]);

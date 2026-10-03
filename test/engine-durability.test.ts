@@ -165,7 +165,7 @@ describe("engine durability seam", () => {
         })),
       ),
     );
-    const digest = await approve(h);
+    let digest = await approve(h);
     const expected = [{ code: "source_package_omitted", kind: "planned_omission", count: 61 }];
     await execute(h);
     for (let pass = 0; pass < 2; pass++) {
@@ -201,6 +201,7 @@ describe("engine durability seam", () => {
       if (pass === 0) {
         h.port.mutateSourceItem("package-0", { name: "renamed-package", etag: "next-version" });
         reopen(h);
+        digest = await approve(h);
         await execute(h);
       }
     }
@@ -290,6 +291,62 @@ describe("engine durability seam", () => {
         }),
       ),
       "approval_digest_stale",
+    );
+  });
+
+  it("binds final intent and preserves freeze evidence and inventory age across reopen", async (t) => {
+    const h = await harness(t, fixture(), {
+      ...config(),
+      options: { staged: true, consistencyIntervalMs: 0 },
+    });
+    const prestage = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+    const final = value(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.plan({ final: true })),
+    );
+    assert.notEqual(final.planDigest, prestage.planDigest);
+    h.now = "2026-09-01T00:05:00.000Z";
+    const freeze = { by: "freeze-owner", at: NOW, how: "Removed editor access" };
+    const approval = value(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.approve({
+          approver: "cutover-owner",
+          mode: "unattended",
+          planDigest: final.planDigest,
+          freeze,
+        }),
+      ),
+    );
+    assert.equal(approval.sourceInventoryAgeMs, 300_000);
+    reopen(h);
+    assert.equal(value(await h.engine.reader(h.ref).status()).currentPlan?.stage, "final");
+    const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+    const evidence = JSON.parse(
+      await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+    );
+    assert.deepEqual(evidence.approval.freeze, freeze);
+    assert.equal(evidence.approval.approvalDigest, approval.approvalDigest);
+    assert.equal(evidence.plan.stage, "final");
+  });
+
+  it("cannot downgrade an approved prestage to unstaged closure by editing configuration", async (t) => {
+    const h = await harness(t, fixture(), { ...config(), options: { staged: true } });
+    await approve(h);
+    await execute(h);
+    value(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.onboard({
+          ...config(),
+          options: { staged: false },
+        }),
+      ),
+    );
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.close()),
+      "cutover_incomplete",
+    );
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.plan()),
+      "configuration_invalid",
     );
   });
 
@@ -962,6 +1019,8 @@ describe("engine durability seam", () => {
       value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
       const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
       try {
+        // Reconstruct the old row shape as well as the old immutable approval.
+        database.exec("UPDATE item SET payload=json_remove(payload,'$.fileScope.preview')");
         database.exec(
           "DELETE FROM plan_input; DELETE FROM plan_revision; DROP TABLE mapping; DROP TABLE mapping_manifest; DROP TABLE member_grant; DROP TABLE created_drive",
         );

@@ -111,6 +111,82 @@ For file verification, a source that changed between copy and verify can raise t
 
 File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member, or an approved excluded item moving outside that subtree within the mapping, requires replanning before any copy starts. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
 
+### Staged cutover: keep one job open
+
+Prestage, approved deltas, and final cutover belong to **one open file-migration
+job**. Decide mirror and its deletion limit before the initial manifest load;
+closing is terminal, and a new job cannot inherit the closed job's mirror authority.
+Configure staged intent before planning:
+
+```toml
+[options]
+staged = true
+consistencyIntervalMs = 30000
+settleMaxPasses = 3
+deltaVerification = "full" # or "changed" for intermediate partial proof
+```
+
+1. Load the manifest, run `plan`, review and approve its digest, then `execute`
+   and `verify`. The initial revision is **prestage**; keep the job open.
+2. As the source changes, repeat `plan` → review → `approve` → `execute` → `verify`
+   in that same job. Ordinary later revisions are **delta**. Each plan lists
+   new, changed, unchanged and (for mirror) to-be-deleted paths with byte totals.
+   Review every deletion against its mapping's `deleteLimit`; an over-limit
+   preview cannot be approved for execution. Copy retains destination-only paths.
+   The preview predicts rclone actions; it is not content-equality proof.
+3. Arrange the source freeze with its accountable human, then make the final
+   revision and approve the exact digest with a freeze attestation:
+
+   ```sh
+   migmate plan --job "$ID" --final --output json
+   migmate approve --job "$ID" --approver "$APPROVER" --plan-digest "$DIGEST" \
+     --freeze-by "$FREEZE_OWNER" --freeze-at "2026-10-04T12:00:00Z" \
+     --freeze-how "Source made read-only by the tenant administrator" --output json
+   migmate execute --job "$ID" --output json
+   migmate verify --job "$ID" --output json
+   migmate report --job "$ID" --output json
+   ```
+
+4. Review settling, full verification and any accepted exceptions before
+   authorizing `close`. A staged job refuses `cutover_incomplete` unless its
+   latest revision is final, settled and fully verified. A verified earlier
+   revision cannot authorize closing a newer one.
+
+Planning and approval show `sourceInventoryAt` and `sourceInventoryAgeMs`; the web
+plan/approval views show the timestamp and age in seconds. Age is information,
+not an expiry rule. Execute performs a **complete read-only source inventory
+comparison** and refuses `plan_revision_required` when approved source evidence
+changed. Graph delta cursor reads have been observed, but descendant-change
+coverage and consistency latency remain unqualified; cursors and root timestamps
+are not used to bypass the complete comparison.
+
+Final execution waits `consistencyIntervalMs` (default **30000**, a configurable
+wait rather than a measured cloud-convergence guarantee) and completely
+re-inventories. It can make up to `settleMaxPasses` additional catch-up passes
+(default **3**) within the approved scope. A complete unchanged confirmation is
+required before full verification; exhaustion leaves cutover incomplete. New
+paths or deletions outside the approved preview require a new revision. Settling
+does not expand deletion authority: the original authorization and cumulative
+limit remain in force across final catch-up passes.
+The 30-second default exceeds the rehearsal's observed 24-second copy-to-verify
+race; it is a conservative polling interval, not a qualified upper bound on
+provider consistency. The repeated complete comparisons, not the delay alone,
+establish observed quiescence.
+
+`deltaVerification = "changed"` selects explicitly labelled **partial proof** for
+intermediate deltas, naming the last successfully verified baseline revision and
+covered paths. Failed or unverified revisions do not advance that baseline.
+Prestage, missing baselines and final revisions always use full verification;
+`"full"` remains the default. Verification scope is separate from opting into
+`verificationMode = "size_only"` and its degraded-content finding.
+
+The web **plan** stage offers **Make final cutover plan**; final approval asks
+who froze the source, when (a timestamp with timezone), and how. This durable
+attestation is a human assertion, **not an automatic tenant lock**. Observed
+quiet and verification do not by themselves prove exact cutover parity.
+Omissions, retained destination-only content and accepted exceptions continue to
+qualify the report even with a freeze.
+
 ### Acting Google account
 
 File jobs optionally enable domain-wide delegation with top-level job TOML settings
@@ -414,9 +490,10 @@ error rather than deleting; other mappings continue. Copy mode remains available
 
 Mirror runs rclone `sync/sync`; exceeding the limit fails that mapping with
 rclone's error without deleting beyond the cap, while other mappings continue.
-Deletions already within the cap are not rolled back; retries have a fresh
-per-pass cap. For a repeat pass after source changes, run `plan`, approve its new
-digest, then `execute` and `verify`; replaying a completed revision skips its passes.
+Deletions already within the cap are not rolled back; ordinary retries have a fresh
+per-pass cap, while final settle catch-up passes share the original cumulative
+deletion authorization. For a repeat pass after source changes, run `plan`, approve
+its new digest, then `execute` and `verify`; replaying a completed revision skips its passes.
 A successful mirror removes leftovers, so verification reports no
 `destination_only_retained` for an unchanged source/destination after the pass.
 Verification still reports any leftovers it actually observes (for example,
