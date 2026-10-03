@@ -1301,6 +1301,19 @@ function assertSettledInventory(
 
 function verificationCoverage(ctx: FileContext, mapping: FileMappingConfig, sources: SourceView[]) {
   const current = inventoryEvidence(sources);
+  const destination = destinationMapping(mapping);
+  const binding = {
+    sourceDriveId: mapping.sourceDriveId,
+    sourceItemId: mapping.sourceItemId,
+    sourceType: mapping.sourceType ?? "sharepoint",
+    destDriveId: destination.destDriveId,
+    destFolderId: destination.destFolderId,
+    exclusions: expandedExclusions({ mapping, sources }).sort((a, b) =>
+      a.sourceItemId < b.sourceItemId ? -1 : a.sourceItemId > b.sourceItemId ? 1 : 0,
+    ),
+    oneNoteNotebooks: ctx.config.options?.oneNoteNotebooks ?? "omit",
+    verificationMode: ctx.config.options?.verificationMode ?? "hash",
+  };
   const baseline =
     ctx.stage === "delta" && ctx.config.options?.deltaVerification === "changed"
       ? ctx.verificationBaseline
@@ -1316,23 +1329,12 @@ function verificationCoverage(ctx: FileContext, mapping: FileMappingConfig, sour
         item.phase === "verify" &&
         item.fileScope?.verification?.sourceInventory,
     );
-    if (complete?.jobType === "file_migration") {
+    if (
+      complete?.jobType === "file_migration" &&
+      canonicalJson(complete.fileScope?.verification?.binding ?? null) === canonicalJson(binding)
+    ) {
       for (const item of complete.fileScope!.verification!.sourceInventory)
         previous.set(item.path, item);
-    } else {
-      for (const phase of ["plan", "verify"])
-        for (const item of rows)
-          if (
-            item.jobType === "file_migration" &&
-            item.phase === phase &&
-            item.sourceEvidence &&
-            !item.sourceItemId.startsWith("destination:")
-          )
-            previous.set(item.relativePath, {
-              id: item.sourceItemId,
-              path: item.relativePath,
-              evidence: item.sourceEvidence,
-            });
     }
   }
   const partial = baseline !== undefined && previous.size > 0;
@@ -1355,6 +1357,7 @@ function verificationCoverage(ctx: FileContext, mapping: FileMappingConfig, sour
       ].sort()
     : [...paths].sort();
   return {
+    binding,
     scope: partial ? ("partial" as const) : ("full" as const),
     baselineRevision: partial ? baseline.revision : null,
     coveredPaths,

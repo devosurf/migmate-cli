@@ -61,6 +61,17 @@ export interface FileScope {
   sourceInventoryAt: string;
   preview?: FilePassPreview & { deletedFolders: string[] };
   verification?: {
+    /** Absent on older evidence: such proof cannot authorize partial verification. */
+    binding?: {
+      sourceDriveId: string;
+      sourceItemId: string;
+      sourceType: string;
+      destDriveId: string;
+      destFolderId: string;
+      exclusions: FileExclusion[];
+      oneNoteNotebooks: "omit" | "copy";
+      verificationMode: "hash" | "size_only";
+    };
     scope: "full" | "partial";
     baselineRevision: number | null;
     coveredPaths: string[];
