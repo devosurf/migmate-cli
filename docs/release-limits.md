@@ -79,6 +79,10 @@ repair drift, revoke removed members, or manage existing-drive permissions.
 and member grants.
 
 The deferred go-live fence does not apply to legacy `before_copy` timing.
+Close uses the immutable plan's approved timing, not the current operator file.
+Already-verified legacy/before-copy plans retain their previous close behavior,
+including plans whose input digests contain retired qualification fields; only
+approved deferred grants require the close-time input re-check.
 In either mode, plan/report warn that mirror can overwrite or delete existing
 writers' files. Deferred grants do not exclude external access, administrators,
 existing drive members or members of pre-populated groups. The acting account
