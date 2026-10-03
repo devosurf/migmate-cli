@@ -2,7 +2,7 @@
 
 ## One open job
 
-For file migrations, `[options] staged = true` labels the first ordinary revision `prestage`, later ordinary revisions `delta`, and `plan --job ID --final --output json` makes a `final` revision. Keep all passes in the same open job: closing a prestage is terminal, and a replacement job does not inherit mirror authority. Decide staged intent, mirror/limit and `deltaVerification` before initial manifest load. Teams archive does not use this file-only lifecycle.
+For file migrations, `[options] staged = true` labels the first ordinary revision `prestage`, later ordinary revisions `delta`, and `plan --job ID --final --output json` makes a `final` revision. Keep all passes in the same open job: closing a prestage is terminal, and a replacement job does not inherit mirror authority. Decide staged intent, mirror/limit and `deltaVerification` before initial manifest load. Once a staged revision is approved, the job stays staged: planning with `staged` removed refuses `configuration_invalid` (`field: "options.staged"`). Teams archive does not use this file-only lifecycle.
 
 ### Preview and freshness
 
