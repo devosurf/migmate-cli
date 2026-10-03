@@ -46,6 +46,7 @@ const enums: Record<string, readonly unknown[]> = {
   workerStatus: WORKER_STATUSES,
   jobType: JOB_TYPES,
   phase: VERBS,
+  stage: ["prestage", "delta", "final"],
   verb: VERBS,
   kind: ["policy_outcome", "planned_omission", "finding", ...EVENT_KINDS, "cli", "web", null],
   state: [...JOB_STATES, ...EXECUTION_TERMINAL_STATES, ...VERB_STATES],

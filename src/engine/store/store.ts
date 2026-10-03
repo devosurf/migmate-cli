@@ -2211,6 +2211,7 @@ class StoreImpl implements Store {
               inputsDigest: plan.inputsDigest,
               createdAt: plan.createdAt,
               sourceInventoryAt: plan.sourceInventoryAt,
+              ...(plan.stage ? { stage: plan.stage } : {}),
               rowCount: plan.rowCount,
               ...(plan.manifestDigest ? { manifestDigest: plan.manifestDigest } : {}),
               disclosures: plan.disclosures,

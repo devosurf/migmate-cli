@@ -475,6 +475,85 @@ describe("windowless native protocol", () => {
     await session.close();
   });
 
+  it("reviews final inventory age and requires a complete explicit freeze attestation", async () => {
+    const home = mkdtempSync(join(tmpdir(), "migmate-web-final-"));
+    const engine = openEngine({
+      home,
+      provider: new FakeFileMigrationPort(fileFixture()),
+      adapter: "web",
+    });
+    let session: WebSession | undefined;
+    try {
+      const config = fileConfig();
+      config.options = { ...config.options, staged: true };
+      const created = await engine.initJob({ type: "file_migration", config });
+      assert.ok(created.ok);
+      session = new WebSession({ engine, job: created.value });
+      await session.open();
+      const handle = createProtocolHandler({ session });
+      assert.equal((await handle(request("plan", { final: true }, "plan"))).status, 202);
+      await settled(session);
+      const planned = await engine.reader(created.value).status();
+      assert.ok(planned.ok);
+      assert.equal(planned.value.currentPlan?.stage, "final");
+      const document = parse(
+        await (await handle(new Request("migmate://localhost/view?stage=approve"))).text(),
+      );
+      assert.match(text(document), /inventory age/i);
+      for (const name of ["freezeBy", "freezeAt", "freezeHow"])
+        assert.equal(
+          elements(
+            document,
+            (element) => attr(element, "name") === name && attr(element, "required") !== undefined,
+          ).length,
+          1,
+        );
+      const approval = {
+        approver: "operator",
+        planDigest: planned.value.planDigest,
+        confirm: true,
+      };
+      assert.equal(
+        (await handle(request("approve", { ...approval, freezeBy: "Morgan" }))).status,
+        409,
+      );
+      assert.equal(
+        (
+          await handle(
+            request("approve", {
+              ...approval,
+              freezeBy: "Morgan",
+              freezeAt: "yesterday",
+              freezeHow: "Read only",
+            }),
+          )
+        ).status,
+        409,
+      );
+      assert.equal(
+        (
+          await handle(
+            request("approve", {
+              ...approval,
+              freezeBy: "Morgan",
+              freezeAt: "2026-10-04T12:00:00Z",
+              freezeHow: "Read only",
+            }),
+          )
+        ).status,
+        202,
+      );
+      await settled(session);
+      const approved = await engine.reader(created.value).status();
+      assert.ok(approved.ok);
+      assert.equal(approved.value.state, "approved");
+    } finally {
+      await session?.close();
+      engine.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("pages and facets real file evidence without changing approval, then binds an explicit approval to its digest", async () => {
     const home = mkdtempSync(join(tmpdir(), "migmate-web-"));
     const provider = new FakeFileMigrationPort(

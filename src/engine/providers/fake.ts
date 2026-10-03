@@ -17,6 +17,7 @@ import type {
   DestinationEntry,
   DestinationItemKind,
   FileHashEntry,
+  FilePassPreview,
   GoogleAbout,
   DriveMember,
   DriveMembership,
@@ -935,6 +936,59 @@ export class FakeFileMigrationPort implements ProviderPort {
     return result;
   }
 
+  async previewCopyPass(
+    input: Parameters<ProviderPort["previewCopyPass"]>[0],
+  ): Promise<FilePassPreview> {
+    this.assertPassWorker(input.socketPath);
+    this.throwRetryAfter("previewCopyPass", input.source.fs);
+    const source = this.tree(input.source.fs);
+    const destination = input.destination ? this.tree(input.destination.fs) : new Map();
+    const excluded = (path: string) =>
+      input.excludePaths?.some((exclude) => path === exclude || path.startsWith(`${exclude}/`)) ??
+      false;
+    const preview: FilePassPreview = {
+      new: [],
+      changed: [],
+      unchanged: [],
+      deleted: [],
+      retained: [],
+      timestampOnly: [],
+      modifyWindowNs: "1000000000",
+    };
+    for (const [path, entry] of source) {
+      if (sourceDirectory(entry) || excluded(path)) continue;
+      const previous = destination.get(path);
+      const item = { path, size: entry.size ?? -1 };
+      // Match this fake's content-based executeCopyPass predicate, not an
+      // invented timestamp clock for fixture content mutations.
+      if (!previous) preview.new.push(item);
+      else if (
+        previous.kind === "file" &&
+        previous.content !== null &&
+        entry.content !== null &&
+        hashBytes(previous.content) === hashBytes(entry.content)
+      )
+        preview.unchanged.push(item);
+      else preview.changed.push(item);
+    }
+    for (const [path, entry] of destination) {
+      if (source.has(path) || sourceDirectory(entry) || excluded(path)) continue;
+      preview[input.mode === "mirror" ? "deleted" : "retained"].push({
+        path,
+        size: entry.size ?? -1,
+      });
+    }
+    for (const entries of [
+      preview.new,
+      preview.changed,
+      preview.unchanged,
+      preview.deleted,
+      preview.retained,
+    ])
+      entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return preview;
+  }
+
   async startCopyPass(
     input: Parameters<ProviderPort["startCopyPass"]>[0],
   ): Promise<CopyPassHandle> {
@@ -1096,6 +1150,20 @@ export class FakeFileMigrationPort implements ProviderPort {
     await pass.done;
   }
 
+  async resolveFilePassSource(input: Parameters<ProviderPort["resolveFilePassSource"]>[0]) {
+    if (!this.workerState?.alive) throw destinationFault("worker_exited", 500);
+    return {
+      socketPath: this.workerState.socketPath,
+      source: {
+        fs: input.sourceItemId,
+        kind:
+          input.sourceType === "google_shared_drive"
+            ? ("google_drive" as const)
+            : ("sharepoint" as const),
+      },
+    };
+  }
+
   async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
     if (!this.workerState?.alive) throw destinationFault("worker_exited", 500);
     return {
@@ -1130,8 +1198,9 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFileHashes", input.root.fs);
     const hashes: FileHashEntry[] = [];
+    const selected = input.paths === undefined ? null : new Set(input.paths);
     for (const [path, entry] of this.tree(input.root.fs)) {
-      if (sourceDirectory(entry)) continue;
+      if (sourceDirectory(entry) || (selected !== null && !selected.has(path))) continue;
       const unreadable =
         input.download &&
         (entry.content === null ||

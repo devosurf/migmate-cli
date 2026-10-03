@@ -101,6 +101,8 @@ export type RefusalCode =
   | "approval_required"
   | "approval_digest_stale"
   | "plan_revision_required"
+  | "cutover_incomplete"
+  | "delete_limit_exceeded"
   | "unsupported_route"
   | "drive_creation_ambiguous"
   | "verification_unaccepted"
@@ -234,6 +236,7 @@ export interface PreflightReport {
 }
 
 export interface PlanRevision {
+  stage?: "prestage" | "delta" | "final";
   revision: number;
   planDigest: string;
   inputsDigest: string;
@@ -253,6 +256,9 @@ export interface ApprovalRecord {
   approver: string;
   mode: "interactive" | "unattended";
   at: string;
+  freeze?: { by: string; at: string; how: string };
+  sourceInventoryAt?: string;
+  sourceInventoryAgeMs?: number;
 }
 
 export interface AcceptedException {

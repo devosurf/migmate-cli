@@ -40,6 +40,8 @@ export const CODES: readonly CodeEntry[] = [
   entry("destination_only_retained", "policy_outcome", "plan", FILE),
   entry("source_deleted_destination_retained", "policy_outcome", "plan", FILE),
   entry("source_package_copied_as_files", "policy_outcome", "plan", FILE),
+  entry("to_be_deleted", "policy_outcome", "plan", FILE),
+  entry("timestamp_only", "policy_outcome", "plan", FILE),
 
   // ---- file migration: planned omissions -----------------------------------
   entry("source_package_omitted", "planned_omission", "plan", FILE),
@@ -55,6 +57,8 @@ export const CODES: readonly CodeEntry[] = [
 
   // ---- file migration: plan / collision blockers ---------------------------
   entry("mapping_overlap", "finding", "plan", FILE),
+  entry("delete_limit_exceeded", "finding", "plan", FILE),
+  entry("cutover_incomplete", "finding", "execute", FILE),
   entry("path_unrepresentable", "finding", "plan", FILE),
   entry("destination_duplicate_name", "finding", "plan", FILE),
   entry("destination_type_conflict", "finding", "plan", FILE),

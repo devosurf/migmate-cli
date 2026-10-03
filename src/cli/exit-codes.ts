@@ -13,6 +13,8 @@ export const EXIT_CODE_BY_REFUSAL_CODE: Record<string, number> = {
   approval_required: 4,
   approval_digest_stale: 4,
   plan_revision_required: 4,
+  cutover_incomplete: 4,
+  delete_limit_exceeded: 4,
   unsupported_route: 4,
   drive_creation_ambiguous: 4,
   verification_unaccepted: 4,

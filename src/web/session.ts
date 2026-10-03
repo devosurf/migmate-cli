@@ -145,9 +145,23 @@ export class WebSession {
             "Onboarding requires a JSON configuration object containing credential references, never secret values.",
           );
         break;
+      case "plan":
+        if (
+          !exact(input, ["final"]) ||
+          (input.final !== undefined && typeof input.final !== "boolean")
+        )
+          return invalid("Final planning requires an explicit boolean final option.");
+        break;
       case "approve":
         if (
-          !exact(input, ["approver", "planDigest", "confirm"]) ||
+          !exact(input, [
+            "approver",
+            "planDigest",
+            "confirm",
+            "freezeBy",
+            "freezeAt",
+            "freezeHow",
+          ]) ||
           !text(input.approver) ||
           !text(input.planDigest) ||
           input.confirm !== true
@@ -155,6 +169,22 @@ export class WebSession {
           return invalid(
             "Approval requires your identity, the exact reviewed plan digest, and an explicit approval action.",
           );
+        if (
+          input.freezeBy !== undefined ||
+          input.freezeAt !== undefined ||
+          input.freezeHow !== undefined
+        ) {
+          if (
+            !text(input.freezeBy) ||
+            !text(input.freezeAt) ||
+            !text(input.freezeHow) ||
+            !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/u.test(String(input.freezeAt)) ||
+            !Number.isFinite(Date.parse(String(input.freezeAt)))
+          )
+            return invalid(
+              "Freeze attestation requires who, a timestamp with timezone, and how the source was frozen.",
+            );
+        }
         break;
       case "accept":
         if (
@@ -268,7 +298,7 @@ export class WebSession {
           break;
         }
         case "plan": {
-          const outcome = await writer.plan();
+          const outcome = await writer.plan(input.final === true ? { final: true } : {});
           if (outcome.ok) this.#plan = outcome.value;
           this.#verification = null;
           result = outcome;
@@ -279,6 +309,15 @@ export class WebSession {
             approver: String(input.approver),
             planDigest: String(input.planDigest),
             mode: "interactive",
+            ...(input.freezeBy !== undefined
+              ? {
+                  freeze: {
+                    by: String(input.freezeBy),
+                    at: String(input.freezeAt),
+                    how: String(input.freezeHow),
+                  },
+                }
+              : {}),
           });
           break;
         case "execute": {

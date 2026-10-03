@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { it } from "node:test";
@@ -92,6 +93,208 @@ it(
         await supervisor.copyPassStatus({ socketPath: worker.socketPath, pass }),
         status,
       );
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  "previews disjoint-hash copies and mirror deletions at the exact modify-window boundary",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-preview-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(source);
+      await mkdir(destination);
+      const base = 1_700_000_000;
+      const fixtures = [
+        { path: "new.txt", source: "new", destination: null, delta: 0 },
+        { path: "size.txt", source: "longer", destination: "old", delta: 0 },
+        { path: "same-size.txt", source: "BBBB", destination: "AAAA", delta: 10 },
+        { path: "boundary.txt", source: "BBBB", destination: "AAAA", delta: 1 },
+        { path: "same.txt", source: "same", destination: "same", delta: 0 },
+        // These straddle a second but differ by less than one second. Truncating
+        // either timestamp to milliseconds incorrectly predicts a transfer.
+        { path: "within-window.txt", source: "BBBB", destination: "AAAA", delta: 1 },
+        { path: "deleted.txt", source: null, destination: "gone", delta: 0 },
+        { path: "excluded[1].txt", source: null, destination: "keep", delta: 0 },
+      ];
+      for (const fixture of fixtures) {
+        for (const [root, content, time] of [
+          [source, fixture.source, base + fixture.delta],
+          [
+            destination,
+            fixture.destination,
+            base + (fixture.path === "within-window.txt" ? 0.0005 : 0),
+          ],
+        ] as const) {
+          if (content === null) continue;
+          await writeFile(join(root, fixture.path), content);
+          await utimes(join(root, fixture.path), time, time);
+        }
+      }
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      await supervisor.call(worker.socketPath, "options/set", { main: { ModifyWindow: "1s" } });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: `:local,hashes=quickxor:${source}`, kind: "local" as const },
+        destination: { fs: `:local,hashes=md5:${destination}`, kind: "local" as const },
+        excludePaths: ["excluded[1].txt"],
+      };
+      const preview = await supervisor.previewCopyPass({ ...input, mode: "mirror" });
+      assert.deepEqual(preview, {
+        new: [{ path: "new.txt", size: 3 }],
+        changed: [
+          { path: "boundary.txt", size: 4 },
+          { path: "same-size.txt", size: 4 },
+          { path: "size.txt", size: 6 },
+        ],
+        unchanged: [
+          { path: "same.txt", size: 4 },
+          { path: "within-window.txt", size: 4 },
+        ],
+        deleted: [{ path: "deleted.txt", size: 4 }],
+        retained: [],
+        timestampOnly: [],
+        modifyWindowNs: "1000000000",
+      });
+      const copyPreview = await supervisor.previewCopyPass({ ...input, mode: "copy" });
+      assert.deepEqual(copyPreview.deleted, []);
+      assert.deepEqual(copyPreview.retained, [{ path: "deleted.txt", size: 4 }]);
+      const emptyPreview = await supervisor.previewCopyPass({
+        socketPath: worker.socketPath,
+        source: input.source,
+        excludePaths: ["same.txt"],
+        mode: "copy",
+      });
+      assert.deepEqual(emptyPreview, {
+        new: [
+          { path: "boundary.txt", size: 4 },
+          { path: "new.txt", size: 3 },
+          { path: "same-size.txt", size: 4 },
+          { path: "size.txt", size: 6 },
+          { path: "within-window.txt", size: 4 },
+        ],
+        changed: [],
+        unchanged: [],
+        deleted: [],
+        retained: [],
+        timestampOnly: [],
+        modifyWindowNs: "1000000000",
+      });
+      // Preview has no write effects, including timestamp changes.
+      assert.equal(await readFile(join(destination, "same-size.txt"), "utf8"), "AAAA");
+      assert.equal(await readFile(join(destination, "deleted.txt"), "utf8"), "gone");
+      const pass = await supervisor.startCopyPass({
+        ...input,
+        mode: "mirror",
+        deleteLimit: 1,
+        transfers: 2,
+      });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass }), {
+        state: "completed",
+        error: null,
+      });
+      const stats = await supervisor.copyPassStats({ socketPath: worker.socketPath, pass });
+      assert.equal(stats.files, 4);
+      assert.equal(stats.bytes, 17);
+      for (const file of [...preview.new, ...preview.changed]) {
+        assert.equal(
+          await readFile(join(destination, file.path), "utf8"),
+          await readFile(join(source, file.path), "utf8"),
+        );
+      }
+      assert.equal(await readFile(join(destination, "within-window.txt"), "utf8"), "AAAA");
+      await assert.rejects(stat(join(destination, "deleted.txt")), { code: "ENOENT" });
+      assert.equal(await readFile(join(destination, "excluded[1].txt"), "utf8"), "keep");
+      // One nanosecond beyond the exact boundary must skip, without rounding
+      // the configured window down to whole milliseconds or seconds.
+      await writeFile(join(destination, "boundary.txt"), "AAAA");
+      await utimes(join(destination, "boundary.txt"), base, base);
+      await supervisor.call(worker.socketPath, "options/set", {
+        main: { ModifyWindow: "1000000001ns" },
+      });
+      const precise = await supervisor.previewCopyPass({ ...input, mode: "copy" });
+      assert.equal(precise.modifyWindowNs, "1000000001");
+      assert.deepEqual(precise.changed, []);
+      assert.deepEqual(precise.timestampOnly, []);
+      const skipped = await supervisor.startCopyPass({ ...input, mode: "copy", transfers: 1 });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass: skipped }), {
+        state: "completed",
+        error: null,
+      });
+      assert.equal(await readFile(join(destination, "boundary.txt"), "utf8"), "AAAA");
+      assert.equal(
+        (await supervisor.copyPassStats({ socketPath: worker.socketPath, pass: skipped })).files,
+        0,
+      );
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  "previews common-hash timestamp-only work without counting it as copied bytes",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-preview-hash-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(source);
+      await mkdir(destination);
+      for (const path of ["timestamp.txt", "different.txt", "skipped.txt"]) {
+        await writeFile(join(source, path), "BBBB");
+        await writeFile(join(destination, path), path === "timestamp.txt" ? "BBBB" : "AAAA");
+        await utimes(join(source, path), 1_700_000_010, 1_700_000_010);
+        const time = path === "skipped.txt" ? 1_700_000_010 : 1_700_000_000;
+        await utimes(join(destination, path), time, time);
+      }
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: source, kind: "local" as const },
+        destination: { fs: destination, kind: "local" as const },
+        mode: "copy" as const,
+      };
+      const preview = await supervisor.previewCopyPass(input);
+      assert.deepEqual(preview, {
+        new: [],
+        changed: [{ path: "different.txt", size: 4 }],
+        unchanged: [{ path: "skipped.txt", size: 4 }],
+        deleted: [],
+        retained: [],
+        timestampOnly: [{ path: "timestamp.txt", size: 4 }],
+        modifyWindowNs: "1",
+      });
+      assert.equal((await stat(join(destination, "timestamp.txt"))).mtimeMs, 1_700_000_000_000);
+      const pass = await supervisor.startCopyPass({ ...input, transfers: 2 });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass }), {
+        state: "completed",
+        error: null,
+      });
+      const stats = await supervisor.copyPassStats({ socketPath: worker.socketPath, pass });
+      assert.equal(stats.files, 1);
+      assert.equal(stats.bytes, 4);
+      assert.equal(await readFile(join(destination, "different.txt"), "utf8"), "BBBB");
+      assert.equal(await readFile(join(destination, "skipped.txt"), "utf8"), "AAAA");
+      assert.equal((await stat(join(destination, "timestamp.txt"))).mtimeMs, 1_700_000_010_000);
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });
@@ -330,6 +533,13 @@ it(
         mode: "copy" as const,
         transfers: 1,
       };
+      const preview = await supervisor.previewCopyPass({
+        ...input,
+        destination: { fs: destination, kind: "sharepoint" },
+      });
+      assert.deepEqual(preview.unchanged, [{ path: "report.docx", size: 12 }]);
+      assert.deepEqual(preview.changed, []);
+      assert.deepEqual(preview.timestampOnly, []);
       const intoSharePoint = await supervisor.startCopyPass({
         ...input,
         destination: { fs: destination, kind: "sharepoint" },
@@ -383,6 +593,144 @@ it(
       );
     } finally {
       await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  "hashes only selected literal relative paths without downloading unselected content",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-hash-selection-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    const downloaded: string[] = [];
+    const content: Record<string, string> = {
+      "/nested/literal[1].txt": "hello",
+      "/nested/literal1.txt": "unselected nested bytes",
+      "/other.txt": "unselected root bytes",
+    };
+    const listings: Record<string, string> = {
+      "/": '<a href="nested/">nested</a><a href="other.txt">other</a>',
+      "/nested/": '<a href="literal%5B1%5D.txt">literal</a><a href="literal1.txt">other</a>',
+    };
+    const server = createServer((request, response) => {
+      const path = decodeURIComponent(new URL(request.url!, "http://localhost").pathname);
+      const body = content[path] ?? listings[path];
+      if (body === undefined) {
+        response.writeHead(404).end();
+        return;
+      }
+      response.setHeader("Content-Type", listings[path] === undefined ? "text/plain" : "text/html");
+      response.setHeader("Content-Length", Buffer.byteLength(body));
+      response.setHeader("Last-Modified", "Tue, 14 Nov 2023 22:13:20 GMT");
+      if (request.method === "HEAD") response.end();
+      else {
+        if (content[path] !== undefined) downloaded.push(path);
+        response.end(body);
+      }
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        root: { fs: `:http,url='http://127.0.0.1:${address.port}/':`, kind: "local" as const },
+        hashType: "sha256" as const,
+        download: true,
+      };
+      assert.deepEqual(
+        await supervisor.listFileHashes({ ...input, paths: ["nested/literal[1].txt"] }),
+        [
+          {
+            path: "nested/literal[1].txt",
+            size: 5,
+            hash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          },
+        ],
+      );
+      assert.deepEqual(downloaded, ["/nested/literal[1].txt"]);
+      assert.deepEqual(await supervisor.listFileHashes({ ...input, paths: [] }), []);
+      assert.deepEqual(downloaded, ["/nested/literal[1].txt"]);
+    } finally {
+      await supervisor.close();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  "previews with backend precision when it exceeds the configured modify window",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-preview-precision-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    let downloads = 0;
+    const server = createServer((request, response) => {
+      const listing = request.url === "/";
+      const body = listing ? '<a href="file.txt">file</a>' : "BBBB";
+      response.setHeader("Content-Type", listing ? "text/html" : "text/plain");
+      response.setHeader("Content-Length", Buffer.byteLength(body));
+      response.setHeader("Last-Modified", "Tue, 14 Nov 2023 22:13:20 GMT");
+      if (request.method === "HEAD") response.end();
+      else {
+        if (!listing) downloads++;
+        response.end(body);
+      }
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const destination = join(directory, "destination");
+      await mkdir(destination);
+      await writeFile(join(destination, "file.txt"), "AAAA");
+      await utimes(join(destination, "file.txt"), 1_700_000_000.5, 1_700_000_000.5);
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: `:http,url='http://127.0.0.1:${address.port}/':`, kind: "local" as const },
+        destination: { fs: destination, kind: "local" as const },
+        mode: "copy" as const,
+      };
+      const preview = await supervisor.previewCopyPass(input);
+      assert.equal(preview.modifyWindowNs, "1000000000");
+      assert.deepEqual(preview.unchanged, [{ path: "file.txt", size: 4 }]);
+      assert.deepEqual(preview.changed, []);
+      assert.equal(downloads, 0);
+      const skipped = await supervisor.startCopyPass({ ...input, transfers: 1 });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass: skipped }), {
+        state: "completed",
+        error: null,
+      });
+      assert.equal(await readFile(join(destination, "file.txt"), "utf8"), "AAAA");
+      assert.equal(downloads, 0);
+      await utimes(join(destination, "file.txt"), 1_700_000_001, 1_700_000_001);
+      const boundary = await supervisor.previewCopyPass(input);
+      assert.deepEqual(boundary.changed, [{ path: "file.txt", size: 4 }]);
+      const copied = await supervisor.startCopyPass({ ...input, transfers: 1 });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass: copied }), {
+        state: "completed",
+        error: null,
+      });
+      assert.equal(await readFile(join(destination, "file.txt"), "utf8"), "BBBB");
+      assert.equal(downloads, 1);
+    } finally {
+      await supervisor.close();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(directory, { recursive: true, force: true });
     }
   },

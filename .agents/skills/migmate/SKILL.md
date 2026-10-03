@@ -29,6 +29,17 @@ Ten verbs on one rail: `init`, `doctor`, `plan`, `approve`, `execute`, `status`,
 
 `status` is safe at any point. `cancel` is terminal and exits 0 on success.
 
+For staged file migrations, follow README's **Staged cutover: keep one job open**.
+Decide `staged`, mirror/limit and `deltaVerification` before manifest load; keep
+prestage and deltas in the same open job. Before each approval read back inventory
+timestamp/age, predicted changes and every deletion. Execute's complete read-only
+freshness comparison can require a new revision; Graph cursors are not yet a
+qualified shortcut. For cutover use `plan --final`, obtain the human's freeze
+decision and pass `--freeze-by`, `--freeze-at`, `--freeze-how` with approval.
+Distinguish attestation from observation and from automatic locking. Review final
+settling and full verification before close; intermediate `"changed"` verification
+is partial proof, never final parity. `cutover_incomplete` means keep the job open.
+
 For file migration batches, initialize with credential config; `[[mappings]]` may
 be omitted. `creds init` and `doctor` can prove credentials before mappings exist.
 Run `manifest load --job ID --file mappings.json --output json` before `plan`,
@@ -116,7 +127,7 @@ Choose dedicated destination roots: file copy never deletes, but can update exis
 
 Read back the plan's **Mirror** setting and delete limit before approval. Default copy passes never delete. Job `[options] mirror = true` requires a nonnegative safe-integer `deleteLimit` per mapping pass (`0` permits no file deletions); every manifest mapping must use `destination.create`, otherwise load refuses with row and `field: "destination"`. Keep the mapping ID and creation intent for later passes so the durable created drive is reused. Plan and approve a new revision to copy source changes; completed passes in the same revision are skipped.
 
-Mirror runs `sync/sync`. On a delete-limit failure, surface the mapping's rclone error from `status.mappingPasses` and the report; other mappings continue. Deletions within the cap are not rolled back and retrying gives a fresh per-pass cap. Successful mirror leaves no destination-only files; verification still reports any leftovers it observes, including outside writes after a pass.
+Mirror runs `sync/sync`. On a delete-limit failure, surface the mapping's rclone error from `status.mappingPasses` and the report; other mappings continue. Deletions within the cap are not rolled back. Ordinary retries have a fresh per-pass cap; final settle catch-up passes retain the original cumulative deletion authorization. Successful mirror leaves no destination-only files; verification still reports any leftovers it observes, including outside writes after a pass.
 
 Mirror also requires `status.createdDrives` provenance: an own create response or
 timestamp-checked name recovery. A legacy record without this evidence fails that

@@ -3,6 +3,7 @@ import type { FileCommitRow } from "../commit.ts";
 import type { DriverContext } from "./types.ts";
 import type {
   DestinationEntry,
+  FilePassPreview,
   ProviderPort,
   ProvenanceRecord,
   SourceEntry,
@@ -58,6 +59,14 @@ export interface FileMarker extends ProvenanceRecord {
 export interface FileScope {
   exclusions: FileExclusion[];
   sourceInventoryAt: string;
+  preview?: FilePassPreview & { deletedFolders: string[] };
+  verification?: {
+    scope: "full" | "partial";
+    baselineRevision: number | null;
+    coveredPaths: string[];
+    deletedPaths: string[];
+    sourceInventory: Array<{ id: string; path: string; evidence: FileSourceEvidence }>;
+  };
 }
 
 export interface FileEvidenceRow extends FileCommitRow {
@@ -67,12 +76,31 @@ export interface FileEvidenceRow extends FileCommitRow {
   fileScope?: FileScope;
 }
 
+/** Stored under `file-settle:${mappingId}` before each copy attempt. */
+export interface FileSettleState {
+  revision: number;
+  mappingId: string;
+  maxPasses: number;
+  consistencyIntervalMs: number;
+  passes: number;
+  copyPassNumber: number;
+  copyPending: boolean;
+  deletionsReserved: number;
+  outcome: "pending" | "settled" | "exhausted";
+  copiedInventory: Array<{ id: string; path: string; evidence: FileSourceEvidence }>;
+  observations: Array<{
+    at: string;
+    changedPaths: string[];
+    outcome: "changed" | "settled" | "exhausted";
+  }>;
+}
+
 export type FileContext = DriverContext<FileMigrationConfig>;
 
 export class FilePlanRevisionRequiredError extends Error {
   readonly code = "plan_revision_required";
-  constructor() {
-    super("The expanded stable exclusion set changed; a new plan is required");
+  constructor(message = "The expanded stable exclusion set changed; a new plan is required") {
+    super(message);
     this.name = "FilePlanRevisionRequiredError";
   }
 }
