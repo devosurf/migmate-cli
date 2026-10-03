@@ -162,6 +162,21 @@ and libraries added after discovery.
 
 **What every job proves about itself.** File verification compares each mapping by relative file path using rclone hash listings. It reads Google Drive's stored SHA-256 without downloading the destination, falling back per file to stored MD5 when SHA-256 is absent, and re-downloads the source to compute the same hash type. Findings name missing files (`destination_missing`), size differences (`size_mismatch`), differing bytes (`content_mismatch`), and unreadable source files (`source_read_failed`), with `path`, `sourceSize`, `destinationSize`, `sourceHash`, `destinationHash`, and `hashType` evidence (unavailable values are `null`). Verification rows retain the destination object's observed id alongside its hash, including destination-only files; that id comes from the current listing, not a prior reserved identity. Destination-only files are reported as `destination_only_retained`, never deleted and never blocking close. Verification does not read per-item markers or reserved ids, and works with destinations written by the current execute.
 
+**OneNote notebooks.** `[options] oneNoteNotebooks = "omit"` is the default:
+`source_package_omitted` findings retain the source URL, section count, reason and
+manual export guidance in plan and verification; paged review shows them. Export
+from OneNote for Windows (File → Export → Notebook `.onepkg` or PDF), then upload
+the export manually. Opt-in `"copy"` instead records `source_package_copied_as_files`
+and copies every notebook descendant as ordinary files, including `.one` sections
+and `Open Notebook.onetoc2`. Per-file hashes, unchanged delta skips and mirror
+deletions apply normally. Other package types remain omitted, and `"copy"` refuses
+on the reverse route (`configuration_invalid`, `options.oneNoteNotebooks`).
+Plan and report disclose a read-only reference copy, not a working Google notebook:
+download the folder to open `Open Notebook.onetoc2` in OneNote for Windows, not Mac
+or Drive. Editing through Drive for desktop is unsafe. This does not enforce
+read-only Drive permissions. Fake-provider lifecycle and paged Graph enumeration
+are covered; a disposable live Google upload still requires operator approval.
+
 **Size-only is an explicit trade-off.** Set `[options] verificationMode = "size_only"` in the job TOML to compare listed sizes without downloading source bytes. The default is `"hash"`; the immutable plan and report state the mode. Size-only verification raises `content_verification_degraded` even when all sizes match or the mapping is empty. A missing destination hash after MD5 fallback raises that same finding. `close` refuses `verification_unaccepted` until an operator accepts every blocking finding by code. Neither mode verifies empty folders or basic metadata. Teams archive verification is unchanged: it self-verifies the local package, then byte-verifies every uploaded object and its provenance.
 
 **What the source serves is what gets copied.** SharePoint can rewrite PDF, Office and HTML files and list sizes that contradict downloaded bytes ([provider byte-integrity research](research/provider-byte-integrity.md)). rclone owns execution and its backend checks; Migmate no longer stages files or requires its old two-read agreement before uploading. Hash verification raises `source_size_inconsistent` when listed size contradicts served bytes, with `listedSize`, `servedSize` and hash evidence. When hashes differ, verification measures an additional source read and checks it against downloaded SHA-256 before attributing the discrepancy. A destination length differing from served length also raises `size_mismatch`. Size-only cannot make that distinction; blocking findings require acceptance.

@@ -28,6 +28,8 @@ export interface FileSourceEvidence {
   modifiedAt: string;
   mimeType: string | null;
   downloadable: boolean;
+  webUrl: string | null;
+  packageSections: number | null;
   ctag?: string | null;
   hashes?: Record<string, string>;
   versionCount?: number;
@@ -60,6 +62,8 @@ export interface FileScope {
 
 export interface FileEvidenceRow extends FileCommitRow {
   sourceEvidence?: FileSourceEvidence;
+  nextStep: string | null;
+  omissionReason: string | null;
   fileScope?: FileScope;
 }
 
@@ -92,6 +96,8 @@ export function sourceEvidence(source: SourceEntry): FileSourceEvidence {
     modifiedAt: source.modifiedAt,
     mimeType: source.mimeType,
     downloadable: source.downloadable,
+    webUrl: source.webUrl,
+    packageSections: source.packageSections,
     ...(richer.ctag !== undefined ? { ctag: richer.ctag } : {}),
     ...(richer.hashes !== undefined ? { hashes: richer.hashes } : {}),
     ...(richer.versionCount !== undefined ? { versionCount: richer.versionCount } : {}),

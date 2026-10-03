@@ -87,6 +87,118 @@ async function bytes(content: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(result);
 }
 
+test("SharePoint notebook sources retain their web URL and count immediate section files across pages", async (t) => {
+  const notebook = {
+    id: "notebook",
+    name: "Team notebook",
+    package: { type: "oneNote" },
+    webUrl: "https://example.sharepoint.com/sites/team/Notebook",
+  };
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    assert.equal(url.hostname, "graph.microsoft.com");
+    if (url.pathname.endsWith("/items/source-root/children"))
+      return Response.json({ value: [notebook] });
+    if (url.pathname.endsWith("/items/notebook/children")) {
+      if (url.searchParams.get("$skiptoken") === "next")
+        return Response.json({
+          value: [
+            { id: "section-2", name: "Roadmap.one", file: {} },
+            { id: "section-group", name: "Group.one", folder: { childCount: 4 } },
+          ],
+        });
+      return Response.json({
+        value: [
+          { id: "section-1", name: "Notes.one", file: {} },
+          { id: "toc", name: "Open Notebook.onetoc2", file: {} },
+          { id: "image", name: "cover.png", file: {} },
+        ],
+        "@odata.nextLink":
+          "https://graph.microsoft.com/v1.0/drives/source-drive/items/notebook/children?$skiptoken=next",
+      });
+    }
+    if (url.pathname.endsWith("/items/notebook")) return Response.json(notebook);
+    throw new Error(`Unexpected Graph request: ${url.pathname}`);
+  });
+  const files = new FileEffects({
+    config: { mappings: [mapping] },
+    session,
+    graph: createGraphTransport(session),
+    worker: {
+      async *read() {
+        throw new Error("Notebook evidence must not read source bytes.");
+      },
+    },
+  });
+  const source = await files.readSourceItem({ driveId: "source-drive", itemId: "notebook" });
+  assert.equal(source?.webUrl, notebook.webUrl);
+  assert.equal(source?.kind, "package");
+  assert.equal(source?.packageSections, 2);
+  const children = await files.listSourceChildren("source-root");
+  assert.deepEqual(children, [source]);
+});
+
+test("non-notebook sources have no section count and Google sources have no web URL", async (t) => {
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.hostname === "www.googleapis.com")
+      return Response.json({
+        id: "google-folder",
+        driveId: "source-drive",
+        name: "Google folder",
+        mimeType: "application/vnd.google-apps.folder",
+        createdTime: "",
+        modifiedTime: "",
+      });
+    assert.equal(url.hostname, "graph.microsoft.com");
+    if (url.pathname.endsWith("/items/source-root/children"))
+      return Response.json({
+        value: [
+          { id: "folder", name: "Folder", folder: {} },
+          { id: "other-package", name: "Package", package: { type: "other" } },
+          { id: "unknown-package", name: "Package", package: {} },
+          {
+            id: "reference",
+            name: "Linked notebook",
+            remoteItem: {},
+            package: { type: "oneNote" },
+          },
+        ],
+      });
+    throw new Error(`Non-notebooks must not query sections: ${url.pathname}`);
+  });
+  const worker = {
+    async *read() {
+      throw new Error("Source evidence must not read source bytes.");
+    },
+  };
+  const sharepoint = new FileEffects({
+    config: { mappings: [mapping] },
+    session,
+    graph: createGraphTransport(session),
+    worker,
+  });
+  const sources = await sharepoint.listSourceChildren("source-root");
+  assert.deepEqual(
+    sources.map(({ id, kind, webUrl, packageSections }) => ({ id, kind, webUrl, packageSections })),
+    [
+      { id: "folder", kind: "folder", webUrl: null, packageSections: null },
+      { id: "other-package", kind: "package", webUrl: null, packageSections: null },
+      { id: "unknown-package", kind: "package", webUrl: null, packageSections: null },
+      { id: "reference", kind: "reference", webUrl: null, packageSections: null },
+    ],
+  );
+  const google = new FileEffects({
+    config: { mappings: [{ ...mapping, sourceType: "google_shared_drive" }] },
+    session,
+    graph,
+    worker,
+  });
+  const source = await google.readSourceItem({ driveId: "source-drive", itemId: "google-folder" });
+  assert.equal(source?.webUrl, null);
+  assert.equal(source?.packageSections, null);
+});
+
 test("delegated Google copies carry a per-mapping impersonation override", async (t) => {
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const url = new URL(String(input));

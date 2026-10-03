@@ -50,6 +50,8 @@ export interface FileCommitRow extends CommitRowBase {
   destinationFingerprint?: string | null;
   provenanceState?: "none" | "marked" | "verified" | "drifted";
   sourceEvidence?: FileSourceEvidence;
+  nextStep?: string | null;
+  omissionReason?: string | null;
   fileScope?: FileScope;
 }
 

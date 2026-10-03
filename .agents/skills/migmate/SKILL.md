@@ -94,6 +94,20 @@ does not revoke access. Existing destination memberships are outside this featur
 
 For file migrations, read the plan's verification mode before approval. The default `"hash"` re-downloads source bytes and compares each relative file path to Drive's stored SHA-256, falling back per file to MD5 without downloading the destination. `[options] verificationMode = "size_only"` trades content proof for listed-size comparison and always requires acceptance of `content_verification_degraded`, even for an empty mapping. Missing, size-differing, corrupt, and unreadable files carry their path, both sizes, and available hashes in the report. Surface those exact paths and evidence. Leftovers (`destination_only_retained`) are retained and reported without blocking close. Verification proves files, not empty folders or metadata.
 
+Read the plan's **OneNote notebooks** disclosure before approval. The default
+`[options] oneNoteNotebooks = "omit"` raises `source_package_omitted`; surface each
+notebook's source link, section count, reason and next step from paged review.
+The manual path is OneNote for Windows → File → Export → Notebook (`.onepkg`) or PDF,
+then upload the export. With `"copy"`, the notebook is
+`source_package_copied_as_files` (nonblocking), and its descendants participate in
+ordinary deltas, mirror deletion and per-file verification. Other packages stay
+omitted; `"copy"` on the reverse route refuses `configuration_invalid` with
+`field: "options.oneNoteNotebooks"`.
+Read back the usability boundary: a read-only reference copy, not a working Google
+notebook. Download the folder and open `Open Notebook.onetoc2` in OneNote for
+Windows; Mac and Drive cannot open it. Editing through Drive for desktop is unsafe,
+and Migmate does not enforce read-only Drive permissions.
+
 Read the plan's **Copy concurrency** before approval. Job `[options]` settings `mappingsInFlight` (default `2`) and `transfersPerMapping` (default `4`) accept positive safe integers; the conservative defaults allow eight file transfers across two mappings. Use `mappingsInFlight = 1` for serial mappings. Passes share one managed worker and one serial checkpoint writer; a freed slot starts the next queued mapping. rclone's pacer absorbs throttling within a pass. Failed passes count against the run's retry budget without stopping other mappings.
 
 Read `status.mappingPasses` for durable outcomes and rclone errors. Re-run `execute` to retry failed/interrupted passes, skipping completed passes for that revision; writer recovery marks all unfinished passes interrupted after the worker is gone, including every pass active at a crash. rclone skips identical files on retry. Ctrl-C stops active passes cooperatively and exits 130. Use `--output jsonl` for `mapping_progress` events (`mappingId`, `passNumber`, `bytes`, `files`, `speed`, `errors`).

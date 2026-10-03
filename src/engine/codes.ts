@@ -39,6 +39,7 @@ export const CODES: readonly CodeEntry[] = [
   entry("unchanged", "policy_outcome", "execute", FILE),
   entry("destination_only_retained", "policy_outcome", "plan", FILE),
   entry("source_deleted_destination_retained", "policy_outcome", "plan", FILE),
+  entry("source_package_copied_as_files", "policy_outcome", "plan", FILE),
 
   // ---- file migration: planned omissions -----------------------------------
   entry("source_package_omitted", "planned_omission", "plan", FILE),

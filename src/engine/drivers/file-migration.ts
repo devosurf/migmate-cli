@@ -43,6 +43,7 @@ export interface FileMigrationConfig {
   subject?: string;
   options?: {
     verificationMode?: "hash" | "size_only";
+    oneNoteNotebooks?: "omit" | "copy";
     mappingsInFlight?: number;
     transfersPerMapping?: number;
     mirror?: boolean;
@@ -288,10 +289,12 @@ function row(
     sourceDriveId: source.driveId,
     sourceItemId: source.id,
     relativePath: source.path,
-    itemType: source.kind === "folder" ? "folder" : "file",
+    itemType: source.kind === "folder" || copiedNotebook(ctx, source) ? "folder" : "file",
     size: source.size,
     sourceEtag: source.etag,
     sourceEvidence: sourceEvidence(source),
+    nextStep: code === "source_package_omitted" ? packageOmission(source).nextStep : null,
+    omissionReason: code === "source_package_omitted" ? packageOmission(source).reason : null,
     sourceFingerprint: null,
     destinationDriveId: null,
     destinationFileId: null,
@@ -343,7 +346,7 @@ async function sourceInventory(
   for (let index = 0; index < sources.length; index++) {
     ctx.signal?.throwIfAborted();
     const parent = sources[index]!;
-    if (parent.kind !== "folder" || parent.outsideRoot) continue;
+    if ((parent.kind !== "folder" && !copiedNotebook(ctx, parent)) || parent.outsideRoot) continue;
     const children = await ctx.provider.listSourceChildren(parent.id);
     children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : 1));
     for (const child of children) {
@@ -445,10 +448,33 @@ function expandedExclusions(tree: Pick<Snapshot, "mapping" | "sources">): FileEx
     .map(([sourceItemId, reason]) => ({ sourceItemId, reason }));
 }
 
-function sourceOmission(source: SourceView): string | null {
+function packageOmission(source: SourceView) {
+  const notebook = source.packageSections !== null;
+  return {
+    path: source.path,
+    webUrl: source.webUrl,
+    sectionCount: source.packageSections,
+    reason: notebook
+      ? "OneNote notebooks are packages, not files, and Google Drive cannot open them."
+      : "This source package is not a supported downloadable file.",
+    nextStep: notebook
+      ? "Open the notebook in OneNote for Windows → File → Export → Notebook (.onepkg) or PDF, then upload the export to the destination drive."
+      : null,
+  };
+}
+
+function copiedNotebook(ctx: FileContext, source: SourceEntry): boolean {
+  return (
+    ctx.config.options?.oneNoteNotebooks === "copy" &&
+    source.kind === "package" &&
+    source.packageSections !== null
+  );
+}
+
+function sourceOmission(ctx: FileContext, source: SourceView): string | null {
   if (source.outsideRoot) return "route_limit_omission";
   if (!source.representable) return "path_unrepresentable";
-  if (source.kind === "package") return "source_package_omitted";
+  if (source.kind === "package" && !copiedNotebook(ctx, source)) return "source_package_omitted";
   if (source.kind === "reference") return "source_reference_omitted";
   if (source.kind === "undownloadable" || (source.kind === "file" && !source.downloadable)) {
     return "source_content_unavailable";
@@ -534,7 +560,12 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
         ? "mapping_overlap"
         : excluded.has(source.id)
           ? "omitted_by_rule"
-          : (sourceOmission(source) ?? (source.path === "." ? "unchanged" : "created"));
+          : (sourceOmission(ctx, source) ??
+            (copiedNotebook(ctx, source)
+              ? "source_package_copied_as_files"
+              : source.path === "."
+                ? "unchanged"
+                : "created"));
       const evidence = row(ctx, "plan", mapping, source, code);
       if (source.path === ".") {
         evidence.destinationDriveId = mapping.destDriveId ?? null;
@@ -550,6 +581,7 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
           : [
               finding(ctx, "plan", code, source.id, {
                 path: source.path,
+                ...(code === "source_package_omitted" ? packageOmission(source) : {}),
                 ...(excluded.has(source.id) ? { reason: excluded.get(source.id) } : {}),
               }),
             ],
@@ -673,7 +705,7 @@ async function* copyMapping(
         : { mode: "copy" as const }),
       transfers: ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
       excludePaths: sources
-        .filter((source) => excluded.has(source.id) || sourceOmission(source))
+        .filter((source) => excluded.has(source.id) || sourceOmission(ctx, source))
         .map((source) => source.path),
     });
     reference = { socketPath: resolved.socketPath, pass: handle };
@@ -846,7 +878,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         ? "omitted_by_rule"
         : source.kind === "file" || source.kind === "undownloadable"
           ? null
-          : sourceOmission(source);
+          : sourceOmission(ctx, source);
       if (omission) {
         yield commit(
           ctx,
@@ -855,6 +887,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
           [
             finding(ctx, "verify", omission, source.id, {
               path: source.path,
+              ...(omission === "source_package_omitted" ? packageOmission(source) : {}),
               ...(excluded.has(source.id) ? { reason: excluded.get(source.id) } : {}),
             }),
           ],
@@ -863,7 +896,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
         continue;
       }
-      if (source.kind === "folder") continue;
+      if (source.kind === "folder" || copiedNotebook(ctx, source)) continue;
       const hashType =
         needsMd5 && destinationHashes.get(source.path)?.hash === null ? "md5" : primaryHash;
       const downloaded = (hashType === "md5" ? sourceMd5 : sourceHashes).get(source.path);
@@ -1104,6 +1137,14 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       format: "text",
       body: "Delete the service-account key after the job.\nDelete the domain-wide delegation entry after the job.",
     };
+  yield {
+    title: "OneNote notebooks",
+    format: "text",
+    body:
+      ctx.config.options?.oneNoteNotebooks === "copy"
+        ? "OneNote notebooks are copied as folders of section files: a read-only reference copy, not a working notebook in Google. Download the folder and open Open Notebook.onetoc2 in OneNote for Windows; it cannot open on Mac or in Drive. Editing through Drive for desktop is unsafe: notebooks must sync through OneNote, not file-sync clients."
+        : "OneNote notebooks are omitted by default: Google Drive cannot open them. Each omission records the source link and section count. Open the notebook in OneNote for Windows, export the notebook (.onepkg) or PDF, and upload that export to the destination drive.",
+  };
   yield {
     title: "Verification mode",
     format: "text",

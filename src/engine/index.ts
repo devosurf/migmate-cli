@@ -339,7 +339,14 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     const options = input.options === undefined ? {} : object(input.options, "options");
     keys(
       options,
-      ["verificationMode", "mappingsInFlight", "transfersPerMapping", "mirror", "deleteLimit"],
+      [
+        "verificationMode",
+        "oneNoteNotebooks",
+        "mappingsInFlight",
+        "transfersPerMapping",
+        "mirror",
+        "deleteLimit",
+      ],
       "options",
     );
     if (
@@ -356,6 +363,16 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           ? {}
           : { verificationMode: options.verificationMode },
     };
+    if (options.oneNoteNotebooks !== undefined) {
+      if (options.oneNoteNotebooks !== "omit" && options.oneNoteNotebooks !== "copy")
+        configError("options.oneNoteNotebooks");
+      if (
+        options.oneNoteNotebooks === "copy" &&
+        common.route === "shared_drive_to_sharepoint_library"
+      )
+        configError("options.oneNoteNotebooks");
+      config.options.oneNoteNotebooks = options.oneNoteNotebooks;
+    }
     if (options.mirror !== undefined) {
       if (typeof options.mirror !== "boolean") configError("options.mirror");
       config.options.mirror = options.mirror;

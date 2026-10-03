@@ -310,6 +310,70 @@ describe("windowless native protocol", () => {
     });
   }
 
+  it("escapes notebook guidance and permits only HTTP source links", async () => {
+    for (const sourceWebUrl of [
+      'https://source.example/notebook?a=1&label="<img>"',
+      "http://source.example/notebook",
+      "javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "/relative-notebook",
+    ]) {
+      const page: RowPage = {
+        facets: [{ code: "source_package_omitted", kind: "planned_omission", count: 1 }],
+        totalRows: 1,
+        nextCursor: null,
+        rows: [
+          {
+            id: "notebook",
+            jobType: "file_migration",
+            mappingId: "mapping",
+            sourceItemId: "notebook",
+            relativePath: "Notebook",
+            size: null,
+            destinationFileId: null,
+            provenanceState: "none",
+            code: "source_package_omitted",
+            kind: "planned_omission",
+            phase: "plan",
+            revision: 1,
+            accepted: false,
+            sourceWebUrl,
+            sourcePackageSections: 0,
+            omissionReason: "Cannot open <notebook> & sections",
+            nextStep: 'Export <img src="bad" onerror="steal()"> & upload',
+          },
+        ],
+      };
+      const session = new WebSession({ engine: readerEngine(status(), page), job: JOB });
+      try {
+        const handle = createProtocolHandler({ session });
+        const document = parse(
+          await (await handle(new Request("migmate://localhost/view?stage=plan"))).text(),
+        );
+        const row = elements(
+          document,
+          (element) =>
+            element.tagName === "tr" && attr(element, "data-code") === "source_package_omitted",
+        )[0]!;
+        assert.match(text(row), /0 sections/);
+        assert.ok(text(row).includes("Cannot open <notebook> & sections"));
+        assert.ok(text(row).includes('Export <img src="bad" onerror="steal()"> & upload'));
+        assert.equal(
+          elements(row, (element) => ["img", "script", "notebook"].includes(element.tagName))
+            .length,
+          0,
+        );
+        const links = elements(row, (element) => element.tagName === "a");
+        if (sourceWebUrl.startsWith("http")) {
+          assert.equal(links.length, 1);
+          assert.equal(attr(links[0]!, "href"), sourceWebUrl);
+        } else assert.equal(links.length, 0);
+      } finally {
+        await session.close();
+      }
+    }
+  });
+
   it("renders conversation identities and accepted omissions safely through the same review query", async () => {
     const projected = {
       ...status(),
@@ -420,6 +484,8 @@ describe("windowless native protocol", () => {
           parentId: "source-root",
           name: `package-${String(index).padStart(2, "0")}`,
           kind: "package" as const,
+          webUrl: `https://source.example/notebook/${index}?a=1&b=2`,
+          packageSections: 3,
         })),
       ),
     );
@@ -439,6 +505,19 @@ describe("windowless native protocol", () => {
       const planned = await engine.reader(created.value).status();
       assert.ok(planned.ok);
       assert.equal(planned.value.state, "planned");
+      const review = await engine.reader(created.value).rows({
+        phase: "plan",
+        codes: ["source_package_omitted"],
+        limit: 25,
+      });
+      assert.ok(review.ok);
+      const notebook = review.value.rows[0]!;
+      assert.equal(notebook.jobType, "file_migration");
+      if (notebook.jobType !== "file_migration") throw new Error("Expected file evidence");
+      assert.equal(notebook.sourceWebUrl, "https://source.example/notebook/0?a=1&b=2");
+      assert.equal(notebook.sourcePackageSections, 3);
+      assert.ok(notebook.omissionReason);
+      assert.ok(notebook.nextStep);
       const first = parse(
         await (
           await handle(
@@ -457,6 +536,18 @@ describe("windowless native protocol", () => {
         25,
       );
       assert.match(text(first), /61 matching rows/);
+      const notebookRow = elements(
+        first,
+        (element) =>
+          element.tagName === "tr" && attr(element, "data-code") === "source_package_omitted",
+      )[0]!;
+      assert.equal(
+        attr(elements(notebookRow, (element) => element.tagName === "a")[0]!, "href"),
+        notebook.sourceWebUrl,
+      );
+      assert.match(text(notebookRow), /3 sections/);
+      assert.ok(text(notebookRow).includes(notebook.omissionReason!));
+      assert.ok(text(notebookRow).includes(notebook.nextStep!));
       const cursor = attr(
         elements(first, (element) => attr(element, "data-next-cursor") !== undefined)[0]!,
         "data-next-cursor",
