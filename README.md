@@ -714,7 +714,7 @@ Exit codes are meaningful: `0` success, `1` internal defect or an unmappable cod
 
 Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Text mode prompts only when stdin and stderr are terminals and those two flags were not both given; the prompt has no default answer and accepts only `yes`, so an agent can never approve a plan by accident.
 
-Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone.
+Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone. It leads numbered decision rounds from scope through staged cutover, report acceptance, close-time go-live and cleanup, with credential, route, finding and refusal references disclosed on demand.
 
 ## Development
 
