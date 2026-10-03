@@ -10,7 +10,7 @@ File migration uses rclone copy rather than Migmate's per-item destination write
 
 Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. A job's route fixes one direction for every mapping: a row in the other direction, including any row of a mixed manifest, refuses at load with its row and `source.type`.
 
-Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back, and each retry has a fresh cap. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
+Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back. Ordinary retries have a fresh cap; final settle catch-up passes retain the original cumulative deletion authorization. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
 
 Creation recovery adopts a sole exact-name match only when Google's `createdTime`
 is at or after the durable creation-intent timestamp; older or missing evidence
@@ -35,22 +35,60 @@ the service-account key and delegation entry as open operator tasks. Per-mapping
 rclone overrides inject impersonation; setting it in the operator's rclone file
 refuses. With impersonation off, the service account continues acting as itself.
 
-**Provisioning.** The plan lists each new drive and its explicit user/group members
-and roles. Execute checkpoints a deterministic job-and-mapping request ID, creates
-the drive, records its ID before granting members, and suppresses notification
-emails. Lost responses recover by exact visible name: one candidate is adopted,
+**Provisioning and grant timing.** The plan lists each new drive and its explicit
+user/group members and roles. Execute checkpoints a deterministic job-and-mapping
+request ID, creates the drive and records its ID before any member grant.
+Lost responses recover by exact visible name with the timestamp evidence above:
 none retries the same request, several refuse `drive_creation_ambiguous` (exit 4).
 Creation names cannot change after submission for that mapping ID. Schema version 5
 adds job-scoped created drives and member grants without revising earlier approvals.
+Grant notification emails are suppressed.
 
-Verification compares created-drive membership against the manifest plus Google's
-implicit creator-organizer grant. Missing, additional, or changed grants raise
-blocking `drive_membership_mismatch` with both memberships as evidence.
-It does not translate source permissions, repair drift, revoke removed members,
-or manage existing-drive permissions. `anyone` and `domain` refuse at manifest load.
-Status and report retain the created IDs and member grants. Offline engine and
-HTTP contracts cover provisioning and crash recovery; no live tenant provisioning
-measurement is claimed.
+The approval-bound `[options] memberGrants` defaults to `before_copy` for unstaged
+jobs and `after_verification` for staged jobs; an explicit value overrides either
+default. Plan and report show the effective mode beside Mirror and Copy concurrency.
+`before_copy` retains execute-time grants. With `after_verification`, execute creates
+and copies without manifest grants, and `status.memberGrants` remains empty through
+execution. Verified prestages and intermediate deltas do not grant access.
+
+Deferred go-live is authorized by confirming `close`, after the latest required
+verification and acceptance of all blocking findings (`verification_unaccepted`
+otherwise). Staged finality, settling and full verification are required before any
+grant. Close durably fences future copy/mirror work for each affected drive before
+the first grant request, grants approved members, checks membership and destination
+content/permission drift, records grant evidence after the verification timestamp,
+then produces the final report and closes. A crash, ambiguous response, partial
+grant or failed check leaves that fence in place. Repeating `close` resumes grants,
+checks and reporting, not transfers. Some access may already exist after a failed
+close; resolve drift manually without another transfer pass against that drive,
+and do not treat failed post-grant checks as successful go-live.
+
+The short drift check re-lists destination file paths, sizes, stored hashes and
+object IDs, plus folder paths, against the listing recorded by verification. It
+does not re-download content or prove inherited permissions, effective group
+membership or absence of later writes. Post-grant mismatches refuse
+`verification_unaccepted` with `detail.accessMayExist = true` and a named check;
+`execute` against a fenced drive refuses `go_live_started` (exit 4).
+
+Membership checks include Google's implicit creator-organizer grant; deferred
+pre-close verification does not require manifest grants that are not yet due.
+Missing, additional, or changed grants raise blocking `drive_membership_mismatch`
+with both memberships as evidence. Migmate does not translate source permissions,
+repair drift, revoke removed members, or manage existing-drive permissions.
+`anyone` and `domain` refuse at manifest load. Status and report retain created IDs
+and member grants.
+
+The deferred go-live fence does not apply to legacy `before_copy` timing.
+Close uses the immutable plan's approved timing, not the current operator file.
+Already-verified legacy/before-copy plans retain their previous close behavior,
+including plans whose input digests contain retired qualification fields; only
+approved deferred grants require the close-time input re-check.
+In either mode, plan/report warn that mirror can overwrite or delete existing
+writers' files. Deferred grants do not exclude external access, administrators,
+existing drive members or members of pre-populated groups. The acting account
+requires organizer access; operators must restrict all other access to claim staged
+isolation. Offline engine and HTTP contracts cover provisioning and crash recovery;
+no live tenant provisioning measurement is claimed.
 
 **Google Shared Drives to SharePoint.** A job with `route = "shared_drive_to_sharepoint_library"`
 reads Google Shared Drive folders (drive id and folder id) into existing SharePoint
@@ -78,6 +116,68 @@ carry `sourceHash`, `destinationHash`, `sourceSize` and `destinationSize` and bl
 Engine, HTTP-transport and local-folder rclone tests cover this direction. The optional
 live suite runs a reverse probe for a reverse job config (copy, quickXorHash verification,
 and a replaced Office file and plain file); no credentialed run of it is claimed.
+
+### Staged migrations and cutover evidence
+
+`[options] staged = true` keeps prestage, ordinary delta revisions and an explicit
+`plan --final` revision in **one open job**. Decide mirror and `deleteLimit` before
+manifest load; a closed job is terminal and a replacement job does not inherit
+its mirror provenance. `close` refuses `cutover_incomplete` unless the latest
+revision is final, settled and fully verified; an earlier final result is not
+authority for a later revision.
+An approved staged revision permanently establishes that intent for the job,
+including after manifest reloads clear the current plan pointer.
+
+Plans expose listing-derived new, changed, unchanged and mirror deletion paths
+and byte totals. Every proposed deletion is reviewable against its mapping's
+limit; an over-limit preview cannot be approved as executable. Copy-only
+destination extras are retained. Preview predicts rclone's comparison, not
+content equality: same-size changes within its effective modify window can be
+skipped. The timestamp boundary, backend precision, common-hash behavior and
+reverse-route `IgnoreSize`/`IgnoreChecksum` settings matter; full verification
+remains separate.
+
+Planning and approval display `sourceInventoryAt` and its current age.
+Execute-start freshness uses a **complete read-only inventory comparison**,
+refusing `plan_revision_required` if the source changed or freshness cannot be
+established. Graph delta acquisition and unchanged replay were observed with
+read-only source credentials, but nested-change coverage and latency remain
+unqualified. A cursor, root tag or root modification timestamp is not a qualified
+shortcut around that comparison. The freshness fence does not close the race
+between checking and copying.
+
+Final approval records `--freeze-by`, `--freeze-at` (timestamp with timezone) and
+`--freeze-how`; the web approval fields capture the same attestation. Migmate
+does not lock the source tenant. A human attestation and read-only observations
+are different evidence. Neither a quiet listing nor successful verification
+alone asserts exact cutover parity; omissions, accepted mismatches and retained
+destination-only paths continue to qualify the result.
+
+After final copying, `consistencyIntervalMs` defaults to **30000** and
+`settleMaxPasses` defaults to **3** additional catch-up passes. The interval is a
+configurable wait, not a measured guarantee of SharePoint convergence. Each
+confirmation inventories completely; a complete confirmation with no unprocessed
+change is required before full verification. Catch-up stays within approval:
+new paths or unapproved deletions require a new revision, and original deletion
+authority is cumulative across settle passes. Exhaustion leaves cutover
+incomplete. Changes during verification still block completion.
+
+`deltaVerification = "full"` is the default. Opt-in `"changed"` gives intermediate
+deltas **partial proof**, recording the last verified baseline and covered paths,
+including creations, changes and deletions, while preserving earlier exceptions.
+Baseline evidence is bound to source/destination roots, expanded exclusions,
+OneNote policy and verification mode; a changed or missing binding forces full
+verification for that mapping instead of reusing another destination's proof.
+Failed or unverified revisions do not advance the baseline. Prestage, missing
+baselines and final revisions use full verification; this option is independent
+of `verificationMode = "size_only"`. Partial proof does not recheck independent
+damage to previously unchanged destination content.
+
+No live tenant writes were used to qualify the staged lifecycle here. Read-only
+Graph probes and disposable local rclone probes in
+[ADR-0012](adr/0012-staged-migrations-and-access-timing.md) do not establish cloud
+settling latency or substitute for an operator-approved live cutover rehearsal.
+See README's **Staged cutover: keep one job open** for the operator sequence.
 
 ## 2. Mapping recovery is durable; rclone jobs are not
 

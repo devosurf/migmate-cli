@@ -120,7 +120,8 @@ export const CLIENT = `"use strict";
     if (action === "onboard") {
       try { input.config = JSON.parse(String(data.get("config"))); }
       catch { connection.textContent = "Configuration must be valid JSON containing typed references, never secret values."; connection.hidden = false; return; }
-    } else if (action === "approve") input = {approver:data.get("approver"),planDigest:data.get("planDigest"),confirm:data.has("confirm")};
+    } else if (action === "plan") input = data.has("final") ? {final:true} : {};
+    else if (action === "approve") input = {approver:data.get("approver"),planDigest:data.get("planDigest"),confirm:data.has("confirm"),...(data.has("freezeBy") ? {freezeBy:data.get("freezeBy"),freezeAt:data.get("freezeAt"),freezeHow:data.get("freezeHow")} : {})};
     else if (action === "accept") input = {approver:data.get("approver"),verificationDigest:data.get("verificationDigest"),codes:data.getAll("codes").map(code => ({code,...(data.get("note:"+code) ? {note:data.get("note:"+code)} : {})}))};
     else if (action === "cancel") input = {reason:data.get("reason"),confirm:data.has("confirm")};
     else if (action === "close") input = {confirm:data.has("confirm")};

@@ -17,7 +17,8 @@ import { it, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { run, type Io } from "../src/cli/main.ts";
-import { defaultHome } from "../src/cli/arguments.ts";
+import { defaultHome, parseInvocation } from "../src/cli/arguments.ts";
+import { knownContract } from "../src/cli/envelope.ts";
 import {
   openEngine,
   type Engine,
@@ -112,6 +113,44 @@ function invokeProcess(argv: string[], cwd: string, environment: NodeJS.ProcessE
   assert.notEqual(result.status, null);
   return { code: result.status!, stdout: result.stdout, stderr: result.stderr, prompts: 0 };
 }
+
+it("binds final planning and complete freeze attestations to their commands", () => {
+  assert.equal(parseInvocation(["plan", "--job", "staged", "--final"]).final, true);
+  const freeze = [
+    "--freeze-by",
+    "Morgan",
+    "--freeze-at",
+    "2026-10-04T12:00:00Z",
+    "--freeze-how",
+    "Source made read-only",
+  ];
+  assert.deepEqual(parseInvocation(["approve", "--job", "staged", ...freeze]).freeze, {
+    by: "Morgan",
+    at: "2026-10-04T12:00:00Z",
+    how: "Source made read-only",
+  });
+  assert.throws(() => parseInvocation(["execute", "--job", "staged", "--final"]));
+  assert.throws(() => parseInvocation(["plan", "--job", "staged", "--final", "--review"]));
+  assert.throws(() => parseInvocation(["approve", "--job", "staged", "--freeze-by", "Morgan"]));
+  assert.throws(() => parseInvocation(["plan", "--job", "staged", ...freeze]));
+  assert.throws(() =>
+    parseInvocation([
+      "approve",
+      "--job",
+      "staged",
+      ...freeze.slice(0, 3),
+      "yesterday",
+      ...freeze.slice(4),
+    ]),
+  );
+});
+
+it("fails closed on unknown cutover stages without rejecting unstaged plans", () => {
+  assert.equal(knownContract({ value: { currentPlan: { stage: "future_stage" } } }), false);
+  for (const stage of ["prestage", "delta", "final"])
+    assert.equal(knownContract({ value: { currentPlan: { stage } } }), true);
+  assert.equal(knownContract({ value: { currentPlan: { revision: 1 } } }), true);
+});
 function harness(t: TestContext, fixture = cliFixture()) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "migmate-cli-contract-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -933,6 +972,8 @@ it("maps stable refusal codes exactly and preserves unknown values fail-closed",
     ["approval_required", 4],
     ["approval_digest_stale", 4],
     ["plan_revision_required", 4],
+    ["cutover_incomplete", 4],
+    ["delete_limit_exceeded", 4],
     ["unsupported_route", 4],
     ["verification_unaccepted", 4],
     ["local_filesystem_required", 4],

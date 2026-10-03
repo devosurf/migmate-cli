@@ -51,7 +51,9 @@ migmate creds init --job ID --config job.toml|job.json
 migmate manifest load --job ID --file manifest.json|manifest.csv
 migmate discover --job ID [--file draft.json]
 migmate doctor|plan|execute|status|verify|report|close --job ID
+migmate plan --job ID --final               # staged final cutover revision
 migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
+  [--freeze-by IDENTITY --freeze-at TIMESTAMP --freeze-how TEXT]
 migmate approve --job ID                    # human terminal: review, then type yes
 migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code CODE [--note NOTE]
 migmate cancel --job ID [--reason TEXT]
@@ -293,6 +295,11 @@ async function review(
   const page = await reader.rows(query);
   if (!page.ok) return page;
   const summary: Record<string, unknown> = value && typeof value === "object" ? { ...value } : {};
+  const sourceInventoryAt = status.currentPlan?.sourceInventoryAt;
+  if (sourceInventoryAt && (invocation.command === "plan" || invocation.command === "approve")) {
+    summary.sourceInventoryAt = sourceInventoryAt;
+    summary.sourceInventoryAgeMs = Math.max(0, Date.now() - Date.parse(sourceInventoryAt));
+  }
   if (query.view === "mappings") delete summary.mappingPasses;
   return {
     ok: true,
@@ -346,6 +353,7 @@ async function approve(
     approver,
     planDigest,
     mode: interactive ? ("interactive" as const) : ("unattended" as const),
+    ...(invocation.freeze ? { freeze: invocation.freeze } : {}),
   };
   const result = await engine.withWriterResult({ id: invocation.jobId! }, (writer) =>
     writer.approve(approval),
@@ -475,7 +483,7 @@ async function executeCommand(
         case "doctor":
           return writer.doctor();
         case "plan":
-          return writer.plan();
+          return writer.plan(invocation.final ? { final: true } : {});
         case "execute":
           return writer.execute({ signal: output.abort.signal });
         case "verify":

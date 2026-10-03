@@ -264,6 +264,9 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async *streamDestinationContent(id) {
       yield* (await files()).streamDestinationContent(id);
     },
+    async previewCopyPass(value) {
+      return (await state()).worker.previewCopyPass(value);
+    },
     async startCopyPass(value) {
       return (await state()).worker.startCopyPass(value);
     },
@@ -290,6 +293,13 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     },
     async addDriveMember(driveId, member) {
       return (await files()).addDriveMember(driveId, member);
+    },
+    async resolveFilePassSource(value) {
+      if (!current) throw new ProviderFault("provider_failed", "The transfer worker is absent.");
+      return {
+        socketPath: current.socketPath,
+        ...(await (await files()).resolveFilePassSource(value)),
+      };
     },
     async resolveFilePass(value) {
       if (!current) throw new ProviderFault("provider_failed", "The transfer worker is absent.");

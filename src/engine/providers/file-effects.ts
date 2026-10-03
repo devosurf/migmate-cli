@@ -652,7 +652,7 @@ export class FileEffects {
     );
   }
 
-  async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
+  async resolveFilePassSource(input: Parameters<ProviderPort["resolveFilePassSource"]>[0]) {
     if (
       (input.sourceType === "google_shared_drive") !==
       this.#googleSourceDrives.has(input.sourceDriveId)
@@ -661,6 +661,35 @@ export class FileEffects {
     const source = await this.resolveSourceRoot(input);
     if (!source || source.kind !== "folder")
       throw new ProviderFault("unsupported_route", "The source root is not an ordinary folder.");
+    const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    if (input.sourceType === "google_shared_drive") {
+      return {
+        source: {
+          fs: `${this.#session.destinationRemote},team_drive=${quote(input.sourceDriveId)},root_folder_id=${quote(input.sourceItemId)}${this.#session.delegatedSubject ? `,impersonate=${quote(this.#session.delegatedSubject)}` : ""}:`,
+          kind: "google_drive" as const,
+        },
+      };
+    }
+    const root = await this.#graph.request<GraphItem>(
+      `/v1.0/drives/${encodeURIComponent(input.sourceDriveId)}/root?$select=id`,
+    );
+    const path =
+      root.id === source.id
+        ? ""
+        : await this.#sourcePath({
+            driveId: input.sourceDriveId,
+            item: source,
+          });
+    return {
+      source: {
+        fs: `${this.#session.sourceRemote},drive_id=${quote(input.sourceDriveId)},root_folder_id=,encoding=Slash:${path}`,
+        kind: "sharepoint" as const,
+      },
+    };
+  }
+
+  async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
+    const { source } = await this.resolveFilePassSource(input);
     if (input.sourceType === "google_shared_drive") {
       const destination = await this.resolveDestinationFolder(input);
       if (!destination || destination.kind !== "folder")
@@ -703,32 +732,16 @@ export class FileEffects {
       }
       const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
       return {
-        source: {
-          fs: `${this.#session.destinationRemote},team_drive=${quote(input.sourceDriveId)},root_folder_id=${quote(input.sourceItemId)}${this.#session.delegatedSubject ? `,impersonate=${quote(this.#session.delegatedSubject)}` : ""}:`,
-          kind: "google_drive" as const,
-        },
+        source,
         destination: {
           fs: `${this.#session.sharepointDestinationRemote},drive_id=${quote(input.destDriveId)},encoding=Slash:${path}`,
           kind: "sharepoint" as const,
         },
       };
     }
-    const root = await this.#graph.request<GraphItem>(
-      `/v1.0/drives/${encodeURIComponent(input.sourceDriveId)}/root?$select=id`,
-    );
-    const path =
-      root.id === source.id
-        ? ""
-        : await this.#sourcePath({
-            driveId: input.sourceDriveId,
-            item: source,
-          });
     const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
     return {
-      source: {
-        fs: `${this.#session.sourceRemote},drive_id=${quote(input.sourceDriveId)},root_folder_id=,encoding=Slash:${path}`,
-        kind: "sharepoint" as const,
-      },
+      source,
       destination: {
         fs: `${this.#session.destinationRemote},team_drive=${quote(input.destDriveId)},root_folder_id=${quote(input.destFolderId)}${this.#session.delegatedSubject ? `,impersonate=${quote(this.#session.delegatedSubject)}` : ""}:`,
         kind: "google_drive" as const,

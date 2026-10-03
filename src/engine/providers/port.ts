@@ -108,7 +108,33 @@ export interface FileHashEntry {
   id?: string;
 }
 
+export interface FilePassPreviewEntry {
+  /** Mapping-relative path; size is the listed byte count, not downloaded proof. */
+  path: string;
+  size: number;
+}
+
+/** Disjoint action classes, sorted by path. This predicts a pass, not content equality. */
+export interface FilePassPreview {
+  new: FilePassPreviewEntry[];
+  changed: FilePassPreviewEntry[];
+  unchanged: FilePassPreviewEntry[];
+  deleted: FilePassPreviewEntry[];
+  retained: FilePassPreviewEntry[];
+  /** Equal common hash with a differing timestamp: no content transfer. */
+  timestampOnly: FilePassPreviewEntry[];
+  modifyWindowNs: string;
+}
+
 export interface FilePassProvider {
+  previewCopyPass(input: {
+    socketPath: string;
+    source: FilePassRoot;
+    /** Omit only for a job-created destination which does not exist yet. */
+    destination?: FilePassRoot;
+    excludePaths?: string[];
+    mode: "copy" | "mirror";
+  }): Promise<FilePassPreview>;
   startCopyPass(
     input: {
       socketPath: string;
@@ -129,6 +155,8 @@ export interface FilePassProvider {
     root: FilePassRoot;
     hashType: "sha256" | "md5" | "quickxor";
     download: boolean;
+    /** Exact relative files to list and hash; an empty selection reads no files. */
+    paths?: string[];
   }): Promise<FileHashEntry[]>;
 }
 
@@ -174,6 +202,11 @@ export interface ProviderPort extends FilePassProvider {
   findSharedDrives(name: string): Promise<SharedDrive[]>;
   listDriveMembers(driveId: string): Promise<DriveMembership[]>;
   addDriveMember(driveId: string, member: DriveMember): Promise<void>;
+  resolveFilePassSource(input: {
+    sourceType?: "sharepoint" | "google_shared_drive";
+    sourceDriveId: string;
+    sourceItemId: string;
+  }): Promise<{ socketPath: string; source: FilePassRoot }>;
   resolveFilePass(input: {
     sourceType?: "sharepoint" | "google_shared_drive";
     sourceDriveId: string;

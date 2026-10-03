@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,7 +12,11 @@ import {
   FakeFileMigrationPort,
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
-import type { FileMigrationConfig } from "../src/engine/drivers/file-migration.ts";
+import {
+  fileMigrationDriver,
+  type FileMigrationConfig,
+} from "../src/engine/drivers/file-migration.ts";
+import type { DriverContext, CommitUnit } from "../src/engine/drivers/types.ts";
 import { fileConfig, fileFixture, value, approve } from "./engine-fixture.ts";
 
 const now = "2026-09-01T00:00:00.000Z";
@@ -82,6 +86,55 @@ async function codes(
 function hash(content: string | Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
+
+describe("staged cutover lifecycle", () => {
+  it("refuses a complete stale inventory before any transfer", async (t) => {
+    const h = await harness(t, fixture(), { ...config, options: { staged: true } });
+    await approve(h);
+    h.port.mutateSourceItem("binary", { content: "a newer version" });
+    const result = await h.engine.withWriterResult(h.ref, (writer) => writer.execute());
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.refusal.code, "plan_revision_required");
+    assert.deepEqual(
+      h.port.snapshotDestination().map((item) => item.path),
+      ["."],
+    );
+  });
+  it("keeps prestage open and binds final intent and freeze to the latest approval", async (t) => {
+    const h = await harness(t, fixture(), {
+      ...config,
+      options: { staged: true, consistencyIntervalMs: 0 },
+    });
+    await approve(h);
+    await execute(h);
+    assert.equal(value(await h.engine.reader(h.ref).status()).currentPlan?.stage, "prestage");
+    const early = await h.engine.withWriterResult(h.ref, (writer) => writer.close());
+    assert.equal(early.ok, false);
+    if (!early.ok) assert.equal(early.refusal.code, "cutover_incomplete");
+    const final = value(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.plan({ final: true })),
+    );
+    assert.equal(final.stage, "final");
+    const freeze = { by: "operator@example.com", at: now, how: "Editors locked out at source" };
+    const approval = value(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.approve({
+          approver: "operator@example.com",
+          mode: "unattended",
+          planDigest: final.planDigest,
+          freeze,
+        }),
+      ),
+    );
+    assert.deepEqual(approval.freeze, freeze);
+    await execute(h);
+    const next = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+    assert.equal(next.stage, "delta");
+    const stale = await h.engine.withWriterResult(h.ref, (writer) => writer.close());
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.refusal.code, "cutover_incomplete");
+  });
+});
 
 describe("destination folder verification", () => {
   for (const reverse of [false, true]) {
@@ -575,6 +628,311 @@ describe("OneNote notebook policy", () => {
   });
 });
 
+describe("staged migration options (ADR-0012)", () => {
+  it("strictly validates staged intent and member grant timing", async (t) => {
+    const h = await harness(t);
+    for (const [field, invalid] of [
+      ["staged", ["yes", 1, null]],
+      ["memberGrants", ["later", "after_copy", true, null]],
+    ] as const)
+      for (const value of invalid) {
+        const result = await h.engine.initJob({
+          type: "file_migration",
+          config: { ...config, options: { [field]: value } },
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) throw new Error(`Invalid ${field} must refuse`);
+        assert.equal(result.refusal.code, "configuration_invalid");
+        assert.deepEqual(result.refusal.detail, { field: `options.${field}` });
+      }
+  });
+});
+
+describe("deferred member go-live", () => {
+  it("keeps members isolated until close and records grants after verification", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    const executed = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(executed.memberGrants, []);
+    const driveId = executed.createdDrives[0]!.driveId!;
+    assert.equal((await h.port.listDriveMembers(driveId)).length, 1);
+    const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verification.clean, true);
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.state, "closed");
+    assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
+    assert.ok(Date.parse(closed.memberGrants[0]!.at!) > Date.parse(verification.at));
+    assert.equal((await h.port.listDriveMembers(driveId)).length, 2);
+  });
+  it("lets a staged job's early close neither fence nor grant, and goes live only after the final revision", async (t) => {
+    // ADR-0012: the A1 finality gate runs before A6 go-live. A habitual close after
+    // prestage must leave the drive unfenced and its members without access.
+    const h = await provisioningHarness(t, fixture(), { staged: true, consistencyIntervalMs: 0 });
+    await execute(h);
+    const prestaged = value(await h.engine.reader(h.ref).status());
+    assert.equal(prestaged.currentPlan?.stage, "prestage");
+    const driveId = prestaged.createdDrives[0]!.driveId!;
+    const early = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(early.ok, false);
+    if (!early.ok) assert.equal(early.refusal.code, "cutover_incomplete");
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
+    assert.equal((await h.port.listDriveMembers(driveId)).length, 1);
+    // Not fenced: a delta still runs against the drive.
+    await approve(h);
+    await execute(h);
+    const final = value(await h.engine.withWriterResult(h.ref, (w) => w.plan({ final: true })));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          approver: "operator@example.com",
+          mode: "unattended",
+          planDigest: final.planDigest,
+          freeze: { by: "operator@example.com", at: now, how: "Editors locked out at source" },
+        }),
+      ),
+    );
+    await execute(h);
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.state, "closed");
+    assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
+    assert.equal((await h.port.listDriveMembers(driveId)).length, 2);
+  });
+  for (const timing of ["before", "after"] as const)
+    it(`fences copy before grants and resumes close after a ${timing}-grant crash`, async (t) => {
+      const h = await provisioningHarness(t, fixture(), {
+        memberGrants: "after_verification",
+        mirror: true,
+        deleteLimit: 3,
+      });
+      await execute(h);
+      value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      h.port.scriptEffect({
+        method: "addDriveMember",
+        timing,
+        count: 1,
+        error: new Error("grant crash"),
+      });
+      await assert.rejects(
+        h.engine.withWriterResult(h.ref, (w) => w.close()),
+        /grant crash/,
+      );
+      h.engine.close();
+      h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+      const refused = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+      assert.equal(refused.ok, false);
+      if (!refused.ok) assert.equal(refused.refusal.code, "go_live_started");
+      const before = value(await h.engine.reader(h.ref).status()).mappingPasses;
+      value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+      const closed = value(await h.engine.reader(h.ref).status());
+      assert.equal(closed.state, "closed");
+      assert.equal(closed.memberGrants.length, 1);
+      assert.deepEqual(closed.mappingPasses, before);
+    });
+  for (const drift of ["membership", "content"] as const)
+    it(`blocks go-live on ${drift} drift and never reopens transfers`, async (t) => {
+      const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+      await execute(h);
+      value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+      if (drift === "membership")
+        await h.port.addDriveMember(driveId, {
+          email: "outside@example.com",
+          type: "user",
+          role: "writer",
+        });
+      else {
+        const file = (await h.port.listDestinationChildren(driveId)).find(
+          (item) => item.name === "report.docx",
+        )!;
+        h.port.mutateDestinationContent(file.id, new Uint8Array([9, 9, 9, 9]));
+      }
+      const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+      assert.equal(closing.ok, false);
+      if (!closing.ok) {
+        assert.equal(closing.refusal.code, "verification_unaccepted");
+        assert.equal(closing.refusal.detail?.accessMayExist, true);
+        assert.equal(
+          closing.refusal.detail?.check,
+          drift === "membership" ? "drive_membership_mismatch" : "destination_drift",
+        );
+      }
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.notEqual(status.state, "closed");
+      assert.equal(status.memberGrants[0]?.member.email, "finance@example.com");
+      const executeResult = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+      assert.equal(executeResult.ok, false);
+      if (!executeResult.ok) assert.equal(executeResult.refusal.code, "go_live_started");
+      const retry = await h.engine.withWriterResult(h.ref, (w) => w.close());
+      assert.equal(retry.ok, false);
+    });
+  it("writes the final grant and check evidence before closing", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const artifacts = value(await h.engine.reader(h.ref).artifacts());
+    assert.ok(artifacts);
+    const report = JSON.parse(
+      await readFile(artifacts.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+    );
+    const access = JSON.parse(
+      report.sections.find(
+        (section: { title: string }) => section.title === "Created Shared Drives and members",
+      ).body,
+    );
+    assert.equal(access.grants[0].member.email, "finance@example.com");
+    assert.equal(access.drives[0].goLive.check.status, "passed");
+  });
+  it("withholds access for blocking findings and grants only after explicit acceptance", async (t) => {
+    const h = await provisioningHarness(t, fixture(), {
+      memberGrants: "after_verification",
+      verificationMode: "size_only",
+    });
+    await execute(h);
+    const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verification.clean, false);
+    const refused = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.refusal.code, "verification_unaccepted");
+    const before = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(before.memberGrants, []);
+    assert.equal(before.createdDrives[0]!.goLive, undefined);
+    assert.deepEqual(await h.port.listDriveMembers(before.createdDrives[0]!.driveId!), [
+      { email: "files@example.com", type: "user", role: "organizer" },
+    ]);
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.accept({
+          verificationDigest: verification.verificationDigest,
+          approver: "operator",
+          codes: [{ code: "content_verification_degraded" }],
+        }),
+      ),
+    );
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).memberGrants[0]?.member.role,
+      "writer",
+    );
+  });
+
+  it("fences the whole drive batch before a partial grant and reconciles access without recopying", async (t) => {
+    const input = fileFixture([
+      { id: "one", parentId: "source-root", name: "one", kind: "folder" },
+      { id: "two", parentId: "source-root", name: "two", kind: "folder" },
+      { id: "first", parentId: "one", name: "first.txt", kind: "file", content: "first" },
+      { id: "second", parentId: "two", name: "second.txt", kind: "file", content: "second" },
+    ]);
+    input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
+    const h = await harness(t, input, {
+      mappings: [],
+      options: { memberGrants: "after_verification" },
+    });
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: ["one", "two"].map((id) => ({
+              id,
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+              destination: { type: "google_shared_drive", create: id },
+              members: [{ email: `${id}@example.com`, type: "group", role: "writer" }],
+            })),
+          }),
+        }),
+      ),
+    );
+    await approve(h);
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    h.port.scriptEffect({
+      method: "addDriveMember",
+      objectId: "two@example.com",
+      timing: "after",
+      count: 1,
+      error: new TypeError("ambiguous second grant"),
+    });
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, (w) => w.close()),
+      /ambiguous second grant/,
+    );
+    const partial = value(await h.engine.reader(h.ref).status());
+    assert.equal(partial.memberGrants.length, 1);
+    assert.ok(partial.createdDrives.every((drive) => drive.goLive));
+    const firstDrive = partial.createdDrives.find((drive) => drive.mappingId === "one")!.driveId!;
+    await h.port.addDriveMember(firstDrive, {
+      email: "one@example.com",
+      type: "group",
+      role: "reader",
+    });
+    h.engine.close();
+    h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+    const mismatch = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(mismatch.ok, false);
+    if (!mismatch.ok) assert.equal(mismatch.refusal.detail?.check, "drive_membership_mismatch");
+    assert.equal(
+      (await h.port.listDriveMembers(firstDrive)).find(
+        (member) => member.email === "one@example.com",
+      )?.role,
+      "reader",
+    );
+    await h.port.addDriveMember(firstDrive, {
+      email: "one@example.com",
+      type: "group",
+      role: "writer",
+    });
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.memberGrants.length, 2);
+    assert.deepEqual(closed.mappingPasses, partial.mappingPasses);
+  });
+  it("cannot bypass approved deferred access by editing timing after verification", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const original = await readFile(path, "utf8");
+    await writeFile(path, original.replace("after_verification", "before_copy"));
+    const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(closing.ok, false);
+    if (!closing.ok) assert.equal(closing.refusal.code, "plan_revision_required");
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
+    await writeFile(path, original);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+  });
+  it("discloses unavailable post-grant checks and resumes close without transfers", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    h.port.scriptEffect({
+      method: "listFileHashes",
+      count: 1,
+      error: new TypeError("listing unavailable"),
+    });
+    const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(closing.ok, false);
+    if (!closing.ok) {
+      assert.equal(closing.refusal.code, "verification_unaccepted");
+      assert.equal(closing.refusal.detail?.accessMayExist, true);
+      assert.equal(closing.refusal.detail?.check, "go_live_check_unavailable");
+    }
+    const partial = value(await h.engine.reader(h.ref).status());
+    assert.equal(partial.memberGrants.length, 1);
+    assert.equal(partial.createdDrives[0]!.goLive!.check!.status, "failed");
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.deepEqual(
+      value(await h.engine.reader(h.ref).status()).mappingPasses,
+      partial.mappingPasses,
+    );
+  });
+});
+
 describe("file migration through the engine", () => {
   it("refuses mirror on legacy created-drive records lacking provenance", async (t) => {
     const h = await provisioningHarness(t, fixture(), { mirror: true, deleteLimit: 2 });
@@ -655,7 +1013,7 @@ describe("file migration through the engine", () => {
       ["outside.txt"],
     );
   });
-  it("caps deletions per mirror mapping and reports failure while other mappings finish", async (t) => {
+  it("refuses an over-limit mirror plan before any mapping can execute", async (t) => {
     const input = multiMapping().input;
     input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
     const h = await harness(t, input, { mappings: [], options: { mirror: true, deleteLimit: 0 } });
@@ -678,12 +1036,18 @@ describe("file migration through the engine", () => {
     await execute(h);
     h.port.deleteSourceItem("a-file");
     h.port.mutateSourceItem("b-file", { content: "changed" });
-    await approve(h);
-    await execute(h);
+    const plan = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+    const approval = await h.engine.withWriterResult(h.ref, (writer) =>
+      writer.approve({
+        approver: "operator",
+        mode: "unattended",
+        planDigest: plan.planDigest,
+      }),
+    );
+    assert.equal(approval.ok, false);
+    if (!approval.ok) assert.equal(approval.refusal.code, "delete_limit_exceeded");
     const status = value(await h.engine.reader(h.ref).status());
-    assert.equal(status.mappingPasses.find((p) => p.mappingId === "a")?.status, "failed");
-    assert.match(status.mappingPasses.find((p) => p.mappingId === "a")!.error!, /max-delete/);
-    assert.equal(status.mappingPasses.find((p) => p.mappingId === "b")?.status, "completed");
+    assert.ok(status.mappingPasses.every((pass) => pass.status === "pending"));
     const driveId = status.createdDrives.find((d) => d.mappingId === "a")!.driveId!;
     assert.deepEqual(
       (await h.port.listDestinationChildren(driveId)).map((f) => f.name),
@@ -694,7 +1058,12 @@ describe("file migration through the engine", () => {
       report.artifacts.find((a) => a.name === "report.json")!.path,
       "utf8",
     );
-    assert.match(json, /max-delete limit exceeded/);
+    assert.equal(
+      JSON.parse(json).findings.some(
+        (finding: { code: string }) => finding.code === "delete_limit_exceeded",
+      ),
+      true,
+    );
   });
   it("repeat copy passes retain deleted and renamed source files", async (t) => {
     const h = await provisioningHarness(t);
@@ -1796,6 +2165,7 @@ describe("file migration through the engine", () => {
     await execute(h);
     const copied = h.port.snapshotDestination().find((item) => item.path === "report.docx")!;
     h.port.deleteSourceItem("binary");
+    await approve(h);
     await execute(h);
     assert.equal(
       h.port.snapshotDestination().find((item) => item.id === copied.id)?.checksum,
@@ -2298,5 +2668,359 @@ describe("file migration through the engine", () => {
       destinationHash: hash("still frame"),
       hashType: "sha256",
     });
+  });
+});
+
+describe("settled and partial file-driver proof", () => {
+  it("catches an approved file changing after copy before final verification", async () => {
+    class MutatingPort extends FakeFileMigrationPort {
+      changed = false;
+      override async copyPassStatus(
+        reference: Parameters<FakeFileMigrationPort["copyPassStatus"]>[0],
+      ) {
+        const status = await super.copyPassStatus(reference);
+        if (status.state === "completed" && !this.changed) {
+          this.changed = true;
+          this.mutateSourceItem("binary", { content: "changed after the first copy" });
+        }
+        return status;
+      }
+    }
+    const port = new MutatingPort(fixture());
+    const worker = await port.startTransferWorker({ runDirectory: "/tmp/settled-driver-proof" });
+    const ctx: DriverContext<FileMigrationConfig> = {
+      jobDirectory: "/tmp/settled-driver-proof",
+      config: { ...config, options: { staged: true, consistencyIntervalMs: 0 } },
+      revision: 1,
+      stage: "final",
+      resume: { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] },
+      provider: port,
+      now: () => new Date(now),
+    };
+    try {
+      for await (const unit of fileMigrationDriver.collect(ctx))
+        ctx.resume.rows!.push(...unit.rows);
+      const completed = new Set<number>();
+      for await (const unit of fileMigrationDriver.execute(ctx)) {
+        if (unit.watermark) ctx.resume.watermarks[unit.watermark.unitKey] = unit.watermark.value;
+        if (unit.mappingPass?.status === "completed") completed.add(unit.mappingPass.passNumber);
+      }
+      assert.equal(
+        port.snapshotDestination().find((item) => item.path === "report.docx")?.checksum,
+        hash("changed after the first copy"),
+      );
+      assert.equal(completed.size, 2);
+      const settled = JSON.parse(ctx.resume.watermarks["file-settle:mapping"]!);
+      assert.equal(settled.outcome, "settled");
+      assert.equal(settled.passes, 1);
+    } finally {
+      await port.stopTransferWorker(worker);
+    }
+  });
+
+  async function stagedContext(t: TestContext, options: FileMigrationConfig["options"] = {}) {
+    const port = new FakeFileMigrationPort(fixture());
+    const worker = await port.startTransferWorker({ runDirectory: "/tmp/staged-driver-proof" });
+    t.after(() => port.stopTransferWorker(worker));
+    const ctx: DriverContext<FileMigrationConfig> = {
+      jobDirectory: "/tmp/staged-driver-proof",
+      config: { ...config, options: { staged: true, consistencyIntervalMs: 0, ...options } },
+      revision: 1,
+      stage: "final",
+      resume: { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] },
+      provider: port,
+      now: () => new Date(now),
+    };
+    return { ctx, port };
+  }
+
+  async function consume(
+    ctx: DriverContext<FileMigrationConfig>,
+    units: AsyncIterable<CommitUnit>,
+  ) {
+    const result: CommitUnit[] = [];
+    for await (const unit of units) {
+      result.push(unit);
+      ctx.resume.rows!.push(...unit.rows);
+      if (unit.watermark) ctx.resume.watermarks[unit.watermark.unitKey] = unit.watermark.value;
+      if (unit.mappingPass) {
+        const index = ctx.resume.mappingPasses!.findIndex(
+          (pass) => pass.passNumber === unit.mappingPass!.passNumber,
+        );
+        if (index < 0) ctx.resume.mappingPasses!.push(unit.mappingPass);
+        else ctx.resume.mappingPasses![index] = unit.mappingPass;
+      }
+    }
+    return result;
+  }
+
+  it("persists exhaustion so resuming never starts a new final catch-up budget", async (t) => {
+    const { ctx, port } = await stagedContext(t, { settleMaxPasses: 1, consistencyIntervalMs: 17 });
+    let observations = 0;
+    ctx.waitForConsistency = async (milliseconds) => {
+      assert.equal(milliseconds, 17);
+      port.mutateSourceItem("binary", { content: `changed-${++observations}` });
+    };
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    await assert.rejects(consume(ctx, fileMigrationDriver.execute(ctx)), {
+      code: "cutover_incomplete",
+    });
+    assert.equal(observations, 2);
+    assert.equal(JSON.parse(ctx.resume.watermarks["file-settle:mapping"]!).outcome, "exhausted");
+    await assert.rejects(consume(ctx, fileMigrationDriver.execute(ctx)), {
+      code: "cutover_incomplete",
+    });
+    assert.equal(observations, 2);
+    await assert.rejects(consume(ctx, fileMigrationDriver.verify(ctx)), {
+      code: "cutover_incomplete",
+    });
+  });
+
+  it("requires new approval rather than catching up a new source path", async (t) => {
+    const { ctx, port } = await stagedContext(t);
+    ctx.waitForConsistency = async () => {
+      port.mutateSourceItem("binary", { name: "unapproved.docx" });
+    };
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    await assert.rejects(consume(ctx, fileMigrationDriver.execute(ctx)), {
+      code: "plan_revision_required",
+    });
+    assert.equal(
+      port.snapshotDestination().some((item) => item.path === "unapproved.docx"),
+      false,
+    );
+  });
+
+  it("labels partial proof against the verified baseline and checks renamed/deleted paths, while final stays full", async (t) => {
+    const { ctx, port } = await stagedContext(t, { deltaVerification: "changed" });
+    ctx.stage = "prestage";
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    await consume(ctx, fileMigrationDriver.execute(ctx));
+    const initial = await consume(ctx, fileMigrationDriver.verify(ctx));
+    const baseline = {
+      revision: 1,
+      rows: [...ctx.resume.rows!],
+      findings: initial.flatMap((unit) => unit.findings),
+      acceptedCodes: [],
+    };
+    port.mutateSourceItem("binary", { name: "renamed.docx", content: "delta content" });
+    ctx.revision = 2;
+    ctx.stage = "delta";
+    ctx.verificationBaseline = baseline;
+    ctx.resume = { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] };
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    await consume(ctx, fileMigrationDriver.execute(ctx));
+    const unchanged = port.snapshotDestination().find((item) => item.path === "nested/zero.bin")!;
+    port.mutateDestinationContent(unchanged.id, "independent destination damage");
+    const partial = await consume(ctx, fileMigrationDriver.verify(ctx));
+    const evidence = partial
+      .flatMap((unit) => unit.rows)
+      .find((item) => item.jobType === "file_migration" && item.fileScope?.verification);
+    assert.ok(evidence?.jobType === "file_migration");
+    assert.equal(evidence.fileScope!.verification!.scope, "partial");
+    assert.equal(evidence.fileScope!.verification!.baselineRevision, 1);
+    assert.deepEqual(evidence.fileScope!.verification!.coveredPaths, [
+      "renamed.docx",
+      "report.docx",
+    ]);
+    assert.deepEqual(evidence.fileScope!.verification!.deletedPaths, ["report.docx"]);
+    assert.equal(
+      partial.flatMap((unit) => unit.findings).some((item) => item.subjectId === "zero"),
+      false,
+    );
+    assert.ok(
+      partial
+        .flatMap((unit) => unit.findings)
+        .some((item) => item.code === "destination_only_retained"),
+    );
+
+    ctx.stage = "final";
+    await consume(ctx, fileMigrationDriver.execute(ctx));
+    // Copy may repair independent damage; damage it again after settled confirmation.
+    port.mutateDestinationContent(unchanged.id, "still damaged at final verification");
+    const full = await consume(ctx, fileMigrationDriver.verify(ctx));
+    assert.ok(
+      full
+        .flatMap((unit) => unit.findings)
+        .some((item) => item.subjectId === "zero" && item.code === "content_mismatch"),
+    );
+    const finalEvidence = full
+      .flatMap((unit) => unit.rows)
+      .find((item) => item.jobType === "file_migration" && item.fileScope?.verification);
+    assert.ok(finalEvidence?.jobType === "file_migration");
+    assert.equal(finalEvidence.fileScope!.verification!.scope, "full");
+  });
+
+  it("previews the rehearsal's five copies and four deletions before approving its cumulative limit", async (t) => {
+    for (const deleteLimit of [4, 3]) {
+      const input = fileFixture(
+        Array.from({ length: 9 }, (_, index) => ({
+          id: `item-${index}`,
+          parentId: "source-root",
+          name: `file-${index}.bin`,
+          kind: "file",
+          content: "old",
+        })),
+      );
+      const h = await provisioningHarness(t, input, { mirror: true, deleteLimit });
+      await execute(h);
+      await approve(h);
+      await execute(h);
+      for (let index = 0; index < 5; index++)
+        h.port.mutateSourceItem(`item-${index}`, { content: "fresh" });
+      for (let index = 5; index < 9; index++) h.port.deleteSourceItem(`item-${index}`);
+      const plan = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+      const rows = value(await h.engine.reader(h.ref).rows({ phase: "plan", limit: 100 })).rows;
+      assert.equal(rows.filter((item) => item.code === "updated").length, 5);
+      assert.deepEqual(
+        rows
+          .filter((item) => item.jobType === "file_migration" && item.code === "to_be_deleted")
+          .map((item) => (item.jobType === "file_migration" ? item.relativePath : ""))
+          .sort(),
+        ["file-5.bin", "file-6.bin", "file-7.bin", "file-8.bin"],
+      );
+      const section = JSON.parse(
+        plan.sections.find((item) => item.title === "Mapping finance")!.body,
+      );
+      assert.equal(section.byteTotals.changed, 25);
+      assert.equal(section.byteTotals.deleted, 12);
+      const approval = await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.approve({
+          approver: "operator",
+          mode: "unattended",
+          planDigest: plan.planDigest,
+        }),
+      );
+      assert.equal(approval.ok, deleteLimit === 4);
+      if (!approval.ok) assert.equal(approval.refusal.code, "delete_limit_exceeded");
+      const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+      assert.equal(
+        (await h.port.listDestinationChildren(driveId)).filter((item) => item.kind === "file")
+          .length,
+        9,
+      );
+    }
+  });
+
+  it("keeps a final mirror deletion budget cumulative across catch-up passes", async (t) => {
+    const h = await provisioningHarness(t, fixture(), {
+      staged: true,
+      memberGrants: "before_copy",
+      mirror: true,
+      deleteLimit: 1,
+      consistencyIntervalMs: 0,
+    });
+    await execute(h);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    h.port.deleteSourceItem("binary");
+    const plan = value(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.plan({ final: true })),
+    );
+    value(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.approve({
+          approver: "operator",
+          mode: "unattended",
+          planDigest: plan.planDigest,
+          freeze: { by: "operator", at: now, how: "writers stopped" },
+        }),
+      ),
+    );
+    h.engine = openEngine({
+      home: h.home,
+      now: () => new Date(now),
+      provider: h.port,
+      waitForConsistency: async () => {
+        h.port.mutateSourceItem("zero", { content: "changed after first final pass" });
+        await h.port.uploadDestinationContent({
+          parentFolderId: driveId,
+          name: "report.docx",
+          content: new Uint8Array([7]),
+          createdAt: now,
+          modifiedAt: now,
+          mimeType: null,
+        });
+      },
+    });
+    const result = await h.engine.withWriterResult(h.ref, (writer) => writer.execute());
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.refusal.code, "plan_revision_required");
+    const retained = (await h.port.listDestinationChildren(driveId)).find(
+      (item) => item.name === "report.docx",
+    );
+    assert.ok(
+      retained,
+      "an already-consumed deletion authorization must not delete recreated content",
+    );
+  });
+
+  it("blocks a source deletion discovered during full final verification", async (t) => {
+    const { ctx, port } = await stagedContext(t);
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    await consume(ctx, fileMigrationDriver.execute(ctx));
+    const verification = fileMigrationDriver.verify(ctx)[Symbol.asyncIterator]();
+    await verification.next();
+    port.deleteSourceItem("binary");
+    await assert.rejects(
+      async () => {
+        while (!(await verification.next()).done) {}
+      },
+      { code: "plan_revision_required" },
+    );
+  });
+
+  it("uses full proof without a baseline and retains earlier exceptions in partial proof", async (t) => {
+    const { ctx, port } = await stagedContext(t, { deltaVerification: "changed" });
+    ctx.stage = "delta";
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    await consume(ctx, fileMigrationDriver.execute(ctx));
+    port.mutateDestinationContent(
+      port.snapshotDestination().find((item) => item.path === "report.docx")!.id,
+      "damage",
+    );
+    const first = await consume(ctx, fileMigrationDriver.verify(ctx));
+    const findings = first.flatMap((unit) => unit.findings);
+    assert.ok(findings.some((item) => item.code === "content_mismatch"));
+    ctx.verificationBaseline = {
+      revision: 1,
+      rows: [...ctx.resume.rows!],
+      findings,
+      acceptedCodes: ["content_mismatch", "size_mismatch"],
+    };
+    ctx.revision = 2;
+    ctx.resume = { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] };
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    const partial = await consume(ctx, fileMigrationDriver.verify(ctx));
+    const inherited = partial
+      .flatMap((unit) => unit.findings)
+      .find((item) => item.code === "content_mismatch");
+    assert.equal(inherited?.evidence.inheritedFromRevision, 1);
+    const coverage = partial
+      .flatMap((unit) => unit.rows)
+      .find((item) => item.jobType === "file_migration" && item.fileScope?.verification);
+    assert.ok(coverage?.jobType === "file_migration");
+    assert.deepEqual(coverage.fileScope!.verification!.coveredPaths, []);
+  });
+
+  it("charges an interrupted durable copy attempt to the original catch-up bound", async (t) => {
+    const { ctx, port } = await stagedContext(t, { settleMaxPasses: 1 });
+    await consume(ctx, fileMigrationDriver.collect(ctx));
+    const interrupted = fileMigrationDriver.execute(ctx)[Symbol.asyncIterator]();
+    const first = await interrupted.next();
+    assert.ok(!first.done && first.value.watermark);
+    ctx.resume.watermarks[first.value.watermark.unitKey] = first.value.watermark.value;
+    await interrupted.return?.();
+    const before = JSON.parse(ctx.resume.watermarks["file-settle:mapping"]!);
+    assert.equal(before.copyPending, true);
+    ctx.waitForConsistency = async () => {
+      port.mutateSourceItem("binary", { content: "changes after resumed copy" });
+    };
+    await assert.rejects(consume(ctx, fileMigrationDriver.execute(ctx)), {
+      code: "cutover_incomplete",
+    });
+    const after = JSON.parse(ctx.resume.watermarks["file-settle:mapping"]!);
+    assert.equal(after.maxPasses, 1);
+    assert.equal(after.passes, 1);
+    assert.equal(after.outcome, "exhausted");
   });
 });

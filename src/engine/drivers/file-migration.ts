@@ -2,12 +2,17 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
+import { canonicalJson } from "../store/digest.ts";
 import type { CheckResult, MappingPass } from "../types.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
 import type {
   CopyPassReference,
   DestinationEntry,
   DriveMember,
+  FilePassPreview,
+  FilePassRoot,
+  DriveMembership,
+  FileHashEntry,
   ProviderPort,
   SourceEntry,
 } from "../providers/port.ts";
@@ -20,6 +25,7 @@ import {
   type FileContext,
   type FileEvidenceRow,
   type FileExclusion,
+  type FileSettleState,
 } from "./file-state.ts";
 
 export interface FileMappingConfig {
@@ -48,7 +54,21 @@ export interface FileMigrationConfig {
     transfersPerMapping?: number;
     mirror?: boolean;
     deleteLimit?: number;
+    /** ADR-0012 A1: the job runs prestage, deltas and a final revision before go-live. */
+    staged?: boolean;
+    deltaVerification?: "full" | "changed";
+    consistencyIntervalMs?: number;
+    settleMaxPasses?: number;
+    /** ADR-0012 A6: when manifest members are granted. Default follows `staged`. */
+    memberGrants?: "before_copy" | "after_verification";
   };
+}
+
+/** ADR-0012 A6: staged jobs grant at go-live (`close`) unless the plan says otherwise. */
+export function memberGrantTiming(
+  options: FileMigrationConfig["options"],
+): "before_copy" | "after_verification" {
+  return options?.memberGrants ?? (options?.staged ? "after_verification" : "before_copy");
 }
 
 const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
@@ -206,6 +226,31 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
       // The engine commits this yield before requesting the first permission.
       yield { ...unit("created"), createdDrive: drive };
     }
+    ctx.resume.createdDrives = [
+      ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== mapping.id),
+      drive,
+    ];
+    if (memberGrantTiming(ctx.config.options) === "before_copy")
+      yield* grantMembers(ctx, [mapping]);
+  }
+}
+
+async function* grantMembers(
+  ctx: FileContext,
+  mappings = ctx.config.mappings,
+): AsyncIterable<CommitUnit> {
+  for (const mapping of mappings) {
+    if (!mapping.createDrive) continue;
+    const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
+    if (!drive?.driveId) throw new Error("Member grants require a durable created drive");
+    const unit = (key: string): CommitUnit => ({
+      rev: ctx.revision,
+      phase: "execute",
+      unitKey: JSON.stringify(["provision", mapping.id, key]),
+      checkpoint: mapping.id,
+      rows: [],
+      findings: [],
+    });
     for (const member of mapping.createDrive.members) {
       if (
         ctx.resume.memberGrants?.some(
@@ -234,13 +279,163 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
           mappingId: mapping.id,
           driveId: drive.driveId!,
           member,
+          ...(memberGrantTiming(ctx.config.options) === "after_verification"
+            ? { at: ctx.now().toISOString() }
+            : {}),
         },
       };
     }
-    ctx.resume.createdDrives = [
-      ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== mapping.id),
-      drive,
-    ];
+  }
+}
+
+export class GoLiveCheckError extends Error {
+  readonly detail: Record<string, unknown>;
+  constructor(detail: Record<string, unknown>) {
+    super(
+      "Go-live checks failed. Some access may already exist; resolve the evidence with an operator and retry close, never a copy or mirror pass.",
+    );
+    this.detail = detail;
+  }
+}
+
+function membershipIdentities(members: DriveMembership[]): string[] {
+  return members
+    .map((member) => JSON.stringify([member.email.toLowerCase(), member.type, member.role]))
+    .sort();
+}
+
+function destinationDigest(
+  files: Iterable<FileHashEntry>,
+  md5: Iterable<FileHashEntry>,
+  folders: Iterable<string>,
+): string {
+  const entries = (items: Iterable<FileHashEntry>) =>
+    [...items]
+      .map((item) => [item.path, item.size, item.hash, item.id ?? null])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return digest([entries(files), entries(md5), [...folders].sort()]);
+}
+
+/** Close is the explicit authorization to open verified destinations to members. */
+export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIterable<CommitUnit> {
+  // Every affected drive is fenced before the first permission request, including
+  // drives later in the batch when an earlier grant crashes or has an ambiguous response.
+  for (const mapping of ctx.config.mappings) {
+    if (!mapping.createDrive) continue;
+    const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
+    if (!drive?.driveId) throw new Error("Go-live requires a durable created drive");
+    if (drive.goLive) continue;
+    drive.goLive = { startedAt: ctx.now().toISOString(), revision: ctx.revision, verificationAt };
+    yield {
+      rev: ctx.revision,
+      phase: "execute",
+      unitKey: JSON.stringify(["go-live-fence", drive.driveId]),
+      checkpoint: mapping.id,
+      rows: [],
+      findings: [],
+      createdDrive: drive,
+    };
+  }
+  yield* grantMembers({
+    ...ctx,
+    now: () => new Date(Math.max(ctx.now().getTime(), Date.parse(verificationAt) + 1)),
+  });
+  for (const mapping of ctx.config.mappings) {
+    if (!mapping.createDrive) continue;
+    const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+    const expected = [...mapping.createDrive.members];
+    if (
+      !expected.some(
+        (member) =>
+          member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
+      )
+    )
+      expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
+    let check: NonNullable<NonNullable<typeof drive.goLive>["check"]>;
+    try {
+      const actual = await ctx.provider.listDriveMembers(drive.driveId!);
+      if (
+        JSON.stringify(membershipIdentities(expected)) !==
+        JSON.stringify(membershipIdentities(actual))
+      ) {
+        check = {
+          at: ctx.now().toISOString(),
+          status: "failed",
+          check: "drive_membership_mismatch",
+          evidence: { expected, actual },
+        };
+      } else {
+        const baseline = drive.verifiedDestination;
+        const pass = await ctx.provider.resolveFilePass(
+          destinationMapping(provisionedMapping(ctx, mapping)),
+        );
+        const files = await ctx.provider.listFileHashes({
+          socketPath: pass.socketPath,
+          root: pass.destination,
+          hashType: baseline?.hashType ?? "sha256",
+          download: false,
+        });
+        const md5 = baseline?.md5
+          ? await ctx.provider.listFileHashes({
+              socketPath: pass.socketPath,
+              root: pass.destination,
+              hashType: "md5",
+              download: false,
+            })
+          : [];
+        const folders = await ctx.provider.listFolders({
+          socketPath: pass.socketPath,
+          root: pass.destination,
+        });
+        const observed = destinationDigest(files, md5, folders);
+        const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
+        check = {
+          at: ctx.now().toISOString(),
+          status: matches ? "passed" : "failed",
+          check: matches ? "membership_and_destination" : "destination_drift",
+          evidence: {
+            expected,
+            actual,
+            expectedDestinationDigest: baseline?.digest ?? null,
+            observedDestinationDigest: observed,
+          },
+        };
+      }
+    } catch (error) {
+      if (
+        !(error instanceof TypeError) &&
+        !(error instanceof HttpProviderFault) &&
+        !terminalUnavailable(error)
+      )
+        throw error;
+      check = {
+        at: ctx.now().toISOString(),
+        status: "failed",
+        check: "go_live_check_unavailable",
+        evidence: {
+          expected,
+          ...(error instanceof HttpProviderFault ? { status: error.status } : {}),
+        },
+      };
+    }
+    drive.goLive = { ...drive.goLive!, check };
+    yield {
+      rev: ctx.revision,
+      phase: "execute",
+      unitKey: JSON.stringify(["go-live-check", drive.driveId, digest(check)]),
+      checkpoint: mapping.id,
+      rows: [],
+      findings: [],
+      createdDrive: drive,
+    };
+    if (check.status === "failed")
+      throw new GoLiveCheckError({
+        accessMayExist: true,
+        mappingId: mapping.id,
+        driveId: drive.driveId,
+        check: check.check,
+        ...check.evidence,
+      });
   }
 }
 
@@ -372,6 +567,39 @@ async function sourceInventory(
     }
   }
   return sources;
+}
+
+/** Complete read-only fallback until descendant coverage of change cursors is qualified. */
+export async function assertSourceInventoryFresh(
+  ctx: FileContext,
+  executionResume = false,
+): Promise<void> {
+  for (const mapping of ctx.config.mappings) {
+    const fresh = await sourceInventory(ctx, mapping);
+    if (executionResume && ctx.stage === "final" && settleState(ctx, mapping)) {
+      assertApprovedPaths(ctx, mapping, fresh);
+      continue;
+    }
+    const expected = new Map<string, unknown>();
+    for (const item of ctx.resume.rows ?? [])
+      if (
+        item.jobType === "file_migration" &&
+        item.phase === "plan" &&
+        item.mappingId === mapping.id &&
+        item.sourceEvidence
+      )
+        expected.set(item.sourceItemId, item.sourceEvidence);
+    if (
+      fresh.length !== expected.size ||
+      fresh.some(
+        (source) =>
+          canonicalJson(sourceEvidence(source)) !== canonicalJson(expected.get(source.id) ?? null),
+      )
+    )
+      throw new FilePlanRevisionRequiredError(
+        "The source inventory changed after approval; collect a new plan.",
+      );
+  }
 }
 
 async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<Snapshot> {
@@ -575,6 +803,16 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     const { mapping } = tree;
     const exclusions = expandedExclusions(tree);
     const excluded = new Map(exclusions.map((item) => [item.sourceItemId, item.reason]));
+    const preview = overlapping.has(mapping.id)
+      ? undefined
+      : await passPreview(ctx, mapping, tree.sources);
+    const outcomes = new Map<string, string>();
+    if (preview) {
+      for (const item of preview.new) outcomes.set(item.path, "created");
+      for (const item of preview.changed) outcomes.set(item.path, "updated");
+      for (const item of preview.unchanged) outcomes.set(item.path, "unchanged");
+      for (const item of preview.timestampOnly) outcomes.set(item.path, "timestamp_only");
+    }
     for (const source of tree.sources) {
       if (overlapping.has(mapping.id) && source.path !== ".") continue;
       const code = overlapping.has(mapping.id)
@@ -586,18 +824,26 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
               ? "source_package_copied_as_files"
               : source.path === "."
                 ? "unchanged"
-                : "created"));
+                : (outcomes.get(source.path) ??
+                  (tree.destinationByPath.has(source.path) ? "unchanged" : "created"))));
       const evidence = row(ctx, "plan", mapping, source, code);
       if (source.path === ".") {
         evidence.destinationDriveId = mapping.destDriveId ?? null;
         evidence.destinationFileId = mapping.destFolderId ?? null;
-        evidence.fileScope = { exclusions, sourceInventoryAt: ctx.now().toISOString() };
+        evidence.fileScope = {
+          exclusions,
+          sourceInventoryAt: ctx.now().toISOString(),
+          ...(preview ? { preview } : {}),
+        };
       }
       const unit = commit(
         ctx,
         "plan",
         evidence,
-        code === "created" || code === "unchanged"
+        code === "created" ||
+          code === "updated" ||
+          code === "unchanged" ||
+          code === "timestamp_only"
           ? metadataOmissions(ctx, "plan", source)
           : [
               finding(ctx, "plan", code, source.id, {
@@ -609,6 +855,19 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
         "plan",
         ++done,
       );
+      if (
+        source.path === "." &&
+        preview &&
+        ctx.config.options?.mirror &&
+        preview.deleted.length > ctx.config.options.deleteLimit!
+      )
+        unit.findings.push(
+          finding(ctx, "plan", "delete_limit_exceeded", mapping.id, {
+            mappingId: mapping.id,
+            deleteLimit: ctx.config.options.deleteLimit,
+            deleted: preview.deleted,
+          }),
+        );
       if (source.path === ".")
         unit.mappingPass = pendingPass(
           ctx.revision,
@@ -617,6 +876,28 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
           ctx.config.options?.mirror ? "mirror" : "copy",
         );
       yield unit;
+    }
+    for (const [code, entries] of [
+      ["to_be_deleted", preview?.deleted ?? []],
+      ["destination_only_retained", preview?.retained ?? []],
+    ] as const) {
+      for (const entry of entries) {
+        const evidence = row(
+          ctx,
+          "plan",
+          mapping,
+          {
+            ...tree.sources[0]!,
+            id: `destination:${entry.path}`,
+            path: entry.path,
+            kind: "file",
+            size: entry.size,
+          },
+          code,
+        );
+        delete evidence.sourceEvidence;
+        yield commit(ctx, "plan", evidence, [], code, ++done);
+      }
     }
   }
 }
@@ -643,14 +924,8 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
           progressed = true;
           continue;
         }
-        const pass = next.value.mappingPass!;
-        if (pass.status !== "pending" && pass.status !== "running") {
-          active.delete(iterator);
-          await iterator.return(undefined);
-          progressed = true;
-        } else if (!pass.lastStats) {
-          progressed = true;
-        }
+        const pass = next.value.mappingPass;
+        if (!pass || pass.status !== "running" || !pass.lastStats) progressed = true;
         yield next.value;
       }
       if (!progressed && !ctx.signal?.aborted) {
@@ -670,6 +945,129 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
   }
 }
 
+function inventoryEvidence(sources: SourceView[]): FileSettleState["copiedInventory"] {
+  return sources.map((source) => ({
+    id: source.id,
+    path: source.path,
+    evidence: sourceEvidence(source),
+  }));
+}
+
+function plannedScope(ctx: FileContext, mapping: FileMappingConfig) {
+  return (ctx.resume.rows ?? []).find(
+    (item) =>
+      item.jobType === "file_migration" &&
+      item.phase === "plan" &&
+      item.rev === ctx.revision &&
+      item.mappingId === mapping.id &&
+      item.fileScope !== undefined,
+  );
+}
+
+function settleState(ctx: FileContext, mapping: FileMappingConfig): FileSettleState | undefined {
+  const raw = ctx.resume.watermarks[`file-settle:${mapping.id}`];
+  if (!raw) return undefined;
+  const state: FileSettleState = JSON.parse(raw);
+  return state.revision === ctx.revision ? state : undefined;
+}
+
+function assertApprovedPaths(ctx: FileContext, mapping: FileMappingConfig, sources: SourceView[]) {
+  const approved = new Map(
+    (ctx.resume.rows ?? [])
+      .filter(
+        (item) =>
+          item.jobType === "file_migration" &&
+          item.phase === "plan" &&
+          item.mappingId === mapping.id &&
+          item.sourceEvidence !== undefined,
+      )
+      .map((item) =>
+        item.jobType === "file_migration" ? [item.sourceItemId, item.relativePath] : ["", ""],
+      ),
+  );
+  if (
+    sources.length !== approved.size ||
+    sources.some((source) => approved.get(source.id) !== source.path)
+  )
+    throw new FilePlanRevisionRequiredError(
+      "Source paths changed outside the approved preview; collect a new plan.",
+    );
+}
+
+function settleUnit(
+  ctx: FileContext,
+  state: FileSettleState,
+): CommitUnit & { watermark: { unitKey: string; value: string } } {
+  const value = JSON.stringify(state);
+  return {
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["settle", state.mappingId, digest(value)]),
+    checkpoint: state.mappingId,
+    rows: [],
+    findings: [],
+    watermark: { unitKey: `file-settle:${state.mappingId}`, value },
+  };
+}
+
+function cutoverIncomplete(): Error {
+  return Object.assign(
+    new Error("The final source did not settle within the approved pass bound."),
+    {
+      code: "cutover_incomplete",
+    },
+  );
+}
+
+async function passPreview(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  sources: SourceView[],
+): Promise<FilePassPreview & { deletedFolders: string[] }> {
+  const excluded = new Set(
+    expandedExclusions({ mapping, sources }).map((item) => item.sourceItemId),
+  );
+  const excludePaths = sources
+    .filter((source) => excluded.has(source.id) || sourceOmission(ctx, source))
+    .map((source) => source.path);
+  const resolved: { socketPath: string; source: FilePassRoot; destination?: FilePassRoot } =
+    mapping.createDrive && !mapping.destDriveId
+      ? await ctx.provider.resolveFilePassSource(mapping)
+      : await ctx.provider.resolveFilePass(destinationMapping(mapping));
+  const preview = await ctx.provider.previewCopyPass({
+    ...resolved,
+    excludePaths,
+    mode: ctx.config.options?.mirror ? "mirror" : "copy",
+  });
+  const expectedFolders = expectedDestinationFolders(
+    ctx,
+    sources,
+    new Map(
+      expandedExclusions({ mapping, sources }).map((item) => [item.sourceItemId, item.reason]),
+    ),
+  );
+  const deletedFolders =
+    ctx.config.options?.mirror && resolved.destination
+      ? (
+          await ctx.provider.listFolders({
+            socketPath: resolved.socketPath,
+            root: resolved.destination,
+          })
+        )
+          .filter(
+            (path) =>
+              path !== "." &&
+              !expectedFolders.has(path) &&
+              !excludePaths.some(
+                (excluded) =>
+                  excluded === "." || path === excluded || path.startsWith(`${excluded}/`),
+              ),
+          )
+          .sort()
+      : [];
+  return { ...preview, deletedFolders };
+}
+
 async function* copyMapping(
   ctx: FileContext,
   mapping: FileMappingConfig,
@@ -677,16 +1075,129 @@ async function* copyMapping(
   const previous = (ctx.resume.mappingPasses ?? [])
     .filter((pass) => pass.mappingId === mapping.id)
     .at(-1);
-  if (previous?.status === "completed") return;
-  let pass =
-    previous?.status === "pending"
-      ? previous
-      : pendingPass(
-          ctx.revision,
-          mapping.id,
-          (previous?.passNumber ?? 0) + 1,
-          ctx.config.options?.mirror ? "mirror" : "copy",
+  const final = ctx.stage === "final";
+  let state = final ? settleState(ctx, mapping) : undefined;
+  if (state?.outcome === "exhausted") throw cutoverIncomplete();
+  if (state?.outcome === "settled" || (!final && previous?.status === "completed")) return;
+  let sources = await sourceInventory(ctx, mapping);
+  assertApprovedPaths(ctx, mapping, sources);
+  let copyNeeded = !state || state.copyPending;
+  // An ambiguous/crashed attempt consumes a catch-up attempt rather than resetting the bound.
+  if (state?.copyPending) {
+    if (state.passes >= state.maxPasses) {
+      state.outcome = "exhausted";
+      yield settleUnit(ctx, state);
+      throw cutoverIncomplete();
+    }
+    state.passes++;
+    state.copyPassNumber++;
+  }
+  if (final && !state)
+    state = {
+      revision: ctx.revision,
+      mappingId: mapping.id,
+      maxPasses: ctx.config.options?.settleMaxPasses ?? 3,
+      consistencyIntervalMs: ctx.config.options?.consistencyIntervalMs ?? 30_000,
+      passes: 0,
+      copyPassNumber:
+        previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1,
+      copyPending: true,
+      deletionsReserved: 0,
+      outcome: "pending",
+      copiedInventory: inventoryEvidence(sources),
+      observations: [],
+    };
+  for (;;) {
+    if (copyNeeded) {
+      const preview = await passPreview(ctx, mapping, sources);
+      const planned = plannedScope(ctx, mapping);
+      const approved =
+        planned?.jobType === "file_migration" ? planned.fileScope?.preview : undefined;
+      const allowed = new Set(approved?.deleted.map((item) => item.path) ?? []);
+      const allowedFolders = new Set(approved?.deletedFolders ?? []);
+      if (
+        preview.deleted.some((item) => !allowed.has(item.path)) ||
+        preview.deletedFolders.some((path) => !allowedFolders.has(path)) ||
+        (ctx.config.options?.mirror &&
+          (state?.deletionsReserved ?? 0) + preview.deleted.length >
+            ctx.config.options.deleteLimit!)
+      )
+        throw new FilePlanRevisionRequiredError(
+          "The cumulative deletion scope exceeds the approved preview or limit.",
         );
+      if (state) {
+        state.copyPending = true;
+        state.copiedInventory = inventoryEvidence(sources);
+        state.deletionsReserved += preview.deleted.length;
+        yield settleUnit(ctx, state);
+      }
+      let completed = false;
+      const passNumber =
+        state?.copyPassNumber ??
+        (previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1);
+      for await (const unit of copyPass(
+        ctx,
+        mapping,
+        sources,
+        passNumber,
+        preview.deleted.length,
+      )) {
+        completed = unit.mappingPass?.status === "completed";
+        if (completed && state) {
+          state.copyPending = false;
+          unit.watermark = settleUnit(ctx, state).watermark;
+        }
+        yield unit;
+      }
+      if (!completed || !state) return;
+    }
+    if (!state) return;
+    if (ctx.waitForConsistency)
+      await ctx.waitForConsistency(state.consistencyIntervalMs, ctx.signal);
+    else await delay(state.consistencyIntervalMs, undefined, { signal: ctx.signal });
+    sources = await sourceInventory(ctx, mapping);
+    assertApprovedPaths(ctx, mapping, sources);
+    const copied = new Map(state.copiedInventory.map((item) => [item.id, item]));
+    const changedPaths = sources
+      .filter(
+        (source) =>
+          canonicalJson(sourceEvidence(source)) !==
+          canonicalJson(copied.get(source.id)?.evidence ?? null),
+      )
+      .map((source) => source.path);
+    state.outcome =
+      changedPaths.length === 0
+        ? "settled"
+        : state.passes >= state.maxPasses
+          ? "exhausted"
+          : "pending";
+    state.observations.push({
+      at: ctx.now().toISOString(),
+      changedPaths,
+      outcome: state.outcome === "pending" ? "changed" : state.outcome,
+    });
+    yield settleUnit(ctx, state);
+    if (state.outcome === "settled") return;
+    if (state.outcome === "exhausted") throw cutoverIncomplete();
+    state.passes++;
+    state.copyPassNumber++;
+    copyNeeded = true;
+  }
+}
+
+async function* copyPass(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  sources: SourceView[],
+  passNumber: number,
+  authorizedDeletions: number,
+): AsyncGenerator<CommitUnit> {
+  let pass = pendingPass(
+    ctx.revision,
+    mapping.id,
+    passNumber,
+    ctx.config.options?.mirror ? "mirror" : "copy",
+  );
   pass = { ...pass, startedAt: ctx.now().toISOString() };
   let sequence = 0;
   const unit = (): CommitUnit => ({
@@ -714,7 +1225,6 @@ async function* copyMapping(
           "Mirror requires proven job-created drive provenance; this mapping cannot delete.",
         );
     }
-    const sources = await sourceInventory(ctx, mapping);
     const excluded = new Set(
       expandedExclusions({ mapping, sources }).map((item) => item.sourceItemId),
     );
@@ -722,7 +1232,7 @@ async function* copyMapping(
     const handle = await ctx.provider.startCopyPass({
       ...resolved,
       ...(ctx.config.options?.mirror
-        ? { mode: "mirror" as const, deleteLimit: ctx.config.options.deleteLimit! }
+        ? { mode: "mirror" as const, deleteLimit: authorizedDeletions }
         : { mode: "copy" as const }),
       transfers: ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
       excludePaths: sources
@@ -766,16 +1276,131 @@ async function* copyMapping(
   }
 }
 
+function assertSettledInventory(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  sources: SourceView[],
+) {
+  if (ctx.stage !== "final") return;
+  const settled = settleState(ctx, mapping);
+  if (settled?.outcome !== "settled") throw cutoverIncomplete();
+  const copied = new Map(settled.copiedInventory.map((item) => [item.id, item]));
+  if (
+    sources.length !== copied.size ||
+    sources.some(
+      (source) =>
+        copied.get(source.id)?.path !== source.path ||
+        canonicalJson(copied.get(source.id)?.evidence ?? null) !==
+          canonicalJson(sourceEvidence(source)),
+    )
+  )
+    throw new FilePlanRevisionRequiredError(
+      "The source changed after settled confirmation; final verification cannot complete.",
+    );
+}
+
+function verificationCoverage(ctx: FileContext, mapping: FileMappingConfig, sources: SourceView[]) {
+  const current = inventoryEvidence(sources);
+  const destination = destinationMapping(mapping);
+  const binding = {
+    sourceDriveId: mapping.sourceDriveId,
+    sourceItemId: mapping.sourceItemId,
+    sourceType: mapping.sourceType ?? "sharepoint",
+    destDriveId: destination.destDriveId,
+    destFolderId: destination.destFolderId,
+    exclusions: expandedExclusions({ mapping, sources }).sort((a, b) =>
+      a.sourceItemId < b.sourceItemId ? -1 : a.sourceItemId > b.sourceItemId ? 1 : 0,
+    ),
+    oneNoteNotebooks: ctx.config.options?.oneNoteNotebooks ?? "omit",
+    verificationMode: ctx.config.options?.verificationMode ?? "hash",
+  };
+  const baseline =
+    ctx.stage === "delta" && ctx.config.options?.deltaVerification === "changed"
+      ? ctx.verificationBaseline
+      : undefined;
+  const previous = new Map<string, FileSettleState["copiedInventory"][number]>();
+  if (baseline) {
+    const rows = baseline.rows.filter(
+      (item) => item.jobType === "file_migration" && item.mappingId === mapping.id,
+    );
+    const complete = rows.find(
+      (item) =>
+        item.jobType === "file_migration" &&
+        item.phase === "verify" &&
+        item.fileScope?.verification?.sourceInventory,
+    );
+    if (
+      complete?.jobType === "file_migration" &&
+      canonicalJson(complete.fileScope?.verification?.binding ?? null) === canonicalJson(binding)
+    ) {
+      for (const item of complete.fileScope!.verification!.sourceInventory)
+        previous.set(item.path, item);
+    }
+  }
+  const partial = baseline !== undefined && previous.size > 0;
+  const paths = new Set(current.map((item) => item.path));
+  const deletedPaths = partial
+    ? [...previous.keys()].filter((path) => !paths.has(path)).sort()
+    : [];
+  const coveredPaths = partial
+    ? [
+        ...new Set([
+          ...current
+            .filter(
+              (item) =>
+                canonicalJson(item.evidence) !==
+                canonicalJson(previous.get(item.path)?.evidence ?? null),
+            )
+            .map((item) => item.path),
+          ...deletedPaths,
+        ]),
+      ].sort()
+    : [...paths].sort();
+  return {
+    binding,
+    scope: partial ? ("partial" as const) : ("full" as const),
+    baselineRevision: partial ? baseline.revision : null,
+    coveredPaths,
+    deletedPaths,
+    sourceInventory: current,
+  };
+}
+
 async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
   let done = 0;
   const sizeOnly = ctx.config.options?.verificationMode === "size_only";
+  if (
+    ctx.stage === "delta" &&
+    ctx.config.options?.deltaVerification === "changed" &&
+    ctx.verificationBaseline?.findings.length
+  ) {
+    yield {
+      rev: ctx.revision,
+      phase: "verify",
+      unitKey: "partial-baseline-exceptions",
+      checkpoint: "partial-baseline-exceptions",
+      rows: [],
+      findings: ctx.verificationBaseline.findings
+        .filter((item) => item.phase === "verify")
+        .map((item) => ({
+          ...item,
+          rev: ctx.revision,
+          at: ctx.now().toISOString(),
+          evidence: { ...item.evidence, inheritedFromRevision: ctx.verificationBaseline!.revision },
+        })),
+    };
+  }
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
     const sources = await sourceInventory(ctx, mapping);
+    assertSettledInventory(ctx, mapping, sources);
     if (mapping.createDrive) {
       const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
       if (!drive?.driveId) throw new Error("Verification requires the durable created drive");
-      const expected = [...mapping.createDrive.members];
+      const expected =
+        memberGrantTiming(ctx.config.options) === "before_copy" || drive.goLive
+          ? [...mapping.createDrive.members]
+          : [];
       if (
         !expected.some(
           (member) =>
@@ -785,11 +1410,10 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       )
         expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
       const actual = await ctx.provider.listDriveMembers(drive.driveId);
-      const identities = (members: typeof actual) =>
-        members
-          .map((member) => JSON.stringify([member.email.toLowerCase(), member.type, member.role]))
-          .sort();
-      if (JSON.stringify(identities(expected)) !== JSON.stringify(identities(actual))) {
+      if (
+        JSON.stringify(membershipIdentities(expected)) !==
+        JSON.stringify(membershipIdentities(actual))
+      ) {
         const evidence = row(ctx, "verify", mapping, sources[0]!, "drive_membership_mismatch");
         evidence.destinationDriveId = drive.driveId;
         evidence.destinationFileId = drive.driveId;
@@ -829,6 +1453,13 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       )
     )
       throw new FilePlanRevisionRequiredError();
+    const coverage = verificationCoverage(ctx, mapping, sources);
+    const covered = coverage.scope === "partial" ? new Set(coverage.coveredPaths) : undefined;
+    const paths = covered ? coverage.coveredPaths : undefined;
+    const coverageRow = row(ctx, "verify", mapping, sources[0]!, "unchanged");
+    coverageRow.id = JSON.stringify([mapping.id, sources[0]!.id, "verify", "coverage"]);
+    coverageRow.fileScope = { ...scope, verification: coverage };
+    yield commit(ctx, "verify", coverageRow, [], "verification-coverage", ++done);
     if (sizeOnly) {
       const evidence = row(ctx, "verify", mapping, sources[0]!, "content_verification_degraded");
       yield commit(
@@ -853,6 +1484,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
           root: pass.source,
           hashType: primaryHash,
           download: !sizeOnly,
+          ...(paths ? { paths } : {}),
         })
       ).map((entry) => [entry.path, entry]),
     );
@@ -863,6 +1495,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
           root: pass.destination,
           hashType: primaryHash,
           download: false,
+          ...(paths ? { paths } : {}),
         })
       ).map((entry) => [entry.path, entry]),
     );
@@ -878,6 +1511,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
               root: pass.source,
               hashType: "md5",
               download: true,
+              ...(paths ? { paths } : {}),
             })
           ).map((entry) => [entry.path, entry])
         : [],
@@ -890,11 +1524,13 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
               root: pass.destination,
               hashType: "md5",
               download: false,
+              ...(paths ? { paths } : {}),
             })
           ).map((entry) => [entry.path, entry])
         : [],
     );
     for (const source of sources) {
+      if (covered && !covered.has(source.path)) continue;
       const omission = excluded.has(source.id)
         ? "omitted_by_rule"
         : source.kind === "file" || source.kind === "undownloadable"
@@ -1019,6 +1655,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       }),
     );
     for (const [path, source] of expectedFolders) {
+      if (covered && !covered.has(path)) continue;
       const destination = destinationHashes.get(path);
       if (!destination && destinationFolders.has(path)) continue;
       const code = destination ? "destination_type_conflict" : "destination_missing";
@@ -1062,6 +1699,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         size: destination.size,
       };
       const evidence = row(ctx, "verify", mapping, source, "destination_only_retained");
+      delete evidence.sourceEvidence;
       evidence.destinationDriveId = mapping.destDriveId ?? null;
       evidence.destinationFileId = destination.id ?? null;
       // MD5 labels the hash only when the MD5 fallback listing actually supplied it.
@@ -1085,6 +1723,34 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         "retained",
         ++done,
       );
+    }
+    // A1/A4 before A6: an unsettled final revision must not record a go-live baseline.
+    if (ctx.stage === "final")
+      assertSettledInventory(ctx, mapping, await sourceInventory(ctx, mapping));
+    if (mapping.createDrive && memberGrantTiming(ctx.config.options) === "after_verification") {
+      const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+      // A new verification must never erase the original go-live content fence.
+      if (!drive.goLive) {
+        drive.verifiedDestination = {
+          revision: ctx.revision,
+          hashType: primaryHash,
+          md5: needsMd5,
+          digest: destinationDigest(
+            destinationHashes.values(),
+            destinationMd5.values(),
+            destinationFolders,
+          ),
+        };
+        yield {
+          rev: ctx.revision,
+          phase: "verify",
+          unitKey: JSON.stringify(["verified-destination", mapping.id]),
+          checkpoint: mapping.id,
+          rows: [],
+          findings: [],
+          createdDrive: drive,
+        };
+      }
     }
   }
 }
@@ -1174,6 +1840,42 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
 }
 
 async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
+  yield { title: "Migration stage", format: "text", body: ctx.stage ?? "unstaged" };
+  if (ctx.stage === "final")
+    yield {
+      title: "Settled confirmation",
+      format: "text",
+      body: JSON.stringify(
+        ctx.config.mappings.map(
+          (mapping) =>
+            settleState(ctx, mapping) ?? {
+              mappingId: mapping.id,
+              revision: ctx.revision,
+              outcome: "pending",
+              maxPasses: ctx.config.options?.settleMaxPasses ?? 3,
+              consistencyIntervalMs: ctx.config.options?.consistencyIntervalMs ?? 30_000,
+              passes: 0,
+              observations: [],
+            },
+        ),
+      ),
+    };
+  const coverage = (ctx.resume.rows ?? []).flatMap((item) =>
+    item.jobType === "file_migration" && item.phase === "verify" && item.fileScope?.verification
+      ? [{ mappingId: item.mappingId, ...item.fileScope.verification, sourceInventory: undefined }]
+      : [],
+  );
+  yield {
+    title: "Verification scope",
+    format: "text",
+    body: JSON.stringify({
+      requested: ctx.config.options?.deltaVerification ?? "full",
+      proof: coverage.some((item) => item.scope === "partial") ? "partial proof" : "full",
+      mappings: coverage,
+      limitation:
+        "Partial proof does not recheck independent destination damage to unchanged paths. Earlier exceptions remain visible; final verification is always full.",
+    }),
+  };
   const drives = ctx.config.mappings
     .filter((m) => m.createDrive)
     .map((m) => ({
@@ -1228,6 +1930,67 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       deleteLimit: ctx.config.options?.mirror ? ctx.config.options.deleteLimit : null,
     }),
   };
+  const timing = memberGrantTiming(ctx.config.options);
+  const mirrorWarnings = [];
+  if (ctx.config.options?.mirror)
+    for (const mapping of ctx.config.mappings) {
+      const driveId = provisionedMapping(ctx, mapping).destDriveId;
+      const members = new Map(
+        (ctx.resume.memberGrants ?? [])
+          .filter((grant) => grant.mappingId === mapping.id || grant.driveId === driveId)
+          .map((grant) => [
+            JSON.stringify([grant.member.email.toLowerCase(), grant.member.type]),
+            grant.member,
+          ]),
+      );
+      if (timing === "before_copy")
+        for (const member of mapping.createDrive?.members ?? [])
+          members.set(JSON.stringify([member.email.toLowerCase(), member.type]), member);
+      const writableMembers = [...members.values()].filter(
+        (member) => member.role !== "reader" && member.role !== "commenter",
+      ).length;
+      if (writableMembers)
+        mirrorWarnings.push({
+          mappingId: mapping.id,
+          driveId: driveId ?? null,
+          writableMembers,
+          warning: `${writableMembers} manifest members have or will receive write access before this mirror pass; mirror may overwrite or delete their files.`,
+        });
+    }
+  yield {
+    title: "Member grants",
+    format: "text",
+    body: JSON.stringify({
+      memberGrants: timing,
+      authorization:
+        timing === "after_verification"
+          ? "Close authorizes go-live after verification and accepted findings; transfers are permanently fenced before grants."
+          : "Execute grants manifest members before copying.",
+      mirrorWarnings,
+      isolation:
+        "External grants, administrators and group membership are outside Migmate's control; restrict other access before claiming staged isolation.",
+    }),
+  };
+  const goLiveDrives = (ctx.resume.createdDrives ?? []).filter((drive) => drive.goLive);
+  if (goLiveDrives.length)
+    yield {
+      title: "Go-live",
+      format: "text",
+      body: JSON.stringify({
+        accessMayExist: true,
+        transfersFenced: true,
+        checksPassed: goLiveDrives.every((drive) => drive.goLive?.check?.status === "passed"),
+        resolution:
+          "If close fails or is interrupted, some access may already exist. Resolve membership or destination drift with an operator and retry close; do not run another copy or mirror pass.",
+        drives: goLiveDrives.map((drive) => ({
+          mappingId: drive.mappingId,
+          driveId: drive.driveId,
+          ...drive.goLive,
+        })),
+        driftScope:
+          "Destination file paths, sizes, stored hashes and identities plus folder paths are compared with verification. This is a point-in-time listing check, not downloaded content, inherited permissions, effective group membership, or a future-write guarantee.",
+      }),
+    };
   yield {
     title: "Copy concurrency",
     format: "text",
@@ -1245,11 +2008,11 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       "Permissions and ownership were not assessed and were not migrated.",
       "Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.",
       ctx.config.options?.mirror
-        ? `Mirror removes destination-only content in job-created drives, capped at ${ctx.config.options.deleteLimit} file deletions per mapping pass; exceeding the limit fails that mapping.`
+        ? `Mirror removes only approved destination-only content in job-created drives, capped at ${ctx.config.options.deleteLimit} cumulative file deletions across final settling attempts; a larger scope requires a new plan.`
         : "Destination-only content and source-deleted prior copies are retained, never deleted.",
       "rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories, which keep modification times only. Owner, permission and label metadata are not copied.",
       "Copy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.",
-      "Verification is a timestamped point-in-time statement, not a source freeze, cutover, settled delta, or future-drift guarantee.",
+      "Verification is a timestamped point-in-time statement, not a source freeze or future-drift guarantee. Settled confirmation is recorded separately; partial intermediate proof is not cutover parity.",
     ].join("\n"),
   };
   yield {
@@ -1261,6 +2024,15 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     ].join("\n"),
   };
   for (const mapping of ctx.config.mappings) {
+    const planned = plannedScope(ctx, mapping);
+    const preview = planned?.jobType === "file_migration" ? planned.fileScope?.preview : undefined;
+    const byteTotals = preview
+      ? Object.fromEntries(
+          (["new", "changed", "unchanged", "deleted", "retained", "timestampOnly"] as const).map(
+            (kind) => [kind, preview[kind].reduce((sum, item) => sum + item.size, 0)],
+          ),
+        )
+      : undefined;
     yield {
       title: `Mapping ${mapping.id}`,
       format: "text",
@@ -1270,6 +2042,8 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         destDriveId: mapping.destDriveId,
         destFolderId: mapping.destFolderId,
         revision: ctx.revision,
+        preview,
+        byteTotals,
         passes: (ctx.resume.mappingPasses ?? []).filter((pass) => pass.mappingId === mapping.id),
       }),
     };

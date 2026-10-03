@@ -31,11 +31,36 @@ export interface CreatedDrive {
   /** Absent on schema-5 records written before creation provenance was recorded. */
   intentAt?: string;
   provenance?: { kind: "create_response" } | { kind: "name_recovery"; createdTime: string };
+  /** Irreversible job-local transfer fence, committed before deferred access starts. */
+  goLive?: {
+    startedAt: string;
+    revision: number;
+    verificationAt: string;
+    check?: {
+      at: string;
+      status: "passed" | "failed";
+      check:
+        | "drive_membership_mismatch"
+        | "destination_drift"
+        | "go_live_check_unavailable"
+        | "membership_and_destination";
+      evidence: Record<string, unknown>;
+    };
+  };
+  /** Listing observed by the latest verification; never rebased once go-live starts. */
+  verifiedDestination?: {
+    revision: number;
+    hashType: "sha256" | "quickxor";
+    md5: boolean;
+    digest: string;
+  };
 }
 export interface MemberGrant {
   mappingId: string;
   driveId: string;
   member: DriveMember;
+  /** Present for grants observed at deferred go-live, after verification. */
+  at?: string;
 }
 
 export const JOB_TYPES = ["file_migration", "teams_archive"] as const;
@@ -101,8 +126,11 @@ export type RefusalCode =
   | "approval_required"
   | "approval_digest_stale"
   | "plan_revision_required"
+  | "cutover_incomplete"
+  | "delete_limit_exceeded"
   | "unsupported_route"
   | "drive_creation_ambiguous"
+  | "go_live_started"
   | "verification_unaccepted"
   | "job_closed"
   | "job_cancelled"
@@ -234,6 +262,7 @@ export interface PreflightReport {
 }
 
 export interface PlanRevision {
+  stage?: "prestage" | "delta" | "final";
   revision: number;
   planDigest: string;
   inputsDigest: string;
@@ -253,6 +282,9 @@ export interface ApprovalRecord {
   approver: string;
   mode: "interactive" | "unattended";
   at: string;
+  freeze?: { by: string; at: string; how: string };
+  sourceInventoryAt?: string;
+  sourceInventoryAgeMs?: number;
 }
 
 export interface AcceptedException {

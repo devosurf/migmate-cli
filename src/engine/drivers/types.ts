@@ -1,7 +1,7 @@
 import type { CheckResult, CreatedDrive, MemberGrant, MappingPass } from "../types.ts";
 import type { ProviderPort } from "../providers/port.ts";
 
-import type { CommitRow, CommitUnit } from "../commit.ts";
+import type { CommitFinding, CommitRow, CommitUnit } from "../commit.ts";
 import type { ArchiveResumeState } from "../providers/archive.ts";
 
 export type {
@@ -29,10 +29,18 @@ export interface DriverContext<Cfg> {
   jobDirectory: string;
   config: Cfg;
   revision: number;
+  stage?: "prestage" | "delta" | "final";
+  verificationBaseline?: {
+    revision: number;
+    rows: CommitRow[];
+    findings: CommitFinding[];
+    acceptedCodes: string[];
+  };
   resume: DriverResumeState;
   provider: ProviderPort;
   now: () => Date;
   signal?: AbortSignal;
+  waitForConsistency?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export interface ReportSection {

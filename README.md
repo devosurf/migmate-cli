@@ -105,11 +105,92 @@ flowchart LR
   cancel
 ```
 
-`init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any finding is unaccepted.
+`init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any blocking finding is unaccepted. With deferred member grants, confirming `close` also authorizes go-live.
 
 For file verification, a source that changed between copy and verify can raise three findings for one path: `source_size_inconsistent`, `size_mismatch`, and `content_mismatch`. `sourceSize` reports the size actually compared with `destinationSize`; when the listing contradicts served bytes, `listedSize` preserves the listing and the inconsistency finding also carries `servedSize`. The dependent size and content findings carry `cause: "source_size_inconsistent"` so they can be reviewed together. All three still block `close` until explicitly accepted; accepting the cause alone does not accept the other findings.
 
 File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member, or an approved excluded item moving outside that subtree within the mapping, requires replanning before any copy starts. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
+
+### Staged cutover: keep one job open
+
+Prestage, approved deltas, and final cutover belong to **one open file-migration
+job**. Decide mirror and its deletion limit before the initial manifest load;
+closing is terminal, and a new job cannot inherit the closed job's mirror authority.
+Configure staged intent before planning:
+
+```toml
+[options]
+staged = true
+consistencyIntervalMs = 30000
+settleMaxPasses = 3
+deltaVerification = "full" # or "changed" for intermediate partial proof
+```
+
+1. Load the manifest, run `plan`, review and approve its digest, then `execute`
+   and `verify`. The initial revision is **prestage**; keep the job open.
+2. As the source changes, repeat `plan` → review → `approve` → `execute` → `verify`
+   in that same job. Ordinary later revisions are **delta**. Each plan lists
+   new, changed, unchanged and (for mirror) to-be-deleted paths with byte totals.
+   Review every deletion against its mapping's `deleteLimit`; an over-limit
+   preview cannot be approved for execution. Copy retains destination-only paths.
+   The preview predicts rclone actions; it is not content-equality proof.
+3. Arrange the source freeze with its accountable human, then make the final
+   revision and approve the exact digest with a freeze attestation:
+
+   ```sh
+   migmate plan --job "$ID" --final --output json
+   migmate approve --job "$ID" --approver "$APPROVER" --plan-digest "$DIGEST" \
+     --freeze-by "$FREEZE_OWNER" --freeze-at "2026-10-04T12:00:00Z" \
+     --freeze-how "Source made read-only by the tenant administrator" --output json
+   migmate execute --job "$ID" --output json
+   migmate verify --job "$ID" --output json
+   migmate report --job "$ID" --output json
+   ```
+
+4. Review settling, full verification and any accepted exceptions before
+   authorizing `close`. A staged job refuses `cutover_incomplete` unless its
+   latest revision is final, settled and fully verified. A verified earlier
+   revision cannot authorize closing a newer one.
+   Approved staged intent belongs to the job's history: changing configuration
+   or reloading a manifest cannot turn that job into an unstaged migration.
+
+Planning and approval show `sourceInventoryAt` and `sourceInventoryAgeMs`; the web
+plan/approval views show the timestamp and age in seconds. Age is information,
+not an expiry rule. Execute performs a **complete read-only source inventory
+comparison** and refuses `plan_revision_required` when approved source evidence
+changed. Graph delta cursor reads have been observed, but descendant-change
+coverage and consistency latency remain unqualified; cursors and root timestamps
+are not used to bypass the complete comparison.
+
+Final execution waits `consistencyIntervalMs` (default **30000**, a configurable
+wait rather than a measured cloud-convergence guarantee) and completely
+re-inventories. It can make up to `settleMaxPasses` additional catch-up passes
+(default **3**) within the approved scope. A complete unchanged confirmation is
+required before full verification; exhaustion leaves cutover incomplete. New
+paths or deletions outside the approved preview require a new revision. Settling
+does not expand deletion authority: the original authorization and cumulative
+limit remain in force across final catch-up passes.
+The 30-second default exceeds the rehearsal's observed 24-second copy-to-verify
+race; it is a conservative polling interval, not a qualified upper bound on
+provider consistency. The repeated complete comparisons, not the delay alone,
+establish observed quiescence.
+
+`deltaVerification = "changed"` selects explicitly labelled **partial proof** for
+intermediate deltas, naming the last successfully verified baseline revision and
+covered paths. Failed or unverified revisions do not advance that baseline.
+Reuse also requires the same source and destination roots, expanded exclusions,
+OneNote policy and content-verification mode. A repointed mapping, changed scope
+or older evidence without that binding falls back to full verification.
+Prestage, missing baselines and final revisions always use full verification;
+`"full"` remains the default. Verification scope is separate from opting into
+`verificationMode = "size_only"` and its degraded-content finding.
+
+The web **plan** stage offers **Make final cutover plan**; final approval asks
+who froze the source, when (a timestamp with timezone), and how. This durable
+attestation is a human assertion, **not an automatic tenant lock**. Observed
+quiet and verification do not by themselves prove exact cutover parity.
+Omissions, retained destination-only content and accepted exceptions continue to
+qualify the report even with a freeze.
 
 ### Acting Google account
 
@@ -195,6 +276,48 @@ to create may coexist in one manifest. Members apply only to drives the job
 creates; types are `user` or `group`, and roles are `organizer`, `fileOrganizer`,
 `writer`, `commenter`, or `reader`. `anyone` and `domain` refuse at load, naming
 the row and `members.N.type`. Emails are case-insensitive and duplicates refuse.
+
+**Member grant timing.**
+
+File jobs bind `[options] memberGrants` into the approved plan. Unstaged jobs
+default to `"before_copy"` (unchanged); staged jobs default to
+`"after_verification"`. Either default can be explicitly overridden:
+
+```toml
+[options]
+staged = true
+memberGrants = "after_verification" # or "before_copy"
+```
+
+Plan and report disclose the effective mode beside Mirror and Copy concurrency.
+With `before_copy`, execute creates drives and grants manifest members before
+copying. With `after_verification`, execute creates drives and copies without
+granting manifest members; `status.memberGrants` stays empty through execution.
+A verified prestage or intermediate delta does not grant access.
+
+Verify, review the pre-close report, and explicitly accept any blocking findings
+before confirming `close`. For staged jobs, the latest revision must also be final,
+settled and fully verified. Close is the go-live authorization: it durably fences
+further copy/mirror work for each affected drive **before the first grant request**,
+grants the approved members, checks membership and destination-content/permission
+drift, and writes timestamped grant evidence and the final report before closing.
+
+If close fails or is interrupted, repeat `close` to resume grants, checks and
+reporting, not transfers. **Some access may already exist after a failed close.**
+Resolve membership or destination drift manually; another copy/mirror pass against
+an affected drive is not a recovery path. Go-live is not successful until its
+post-grant checks pass.
+`execute` against a fenced drive refuses `go_live_started` (exit 4). The short
+destination drift check compares file paths, sizes, stored hashes and IDs plus
+folder paths with verification; it is not another content download or a guarantee
+against later writes. Its permission check covers explicit drive membership, not
+inherited permissions or effective group membership.
+
+In either mode, plan/report warn that mirror can overwrite or delete existing
+writers' files. Deferring manifest grants does not revoke or exclude external
+access, administrators, existing drive members or members of pre-populated groups.
+The acting account needs organizer access; restricting other access is an operator
+precondition, not a Migmate isolation guarantee.
 
 For existing destinations, CSV accepts this exact seven-column header:
 
@@ -414,9 +537,10 @@ error rather than deleting; other mappings continue. Copy mode remains available
 
 Mirror runs rclone `sync/sync`; exceeding the limit fails that mapping with
 rclone's error without deleting beyond the cap, while other mappings continue.
-Deletions already within the cap are not rolled back; retries have a fresh
-per-pass cap. For a repeat pass after source changes, run `plan`, approve its new
-digest, then `execute` and `verify`; replaying a completed revision skips its passes.
+Deletions already within the cap are not rolled back; ordinary retries have a fresh
+per-pass cap, while final settle catch-up passes share the original cumulative
+deletion authorization. For a repeat pass after source changes, run `plan`, approve
+its new digest, then `execute` and `verify`; replaying a completed revision skips its passes.
 A successful mirror removes leftovers, so verification reports no
 `destination_only_retained` for an unchanged source/destination after the pass.
 Verification still reports any leftovers it actually observes (for example,
@@ -590,7 +714,7 @@ Exit codes are meaningful: `0` success, `1` internal defect or an unmappable cod
 
 Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Text mode prompts only when stdin and stderr are terminals and those two flags were not both given; the prompt has no default answer and accepts only `yes`, so an agent can never approve a plan by accident.
 
-Agents working in this repo have a skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone.
+Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone. It leads numbered decision rounds from scope through staged cutover, report acceptance, close-time go-live and cleanup, with credential, route, finding and refusal references disclosed on demand.
 
 ## Development
 
