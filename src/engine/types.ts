@@ -317,6 +317,10 @@ export interface FileItemRow extends RowBase {
   jobType: "file_migration";
   mappingId: string;
   sourceItemId: string;
+  sourceWebUrl: string | null;
+  sourcePackageSections: number | null;
+  omissionReason: string | null;
+  nextStep: string | null;
   relativePath: string;
   size: number | null;
   destinationFileId: string | null;

@@ -39,6 +39,7 @@ interface Mapping {
 interface GraphItem {
   id: string;
   name: string;
+  webUrl?: string;
   size?: number;
   eTag?: string;
   cTag?: string;
@@ -47,7 +48,7 @@ interface GraphItem {
   parentReference?: { id?: string; driveId?: string; path?: string };
   file?: { mimeType?: string; hashes?: Record<string, string> };
   folder?: { childCount?: number };
-  package?: unknown;
+  package?: { type?: string };
   remoteItem?: unknown;
   malware?: unknown;
   fileSystemInfo?: Record<string, unknown>;
@@ -274,7 +275,7 @@ export class FileEffects {
     }
   }
 
-  #source(raw: GraphItem, driveId: string): SourceEntry {
+  async #source(raw: GraphItem, driveId: string): Promise<SourceEntry> {
     if (this.#sourceDrive.has(raw.id) && this.#sourceDrive.get(raw.id) !== driveId)
       throw new ProviderFault(
         "preflight_failed",
@@ -290,12 +291,44 @@ export class FileEffects {
           : raw.file && !raw.malware
             ? "file"
             : "undownloadable";
+    let packageSections: number | null = null;
+    if (kind === "package" && raw.package?.type === "oneNote") {
+      packageSections = 0;
+      // Section groups are folders inside the notebook and nest; the recycle bin
+      // holds deleted sections, which are not part of the notebook.
+      const folders = [raw.id];
+      while (folders.length) {
+        const folderId = folders.pop()!;
+        for await (const children of cursorPages(
+          `/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(folderId)}/children?$top=200&$select=id,name,file,folder`,
+          async (cursor) => {
+            const page = await this.#graph.request<{
+              value: GraphItem[];
+              "@odata.nextLink"?: string;
+            }>(cursor!);
+            return { value: page.value, next: page["@odata.nextLink"] };
+          },
+          () =>
+            new ProviderFault(
+              "provider_request_failed",
+              "Notebook section paging repeated a cursor.",
+            ),
+        )) {
+          for (const child of children) {
+            if (child.file && child.name.endsWith(".one")) packageSections++;
+            else if (child.folder && child.name !== "OneNote_RecycleBin") folders.push(child.id);
+          }
+        }
+      }
+    }
     return {
       id: raw.id,
       driveId,
       parentId: raw.parentReference?.id ?? null,
       name: raw.name,
       kind,
+      webUrl: raw.webUrl ?? null,
+      packageSections,
       size: kind === "file" ? (raw.size ?? null) : null,
       etag: raw.eTag ?? null,
       createdAt: raw.createdDateTime ?? "",
@@ -333,6 +366,8 @@ export class FileEffects {
       parentId: raw.parents?.[0] ?? null,
       name: raw.name,
       kind,
+      webUrl: null,
+      packageSections: null,
       size: raw.size === undefined ? null : Number(raw.size),
       etag: raw.headRevisionId ?? null,
       createdAt: raw.createdTime,
@@ -447,7 +482,7 @@ export class FileEffects {
       const item = await this.#graph.request<GraphItem>(
         `/v1.0/drives/${encodeURIComponent(input.driveId)}/items/${encodeURIComponent(input.itemId)}?$expand=listItem($expand=fields)`,
       );
-      return await this.#sourceMetadata(this.#source(item, input.driveId));
+      return await this.#sourceMetadata(await this.#source(item, input.driveId));
     } catch (error) {
       if (error instanceof HttpProviderFault && error.status === 404) return null;
       throw error;
@@ -802,7 +837,8 @@ export class FileEffects {
       },
       () => new ProviderFault("provider_request_failed", "Source paging repeated a cursor."),
     )) {
-      for (const raw of page) items.push(await this.#sourceMetadata(this.#source(raw, driveId)));
+      for (const raw of page)
+        items.push(await this.#sourceMetadata(await this.#source(raw, driveId)));
     }
     return items;
   }

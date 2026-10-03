@@ -295,6 +295,9 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
       if (!current) throw new ProviderFault("provider_failed", "The transfer worker is absent.");
       return { socketPath: current.socketPath, ...(await (await files()).resolveFilePass(value)) };
     },
+    async listFolders(value) {
+      return (await state()).worker.listFolders(value);
+    },
     async listFileHashes(value) {
       return (await state()).worker.listFileHashes(value);
     },

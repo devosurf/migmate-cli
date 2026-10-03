@@ -107,6 +107,8 @@ flowchart LR
 
 `init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any finding is unaccepted.
 
+For file verification, a source that changed between copy and verify can raise three findings for one path: `source_size_inconsistent`, `size_mismatch`, and `content_mismatch`. `sourceSize` reports the size actually compared with `destinationSize`; when the listing contradicts served bytes, `listedSize` preserves the listing and the inconsistency finding also carries `servedSize`. The dependent size and content findings carry `cause: "source_size_inconsistent"` so they can be reviewed together. All three still block `close` until explicitly accepted; accepting the cause alone does not accept the other findings.
+
 File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member, or an approved excluded item moving outside that subtree within the mapping, requires replanning before any copy starts. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
 
 ### Acting Google account
@@ -344,6 +346,26 @@ timestamp-checked name recovery); a null drive ID is an unresolved creation inte
 memberships are neither managed nor verified. Provisioning is covered by fake
 provider and HTTP-transport contracts; this does not claim a live tenant run.
 
+### OneNote notebooks
+
+`[options] oneNoteNotebooks = "omit"` is the default. Each omitted notebook's
+`source_package_omitted` finding in the plan and verification records its SharePoint
+link, section count, reason and manual next step; paged review displays those facts.
+Open the source in OneNote for Windows → File → Export → Notebook (`.onepkg`) or PDF,
+then upload the export to the destination drive.
+
+Set `[options] oneNoteNotebooks = "copy"` to copy notebooks as folders of section
+files. The notebook receives the nonblocking `source_package_copied_as_files`
+policy outcome; its files use ordinary copy, delta, mirror and hash verification.
+Other package types remain omitted. `"copy"` refuses on the reverse route with
+`configuration_invalid`, field `options.oneNoteNotebooks`.
+
+The plan and report disclose a **read-only reference copy**, not a working notebook
+in Google. Download the whole folder and open `Open Notebook.onetoc2` in OneNote for
+Windows. It does not open on Mac or in Drive. Editing through Drive for desktop is
+unsafe: notebooks must sync through OneNote itself, not a file-sync client.
+“Read-only” describes the intended use, not a Drive permission enforced by Migmate.
+
 ### File mapping copies and recovery
 
 Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying.
@@ -365,6 +387,8 @@ Ctrl-C stops active passes cooperatively, returns exit **130**, and leaves the j
 The web view's **execute** and **status** stages show each mapping's pass number, state, bytes, files, speed, error count, and failure message. Pending passes show unknown statistics until rclone reports them; earlier attempts remain visible alongside resumed passes.
 
 rclone copies empty folders and preserves supported created/modified times and Google Drive content type through metadata; created time on Drive applies to fresh uploads. Folders receive modification times only: rclone v1.75.0's Drive backend applies a folder's source content type (SharePoint reports `inode/directory`) to the folder it creates, which makes a 0-byte file instead of a folder, so the worker never writes folder metadata. Owner, permission and label metadata are off. SharePoint roots are paths inside a drive pinned by id, never SharePoint `root_folder_id`; per-mapping connection overrides reuse the operator's two remotes. Copy never deletes: renamed or removed source files can leave destination-only files, reported nonblockingly by verification.
+
+On both file routes, verification checks that every expected folder exists at the destination, including empty folders, in both hash and size-only modes. A missing folder raises blocking `destination_missing`; a file at its path raises blocking `destination_type_conflict`, rather than the nonblocking `destination_only_retained`. Excluded and omitted folders and their descendants are outside this check. File and folder metadata are not verified.
 
 #### Mirror for job-created drives
 

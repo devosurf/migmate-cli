@@ -14,6 +14,17 @@ function actionForm(action: string, label: string, disabled: boolean, fields = "
   return `<form data-action="${action}"><fieldset${disabled ? " disabled" : ""}>${fields}<button type="submit">${escapeHtml(label)}</button></fieldset></form>`;
 }
 
+function sourceLink(value: string | null): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return `<small><a href="${escapeHtml(value)}" rel="noopener noreferrer">Open source notebook</a></small>`;
+  } catch {
+    return "";
+  }
+}
+
 /** Both row variants have one paging/filtering surface; only cells differ. */
 function reviewTable(page: RowPage | null, query: ViewQuery): string {
   if (!page) return "<p>No row evidence is available yet.</p>";
@@ -21,11 +32,11 @@ function reviewTable(page: RowPage | null, query: ViewQuery): string {
   const cells = (row: Row): string => {
     const identity =
       row.jobType === "file_migration"
-        ? `<strong>${escapeHtml(row.relativePath)}</strong><small>Mapping ${escapeHtml(row.mappingId)} · Source ${escapeHtml(row.sourceItemId)}<br>Destination ${escapeHtml(row.destinationFileId ?? "not committed")}</small>`
+        ? `<strong>${escapeHtml(row.relativePath)}</strong><small>Mapping ${escapeHtml(row.mappingId)} · Source ${escapeHtml(row.sourceItemId)}<br>Destination ${escapeHtml(row.destinationFileId ?? "not committed")}</small>${row.sourcePackageSections !== null && row.kind === "planned_omission" ? sourceLink(row.sourceWebUrl) : ""}`
         : `<strong>${escapeHtml(row.conversationId)}</strong><small>Scope entry ${escapeHtml(row.scopeEntryId)}</small>`;
     const evidence =
       row.jobType === "file_migration"
-        ? `${row.size === null ? "size unknown" : `${escapeHtml(row.size)} bytes`}<small>Provenance: ${escapeHtml(row.provenanceState)}</small>`
+        ? `${row.size === null ? "size unknown" : `${escapeHtml(row.size)} bytes`}<small>Provenance: ${escapeHtml(row.provenanceState)}</small>${row.sourcePackageSections !== null ? `<small>${escapeHtml(row.sourcePackageSections)} sections</small>` : ""}${row.omissionReason ? `<small>${escapeHtml(row.omissionReason)}</small>` : ""}${row.nextStep ? `<small>Next step: ${escapeHtml(row.nextStep)}</small>` : ""}`
         : `${escapeHtml(row.records)} records · ${escapeHtml(row.assets)} assets<small>Watermark: ${escapeHtml(row.watermark ?? "not collected")}</small>`;
     return `<tr data-code="${escapeHtml(row.code)}"><td>${identity}</td><td><code>${escapeHtml(row.code)}</code><small>${escapeHtml(row.kind)}</small></td><td>${evidence}</td><td>${row.accepted ? "Accepted exception — still disclosed" : "Not accepted"}</td></tr>`;
   };

@@ -1835,6 +1835,10 @@ class StoreImpl implements Store {
         revision: revision ?? 0,
         mappingId: mapping.id,
         sourceItemId: mapping.sourceItemId,
+        sourceWebUrl: null,
+        sourcePackageSections: null,
+        omissionReason: null,
+        nextStep: null,
         relativePath: mapping.sourceFolderPath ?? ".",
         size: null,
         destinationFileId: mapping.destFolderId ?? null,
@@ -1973,6 +1977,7 @@ class StoreImpl implements Store {
           : [],
       );
       const rows: Row[] = page.map((row) => {
+        const evidence = table === "item" ? rowToCommit("item", row) : null;
         const base = {
           id: String(row.id),
           code: String(row.code),
@@ -1987,6 +1992,17 @@ class StoreImpl implements Store {
               jobType: "file_migration",
               mappingId: String(row.mapping_id),
               sourceItemId: String(row.source_item_id),
+              sourceWebUrl:
+                evidence?.jobType === "file_migration"
+                  ? (evidence.sourceEvidence?.webUrl ?? null)
+                  : null,
+              sourcePackageSections:
+                evidence?.jobType === "file_migration"
+                  ? (evidence.sourceEvidence?.packageSections ?? null)
+                  : null,
+              omissionReason:
+                evidence?.jobType === "file_migration" ? (evidence.omissionReason ?? null) : null,
+              nextStep: evidence?.jobType === "file_migration" ? (evidence.nextStep ?? null) : null,
               relativePath: String(row.relative_path),
               size: nullableNumber(row.size),
               destinationFileId: nullableString(row.dest_file_id),

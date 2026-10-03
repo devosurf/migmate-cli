@@ -842,6 +842,23 @@ export function createTransferSupervisor(options: {
 
   return {
     proveBinary,
+    async listFolders({ socketPath, root }) {
+      const listing = await authenticated(owned(socketPath), "operations/list", {
+        fs: root.fs,
+        remote: "",
+        opt: { recurse: true, dirsOnly: true, noModTime: true, noMimeType: true },
+      });
+      if (!record(listing) || !Array.isArray(listing.list))
+        throw fail("provider_failed", "worker_response_invalid");
+      return listing.list
+        .map((folder: unknown) => {
+          if (!record(folder) || typeof folder.Path !== "string" || folder.IsDir !== true)
+            throw fail("provider_failed", "worker_response_invalid");
+          return folder.Path;
+        })
+        .filter((path: string) => path !== "" && path !== ".")
+        .sort();
+    },
     async listFileHashes({ socketPath, root, hashType, download }) {
       const worker = owned(socketPath);
       const listing = await authenticated(worker, "operations/list", {

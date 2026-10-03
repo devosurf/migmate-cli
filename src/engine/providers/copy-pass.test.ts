@@ -359,6 +359,36 @@ it(
 );
 
 it(
+  "lists nested and empty folders without files or the mapping root",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-folders-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const root = join(directory, "tree");
+      await mkdir(join(root, "a", "b"), { recursive: true });
+      await mkdir(join(root, "e"));
+      await writeFile(join(root, "a", "f.txt"), "file");
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      assert.deepEqual(
+        await supervisor.listFolders({
+          socketPath: worker.socketPath,
+          root: { fs: root, kind: "local" },
+        }),
+        ["a", "a/b", "e"],
+      );
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
   "lists relative paths, sizes and requested hashes, downloading hashes absent from the remote",
   { skip: !enabled },
   async () => {

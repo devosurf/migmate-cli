@@ -43,6 +43,8 @@ export interface FakeSourceItemFixture {
   mimeType?: string | null;
   identity?: string;
   downloadable?: boolean;
+  webUrl?: string | null;
+  packageSections?: number | null;
   metadata?: Record<string, unknown>;
   content?: Uint8Array | string;
 }
@@ -214,6 +216,13 @@ async function readAll(content: Uint8Array | AsyncIterable<Uint8Array>): Promise
   return bytes;
 }
 
+function sourceDirectory(entry: SourceEntry | DestinationEntry): boolean {
+  return (
+    entry.kind === "folder" ||
+    (entry.kind === "package" && "packageSections" in entry && entry.packageSections !== null)
+  );
+}
+
 function cloneSource(entry: MutableSourceEntry): SourceEntry {
   return {
     id: entry.id,
@@ -228,6 +237,8 @@ function cloneSource(entry: MutableSourceEntry): SourceEntry {
     mimeType: entry.mimeType,
     identity: entry.identity,
     downloadable: entry.downloadable,
+    webUrl: entry.webUrl,
+    packageSections: entry.packageSections,
     ...(entry.metadata ? { metadata: structuredClone(entry.metadata) } : {}),
   };
 }
@@ -917,7 +928,7 @@ export class FakeFileMigrationPort implements ProviderPort {
         if (!child) continue;
         const path = `${prefix}${child.name}`;
         result.set(path, child);
-        if (child.kind === "folder") visit(child.id, `${path}/`);
+        if (sourceDirectory(child)) visit(child.id, `${path}/`);
       }
     };
     visit(root, "");
@@ -997,7 +1008,7 @@ export class FakeFileMigrationPort implements ProviderPort {
         const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
         const parentId = parents.get(parentPath)!;
         const existing = destination.get(path);
-        if (entry.kind === "folder") {
+        if (sourceDirectory(entry)) {
           if (existing && existing.kind !== "folder") throw new Error(`not a directory: ${path}`);
           const folder =
             existing ??
@@ -1106,12 +1117,21 @@ export class FakeFileMigrationPort implements ProviderPort {
     };
   }
 
+  async listFolders(input: Parameters<ProviderPort["listFolders"]>[0]): Promise<string[]> {
+    this.assertPassWorker(input.socketPath);
+    this.throwRetryAfter("listFolders", input.root.fs);
+    return [...this.tree(input.root.fs)]
+      .filter(([, entry]) => sourceDirectory(entry))
+      .map(([path]) => path)
+      .sort();
+  }
+
   async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFileHashes", input.root.fs);
     const hashes: FileHashEntry[] = [];
     for (const [path, entry] of this.tree(input.root.fs)) {
-      if (entry.kind === "folder") continue;
+      if (sourceDirectory(entry)) continue;
       const unreadable =
         input.download &&
         (entry.content === null ||
@@ -1252,6 +1272,8 @@ export class FakeFileMigrationPort implements ProviderPort {
       mimeType: fixture.mimeType ?? null,
       identity: fixture.identity ?? fixture.id,
       downloadable: fixture.downloadable ?? fixture.kind !== "undownloadable",
+      webUrl: fixture.webUrl ?? null,
+      packageSections: fixture.packageSections ?? null,
       content: bytes,
       ...(fixture.metadata ? { metadata: structuredClone(fixture.metadata) } : {}),
     };
