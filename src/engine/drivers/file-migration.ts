@@ -455,6 +455,26 @@ function sourceOmission(source: SourceView): string | null {
   }
   return null;
 }
+function expectedDestinationFolders(
+  sources: SourceView[],
+  excluded: ReadonlyMap<string, string>,
+): Map<string, SourceView> {
+  const omittedPaths = sources
+    .filter((source) => excluded.has(source.id) || sourceOmission(source) !== null)
+    .map((source) => source.path);
+  return new Map(
+    sources
+      .filter(
+        (source) =>
+          source.kind === "folder" &&
+          source.path !== "." &&
+          !omittedPaths.some(
+            (path) => path === "." || source.path === path || source.path.startsWith(`${path}/`),
+          ),
+      )
+      .map((source) => [source.path, source]),
+  );
+}
 
 function metadataOmissions(ctx: FileContext, phase: Phase, source: SourceView): CommitFinding[] {
   const evidence = sourceEvidence(source);
@@ -951,8 +971,49 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         ++done,
       );
     }
+    const expectedFolders = expectedDestinationFolders(sources, excluded);
+    const destinationFolders = new Set(
+      await ctx.provider.listFolders({
+        socketPath: pass.socketPath,
+        root: pass.destination,
+      }),
+    );
+    for (const [path, source] of expectedFolders) {
+      const destination = destinationHashes.get(path);
+      if (!destination && destinationFolders.has(path)) continue;
+      const code = destination ? "destination_type_conflict" : "destination_missing";
+      const evidence = row(ctx, "verify", mapping, source, code);
+      evidence.destinationDriveId = mapping.destDriveId ?? null;
+      evidence.destinationFileId = destination?.id ?? null;
+      const stored =
+        destination?.hash === null ? (destinationMd5.get(path) ?? destination) : destination;
+      evidence.destinationFingerprint = stored?.hash ?? null;
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        [
+          finding(
+            ctx,
+            "verify",
+            code,
+            source.id,
+            destination
+              ? {
+                  path,
+                  ...(destination.id ? { destinationId: destination.id } : {}),
+                  destinationSize: destination.size,
+                  destinationHash: stored?.hash ?? null,
+                }
+              : { path, itemType: "folder" },
+          ),
+        ],
+        "folder-verification",
+        ++done,
+      );
+    }
     for (const destination of destinationHashes.values()) {
-      if (sourceHashes.has(destination.path)) continue;
+      if (sourceHashes.has(destination.path) || expectedFolders.has(destination.path)) continue;
       const source: SourceView = {
         ...sources[0]!,
         id: `destination:${destination.path}`,

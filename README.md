@@ -366,6 +366,8 @@ The web view's **execute** and **status** stages show each mapping's pass number
 
 rclone copies empty folders and preserves supported created/modified times and Google Drive content type through metadata; created time on Drive applies to fresh uploads. Folders receive modification times only: rclone v1.75.0's Drive backend applies a folder's source content type (SharePoint reports `inode/directory`) to the folder it creates, which makes a 0-byte file instead of a folder, so the worker never writes folder metadata. Owner, permission and label metadata are off. SharePoint roots are paths inside a drive pinned by id, never SharePoint `root_folder_id`; per-mapping connection overrides reuse the operator's two remotes. Copy never deletes: renamed or removed source files can leave destination-only files, reported nonblockingly by verification.
 
+On both file routes, verification checks that every expected folder exists at the destination, including empty folders, in both hash and size-only modes. A missing folder raises blocking `destination_missing`; a file at its path raises blocking `destination_type_conflict`, rather than the nonblocking `destination_only_retained`. Excluded and omitted folders and their descendants are outside this check. File and folder metadata are not verified.
+
 #### Mirror for job-created drives
 
 Copy is the default, including repeat passes. To remove destination-only files,
