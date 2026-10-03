@@ -408,6 +408,148 @@ async function provisioningHarness(
   return h;
 }
 
+function notebookFixture(): FakeFileMigrationFixture {
+  return fileFixture([
+    {
+      id: "notebook",
+      parentId: "source-root",
+      name: "Notes",
+      kind: "package",
+      webUrl: "https://example.sharepoint.com/Notes",
+      packageSections: 1,
+    },
+    {
+      id: "section",
+      parentId: "notebook",
+      name: "Section.one",
+      kind: "file",
+      content: "section bytes",
+    },
+    {
+      id: "toc",
+      parentId: "notebook",
+      name: "Open Notebook.onetoc2",
+      kind: "file",
+      content: "table of contents",
+    },
+    { id: "other-package", parentId: "source-root", name: "Other", kind: "package" },
+  ]);
+}
+
+describe("OneNote notebook policy", () => {
+  it("makes default omissions actionable in plan, verification and report", async (t) => {
+    const h = await harness(t, notebookFixture());
+    await approve(h);
+    assert.equal((await codes(h, "plan")).get("notebook"), "source_package_omitted");
+    assert.equal((await codes(h, "plan")).has("section"), false);
+    for (const phase of ["plan", "verify"]) {
+      if (phase === "verify") {
+        await execute(h);
+        value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      }
+      const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+      const json = JSON.parse(
+        await readFile(report.artifacts.find((a) => a.name === "report.json")!.path, "utf8"),
+      );
+      const evidence = json.findings.find(
+        (f: { phase: string; subjectId: string; code: string }) =>
+          f.phase === phase && f.subjectId === "notebook" && f.code === "source_package_omitted",
+      ).evidence;
+      assert.equal(evidence.webUrl, "https://example.sharepoint.com/Notes");
+      assert.equal(evidence.sectionCount, 1);
+      assert.equal(typeof evidence.reason, "string");
+      assert.equal(typeof evidence.nextStep, "string");
+      const other = json.findings.find(
+        (f: { phase: string; subjectId: string }) =>
+          f.phase === phase && f.subjectId === "other-package",
+      );
+      assert.equal(other.evidence.nextStep, null);
+    }
+    assert.deepEqual(
+      h.port.snapshotDestination().filter((entry) => entry.kind === "file"),
+      [],
+    );
+  });
+  it("copies notebook files, verifies their bytes, skips unchanged deltas and mirrors deleted sections", async (t) => {
+    const h = await provisioningHarness(t, notebookFixture(), {
+      oneNoteNotebooks: "copy",
+      mirror: true,
+      deleteLimit: 1,
+    });
+    assert.equal((await codes(h, "plan")).get("notebook"), "source_package_copied_as_files");
+    assert.equal((await codes(h, "plan")).get("other-package"), "source_package_omitted");
+    assert.equal((await codes(h, "plan")).get("section"), "created");
+    const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
+    assert.ok(plan.sections.some((section) => section.title === "OneNote notebooks"));
+    await execute(h);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    const notebook = (await h.port.listDestinationChildren(driveId)).find(
+      (e) => e.name === "Notes",
+    )!;
+    assert.equal(notebook.kind, "folder");
+    assert.deepEqual(
+      (await h.port.listDestinationChildren(notebook.id)).map((e) => [e.name, e.kind]).sort(),
+      [
+        ["Open Notebook.onetoc2", "file"],
+        ["Section.one", "file"],
+      ],
+    );
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal((await codes(h, "verify")).get("section"), "unchanged");
+    assert.notEqual((await codes(h, "verify")).get("notebook"), "source_package_omitted");
+    const section = (await h.port.listDestinationChildren(notebook.id)).find(
+      (e) => e.name === "Section.one",
+    )!;
+    h.port.mutateDestinationContent(section.id, "corrupt bytes");
+    const corrupt = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.ok(corrupt.findings.some((f) => f.code === "content_mismatch"));
+    h.port.mutateDestinationContent(section.id, "section bytes");
+    await approve(h);
+    await execute(h);
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).mappingPasses[0]?.lastStats?.files,
+      0,
+    );
+    h.port.deleteSourceItem("section");
+    await approve(h);
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.deepEqual(
+      (await h.port.listDestinationChildren(notebook.id)).map((e) => e.name),
+      ["Open Notebook.onetoc2"],
+    );
+    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    const json = JSON.parse(
+      await readFile(report.artifacts.find((a) => a.name === "report.json")!.path, "utf8"),
+    );
+    for (const sections of [plan.sections, json.sections]) {
+      const disclosure = sections.find((s: { title: string }) => s.title === "OneNote notebooks");
+      assert.ok(disclosure);
+      assert.match(disclosure.body, /read-only/);
+      assert.match(disclosure.body, /Open Notebook\.onetoc2/);
+      assert.match(disclosure.body, /unsafe/);
+    }
+  });
+
+  it("strictly validates notebook policy and refuses copy on the reverse route", async (t) => {
+    const h = await harness(t);
+    for (const oneNoteNotebooks of ["zip", true, null, "COPY", 1, "copy"]) {
+      const result = await h.engine.initJob({
+        type: "file_migration",
+        config: {
+          mappings: [],
+          route: "shared_drive_to_sharepoint_library",
+          options: { oneNoteNotebooks },
+        },
+      });
+      assert.equal(result.ok, false);
+      if (result.ok) throw new Error("Invalid notebook policy must refuse");
+      assert.equal(result.refusal.code, "configuration_invalid");
+      assert.deepEqual(result.refusal.detail, { field: "options.oneNoteNotebooks" });
+    }
+  });
+});
+
 describe("file migration through the engine", () => {
   it("refuses mirror on legacy created-drive records lacking provenance", async (t) => {
     const h = await provisioningHarness(t, fixture(), { mirror: true, deleteLimit: 2 });

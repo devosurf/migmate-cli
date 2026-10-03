@@ -346,6 +346,26 @@ timestamp-checked name recovery); a null drive ID is an unresolved creation inte
 memberships are neither managed nor verified. Provisioning is covered by fake
 provider and HTTP-transport contracts; this does not claim a live tenant run.
 
+### OneNote notebooks
+
+`[options] oneNoteNotebooks = "omit"` is the default. Each omitted notebook's
+`source_package_omitted` finding in the plan and verification records its SharePoint
+link, section count, reason and manual next step; paged review displays those facts.
+Open the source in OneNote for Windows → File → Export → Notebook (`.onepkg`) or PDF,
+then upload the export to the destination drive.
+
+Set `[options] oneNoteNotebooks = "copy"` to copy notebooks as folders of section
+files. The notebook receives the nonblocking `source_package_copied_as_files`
+policy outcome; its files use ordinary copy, delta, mirror and hash verification.
+Other package types remain omitted. `"copy"` refuses on the reverse route with
+`configuration_invalid`, field `options.oneNoteNotebooks`.
+
+The plan and report disclose a **read-only reference copy**, not a working notebook
+in Google. Download the whole folder and open `Open Notebook.onetoc2` in OneNote for
+Windows. It does not open on Mac or in Drive. Editing through Drive for desktop is
+unsafe: notebooks must sync through OneNote itself, not a file-sync client.
+“Read-only” describes the intended use, not a Drive permission enforced by Migmate.
+
 ### File mapping copies and recovery
 
 Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying.

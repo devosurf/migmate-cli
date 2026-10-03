@@ -18,6 +18,8 @@ export interface SourceEntry {
   mimeType: string | null;
   identity: string;
   downloadable: boolean;
+  webUrl: string | null;
+  packageSections: number | null;
   metadata?: Record<string, unknown>;
 }
 
