@@ -387,7 +387,7 @@ write_env MIGMATE_DESTINATION_FOLDER_ID_FILE "$MIGMATE_DESTINATION_FOLDER_ID_FIL
 pause "Press Enter once the folder share is complete."
 
 stage "rclone.conf"
-say "Migmate runs sequential rclone copy passes using these two remotes with per-mapping connection overrides. SharePoint is addressed by path within a drive pinned by id, never root_folder_id. Copies preserve supported timestamps and empty folders, with owner, permission and label metadata off."
+say "Migmate runs sequential rclone copy passes using these two remotes with per-mapping connection overrides. The remotes name no drive or folder: every pass supplies its mapping's approved roots. SharePoint is addressed by path within a drive pinned by id, never root_folder_id. Copies preserve supported timestamps and empty folders, with owner, permission and label metadata off."
 open_url "https://rclone.org/onedrive/"
 open_url "https://rclone.org/drive/"
 if ! confirm "Write the operator-owned rclone.conf now?"; then
@@ -405,15 +405,11 @@ client_secret = $MIGMATE_RCLONE_CLIENT_SECRET
 client_credentials = true
 tenant = $MIGMATE_TENANT_ID
 drive_type = documentLibrary
-drive_id = $MIGMATE_SOURCE_DRIVE_ID
-root_folder_id = $MIGMATE_MAPPING_ROOT_ITEM_ID
 
 [google-destination]
 type = drive
 scope = drive
 service_account_file = $MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE
-team_drive = $MIGMATE_SHARED_DRIVE_ID
-root_folder_id = $MIGMATE_DESTINATION_FOLDER_ID
 EOF
 chmod 600 "$MIGMATE_RCLONE_CONF_FILE"
 write_env MIGMATE_RCLONE_CONF_FILE "$MIGMATE_RCLONE_CONF_FILE"
@@ -574,10 +570,8 @@ if confirm "Set up a SharePoint destination app and reverse job config now?"; th
     unset MIGMATE_SP_DEST_SECRET
   fi
   chmod 600 "$MIGMATE_SP_DEST_SECRET_FILE"
-  note "Fetch a destination library's drive id with GET /sites/{site-id}/drives. Every mapping overrides it; the remote only needs a valid seed."
-  ask MIGMATE_SP_DEST_DRIVE_ID "Paste one destination document-library drive id:"
+  note "Each reverse mapping names its destination library's drive id (GET /sites/{site-id}/drives) in the manifest; the remote itself needs none."
   step "Add the acting Google account (the impersonation subject, or the service account when impersonation is off) as a member of every source Shared Drive. Preflight names each source drive it cannot read."
-  ask MIGMATE_REVERSE_SOURCE_DRIVE_ID "Paste one source Shared Drive id (seed only; every mapping overrides it):"
   MIGMATE_REVERSE_RCLONE_CONF_FILE="$PREREQ_DIR/rclone/reverse-rclone.conf"
   MIGMATE_SP_DEST_CLIENT_SECRET=$(<"$MIGMATE_SP_DEST_SECRET_FILE")
   cat > "$MIGMATE_REVERSE_RCLONE_CONF_FILE" <<EOF
@@ -585,8 +579,6 @@ if confirm "Set up a SharePoint destination app and reverse job config now?"; th
 type = drive
 scope = drive
 service_account_file = $MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE
-team_drive = $MIGMATE_REVERSE_SOURCE_DRIVE_ID
-root_folder_id = $MIGMATE_REVERSE_SOURCE_DRIVE_ID
 
 [sharepoint-destination]
 type = onedrive
@@ -595,7 +587,6 @@ client_secret = $MIGMATE_SP_DEST_CLIENT_SECRET
 client_credentials = true
 tenant = $MIGMATE_TENANT_ID
 drive_type = documentLibrary
-drive_id = $MIGMATE_SP_DEST_DRIVE_ID
 EOF
   unset MIGMATE_SP_DEST_CLIENT_SECRET
   chmod 600 "$MIGMATE_REVERSE_RCLONE_CONF_FILE"
@@ -624,8 +615,6 @@ EOF
   chmod 600 "$MIGMATE_REVERSE_JOB_CONFIG"
   write_env MIGMATE_SP_DEST_CLIENT_ID "$MIGMATE_SP_DEST_CLIENT_ID"
   write_env MIGMATE_SP_DEST_SECRET_FILE "$MIGMATE_SP_DEST_SECRET_FILE"
-  write_env MIGMATE_SP_DEST_DRIVE_ID "$MIGMATE_SP_DEST_DRIVE_ID"
-  write_env MIGMATE_REVERSE_SOURCE_DRIVE_ID "$MIGMATE_REVERSE_SOURCE_DRIVE_ID"
   write_env MIGMATE_REVERSE_RCLONE_CONF_FILE "$MIGMATE_REVERSE_RCLONE_CONF_FILE"
   write_env MIGMATE_REVERSE_JOB_CONFIG "$MIGMATE_REVERSE_JOB_CONFIG"
   note "Onboard it with: migmate init --type file_migration --config $MIGMATE_REVERSE_JOB_CONFIG, then load a manifest of google_shared_drive -> sharepoint mappings (README: Google Shared Drives to SharePoint)."

@@ -16,6 +16,12 @@ Read back the plan's acting account before approval, and hand the closing report
 open key/delegation deletion items to the administrator. With impersonation off,
 the service account acts as itself. See README's **Acting Google account**.
 
+The rclone remotes need no seed root. `drive_id`, `team_drive` and `root_folder_id`
+are optional because every pass overrides them with the approved mapping's roots;
+leave them out, especially when the manifest creates the destination drive. A value
+that is present must still be a stable ID or onboarding refuses
+`credential_config_invalid`.
+
 ### SharePoint source discovery
 
 Use exactly one source-app grant: `Sites.Selected` with a read grant per site for

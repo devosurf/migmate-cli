@@ -312,6 +312,10 @@ function iniKeys(section: Map<string, string>, keys: readonly string[]): void {
     throw refused("credential_backend_unsupported");
 }
 
+function seedRoots(section: Map<string, string>, keys: readonly string[]): void {
+  for (const key of keys) if (section.has(key)) stableId(section.get(key));
+}
+
 function setting(
   section: Map<string, string>,
   key: string,
@@ -587,9 +591,9 @@ async function loadCredentials(
           if (scopes.length !== 1 || !Object.hasOwn(FILE_ROLES, scopes[0]!))
             throw refused("credential_permissions_invalid");
         }
-        // Remote roots are seed settings. Every pass overrides them with approved mapping roots.
-        stableId(source.get("drive_id"));
-        if (source.has("root_folder_id")) stableId(source.get("root_folder_id"));
+        // Remote roots are optional seed settings: every pass overrides them with
+        // the approved mapping roots. A root the operator does set is still checked.
+        seedRoots(source, ["drive_id", "root_folder_id"]);
         const tenantId = guid(source.get("tenant"));
         const clientId = guid(source.get("client_id"));
         graph = { tenantId, clientId, secret: clientSecret(source.get("client_secret")) };
@@ -620,7 +624,7 @@ async function loadCredentials(
           if (scopes.join(" ") !== Object.keys(SHAREPOINT_DESTINATION_ROLES).sort().join(" "))
             throw refused("credential_permissions_invalid");
         }
-        stableId(sharepointDestination.get("drive_id"));
+        seedRoots(sharepointDestination, ["drive_id"]);
         graphDestination = {
           tenantId: guid(sharepointDestination.get("tenant")),
           clientId: guid(sharepointDestination.get("client_id")),
@@ -653,8 +657,7 @@ async function loadCredentials(
       setting(destination, "metadata_owner", "off");
       setting(destination, "metadata_permissions", "off");
       setting(destination, "metadata_labels", "off");
-      stableId(destination.get("team_drive"));
-      stableId(destination.get("root_folder_id"));
+      seedRoots(destination, ["team_drive", "root_folder_id"]);
       const serviceAccount = await readCredentialFile(
         fileReference({ resolver: "file", path: destination.get("service_account_file") }),
         jobDirectory,

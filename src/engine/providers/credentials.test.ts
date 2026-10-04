@@ -35,6 +35,7 @@ function serviceAccount(): string {
 async function operatorFiles(
   t: { after: (fn: () => Promise<unknown>) => void },
   sourceSection: string,
+  destinationRoots = `team_drive = ${mapping.destDriveId}\nroot_folder_id = ${mapping.destFolderId}\n`,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "migmate-credentials-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -43,7 +44,7 @@ async function operatorFiles(
   const configPath = join(directory, "rclone.conf");
   await writeFile(
     configPath,
-    `[sharepoint-source]\n${sourceSection}\n\n[google-destination]\ntype = drive\nscope = drive\nservice_account_file = ${keyPath}\nteam_drive = ${mapping.destDriveId}\nroot_folder_id = ${mapping.destFolderId}\n`,
+    `[sharepoint-source]\n${sourceSection}\n\n[google-destination]\ntype = drive\nscope = drive\nservice_account_file = ${keyPath}\n${destinationRoots}`,
     { mode: 0o600 },
   );
   const jobDirectory = await mkdtemp(join(tmpdir(), "migmate-job-"));
@@ -95,6 +96,49 @@ test("onboards the operator config rclone itself runs with", async (t) => {
   });
   await session.dispose();
   assert.equal(contactedProvider, false);
+});
+
+// Every pass overrides remote roots with the approved mapping's, so a seed root
+// is optional; when present it still has to be a stable ID.
+test("onboards rclone remotes that name no seed root", async (t) => {
+  const unrooted = source.filter((line) => !/^(drive_id|root_folder_id) /u.test(line)).join("\n");
+  const { jobDirectory, config } = await operatorFiles(t, unrooted, "");
+  const forward = await createCredentialSession({
+    jobType: "file_migration",
+    config,
+    jobDirectory,
+  });
+  await forward.dispose();
+  const reverse = await createCredentialSession({
+    jobType: "file_migration",
+    config: {
+      mappings: [{ ...mapping, sourceType: "google_shared_drive" }],
+      rclone: {
+        config: config.rclone.config,
+        destinationRemote: "google-destination",
+        sharepointDestinationRemote: "sharepoint-source",
+      },
+    },
+    jobDirectory,
+  });
+  await reverse.dispose();
+  for (const [sourceRoot, destinationRoot] of [
+    ["drive_id = root", ""],
+    ["root_folder_id = ..", ""],
+    ["", "team_drive = root\n"],
+    ["", "root_folder_id = .\n"],
+  ] as const) {
+    const malformed = await operatorFiles(t, [unrooted, sourceRoot].join("\n"), destinationRoot);
+    await assert.rejects(
+      createCredentialSession({
+        jobType: "file_migration",
+        config: malformed.config,
+        jobDirectory: malformed.jobDirectory,
+      }),
+      { code: "credential_config_invalid" },
+      `${sourceRoot || destinationRoot.trim()} must still be a stable ID`,
+    );
+  }
 });
 
 test("loads file credentials before mappings are supplied by a manifest", async (t) => {

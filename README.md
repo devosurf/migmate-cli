@@ -214,6 +214,10 @@ Preflight proves Google issues a subject token and `about.user.emailAddress` equ
 the configured subject; failures name the delegation fix. Migmate requests only the
 Drive scope and injects `impersonate` into each mapping's rclone connection string.
 Keep `impersonate` out of the operator's rclone config: its strict allowlist refuses it.
+The rclone remotes name no root either: `drive_id` (SharePoint), `team_drive` and
+`root_folder_id` are optional, because every pass overrides them with the approved
+mapping's roots. Leave them out, particularly when a manifest creates the destination
+drive; a value that is set must still be a stable ID.
 Plan and report show the acting account. The closing report leaves deleting the
 service-account key and deleting the delegation entry as open operator tasks;
 Migmate does not perform those administrative deletions. A manifest that creates

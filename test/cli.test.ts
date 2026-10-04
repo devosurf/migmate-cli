@@ -265,7 +265,7 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
   const rclonePath = join(h.home, "rclone.conf");
   writeFileSync(
     rclonePath,
-    `[sharepoint]\ntype = onedrive\nclient_id = ${clientId}\nclient_secret = test-secret\nclient_credentials = true\ntenant = ${tenantId}\ndrive_type = documentLibrary\ndrive_id = src-drive\n\n[google]\ntype = drive\nscope = drive\nservice_account_file = ${keyPath}\nteam_drive = dst-drive\nroot_folder_id = dst-root\n`,
+    `[sharepoint]\ntype = onedrive\nclient_id = ${clientId}\nclient_secret = test-secret\nclient_credentials = true\ntenant = ${tenantId}\ndrive_type = documentLibrary\n\n[google]\ntype = drive\nscope = drive\nservice_account_file = ${keyPath}\n`,
     { mode: 0o600 },
   );
   const config = {
