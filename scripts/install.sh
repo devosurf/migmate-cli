@@ -6,6 +6,8 @@
 # Installs one GitHub release into a versioned directory after checking it
 # against the release's SHA256SUMS, then writes a `migmate` launcher. Running it
 # again, or `migmate upgrade`, moves to the latest release; `--version X` pins one.
+# It also installs Migmate's agent skill for the coding agents it finds, asking
+# on the terminal the first time and refreshing the same places on upgrade.
 #
 # Environment:
 #   MIGMATE_INSTALL_DIR   install root  (default ~/.local/share/migmate-cli)
@@ -13,6 +15,9 @@
 #   MIGMATE_NODE          auto | system | bundled  (default auto: system Node when it
 #                         meets the release's floor and ships npm, else a private copy)
 #   MIGMATE_VERSION       release to install  (default latest)
+#   MIGMATE_SKILLS        ask | detected | none | agent ids such as claude,codex
+#                         (default: the recorded choice, else ask on a terminal,
+#                         else every detected agent); same as --skills
 #   MIGMATE_RELEASES_URL  release host  (default https://github.com/devosurf/migmate-cli/releases)
 #
 # Everything runs inside main, so a truncated download executes nothing.
@@ -27,7 +32,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--version X.Y.Z]
+Usage: install.sh [--version X.Y.Z] [--skills ask|detected|none|AGENT,...]
 
 Installs or upgrades Migmate from GitHub Releases. See the header of this
 script for the MIGMATE_* environment variables.
@@ -248,8 +253,235 @@ path_hint() {
   info "  echo 'export PATH=\"$bin_dir:\$PATH\"' >> $rc"
 }
 
+# Coding agents that load user-level Agent Skills, one per line as
+# id|name|presence directory|binary|skills root. Paths and the variables that
+# relocate them come from docs/research/agent-skill-directories.md. Most read the
+# shared ~/.agents/skills; Claude Code and a relocated Copilot CLI need their own.
+harness_table() {
+  shared=$HOME/.agents/skills
+  config=${XDG_CONFIG_HOME:-$HOME/.config}
+  claude=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  copilot_root=$shared
+  [ -z "${COPILOT_HOME-}" ] || copilot_root=$COPILOT_HOME/skills
+  cat <<EOF
+claude|Claude Code|$claude|claude|$claude/skills
+codex|Codex|${CODEX_HOME:-$HOME/.codex}|codex|$shared
+gemini|Gemini CLI|${GEMINI_CLI_HOME:-$HOME}/.gemini|gemini|${GEMINI_CLI_HOME:-$HOME}/.agents/skills
+opencode|OpenCode|$config/opencode|opencode|$shared
+pi|pi|${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}|pi|$shared
+omp|omp|$HOME/.omp|omp|$shared
+cursor|Cursor|$HOME/.cursor|cursor-agent|$shared
+copilot|GitHub Copilot CLI|${COPILOT_HOME:-$HOME/.copilot}|copilot|$copilot_root
+amp|Amp|$HOME/.config/amp|amp|$shared
+droid|Factory Droid|$HOME/.factory|droid|$shared
+goose|Goose|$config/goose|goose|$shared
+EOF
+}
+
+# harness ID FIELD: one field of the agent's row (2 name, 5 skills root).
+harness() {
+  harness_table | awk -F'|' -v id="$1" -v field="$2" '$1 == id { print $field }'
+}
+
+tilde() {
+  case $1 in
+    "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+has_terminal() {
+  (exec </dev/tty >/dev/tty) 2>/dev/null
+}
+
+# Sets detected to the ids of agents with a config directory or a binary on PATH.
+detect_harnesses() {
+  detected=
+  while IFS='|' read -r id name presence binary root; do
+    if [ -d "$presence" ] || command -v "$binary" >/dev/null 2>&1; then
+      detected="$detected $id"
+    fi
+  done <<EOF
+$(harness_table)
+EOF
+  detected=${detected# }
+}
+
+# Prints the unique agent ids named by a list of agent ids or numbers from the
+# detected list; fails on anything else, including an empty list.
+pick_harnesses() {
+  picked=
+  for token in $(printf '%s' "$1" | tr ',' ' '); do
+    case $token in
+      *[!0-9]*) id=$(harness "$token" 1) ;;
+      *) id=$( [ "$token" -gt 0 ] && printf '%s\n' $detected | sed -n "${token}p") ;;
+    esac
+    [ -n "$id" ] || return 1
+    case " $picked " in
+      *" $id "*) ;;
+      *) picked="$picked $id" ;;
+    esac
+  done
+  [ -n "$picked" ] || return 1
+  printf '%s' "${picked# }"
+}
+
+# Sets selected from a numbered prompt on the terminal; the installer's own
+# stdin may be the curl pipe. Enter accepts every detected agent.
+ask_harnesses() {
+  n=0
+  defaults=
+  {
+    printf '\nMigmate ships an agent skill that guides coding agents through a migration.\n'
+    printf 'Found these coding agents:\n'
+    for id in $detected; do
+      n=$((n + 1))
+      defaults="$defaults $n"
+      printf '  %d) %-19s %s/migmate\n' "$n" "$(harness "$id" 2)" "$(tilde "$(harness "$id" 5)")"
+    done
+  } >/dev/tty
+  while :; do
+    printf 'Install the skill for [%s]? Enter accepts, "none" skips: ' "${defaults# }" >/dev/tty
+    # End of input (Ctrl-D) declines rather than accepting the defaults.
+    IFS= read -r answer </dev/tty || answer=none
+    case $answer in
+      '') selected=$detected && return ;;
+      none | n | no) selected= && return ;;
+    esac
+    if selected=$(pick_harnesses "$answer"); then
+      return
+    fi
+    printf 'Pick numbers from the list, separated by spaces, or type none.\n' >/dev/tty
+  done
+}
+
+# owned PATH: nothing is there, or Migmate put it there.
+owned() {
+  if [ -L "$1" ]; then
+    [ "$(readlink "$1")" = "$HOME/.agents/skills/migmate" ]
+  else
+    [ ! -e "$1" ] || [ -f "$1/.migmate-installed" ]
+  fi
+}
+
+# place_skill SOURCE TARGET [LINK]: replace TARGET with a copy of SOURCE, or a
+# symlink to LINK, unless something Migmate did not install is already there.
+place_skill() {
+  if ! owned "$2"; then
+    printf 'migmate install: %s was not installed by Migmate; leaving it alone\n' "$(tilde "$2")" >&2
+    return 1
+  fi
+  mkdir -p "${2%/*}" || return 1
+  next=${2%/*}/.migmate-skill.$$
+  rm -rf "$next"
+  if [ -n "${3-}" ]; then
+    ln -s "$3" "$next" || return 1
+  elif ! { cp -R "$1" "$next" && printf '%s\n' "$version" >"$next/.migmate-installed"; }; then
+    rm -rf "$next"
+    return 1
+  fi
+  rm -rf "$2" && mv "$next" "$2"
+}
+
+# Installs the release's agent skill for the chosen agents and records the
+# choice, so upgrades refresh the same places without asking again. One copy
+# goes to the shared ~/.agents/skills; other roots link to it, because several
+# agents read both and warn about two copies.
+install_skill() {
+  skill=$install_dir/current/lib/node_modules/@devosurf/migmate/.agents/skills/migmate
+  record=$install_dir/agent-skill
+  if [ ! -f "$skill/SKILL.md" ]; then
+    info "Migmate $version ships no agent skill."
+    return
+  fi
+  detect_harnesses
+  choice=$skills
+  if [ -z "$choice" ]; then
+    if [ -f "$record" ]; then
+      choice=recorded
+    elif has_terminal; then
+      choice=ask
+    else
+      choice=detected
+    fi
+  fi
+  seen=$detected
+  case $choice in
+    recorded)
+      selected=$(sed -n 's/^harnesses //p' "$record")
+      seen=$(sed -n 's/^seen //p' "$record")
+      ;;
+    ask)
+      selected=
+      [ -z "$detected" ] || ask_harnesses
+      ;;
+    detected) selected=$detected ;;
+    none) selected= ;;
+    *) selected=$(pick_harnesses "$choice") ;;
+  esac
+
+  roots=$(for id in $selected; do harness "$id" 5; done |
+    awk -v shared="$HOME/.agents/skills" '!seen[$0]++ { if ($0 == shared) print; else rest = rest $0 "\n" }
+      END { printf "%s", rest }')
+  written=
+  link=
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    if place_skill "$skill" "$root/migmate" "$link"; then
+      written="$written
+$root/migmate"
+      [ "$root" != "$HOME/.agents/skills" ] || link=$root/migmate
+    fi
+  done <<EOF
+$roots
+EOF
+
+  if [ -f "$record" ]; then
+    while IFS= read -r old; do
+      case $old in /*) ;; *) continue ;; esac
+      if printf '%s\n' "$written" | grep -Fxq -- "$old"; then continue; fi
+      if { [ -e "$old" ] || [ -L "$old" ]; } && owned "$old"; then
+        rm -rf "$old"
+        info "Removed the agent skill from $(tilde "$old")."
+      fi
+    done <"$record"
+  fi
+
+  new=
+  for id in $detected; do
+    case " $seen " in
+      *" $id "*) ;;
+      *) new="$new, $(harness "$id" 2)" && seen="$seen $id" ;;
+    esac
+  done
+  {
+    printf 'harnesses %s\n' "$selected"
+    printf 'seen %s\n' "${seen# }"
+    printf '%s\n' "$written" | sed '/^$/d'
+  } >"$record.tmp.$$"
+  mv -f "$record.tmp.$$" "$record"
+
+  if [ -n "$written" ]; then
+    names=
+    for id in $selected; do names="$names, $(harness "$id" 2)"; done
+    info "Agent skill for ${names#, }:"
+    printf '%s\n' "$written" | sed '/^$/d' | while IFS= read -r path; do
+      info "  $(tilde "$path")"
+    done
+  elif [ "$choice" != recorded ] && [ -z "$detected" ]; then
+    info "Found no coding agent, so no agent skill was installed. Add it later with"
+    info "migmate upgrade --skills AGENT, AGENT being one of: $(harness_table | cut -d'|' -f1 | tr '\n' ' ')"
+  elif [ "$choice" != recorded ]; then
+    info "No agent skill installed. Add it later with: migmate upgrade --skills ask"
+  fi
+  if [ -n "$new" ] && [ "$choice" = recorded ]; then
+    info "Also found ${new#, }. Add the agent skill for it with: migmate upgrade --skills ask"
+  fi
+}
+
 main() {
   version=${MIGMATE_VERSION-}
+  skills=${MIGMATE_SKILLS-}
   while [ $# -gt 0 ]; do
     case "$1" in
       --version)
@@ -261,6 +493,15 @@ main() {
         version=${1#*=}
         shift
         ;;
+      --skills)
+        [ $# -ge 2 ] || fail "--skills needs a value"
+        skills=$2
+        shift 2
+        ;;
+      --skills=*)
+        skills=${1#*=}
+        shift
+        ;;
       -h | --help)
         usage
         return
@@ -270,6 +511,15 @@ main() {
   done
 
   [ -n "${HOME:-}" ] || fail "HOME is not set"
+  case $skills in
+    '' | detected | none) ;;
+    ask) has_terminal || fail "--skills ask needs a terminal" ;;
+    *)
+      detected=
+      pick_harnesses "$skills" >/dev/null ||
+        fail "--skills takes ask, detected, none, or agents from: $(harness_table | cut -d'|' -f1 | tr '\n' ' ')"
+      ;;
+  esac
   # Not ~/.migmate: Migmate treats the nearest .migmate directory as a job store.
   install_dir=${MIGMATE_INSTALL_DIR:-$HOME/.local/share/migmate-cli}
   bin_dir=${MIGMATE_BIN_DIR:-$HOME/.local/bin}
@@ -294,6 +544,7 @@ main() {
     [ -x "$(cat "$install_dir/current/.node")" ]; then
     write_launcher
     info "Migmate $version is already installed and current."
+    install_skill
     path_hint
     return
   fi
@@ -337,6 +588,7 @@ main() {
 
   info "Installed Migmate $version: $bin_dir/migmate"
   [ -z "$previous" ] || info "Previous version $previous is kept until the next upgrade."
+  install_skill
   path_hint
 }
 

@@ -1,6 +1,7 @@
 // Installer smoke: serves packed releases from 127.0.0.1 in GitHub's URL shape,
 // then drives scripts/install.sh and the launcher it writes through a fresh
-// install, upgrades, pruning, a tampered checksum, and a private Node runtime.
+// install, upgrades, pruning, a tampered checksum, a private Node runtime, and
+// the agent skill's install, refresh, removal and refusal to replace a user's own.
 // The private-runtime case downloads Node from nodejs.org.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -8,6 +9,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import {
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -29,6 +31,7 @@ interface Run {
 
 interface Install {
   installDir: string;
+  home: string;
   install(args?: string[]): Promise<Run>;
   migmate(args: string[]): Promise<Run>;
   current(): Promise<string | undefined>;
@@ -50,6 +53,7 @@ const version = String(manifest.version);
 const upgraded = `${version}.1`;
 const newest = `${version}.2`;
 const tampered = `${version}.tampered`;
+const skill = await readFile(join(root, ".agents", "skills", "migmate", "SKILL.md"), "utf8");
 
 // Async on purpose: the release server lives in this process.
 function run(file: string, args: string[], env: NodeJS.ProcessEnv): Promise<Run> {
@@ -129,17 +133,30 @@ try {
   function layout(name: string, nodeMode: "system" | "bundled"): Install {
     const installDir = join(temporary, name, "install");
     const binDir = join(temporary, name, "bin");
+    const home = join(temporary, name, "home");
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      HOME: join(temporary, name, "home"),
+      HOME: home,
       MIGMATE_INSTALL_DIR: installDir,
       MIGMATE_BIN_DIR: binDir,
       MIGMATE_NODE: nodeMode,
       MIGMATE_RELEASES_URL: releasesUrl,
       PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH ?? ""}`,
     };
+    // Agent roots stay inside the temporary HOME, whatever this host relocates.
+    for (const key of [
+      "MIGMATE_SKILLS",
+      "CLAUDE_CONFIG_DIR",
+      "CODEX_HOME",
+      "GEMINI_CLI_HOME",
+      "COPILOT_HOME",
+      "XDG_CONFIG_HOME",
+      "PI_CODING_AGENT_DIR",
+    ])
+      delete env[key];
     return {
       installDir,
+      home,
       install: (args = []) => run("sh", [installer, ...args], env),
       migmate: (args) => run(join(binDir, "migmate"), args, env),
       current: async () => (await readlink(join(installDir, "current"))).split("/").pop(),
@@ -168,14 +185,22 @@ try {
   }
 
   const system = layout("system", "system");
-  succeeded(await system.install(), "fresh install");
+  const shared = join(system.home, ".agents", "skills", "migmate");
+  const claude = join(system.home, ".claude", "skills", "migmate");
+  succeeded(await system.install(["--skills", "claude,codex"]), "fresh install");
   assert.equal(await system.current(), version);
   assert.equal(await system.node(), join(dirname(process.execPath), "node"));
+  assert.equal(await readFile(join(shared, "SKILL.md"), "utf8"), skill);
+  assert.ok((await lstat(claude)).isSymbolicLink(), "Claude Code links to the shared skill copy");
+  assert.equal(await readlink(claude), shared);
   await createsJob(system);
+  // The recorded choice refreshes a stale copy without asking.
+  await writeFile(join(shared, "SKILL.md"), "stale");
   assert.match(
     succeeded(await system.migmate(["upgrade"]), "upgrade when current"),
     /already installed and current/u,
   );
+  assert.equal(await readFile(join(shared, "SKILL.md"), "utf8"), skill);
 
   latest = upgraded;
   succeeded(await system.migmate(["upgrade"]), "first upgrade");
@@ -189,6 +214,7 @@ try {
     [upgraded, newest].sort(),
     "only the current and previous versions are kept",
   );
+  assert.equal((await readFile(join(shared, ".migmate-installed"), "utf8")).trim(), newest);
 
   const refused = await system.migmate(["upgrade", "--version", tampered]);
   assert.notEqual(refused.status, 0, "a tampered artifact must not install");
@@ -196,8 +222,24 @@ try {
   assert.equal(await system.current(), newest, "a refused upgrade leaves the install untouched");
   await createsJob(system);
 
+  // Choosing Claude Code alone turns its link into a copy and drops the shared one.
+  succeeded(await system.migmate(["upgrade", "--skills", "claude"]), "skill for Claude only");
+  assert.equal(existsSync(shared), false);
+  assert.ok((await lstat(claude)).isDirectory());
+  assert.equal(await readFile(join(claude, "SKILL.md"), "utf8"), skill);
+  succeeded(await system.migmate(["upgrade", "--skills", "none"]), "skill removal");
+  assert.equal(existsSync(claude), false);
+  succeeded(await system.migmate(["upgrade"]), "upgrade after removing the skill");
+  assert.equal(existsSync(claude), false, "a recorded none stays none");
+
   const bundled = layout("bundled", "bundled");
-  succeeded(await bundled.install(), "install with a private Node runtime");
+  const own = join(bundled.home, ".claude", "skills", "migmate");
+  await mkdir(own, { recursive: true });
+  await writeFile(join(own, "SKILL.md"), "the user's own skill");
+  const kept = await bundled.install(["--skills", "claude"]);
+  succeeded(kept, "install with a private Node runtime");
+  assert.match(kept.stderr, /was not installed by Migmate; leaving it alone/u);
+  assert.equal(await readFile(join(own, "SKILL.md"), "utf8"), "the user's own skill");
   assert.ok(
     (await bundled.node()).startsWith(join(bundled.installDir, "runtime")),
     "MIGMATE_NODE=bundled must use the private runtime",
@@ -206,7 +248,7 @@ try {
 
   console.log(
     `Installer smoke passed for ${process.platform}-${process.arch}: install, upgrade, prune, ` +
-      "checksum refusal, and private Node runtime.",
+      "checksum refusal, private Node runtime, and agent skill.",
   );
 } finally {
   server.close();

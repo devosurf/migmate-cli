@@ -35,14 +35,17 @@ The installer checks the platform, downloads the latest release (~117 MB, almost
 
 Update with `migmate upgrade`, or run the same one-liner again. The previous version stays on disk until the next upgrade, so a job still running from it keeps its files.
 
-| Setting                               | Default                      | Effect                                                             |
-| ------------------------------------- | ---------------------------- | ------------------------------------------------------------------ |
-| `--version X.Y.Z` / `MIGMATE_VERSION` | latest                       | Install or move to one release: `migmate upgrade --version X.Y.Z`  |
-| `MIGMATE_INSTALL_DIR`                 | `~/.local/share/migmate-cli` | Installed versions, any private Node, and the `current` link       |
-| `MIGMATE_BIN_DIR`                     | `~/.local/bin`               | Where the `migmate` launcher goes                                  |
-| `MIGMATE_NODE`                        | `auto`                       | `system` insists on your Node; `bundled` always uses a private one |
+The installer also installs Migmate's [agent skill](#driving-it-from-an-agent-or-ci) for the coding agents it finds: Claude Code, Codex, Gemini CLI, OpenCode, pi, omp, Cursor, GitHub Copilot CLI, Amp, Factory Droid and Goose, recognised by their config directory or binary. The first time, it lists them on the terminal (it reads the terminal, not the `curl` pipe); Enter accepts all of them, `none` or Ctrl-D declines. Without a terminal it takes every agent it found. It records the answer, and every upgrade refreshes the skill in the same places without asking again. One copy goes to `~/.agents/skills/migmate`, which most of these agents read. An agent with its own directory, such as Claude Code, gets a symlink to that copy, or a copy of its own when no agent reading the shared directory was chosen. A `migmate` skill the installer did not write is left alone. [docs/research/agent-skill-directories.md](docs/research/agent-skill-directories.md) records each agent's skill directory and its sources.
 
-Pass options through the pipe with `sh -s --`, for example `… | sh -s -- --version 0.1.0`. Uninstall with `rm -rf ~/.local/share/migmate-cli ~/.local/bin/migmate`; job stores live elsewhere and are left alone.
+| Setting                               | Default                      | Effect                                                                                                                     |
+| ------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `--version X.Y.Z` / `MIGMATE_VERSION` | latest                       | Install or move to one release: `migmate upgrade --version X.Y.Z`                                                          |
+| `--skills …` / `MIGMATE_SKILLS`       | recorded choice              | `ask`, `detected`, `none`, or agent ids such as `claude,codex`: `migmate upgrade --skills ask` changes the recorded choice |
+| `MIGMATE_INSTALL_DIR`                 | `~/.local/share/migmate-cli` | Installed versions, any private Node, the `current` link and the recorded skill choice                                     |
+| `MIGMATE_BIN_DIR`                     | `~/.local/bin`               | Where the `migmate` launcher goes                                                                                          |
+| `MIGMATE_NODE`                        | `auto`                       | `system` insists on your Node; `bundled` always uses a private one                                                         |
+
+Pass options through the pipe with `sh -s --`, for example `… | sh -s -- --version 0.1.0`. Uninstall with `migmate upgrade --skills none`, then `rm -rf ~/.local/share/migmate-cli ~/.local/bin/migmate`; job stores live elsewhere and are left alone.
 
 ### From source
 
@@ -718,7 +721,7 @@ Exit codes are meaningful: `0` success, `1` internal defect or an unmappable cod
 
 Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Text mode prompts only when stdin and stderr are terminals and those two flags were not both given; the prompt has no default answer and accepts only `yes`, so an agent can never approve a plan by accident.
 
-Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone. It leads numbered decision rounds from scope through staged cutover, report acceptance, close-time go-live and cleanup, with credential, route, finding and refusal references disclosed on demand.
+Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone; the [installer](#install) installs the same skill for the coding agents on the machine. It leads numbered decision rounds from scope through staged cutover, report acceptance, close-time go-live and cleanup, with credential, route, finding and refusal references disclosed on demand.
 
 ## Development
 

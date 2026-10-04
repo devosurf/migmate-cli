@@ -22,6 +22,7 @@
   "files": [
     "dist",
     "vendor",
+    ".agents/skills/migmate",
     "!vendor/**/*.zip",
     "!vendor/**/SHA256SUMS",
     "!vendor/**/*.sha256"
