@@ -120,11 +120,13 @@ and a replaced Office file and plain file); no credentialed run of it is claimed
 ### Staged migrations and cutover evidence
 
 `[options] staged = true` keeps prestage, ordinary delta revisions and an explicit
-`plan --final` revision in **one open job**. Decide mirror and `deleteLimit` before
-manifest load; a closed job is terminal and a replacement job does not inherit
-its mirror provenance. `close` refuses `cutover_incomplete` unless the latest
-revision is final, settled and fully verified; an earlier final result is not
-authority for a later revision.
+`plan --final` revision in **one open job**. Ordinary revisions are prestage until
+the job completes an execution and delta afterwards; an unapproved, unexecuted or
+interrupted earlier revision does not turn a replan into a delta. Decide mirror and
+`deleteLimit` before manifest load; a closed job is terminal and a replacement job
+does not inherit its mirror provenance. `close` refuses `cutover_incomplete` unless
+the latest revision is final, settled and fully verified; an earlier final result
+is not authority for a later revision.
 An approved staged revision permanently establishes that intent for the job,
 including after manifest reloads clear the current plan pointer.
 

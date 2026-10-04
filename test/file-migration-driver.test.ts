@@ -134,6 +134,25 @@ describe("staged cutover lifecycle", () => {
     assert.equal(stale.ok, false);
     if (!stale.ok) assert.equal(stale.refusal.code, "cutover_incomplete");
   });
+  it("labels ordinary revisions prestage until an execution completes", async (t) => {
+    const h = await harness(t, fixture(), {
+      ...config,
+      options: { staged: true, consistencyIntervalMs: 0 },
+    });
+    const plan = async () =>
+      value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan())).stage;
+    assert.equal(await plan(), "prestage");
+    assert.equal(await plan(), "prestage");
+    await approve(h);
+    const interrupted = await h.engine.withWriterResult(h.ref, (writer) =>
+      writer.execute({ signal: AbortSignal.abort() }),
+    );
+    assert.equal(value(interrupted).outcome, "interrupted");
+    assert.equal(await plan(), "prestage");
+    await approve(h);
+    await execute(h);
+    assert.equal(await plan(), "delta");
+  });
 });
 
 describe("destination folder verification", () => {

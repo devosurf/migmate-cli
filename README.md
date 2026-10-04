@@ -130,10 +130,13 @@ deltaVerification = "full" # or "changed" for intermediate partial proof
 ```
 
 1. Load the manifest, run `plan`, review and approve its digest, then `execute`
-   and `verify`. The initial revision is **prestage**; keep the job open.
+   and `verify`. Revisions are **prestage** until an execution completes, so
+   replanning before then (unapproved, approved or interrupted) stays prestage;
+   keep the job open.
 2. As the source changes, repeat `plan` → review → `approve` → `execute` → `verify`
-   in that same job. Ordinary later revisions are **delta**. Each plan lists
-   new, changed, unchanged and (for mirror) to-be-deleted paths with byte totals.
+   in that same job. Ordinary revisions after a completed execution are
+   **delta**. Each plan lists new, changed, unchanged and (for mirror)
+   to-be-deleted paths with byte totals.
    Review every deletion against its mapping's `deleteLimit`; an over-limit
    preview cannot be approved for execution. Copy retains destination-only paths.
    The preview predicts rclone actions; it is not content-equality proof.

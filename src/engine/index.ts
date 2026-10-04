@@ -2138,13 +2138,15 @@ function makeWriter(
           ready = await preflight(config, p);
         if (!ready.ok) return ready;
         const revision = store.nextPlanRevision();
+        // ADR-0012 A1: the destination is prestaged once an execution completes, so
+        // earlier unexecuted, unapproved or interrupted revisions do not make a delta.
         const stage =
           "mappings" in config && config.options?.staged
             ? input?.final
               ? ("final" as const)
-              : revision === 1
-                ? ("prestage" as const)
-                : ("delta" as const)
+              : job().executionCompleted
+                ? ("delta" as const)
+                : ("prestage" as const)
             : undefined;
         pendingStage = stage;
         const sourceInventoryAt = deps.now().toISOString();
