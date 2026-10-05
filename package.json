@@ -1,6 +1,6 @@
 {
   "name": "@devosurf/migmate",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Finite, one-way movement or preservation of organizational content",
   "license": "UNLICENSED",
   "type": "module",
