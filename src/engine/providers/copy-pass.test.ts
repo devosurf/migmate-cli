@@ -668,6 +668,55 @@ it(
 );
 
 it(
+  "stops a listing with no deadline when its signal aborts, and rclone drops the upstream request",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-list-abort-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    const upstreamClosed = Promise.withResolvers<void>();
+    // A listing the backend never answers: only cancellation can end it.
+    const server = createServer((request) => request.socket.once("close", upstreamClosed.resolve));
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const controller = new AbortController();
+      const listing = supervisor.listFolders({
+        socketPath: worker.socketPath,
+        root: { fs: `:http,url='http://127.0.0.1:${address.port}/':`, kind: "local" },
+        signal: controller.signal,
+      });
+      await delay(500);
+      controller.abort();
+      await assert.rejects(listing, { name: "AbortError" });
+      await Promise.race([
+        upstreamClosed.promise,
+        delay(5_000).then(() => assert.fail("rclone kept the cancelled listing running")),
+      ]);
+      const local = join(directory, "local");
+      await mkdir(join(local, "still-served"), { recursive: true });
+      assert.deepEqual(
+        await supervisor.listFolders({
+          socketPath: worker.socketPath,
+          root: { fs: local, kind: "local" },
+        }),
+        ["still-served"],
+      );
+    } finally {
+      await supervisor.close();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
   "previews with backend precision when it exceeds the configured modify window",
   { skip: !enabled },
   async () => {

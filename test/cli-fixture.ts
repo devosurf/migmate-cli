@@ -153,10 +153,10 @@ export class PersistentCliPort extends FakeFileMigrationPort {
     await this.persist();
     return stats;
   }
-  override async *openSourceContent(sourceItemId: string) {
+  override async *openSourceContent(input: { driveId: string; itemId: string }) {
     // Cross-process SIGINT/SIGKILL cannot be driven by an in-process fake clock.
     if (this.delayMs) await delay(this.delayMs);
-    yield* super.openSourceContent(sourceItemId);
+    yield* super.openSourceContent(input);
   }
   override async uploadDestinationContent(input: {
     destinationId?: string;

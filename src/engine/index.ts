@@ -362,6 +362,8 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         "deltaVerification",
         "consistencyIntervalMs",
         "settleMaxPasses",
+        "acceptedOmissions",
+        "proof",
       ],
       "options",
     );
@@ -418,12 +420,42 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         configError("options.deltaVerification");
       config.options.deltaVerification = options.deltaVerification;
     }
+    if (options.acceptedOmissions !== undefined) {
+      const codes = options.acceptedOmissions;
+      // Only omissions a plan can disclose before approval; verification gaps such as
+      // degraded proof still need acceptance of the verification that found them.
+      if (
+        !Array.isArray(codes) ||
+        new Set(codes).size !== codes.length ||
+        codes.some((code) => {
+          const registered = typeof code === "string" ? CODE_BY_NAME[code] : undefined;
+          return (
+            registered?.kind !== "planned_omission" ||
+            registered.phase !== "plan" ||
+            registered.jobType !== "file_migration"
+          );
+        })
+      )
+        configError("options.acceptedOmissions");
+      config.options.acceptedOmissions = [...codes].sort(compareText);
+    }
     for (const key of ["consistencyIntervalMs", "settleMaxPasses"] as const) {
       if (options[key] !== undefined) {
         if (!Number.isSafeInteger(options[key]) || Number(options[key]) < 0)
           configError(`options.${key}`);
         config.options[key] = Number(options[key]);
       }
+    }
+    if (options.proof !== undefined) {
+      if (options.proof !== "full" && options.proof !== "rclone") configError("options.proof");
+      config.options.proof = options.proof;
+    }
+    // rclone proof has no per-file inventory: options that need one cannot apply.
+    if (config.options.proof === "rclone") {
+      if (common.route !== "sharepoint_library_to_shared_drive") configError("options.proof");
+      if (options.verificationMode !== undefined) configError("options.verificationMode");
+      if (options.deltaVerification === "changed") configError("options.deltaVerification");
+      if (options.oneNoteNotebooks === "omit") configError("options.oneNoteNotebooks");
     }
     if (input.impersonate !== undefined) {
       if (typeof input.impersonate !== "boolean") configError("impersonate");
@@ -701,8 +733,11 @@ function expectedFailure<T>(error: unknown): Outcome<T> | null {
     return refuse("drive_creation_ambiguous", error.message, {
       detail: error.detail as Record<string, unknown>,
     });
+  // ProviderFault messages and evidence are static and secret-free by contract.
   if (code && Object.hasOwn(REFUSAL_CODES, code))
-    return refuse(code as RefusalCode, "The operation could not satisfy its required gate.");
+    return error instanceof ProviderFault
+      ? refuse(code as RefusalCode, error.message, { detail: error.evidence })
+      : refuse(code as RefusalCode, "The operation could not satisfy its required gate.");
   if (code?.startsWith("credential_") || code === "recovery_required")
     return refuse("preflight_failed", "A provider prerequisite could not be established.", {
       detail: { check: code },
@@ -1125,6 +1160,14 @@ async function boundEvidence(provider: ProviderPort, config: JobConfig): Promise
     binaryVersion: typeof binary.version === "string" ? binary.version : "",
     binaryPath: typeof binary.path === "string" ? binary.path : "",
   };
+}
+/** File options bound into an approved plan, not the editable operator file. */
+function approvedOptions(plan: {
+  inputs: Record<string, string | undefined>;
+}): FileMigrationConfig["options"] {
+  // Bound inputs were validated by parseConfig before planning; archive plans have no options.
+  const approved = JSON.parse(plan.inputs.configuration ?? "{}") as Partial<FileMigrationConfig>;
+  return approved.options;
 }
 function semantic(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(semantic);
@@ -1739,20 +1782,39 @@ function makeWriter(
       evidenceDigest,
     });
     const findings = findingFacets(store, revision),
-      at = deps.now().toISOString();
+      at = deps.now().toISOString(),
+      plan = store.readPlanRevision(revision)!,
+      approval = store.readApproval(revision)!;
+    // Consent given by approving the exact plan that disclosed these omissions.
+    const approved = approvedOptions(plan)?.acceptedOmissions ?? [];
+    const disclosed = new Set(store.readFindings(revision, "plan").map((f) => f.code));
+    const preaccepted = findings
+      .map((f) => f.code)
+      .filter((code) => approved.includes(code) && disclosed.has(code))
+      .sort(compareText);
     const result = {
       revision: run,
       planRev: revision,
       verificationDigest,
       evidenceDigest,
-      clean: findings.length === 0,
+      clean: findings.every((f) => preaccepted.includes(f.code)),
       findings,
-      acceptedCodes: [],
+      acceptedCodes: preaccepted,
       at,
     };
     store.atomic(() => {
       store.writeVerificationRevision(result);
       store.writeJob({ ...job(), verificationRevision: run });
+      if (preaccepted.length)
+        store.writeAcceptances(
+          preaccepted.map((code) => ({
+            verificationDigest,
+            code,
+            approver: approval.approver,
+            note: `Accepted in advance by approving plan ${plan.planDigest} with [options] acceptedOmissions.`,
+            at: approval.at,
+          })),
+        );
     });
     return ok(result);
   }
@@ -2122,6 +2184,16 @@ function makeWriter(
               detail: { field: "options.staged" },
             },
           );
+        if (
+          "mappings" in config &&
+          config.options?.proof === "rclone" &&
+          config.mappings.some((mapping) => mapping.exclusions?.length)
+        )
+          return refuse(
+            "configuration_invalid",
+            "rclone proof copies whole mapping roots; exclusions need the full per-file inventory.",
+            { detail: { field: "exclusions" } },
+          );
         if (input?.final !== undefined && typeof input.final !== "boolean")
           return refuse("configuration_invalid", "Final intent must be a boolean.");
         if (input?.final && (!("mappings" in config) || !config.options?.staged))
@@ -2442,7 +2514,7 @@ function makeWriter(
           if (worker) await stopWorker(p, worker);
         }
       }),
-    verify: () =>
+    verify: (opts) =>
       operation("verify", async () => {
         if (!["verified", "needs_attention"].includes(job().state) || job().planRevision === null)
           return refuse("verification_unaccepted", "Verification requires completed execution.");
@@ -2451,6 +2523,16 @@ function makeWriter(
         const p = provider(config, true),
           revision = job().planRevision!,
           plan = store.readPlanRevision(revision)!;
+        // Verification proves what was approved: an options edit cannot weaken it.
+        if (
+          "mappings" in config &&
+          (approvedOptions(plan)?.proof ?? "full") !== (config.options?.proof ?? "full")
+        )
+          return refuse(
+            "plan_revision_required",
+            "The proof level differs from the approved plan; plan and approve again.",
+            { detail: { field: "options.proof" } },
+          );
         let worker: TransferWorkerHandle | undefined;
         try {
           if (needsTransferWorker(config)) {
@@ -2474,7 +2556,13 @@ function makeWriter(
               );
             if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
           }
-          const result = await verifyRun(p, config, revision, new RetryBudget(plan.rowCount));
+          const result = await verifyRun(
+            p,
+            config,
+            revision,
+            new RetryBudget(plan.rowCount),
+            opts?.signal,
+          );
           if (!result.ok) return result;
           transition(result.value.clean ? "verify_clean" : "verify_gaps", "verify", {
             verificationDigest: result.value.verificationDigest,
@@ -2605,10 +2693,7 @@ function makeWriter(
         // Read timing from the immutable approval, not the editable operator file.
         // Legacy before-copy plans may bind retired input fields and close as before.
         const deferredGrants =
-          "mappings" in config &&
-          memberGrantTiming(
-            (JSON.parse(plan.inputs.configuration!) as FileMigrationConfig).options,
-          ) === "after_verification";
+          "mappings" in config && memberGrantTiming(approvedOptions(plan)) === "after_verification";
         if ("mappings" in config && deferredGrants) {
           if (plan.manifestDigest === undefined) delete config.manifestDigest;
           // A changed operator file cannot bypass the approved deferred grants.
@@ -2807,7 +2892,10 @@ async function checkApprovedMappingScope(
             message: "The source hierarchy is no longer a tree.",
           });
         sourceSeen.add(parent.id);
-        for (const child of await p.listSourceChildren(parent.id)) {
+        for (const child of await p.listSourceChildren({
+          driveId: mapping.sourceDriveId,
+          itemId: parent.id,
+        })) {
           const inExclusion = parent.excluded || requested.has(child.id);
           if (inExclusion !== excluded.has(child.id))
             throw new EngineRefusalError({

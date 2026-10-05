@@ -134,6 +134,8 @@ export interface FilePassProvider {
     destination?: FilePassRoot;
     excludePaths?: string[];
     mode: "copy" | "mirror";
+    /** Listings have no deadline; aborting stops them. */
+    signal?: AbortSignal;
   }): Promise<FilePassPreview>;
   startCopyPass(
     input: {
@@ -149,7 +151,11 @@ export interface FilePassProvider {
   copyPassStats(input: CopyPassReference): Promise<CopyPassStats>;
   stopCopyPass(input: CopyPassReference): Promise<void>;
   /** Sorted recursive relative folder paths, excluding the root. */
-  listFolders(input: { socketPath: string; root: FilePassRoot }): Promise<string[]>;
+  listFolders(input: {
+    socketPath: string;
+    root: FilePassRoot;
+    signal?: AbortSignal;
+  }): Promise<string[]>;
   listFileHashes(input: {
     socketPath: string;
     root: FilePassRoot;
@@ -157,6 +163,7 @@ export interface FilePassProvider {
     download: boolean;
     /** Exact relative files to list and hash; an empty selection reads no files. */
     paths?: string[];
+    signal?: AbortSignal;
   }): Promise<FileHashEntry[]>;
 }
 
@@ -244,8 +251,9 @@ export interface ProviderPort extends FilePassProvider {
     sourceDriveId: string;
     sourceItemId: string;
   }): Promise<SourceEntry | null>;
-  listSourceChildren(sourceItemId: string): Promise<SourceEntry[]>;
-  openSourceContent(sourceItemId: string): AsyncIterable<Uint8Array>;
+  /** Graph item IDs are unique only within a drive: every source read names both. */
+  listSourceChildren(input: { driveId: string; itemId: string }): Promise<SourceEntry[]>;
+  openSourceContent(input: { driveId: string; itemId: string }): AsyncIterable<Uint8Array>;
 
   resolveDestinationFolder(input: {
     destDriveId: string;

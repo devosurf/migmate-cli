@@ -61,6 +61,13 @@ export interface FileMigrationConfig {
     settleMaxPasses?: number;
     /** ADR-0012 A6: when manifest members are granted. Default follows `staged`. */
     memberGrants?: "before_copy" | "after_verification";
+    /** Plan-phase planned omissions accepted in advance by approving the plan that names them. */
+    acceptedOmissions?: string[];
+    /**
+     * `rclone`: the plan approves mapping roots only; rclone lists files when it copies, and
+     * verification compares rclone listings by path and size. Default `full`.
+     */
+    proof?: "full" | "rclone";
   };
 }
 
@@ -374,6 +381,7 @@ export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIt
           root: pass.destination,
           hashType: baseline?.hashType ?? "sha256",
           download: false,
+          ...abortable(ctx),
         });
         const md5 = baseline?.md5
           ? await ctx.provider.listFileHashes({
@@ -381,11 +389,13 @@ export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIt
               root: pass.destination,
               hashType: "md5",
               download: false,
+              ...abortable(ctx),
             })
           : [];
         const folders = await ctx.provider.listFolders({
           socketPath: pass.socketPath,
           root: pass.destination,
+          ...abortable(ctx),
         });
         const observed = destinationDigest(files, md5, folders);
         const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
@@ -525,24 +535,168 @@ function commit(
   };
 }
 
+/** rclone proof: approval binds the map of roots, not a per-file Graph inventory. */
+function rcloneProof(ctx: FileContext): boolean {
+  return ctx.config.options?.proof === "rclone";
+}
+
+async function sourceRoot(ctx: FileContext, mapping: FileMappingConfig): Promise<SourceView> {
+  const root = await ctx.provider.resolveSourceRoot(mapping);
+  if (!root || root.kind !== "folder" || root.driveId !== mapping.sourceDriveId)
+    throw Object.assign(new Error("The source root is missing or is not an ordinary folder"), {
+      code: "unsupported_route",
+    });
+  return { ...root, path: ".", representable: true, outsideRoot: false };
+}
+
+async function destinationRoot(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+): Promise<DestinationEntry> {
+  const root = await ctx.provider.resolveDestinationFolder(destinationMapping(mapping));
+  if (!root || root.kind !== "folder" || root.driveId !== mapping.destDriveId)
+    throw Object.assign(new Error("The destination root is missing or is not an ordinary folder"), {
+      code: "unsupported_route",
+    });
+  return root;
+}
+
+/** An item known only from an rclone listing: its path, size and listed provider ID. */
+function listedItem(
+  driveId: string,
+  id: string,
+  path: string,
+  kind: "file" | "folder",
+  size: number | null,
+): SourceView {
+  return {
+    id,
+    driveId,
+    parentId: null,
+    name: path.slice(path.lastIndexOf("/") + 1),
+    kind,
+    size: size !== null && size >= 0 ? size : null,
+    etag: null,
+    createdAt: "",
+    modifiedAt: "",
+    mimeType: null,
+    identity: `${driveId}:${id}`,
+    downloadable: kind === "file",
+    webUrl: null,
+    packageSections: null,
+    path,
+    representable: true,
+    outsideRoot: false,
+  };
+}
+
+/** Listings have no deadline: the run's AbortSignal is what stops them. */
+function abortable(ctx: FileContext): { signal?: AbortSignal } {
+  return ctx.signal ? { signal: ctx.signal } : {};
+}
+
+/**
+ * rclone proof: what a pass would still change, from rclone listings of each side. Folders
+ * are compared too: rclone's file listing cannot see a new empty source folder.
+ */
+async function rclonePending(ctx: FileContext, mapping: FileMappingConfig): Promise<string[]> {
+  const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+  const [preview, sourceFolders, destinationFolders] = await Promise.all([
+    ctx.provider.previewCopyPass({
+      ...resolved,
+      excludePaths: [],
+      mode: ctx.config.options?.mirror ? "mirror" : "copy",
+      ...abortable(ctx),
+    }),
+    ctx.provider.listFolders({
+      socketPath: resolved.socketPath,
+      root: resolved.source,
+      ...abortable(ctx),
+    }),
+    ctx.provider.listFolders({
+      socketPath: resolved.socketPath,
+      root: resolved.destination,
+      ...abortable(ctx),
+    }),
+  ]);
+  const present = new Set(destinationFolders);
+  return [
+    ...[...preview.new, ...preview.changed, ...preview.timestampOnly, ...preview.deleted].map(
+      (item) => item.path,
+    ),
+    ...sourceFolders.filter((path) => !present.has(path)),
+  ].sort();
+}
+
+/**
+ * rclone proof: before a mirror pass, list both sides once and record each destination-only
+ * file as a `to_be_deleted` row; the pass may delete exactly that many files.
+ */
+async function* mirrorDeletions(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  passNumber: number,
+  reserved: number,
+): AsyncGenerator<CommitUnit, number> {
+  if (!ctx.config.options?.mirror) return 0;
+  const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+  // An empty destination has nothing to delete: copying starts without listing the source.
+  const present = await ctx.provider.listFileHashes({
+    socketPath: resolved.socketPath,
+    root: resolved.destination,
+    hashType: "md5",
+    download: false,
+    ...abortable(ctx),
+  });
+  if (!present.length) return 0;
+  const { deleted } = await ctx.provider.previewCopyPass({
+    ...resolved,
+    excludePaths: [],
+    mode: "mirror",
+    ...abortable(ctx),
+  });
+  if (reserved + deleted.length > ctx.config.options.deleteLimit!)
+    throw new FilePlanRevisionRequiredError(
+      "Mirror would delete more destination files than deleteLimit allows; review the source, then raise deleteLimit in a new plan.",
+    );
+  if (!deleted.length) return 0;
+  yield {
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["mirror-deletions", mapping.id, passNumber]),
+    checkpoint: mapping.id,
+    rows: deleted.map((entry) => {
+      const id = `destination:${entry.path}`;
+      const evidence = row(
+        ctx,
+        "execute",
+        mapping,
+        listedItem(mapping.sourceDriveId, id, entry.path, "file", entry.size),
+        "to_be_deleted",
+      );
+      delete evidence.sourceEvidence;
+      evidence.destinationDriveId = mapping.destDriveId ?? null;
+      return evidence;
+    }),
+    findings: [],
+  };
+  return deleted.length;
+}
+
 async function sourceInventory(
   ctx: FileContext,
   mapping: FileMappingConfig,
 ): Promise<SourceView[]> {
-  const sourceRoot = await ctx.provider.resolveSourceRoot(mapping);
-  if (!sourceRoot || sourceRoot.kind !== "folder" || sourceRoot.driveId !== mapping.sourceDriveId)
-    throw Object.assign(new Error("The source root is missing or is not an ordinary folder"), {
-      code: "unsupported_route",
-    });
-  const sources: SourceView[] = [
-    { ...sourceRoot, path: ".", representable: true, outsideRoot: false },
-  ];
-  const sourceById = new Map([[sourceRoot.id, sources[0]!]]);
+  const sources: SourceView[] = [await sourceRoot(ctx, mapping)];
+  const sourceById = new Map([[sources[0]!.id, sources[0]!]]);
   for (let index = 0; index < sources.length; index++) {
     ctx.signal?.throwIfAborted();
     const parent = sources[index]!;
     if ((parent.kind !== "folder" && !copiedNotebook(ctx, parent)) || parent.outsideRoot) continue;
-    const children = await ctx.provider.listSourceChildren(parent.id);
+    const children = await ctx.provider.listSourceChildren({
+      driveId: parent.driveId,
+      itemId: parent.id,
+    });
     children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : 1));
     for (const child of children) {
       const outsideRoot = child.driveId !== mapping.sourceDriveId || child.parentId !== parent.id;
@@ -574,6 +728,8 @@ export async function assertSourceInventoryFresh(
   ctx: FileContext,
   executionResume = false,
 ): Promise<void> {
+  // rclone proof approved no inventory, so there is nothing to compare before copying.
+  if (rcloneProof(ctx)) return;
   for (const mapping of ctx.config.mappings) {
     const fresh = await sourceInventory(ctx, mapping);
     if (executionResume && ctx.stage === "final" && settleState(ctx, mapping)) {
@@ -614,17 +770,9 @@ async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<S
       destinationById: new Map(),
       destinationByPath: new Map(),
     };
-  const destinationRoot = await ctx.provider.resolveDestinationFolder(destinationMapping(mapping));
-  if (
-    !destinationRoot ||
-    destinationRoot.kind !== "folder" ||
-    destinationRoot.driveId !== mapping.destDriveId
-  )
-    throw Object.assign(new Error("The destination root is missing or is not an ordinary folder"), {
-      code: "unsupported_route",
-    });
-  const destinations: DestinationView[] = [{ ...destinationRoot, path: "." }];
-  const destinationById = new Map([[destinationRoot.id, destinations[0]!]]);
+  const root = await destinationRoot(ctx, mapping);
+  const destinations: DestinationView[] = [{ ...root, path: "." }];
+  const destinationById = new Map([[root.id, destinations[0]!]]);
   const destinationByPath = new Map<string, DestinationView[]>([[".", [destinations[0]!]]]);
   for (let index = 0; index < destinations.length; index++) {
     ctx.signal?.throwIfAborted();
@@ -775,7 +923,33 @@ function pendingPass(
   };
 }
 
+/** rclone proof: the plan is the map of approved roots; rclone lists files when it copies. */
+async function* collectMap(ctx: FileContext): AsyncIterable<CommitUnit> {
+  let done = 0;
+  for (const planned of ctx.config.mappings) {
+    const mapping = provisionedMapping(ctx, planned);
+    const root = await sourceRoot(ctx, mapping);
+    if (!mapping.createDrive || mapping.destDriveId) await destinationRoot(ctx, mapping);
+    const evidence = row(ctx, "plan", mapping, root, "unchanged");
+    evidence.destinationDriveId = mapping.destDriveId ?? null;
+    evidence.destinationFileId = mapping.destFolderId ?? null;
+    evidence.fileScope = { exclusions: [], sourceInventoryAt: ctx.now().toISOString() };
+    const unit = commit(ctx, "plan", evidence, [], "plan", ++done);
+    unit.mappingPass = pendingPass(
+      ctx.revision,
+      mapping.id,
+      1,
+      ctx.config.options?.mirror ? "mirror" : "copy",
+    );
+    yield unit;
+  }
+}
+
 async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
+  if (rcloneProof(ctx)) {
+    yield* collectMap(ctx);
+    return;
+  }
   const trees: Snapshot[] = [];
   for (const mapping of ctx.config.mappings)
     trees.push(await snapshot(ctx, provisionedMapping(ctx, mapping)));
@@ -1038,6 +1212,7 @@ async function passPreview(
     ...resolved,
     excludePaths,
     mode: ctx.config.options?.mirror ? "mirror" : "copy",
+    ...abortable(ctx),
   });
   const expectedFolders = expectedDestinationFolders(
     ctx,
@@ -1052,6 +1227,7 @@ async function passPreview(
           await ctx.provider.listFolders({
             socketPath: resolved.socketPath,
             root: resolved.destination,
+            ...abortable(ctx),
           })
         )
           .filter(
@@ -1079,8 +1255,10 @@ async function* copyMapping(
   let state = final ? settleState(ctx, mapping) : undefined;
   if (state?.outcome === "exhausted") throw cutoverIncomplete();
   if (state?.outcome === "settled" || (!final && previous?.status === "completed")) return;
-  let sources = await sourceInventory(ctx, mapping);
-  assertApprovedPaths(ctx, mapping, sources);
+  const rclone = rcloneProof(ctx);
+  // rclone proof copies without a Graph inventory; rclone lists both sides as it copies.
+  let sources = rclone ? [] : await sourceInventory(ctx, mapping);
+  if (!rclone) assertApprovedPaths(ctx, mapping, sources);
   let copyNeeded = !state || state.copyPending;
   // An ambiguous/crashed attempt consumes a catch-up attempt rather than resetting the bound.
   if (state?.copyPending) {
@@ -1109,39 +1287,44 @@ async function* copyMapping(
     };
   for (;;) {
     if (copyNeeded) {
-      const preview = await passPreview(ctx, mapping, sources);
-      const planned = plannedScope(ctx, mapping);
-      const approved =
-        planned?.jobType === "file_migration" ? planned.fileScope?.preview : undefined;
-      const allowed = new Set(approved?.deleted.map((item) => item.path) ?? []);
-      const allowedFolders = new Set(approved?.deletedFolders ?? []);
-      if (
-        preview.deleted.some((item) => !allowed.has(item.path)) ||
-        preview.deletedFolders.some((path) => !allowedFolders.has(path)) ||
-        (ctx.config.options?.mirror &&
-          (state?.deletionsReserved ?? 0) + preview.deleted.length >
-            ctx.config.options.deleteLimit!)
-      )
-        throw new FilePlanRevisionRequiredError(
-          "The cumulative deletion scope exceeds the approved preview or limit.",
-        );
-      if (state) {
-        state.copyPending = true;
-        state.copiedInventory = inventoryEvidence(sources);
-        state.deletionsReserved += preview.deleted.length;
-        yield settleUnit(ctx, state);
-      }
-      let completed = false;
       const passNumber =
         state?.copyPassNumber ??
         (previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1);
-      for await (const unit of copyPass(
-        ctx,
-        mapping,
-        sources,
-        passNumber,
-        preview.deleted.length,
-      )) {
+      let authorized: number;
+      if (rclone)
+        authorized = yield* mirrorDeletions(
+          ctx,
+          mapping,
+          passNumber,
+          state?.deletionsReserved ?? 0,
+        );
+      else {
+        const preview = await passPreview(ctx, mapping, sources);
+        const planned = plannedScope(ctx, mapping);
+        const approved =
+          planned?.jobType === "file_migration" ? planned.fileScope?.preview : undefined;
+        const allowed = new Set(approved?.deleted.map((item) => item.path) ?? []);
+        const allowedFolders = new Set(approved?.deletedFolders ?? []);
+        if (
+          preview.deleted.some((item) => !allowed.has(item.path)) ||
+          preview.deletedFolders.some((path) => !allowedFolders.has(path)) ||
+          (ctx.config.options?.mirror &&
+            (state?.deletionsReserved ?? 0) + preview.deleted.length >
+              ctx.config.options.deleteLimit!)
+        )
+          throw new FilePlanRevisionRequiredError(
+            "The cumulative deletion scope exceeds the approved preview or limit.",
+          );
+        authorized = preview.deleted.length;
+      }
+      if (state) {
+        state.copyPending = true;
+        state.copiedInventory = inventoryEvidence(sources);
+        state.deletionsReserved += authorized;
+        yield settleUnit(ctx, state);
+      }
+      let completed = false;
+      for await (const unit of copyPass(ctx, mapping, sources, passNumber, authorized)) {
         completed = unit.mappingPass?.status === "completed";
         if (completed && state) {
           state.copyPending = false;
@@ -1155,16 +1338,20 @@ async function* copyMapping(
     if (ctx.waitForConsistency)
       await ctx.waitForConsistency(state.consistencyIntervalMs, ctx.signal);
     else await delay(state.consistencyIntervalMs, undefined, { signal: ctx.signal });
-    sources = await sourceInventory(ctx, mapping);
-    assertApprovedPaths(ctx, mapping, sources);
-    const copied = new Map(state.copiedInventory.map((item) => [item.id, item]));
-    const changedPaths = sources
-      .filter(
-        (source) =>
-          canonicalJson(sourceEvidence(source)) !==
-          canonicalJson(copied.get(source.id)?.evidence ?? null),
-      )
-      .map((source) => source.path);
+    let changedPaths: string[];
+    if (rclone) changedPaths = await rclonePending(ctx, mapping);
+    else {
+      sources = await sourceInventory(ctx, mapping);
+      assertApprovedPaths(ctx, mapping, sources);
+      const copied = new Map(state.copiedInventory.map((item) => [item.id, item]));
+      changedPaths = sources
+        .filter(
+          (source) =>
+            canonicalJson(sourceEvidence(source)) !==
+            canonicalJson(copied.get(source.id)?.evidence ?? null),
+        )
+        .map((source) => source.path);
+    }
     state.outcome =
       changedPaths.length === 0
         ? "settled"
@@ -1366,7 +1553,295 @@ function verificationCoverage(ctx: FileContext, mapping: FileMappingConfig, sour
   };
 }
 
+/** A created drive whose actual members differ from those due at this point. */
+async function membershipUnit(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  root: SourceView,
+  done: number,
+): Promise<CommitUnit | undefined> {
+  if (!mapping.createDrive) return undefined;
+  const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
+  if (!drive?.driveId) throw new Error("Verification requires the durable created drive");
+  const expected =
+    memberGrantTiming(ctx.config.options) === "before_copy" || drive.goLive
+      ? [...mapping.createDrive.members]
+      : [];
+  if (
+    !expected.some(
+      (member) =>
+        member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
+    )
+  )
+    expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
+  const actual = await ctx.provider.listDriveMembers(drive.driveId);
+  if (
+    JSON.stringify(membershipIdentities(expected)) === JSON.stringify(membershipIdentities(actual))
+  )
+    return undefined;
+  const evidence = row(ctx, "verify", mapping, root, "drive_membership_mismatch");
+  evidence.destinationDriveId = drive.driveId;
+  evidence.destinationFileId = drive.driveId;
+  return commit(
+    ctx,
+    "verify",
+    evidence,
+    [
+      finding(ctx, "verify", "drive_membership_mismatch", mapping.id, {
+        mappingId: mapping.id,
+        driveId: drive.driveId,
+        expected,
+        actual,
+      }),
+    ],
+    "drive-membership",
+    done,
+  );
+}
+
+/** A1/A4 before A6: the destination listing a deferred go-live is later checked against. */
+function goLiveBaseline(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  observed: { hashType: "sha256" | "quickxor"; md5: boolean; digest: string },
+): CommitUnit | undefined {
+  if (!mapping.createDrive || memberGrantTiming(ctx.config.options) !== "after_verification")
+    return undefined;
+  const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+  // A new verification must never erase the original go-live content fence.
+  if (drive.goLive) return undefined;
+  drive.verifiedDestination = { revision: ctx.revision, ...observed };
+  return {
+    rev: ctx.revision,
+    phase: "verify",
+    unitKey: JSON.stringify(["verified-destination", mapping.id]),
+    checkpoint: mapping.id,
+    rows: [],
+    findings: [],
+    createdDrive: drive,
+  };
+}
+
+/**
+ * rclone proof: rclone size-checked each upload; SharePoint and Drive share no hash type.
+ * Verification compares rclone listings of both sides by path and size, folders included,
+ * without re-reading content.
+ */
+async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
+  let done = 0;
+  for (const planned of ctx.config.mappings) {
+    const mapping = provisionedMapping(ctx, planned);
+    if (ctx.stage === "final" && settleState(ctx, mapping)?.outcome !== "settled")
+      throw cutoverIncomplete();
+    const root = await sourceRoot(ctx, mapping);
+    const membership = await membershipUnit(ctx, mapping, root, done + 1);
+    if (membership) {
+      done++;
+      yield membership;
+    }
+    const planRow = plannedScope(ctx, mapping);
+    if (planRow?.jobType !== "file_migration" || !planRow.fileScope)
+      throw new FilePlanRevisionRequiredError();
+    const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+    const list = (side: FilePassRoot, hashType: "quickxor" | "sha256" | "md5") =>
+      ctx.provider.listFileHashes({
+        socketPath: pass.socketPath,
+        root: side,
+        hashType,
+        download: false,
+        ...abortable(ctx),
+      });
+    const [sources, destinations, sourceFolders, destinationFolders] = await Promise.all([
+      list(pass.source, "quickxor"),
+      list(pass.destination, "sha256"),
+      ctx.provider.listFolders({
+        socketPath: pass.socketPath,
+        root: pass.source,
+        ...abortable(ctx),
+      }),
+      ctx.provider.listFolders({
+        socketPath: pass.socketPath,
+        root: pass.destination,
+        ...abortable(ctx),
+      }),
+    ]);
+    const needsMd5 = destinations.some((entry) => entry.hash === null);
+    const destinationMd5 = needsMd5 ? await list(pass.destination, "md5") : [];
+    const md5ByPath = new Map(destinationMd5.map((entry) => [entry.path, entry.hash]));
+    const destinationByPath = new Map(destinations.map((entry) => [entry.path, entry]));
+    const sourcePaths = new Set(sources.map((entry) => entry.path));
+    const target = destinationMapping(mapping);
+    const coverageRow = row(ctx, "verify", mapping, root, "unchanged");
+    coverageRow.id = JSON.stringify([mapping.id, root.id, "verify", "coverage"]);
+    coverageRow.fileScope = {
+      ...planRow.fileScope,
+      verification: {
+        binding: {
+          sourceDriveId: mapping.sourceDriveId,
+          sourceItemId: mapping.sourceItemId,
+          sourceType: "sharepoint",
+          destDriveId: target.destDriveId,
+          destFolderId: target.destFolderId,
+          exclusions: [],
+          oneNoteNotebooks: "copy",
+          verificationMode: "size_only",
+        },
+        scope: "full",
+        baselineRevision: null,
+        coveredPaths: [...sourcePaths].sort(),
+        deletedPaths: [],
+        sourceInventory: [],
+      },
+    };
+    yield commit(ctx, "verify", coverageRow, [], "verification-coverage", ++done);
+    const latest = (ctx.resume.mappingPasses ?? [])
+      .filter((item) => item.mappingId === mapping.id)
+      .at(-1);
+    if (latest?.status !== "completed") {
+      const evidence = row(ctx, "verify", mapping, root, "destination_write_failed");
+      evidence.id = JSON.stringify([mapping.id, root.id, "verify", "copy-pass"]);
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        [
+          finding(ctx, "verify", "destination_write_failed", mapping.id, {
+            mappingId: mapping.id,
+            passNumber: latest?.passNumber ?? null,
+            status: latest?.status ?? null,
+            error: latest?.error ?? null,
+            errors: latest?.lastStats?.errors ?? null,
+          }),
+        ],
+        "copy-pass",
+        ++done,
+      );
+    }
+    for (const source of sources) {
+      const copied = destinationByPath.get(source.path);
+      // rclone's OneDrive IDs are `driveId#itemId`; rows keep the Graph item ID, as in full proof.
+      const listedId = source.id?.startsWith(`${mapping.sourceDriveId}#`)
+        ? source.id.slice(mapping.sourceDriveId.length + 1)
+        : source.id;
+      const view = listedItem(
+        mapping.sourceDriveId,
+        listedId ?? `path:${source.path}`,
+        source.path,
+        "file",
+        source.size,
+      );
+      const code = !copied
+        ? "destination_missing"
+        : view.size !== null && copied.size >= 0 && view.size !== copied.size
+          ? "size_mismatch"
+          : null;
+      const destinationHash = copied ? (copied.hash ?? md5ByPath.get(copied.path) ?? null) : null;
+      const evidence = row(ctx, "verify", mapping, view, code ?? "unchanged");
+      evidence.destinationDriveId = mapping.destDriveId ?? null;
+      evidence.destinationFileId = copied?.id ?? null;
+      evidence.sourceFingerprint = source.hash;
+      evidence.destinationFingerprint = destinationHash;
+      evidence.provenanceState = code ? "drifted" : "verified";
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        code
+          ? [
+              finding(ctx, "verify", code, view.id, {
+                path: source.path,
+                sourceSize: view.size,
+                destinationSize: copied?.size ?? null,
+                sourceHash: source.hash,
+                destinationHash,
+                hashType: null,
+              }),
+            ]
+          : [],
+        "verification",
+        ++done,
+      );
+    }
+    const presentFolders = new Set(destinationFolders);
+    for (const path of sourceFolders) {
+      if (presentFolders.has(path)) continue;
+      const conflicting = destinationByPath.get(path);
+      const code = conflicting ? "destination_type_conflict" : "destination_missing";
+      const view = listedItem(mapping.sourceDriveId, `folder:${path}`, path, "folder", null);
+      const evidence = row(ctx, "verify", mapping, view, code);
+      evidence.destinationDriveId = mapping.destDriveId ?? null;
+      evidence.destinationFileId = conflicting?.id ?? null;
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        [
+          finding(
+            ctx,
+            "verify",
+            code,
+            view.id,
+            conflicting
+              ? {
+                  path,
+                  ...(conflicting.id ? { destinationId: conflicting.id } : {}),
+                  destinationSize: conflicting.size,
+                  destinationHash: conflicting.hash,
+                }
+              : { path, itemType: "folder" },
+          ),
+        ],
+        "folder-verification",
+        ++done,
+      );
+    }
+    for (const retained of destinations) {
+      if (sourcePaths.has(retained.path)) continue;
+      const view = listedItem(
+        mapping.sourceDriveId,
+        `destination:${retained.path}`,
+        retained.path,
+        "file",
+        retained.size,
+      );
+      const destinationHash = retained.hash ?? md5ByPath.get(retained.path) ?? null;
+      const evidence = row(ctx, "verify", mapping, view, "destination_only_retained");
+      delete evidence.sourceEvidence;
+      evidence.destinationDriveId = mapping.destDriveId ?? null;
+      evidence.destinationFileId = retained.id ?? null;
+      evidence.destinationFingerprint = destinationHash;
+      yield commit(
+        ctx,
+        "verify",
+        evidence,
+        [
+          finding(ctx, "verify", "destination_only_retained", view.id, {
+            path: retained.path,
+            sourceSize: null,
+            destinationSize: retained.size,
+            sourceHash: null,
+            destinationHash,
+            hashType: null,
+          }),
+        ],
+        "retained",
+        ++done,
+      );
+    }
+    const baseline = goLiveBaseline(ctx, mapping, {
+      hashType: "sha256",
+      md5: needsMd5,
+      digest: destinationDigest(destinations, destinationMd5, destinationFolders),
+    });
+    if (baseline) yield baseline;
+  }
+}
+
 async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
+  if (rcloneProof(ctx)) {
+    yield* verifyListing(ctx);
+    return;
+  }
   let done = 0;
   const sizeOnly = ctx.config.options?.verificationMode === "size_only";
   if (
@@ -1394,45 +1869,10 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
     const mapping = provisionedMapping(ctx, planned);
     const sources = await sourceInventory(ctx, mapping);
     assertSettledInventory(ctx, mapping, sources);
-    if (mapping.createDrive) {
-      const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
-      if (!drive?.driveId) throw new Error("Verification requires the durable created drive");
-      const expected =
-        memberGrantTiming(ctx.config.options) === "before_copy" || drive.goLive
-          ? [...mapping.createDrive.members]
-          : [];
-      if (
-        !expected.some(
-          (member) =>
-            member.type === "user" &&
-            member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
-        )
-      )
-        expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
-      const actual = await ctx.provider.listDriveMembers(drive.driveId);
-      if (
-        JSON.stringify(membershipIdentities(expected)) !==
-        JSON.stringify(membershipIdentities(actual))
-      ) {
-        const evidence = row(ctx, "verify", mapping, sources[0]!, "drive_membership_mismatch");
-        evidence.destinationDriveId = drive.driveId;
-        evidence.destinationFileId = drive.driveId;
-        yield commit(
-          ctx,
-          "verify",
-          evidence,
-          [
-            finding(ctx, "verify", "drive_membership_mismatch", mapping.id, {
-              mappingId: mapping.id,
-              driveId: drive.driveId,
-              expected,
-              actual,
-            }),
-          ],
-          "drive-membership",
-          ++done,
-        );
-      }
+    const membership = await membershipUnit(ctx, mapping, sources[0]!, done + 1);
+    if (membership) {
+      done++;
+      yield membership;
     }
     const scope = (ctx.resume.rows ?? []).find(
       (candidate): candidate is FileEvidenceRow =>
@@ -1485,6 +1925,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
           hashType: primaryHash,
           download: !sizeOnly,
           ...(paths ? { paths } : {}),
+          ...abortable(ctx),
         })
       ).map((entry) => [entry.path, entry]),
     );
@@ -1496,6 +1937,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
           hashType: primaryHash,
           download: false,
           ...(paths ? { paths } : {}),
+          ...abortable(ctx),
         })
       ).map((entry) => [entry.path, entry]),
     );
@@ -1512,6 +1954,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
               hashType: "md5",
               download: true,
               ...(paths ? { paths } : {}),
+              ...abortable(ctx),
             })
           ).map((entry) => [entry.path, entry])
         : [],
@@ -1525,6 +1968,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
               hashType: "md5",
               download: false,
               ...(paths ? { paths } : {}),
+              ...abortable(ctx),
             })
           ).map((entry) => [entry.path, entry])
         : [],
@@ -1575,7 +2019,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
         else {
           try {
             const measured = await hashStream(
-              ctx.provider.openSourceContent(source.id),
+              ctx.provider.openSourceContent({ driveId: source.driveId, itemId: source.id }),
               ctx.signal,
             );
             if (measured.sha256 !== sourceHashes.get(source.path)?.hash)
@@ -1652,6 +2096,7 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
       await ctx.provider.listFolders({
         socketPath: pass.socketPath,
         root: pass.destination,
+        ...abortable(ctx),
       }),
     );
     for (const [path, source] of expectedFolders) {
@@ -1727,31 +2172,16 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
     // A1/A4 before A6: an unsettled final revision must not record a go-live baseline.
     if (ctx.stage === "final")
       assertSettledInventory(ctx, mapping, await sourceInventory(ctx, mapping));
-    if (mapping.createDrive && memberGrantTiming(ctx.config.options) === "after_verification") {
-      const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
-      // A new verification must never erase the original go-live content fence.
-      if (!drive.goLive) {
-        drive.verifiedDestination = {
-          revision: ctx.revision,
-          hashType: primaryHash,
-          md5: needsMd5,
-          digest: destinationDigest(
-            destinationHashes.values(),
-            destinationMd5.values(),
-            destinationFolders,
-          ),
-        };
-        yield {
-          rev: ctx.revision,
-          phase: "verify",
-          unitKey: JSON.stringify(["verified-destination", mapping.id]),
-          checkpoint: mapping.id,
-          rows: [],
-          findings: [],
-          createdDrive: drive,
-        };
-      }
-    }
+    const baseline = goLiveBaseline(ctx, mapping, {
+      hashType: primaryHash,
+      md5: needsMd5,
+      digest: destinationDigest(
+        destinationHashes.values(),
+        destinationMd5.values(),
+        destinationFolders,
+      ),
+    });
+    if (baseline) yield baseline;
   }
 }
 
@@ -1841,6 +2271,22 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
 
 async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
   yield { title: "Migration stage", format: "text", body: ctx.stage ?? "unstaged" };
+  if (rcloneProof(ctx))
+    yield {
+      title: "Proof level",
+      format: "text",
+      body: [
+        "rclone proof: approval binds mapping roots, drives, members and options, not a per-file inventory. Copying starts without a preview or source freshness check.",
+        "rclone selects files by size and modification time and checks each upload's size. SharePoint and Drive share no hash type, so rclone cannot compare content hashes on this route.",
+        "Verification compares rclone listings of source and destination by path and size, folders included. It reads no content again and makes no independent content comparison.",
+        "Version history, list-item fields, retention labels and permissions are not copied and are not enumerated per file. OneNote notebooks are copied as their section files.",
+        ...(ctx.config.options?.mirror
+          ? [
+              "Before each mirror pass that finds destination files, rclone lists both sides and records every destination-only file as to_be_deleted; the pass may delete exactly that many.",
+            ]
+          : []),
+      ].join("\n"),
+    };
   if (ctx.stage === "final")
     yield {
       title: "Settled confirmation",
@@ -2008,11 +2454,16 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       "Permissions and ownership were not assessed and were not migrated.",
       "Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.",
       ctx.config.options?.mirror
-        ? `Mirror removes only approved destination-only content in job-created drives, capped at ${ctx.config.options.deleteLimit} cumulative file deletions across final settling attempts; a larger scope requires a new plan.`
+        ? `Mirror removes only ${rcloneProof(ctx) ? "listed" : "approved"} destination-only content in job-created drives, capped at ${ctx.config.options.deleteLimit} cumulative file deletions across final settling attempts; a larger scope requires a new plan.`
         : "Destination-only content and source-deleted prior copies are retained, never deleted.",
       "rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories, which keep modification times only. Owner, permission and label metadata are not copied.",
       "Copy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.",
       "Verification is a timestamped point-in-time statement, not a source freeze or future-drift guarantee. Settled confirmation is recorded separately; partial intermediate proof is not cutover parity.",
+      ...(ctx.config.options?.acceptedOmissions?.length
+        ? [
+            `Accepted in advance by approving this plan: ${ctx.config.options.acceptedOmissions.join(", ")}. Each verification records those that this plan contains as accepted exceptions under its approver; every other finding still needs explicit acceptance.`,
+          ]
+        : []),
     ].join("\n"),
   };
   yield {

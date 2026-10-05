@@ -261,7 +261,10 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
     capture("mapping_interrupt_and_resume", resumeStartedAt, resumeAssertions);
 
     const routeStartedAt = new Date().toISOString();
-    const children = await readback.listSourceChildren(root.sourceItemId);
+    const children = await readback.listSourceChildren({
+      driveId: root.sourceDriveId,
+      itemId: root.sourceItemId,
+    });
     const kinds: Record<string, number> = {
       file: 0,
       folder: 0,

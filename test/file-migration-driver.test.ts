@@ -17,6 +17,7 @@ import {
   type FileMigrationConfig,
 } from "../src/engine/drivers/file-migration.ts";
 import type { DriverContext, CommitUnit } from "../src/engine/drivers/types.ts";
+import { ProviderFault } from "../src/engine/providers/credentials.ts";
 import { fileConfig, fileFixture, value, approve } from "./engine-fixture.ts";
 
 const now = "2026-09-01T00:00:00.000Z";
@@ -155,6 +156,214 @@ describe("staged cutover lifecycle", () => {
   });
 });
 
+describe("rclone proof", () => {
+  const rclone = { proof: "rclone" as const, consistencyIntervalMs: 0 };
+
+  it("copies, verifies and closes from a map-only plan without a per-file source inventory", async (t) => {
+    const h = await harness(t, fixture(), { ...config, options: rclone });
+    await approve(h);
+    assert.deepEqual([...(await codes(h, "plan")).keys()], ["source-root"]);
+    await execute(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.state, "verified");
+    assert.deepEqual(status.outstandingFindings, []);
+    const verified = await codes(h, "verify");
+    assert.equal(verified.get("binary"), "unchanged");
+    assert.equal(verified.get("zero"), "unchanged");
+    assert.deepEqual(
+      h.port
+        .snapshotDestination()
+        .map((item) => item.path)
+        .sort(),
+      [".", "nested", "nested/empty", "nested/zero.bin", "report.docx"],
+    );
+    assert.deepEqual(
+      h.port.calls.filter((call) => /^(listSourceChildren|openSourceContent):/u.test(call)),
+      [],
+    );
+    assert.equal(
+      value(await h.engine.withWriterResult(h.ref, (w) => w.close())).outcome,
+      "completed",
+    );
+  });
+
+  it("finds missing and resized destination files and folders from listings", async (t) => {
+    const h = await harness(t, fixture(), { ...config, options: rclone });
+    await approve(h);
+    await execute(h);
+    const copied = new Map(h.port.snapshotDestination().map((item) => [item.path, item.id]));
+    h.port.mutateDestinationContent(copied.get("report.docx")!, "a longer replacement");
+    h.port.removeDestinationItem(copied.get("nested/zero.bin")!);
+    h.port.removeDestinationItem(copied.get("nested/empty")!);
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, false);
+    const page = value(await h.engine.reader(h.ref).rows({ phase: "verify", limit: 100 }));
+    assert.deepEqual(
+      page.rows
+        .filter((item) => item.jobType === "file_migration" && item.kind === "finding")
+        .map((item) => (item.jobType === "file_migration" ? [item.relativePath, item.code] : []))
+        .sort(),
+      [
+        ["nested/empty", "destination_missing"],
+        ["nested/zero.bin", "destination_missing"],
+        ["report.docx", "size_mismatch"],
+      ],
+    );
+    const refused = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.refusal.code, "verification_unaccepted");
+  });
+
+  it("records mirror deletions before each pass and refuses more than deleteLimit", async (t) => {
+    const h = await provisioningHarness(
+      t,
+      fileFixture(
+        ["a", "b", "c"].map((id) => ({
+          id,
+          parentId: "source-root",
+          name: `${id}.txt`,
+          kind: "file" as const,
+          content: id,
+        })),
+      ),
+      { ...rclone, mirror: true, deleteLimit: 1 },
+    );
+    await execute(h);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    const names = async () =>
+      (await h.port.listDestinationChildren(driveId)).map((item) => item.name).sort();
+    assert.deepEqual(await names(), ["a.txt", "b.txt", "c.txt"]);
+    h.port.deleteSourceItem("a");
+    await approve(h);
+    await execute(h);
+    const deletions = value(await h.engine.reader(h.ref).rows({ phase: "execute", limit: 100 }));
+    assert.deepEqual(
+      deletions.rows.map((item) =>
+        item.jobType === "file_migration" ? [item.relativePath, item.code] : [],
+      ),
+      [["a.txt", "to_be_deleted"]],
+    );
+    assert.deepEqual(await names(), ["b.txt", "c.txt"]);
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).outstandingFindings, []);
+    h.port.deleteSourceItem("b");
+    h.port.deleteSourceItem("c");
+    await approve(h);
+    const refused = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.refusal.code, "plan_revision_required");
+    assert.deepEqual(await names(), ["b.txt", "c.txt"]);
+  });
+
+  it("settles a staged final pass by listing and goes live at close", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { ...rclone, staged: true });
+    await execute(h);
+    h.port.mutateSourceItem("binary", { content: "edited before the freeze" });
+    const final = value(await h.engine.withWriterResult(h.ref, (w) => w.plan({ final: true })));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          approver: "operator@example.com",
+          mode: "unattended",
+          planDigest: final.planDigest,
+          freeze: { by: "operator@example.com", at: now, how: "Editors locked out at source" },
+        }),
+      ),
+    );
+    await execute(h);
+    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    const settled = JSON.parse(
+      await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+    ).sections.find((section: { title: string }) => section.title === "Settled confirmation");
+    assert.equal(JSON.parse(settled.body)[0].outcome, "settled");
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.state, "closed");
+    assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
+  });
+
+  it("catches up a source folder that appears while the final pass settles", async (t) => {
+    const input = fixture();
+    input.sourceItems.push({ id: "late", parentId: "source-root", name: "late", kind: "folder" });
+    const h = await provisioningHarness(t, input, { ...rclone, staged: true });
+    const visible = h.port
+      .snapshotSource()
+      .filter((item) => item.parentId === "source-root")
+      .map((item) => item.id);
+    h.port.overrideSourceChildren(
+      "source-root",
+      visible.filter((id) => id !== "late"),
+    );
+    await execute(h);
+    const final = value(await h.engine.withWriterResult(h.ref, (w) => w.plan({ final: true })));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          approver: "operator@example.com",
+          mode: "unattended",
+          planDigest: final.planDigest,
+          freeze: { by: "operator@example.com", at: now, how: "Editors locked out at source" },
+        }),
+      ),
+    );
+    h.engine.close();
+    h.engine = openEngine({
+      home: h.home,
+      now: () => new Date(now),
+      provider: h.port,
+      // An empty folder becomes visible only after the first final pass.
+      waitForConsistency: async () => h.port.overrideSourceChildren("source-root", visible),
+    });
+    await execute(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.state, "verified");
+    assert.deepEqual(status.outstandingFindings, []);
+    const driveId = status.createdDrives[0]!.driveId!;
+    assert.ok((await h.port.listDestinationChildren(driveId)).some((item) => item.name === "late"));
+  });
+
+  it("verifies only at the proof level the plan approved", async (t) => {
+    const h = await harness(t, fixture(), config);
+    await approve(h);
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.onboard({ ...config, options: rclone })));
+    const refused = await h.engine.withWriterResult(h.ref, (w) => w.verify());
+    assert.equal(refused.ok, false);
+    if (!refused.ok)
+      assert.deepEqual(
+        [refused.refusal.code, refused.refusal.detail?.field],
+        ["plan_revision_required", "options.proof"],
+      );
+  });
+
+  it("refuses options that need the per-file inventory", async (t) => {
+    for (const [options, field] of [
+      [{ verificationMode: "size_only" }, "options.verificationMode"],
+      [{ deltaVerification: "changed" }, "options.deltaVerification"],
+      [{ oneNoteNotebooks: "omit" }, "options.oneNoteNotebooks"],
+    ] as const) {
+      const home = await mkdtemp(join(tmpdir(), "migmate-rclone-proof-"));
+      t.after(() => rm(home, { recursive: true, force: true }));
+      const engine = openEngine({ home, provider: new FakeFileMigrationPort(fixture()) });
+      const init = await engine.initJob({
+        type: "file_migration",
+        config: { ...config, options: { ...options, proof: "rclone" } },
+      });
+      assert.equal(init.ok, false);
+      if (!init.ok) assert.equal(init.refusal.detail?.field, field);
+    }
+    const h = await harness(t, fixture(), {
+      mappings: config.mappings.map((mapping) => ({
+        ...mapping,
+        exclusions: [{ sourceItemId: "binary", reason: "Not migrated" }],
+      })),
+      options: rclone,
+    });
+    const plan = await h.engine.withWriterResult(h.ref, (w) => w.plan());
+    assert.equal(plan.ok, false);
+    if (!plan.ok) assert.equal(plan.refusal.detail?.field, "exclusions");
+  });
+});
+
 describe("destination folder verification", () => {
   for (const reverse of [false, true]) {
     for (const conflict of [false, true]) {
@@ -239,9 +448,10 @@ describe("destination folder verification", () => {
           conflict
             ? {
                 path: "nested/empty",
-                destinationId: h.port
-                  .snapshotDestination()
-                  .find((entry) => entry.path === "nested/empty")!.id,
+                // rclone lists SharePoint objects as `driveId#itemId`.
+                destinationId: `${reverse ? "destination-drive#" : ""}${
+                  h.port.snapshotDestination().find((entry) => entry.path === "nested/empty")!.id
+                }`,
                 destinationSize: 0,
                 destinationHash: reverse ? "0000000000000000000000000000000000000000" : hash(""),
               }
@@ -1750,6 +1960,40 @@ describe("file migration through the engine", () => {
     assert.deepEqual(
       page.rows.map((row) => (row.jobType === "file_migration" ? row.mappingId : null)),
       ["b"],
+    );
+  });
+
+  it("refuses a provider fault during manifest load with its static message and evidence", async (t) => {
+    const { input, selected } = multiMapping();
+    const h = await harness(t, input, selected);
+    t.mock.method(h.port, "resolveSourceFolder", async () => {
+      throw new ProviderFault("preflight_failed", "The source folder is inaccessible.", {
+        sourceDriveId: "source-drive",
+      });
+    });
+    const loaded = await h.engine.withWriterResult(h.ref, (w) =>
+      w.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "b",
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: "b" },
+              destination: {
+                type: "google_shared_drive",
+                driveId: "destination-drive",
+                folderId: "dest-b",
+              },
+            },
+          ],
+        }),
+      }),
+    );
+    if (loaded.ok) throw new Error("Manifest loaded despite the provider fault");
+    assert.deepEqual(
+      [loaded.refusal.code, loaded.refusal.message, loaded.refusal.detail],
+      ["preflight_failed", "The source folder is inaccessible.", { sourceDriveId: "source-drive" }],
     );
   });
 

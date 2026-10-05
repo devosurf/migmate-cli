@@ -234,11 +234,11 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async readSourceItem(value) {
       return (await files()).readSourceItem(value);
     },
-    async listSourceChildren(id) {
-      return (await files()).listSourceChildren(id);
+    async listSourceChildren(input) {
+      return (await files()).listSourceChildren(input);
     },
-    async *openSourceContent(id) {
-      yield* (await files()).openSourceContent(id);
+    async *openSourceContent(input) {
+      yield* (await files()).openSourceContent(input);
     },
     async resolveDestinationFolder(value) {
       return (await files()).resolveDestinationFolder(value);

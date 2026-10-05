@@ -69,7 +69,7 @@ A condition of a source tenant that no credential satisfies and no retry survive
 _Avoid_: Setting, environment config, dependency
 
 **Exception**:
-A known gap between what a job planned and what is verifiably present, explicitly acknowledged by an operator. An exception is a recorded outcome, not a failure, and it never disappears from a report.
+A known gap between what a job planned and what is verifiably present, explicitly acknowledged by an operator, either by accepting a verification finding or by approving a plan that names a planned omission as accepted in advance. An exception is a recorded outcome, not a failure, and it never disappears from a report.
 _Avoid_: Error, warning, caveat
 
 **File mapping**:

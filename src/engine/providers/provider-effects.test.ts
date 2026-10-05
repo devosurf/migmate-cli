@@ -147,7 +147,10 @@ test("SharePoint notebook sources retain their web URL and count sections across
   assert.equal(source?.webUrl, notebook.webUrl);
   assert.equal(source?.kind, "package");
   assert.equal(source?.packageSections, 4);
-  const children = await files.listSourceChildren("source-root");
+  const children = await files.listSourceChildren({
+    driveId: "source-drive",
+    itemId: "source-root",
+  });
   assert.deepEqual(children, [source]);
 });
 
@@ -191,7 +194,10 @@ test("non-notebook sources have no section count and Google sources have no web 
     graph: createGraphTransport(session),
     worker,
   });
-  const sources = await sharepoint.listSourceChildren("source-root");
+  const sources = await sharepoint.listSourceChildren({
+    driveId: "source-drive",
+    itemId: "source-root",
+  });
   assert.deepEqual(
     sources.map(({ id, kind, webUrl, packageSections }) => ({ id, kind, webUrl, packageSections })),
     [
@@ -210,6 +216,53 @@ test("non-notebook sources have no section count and Google sources have no web 
   const source = await google.readSourceItem({ driveId: "source-drive", itemId: "google-folder" });
   assert.equal(source?.webUrl, null);
   assert.equal(source?.packageSections, null);
+});
+
+test("libraries of one site resolve and list their shared root item ID within each drive", async (t) => {
+  // SharePoint gives every document library root in a site the same item ID.
+  const drives = ["documents", "teams-wiki-data"];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    const [, driveId, itemId, children] =
+      /^\/v1\.0\/drives\/([^/]+)\/items\/([^/]+)(\/children)?$/.exec(url.pathname) ?? [];
+    if (!drives.includes(driveId!) || itemId !== "site-root")
+      throw new Error(`Unexpected Graph request: ${url.pathname}`);
+    return Response.json(
+      children
+        ? { value: [{ id: `${driveId}-folder`, name: "Folder", folder: {} }] }
+        : { id: "site-root", name: "root", folder: {} },
+    );
+  });
+  const files = new FileEffects({
+    config: {
+      mappings: drives.map((driveId) => ({
+        ...mapping,
+        id: driveId,
+        sourceDriveId: driveId,
+        sourceItemId: "site-root",
+        destFolderId: `${driveId}-destination`,
+      })),
+    },
+    session,
+    graph: createGraphTransport(session),
+    worker: {
+      async *read() {
+        throw new Error("Listing must not read source bytes.");
+      },
+    },
+  });
+  for (const driveId of drives) {
+    const root = await files.resolveSourceRoot({
+      sourceDriveId: driveId,
+      sourceItemId: "site-root",
+    });
+    assert.equal(root?.identity, `${driveId}:site-root`);
+    const children = await files.listSourceChildren({ driveId, itemId: "site-root" });
+    assert.deepEqual(
+      children.map(({ id, driveId: childDrive }) => [id, childDrive]),
+      [[`${driveId}-folder`, driveId]],
+    );
+  }
 });
 
 test("delegated Google copies carry a per-mapping impersonation override", async (t) => {
@@ -311,7 +364,12 @@ test("reverse mappings read Google bytes as the actor and address SharePoint des
   );
   const file = await files.readSourceItem({ driveId: "source-drive", itemId: "source-file" });
   assert.equal(file?.driveId, "source-drive");
-  assert.equal((await bytes(files.openSourceContent("source-file"))).toString(), "source bytes");
+  assert.equal(
+    (
+      await bytes(files.openSourceContent({ driveId: "source-drive", itemId: "source-file" }))
+    ).toString(),
+    "source bytes",
+  );
 });
 
 test("Google about proves the acting email and exposes drive creation capability", async (t) => {
@@ -763,9 +821,12 @@ test("source bytes are read by the drive-root path that is bound to the item", a
       },
     },
   });
-  await effects.listSourceChildren("source-root").catch(() => undefined);
-  await effects.readSourceItem({ driveId: "source-drive", itemId: "stable-source" });
-  assert.equal((await bytes(effects.openSourceContent("stable-source"))).toString(), "bytes");
+  const stable = { driveId: "source-drive", itemId: "stable-source" };
+  await effects
+    .listSourceChildren({ driveId: "source-drive", itemId: "source-root" })
+    .catch(() => undefined);
+  await effects.readSourceItem(stable);
+  assert.equal((await bytes(effects.openSourceContent(stable))).toString(), "bytes");
   assert.deepEqual(requested, [{ driveId: "source-drive", path: "reports/Q4 2026/summary.txt" }]);
 });
 
@@ -785,9 +846,10 @@ test("a source path that resolves to another item refuses instead of serving its
       },
     },
   });
-  await effects.readSourceItem({ driveId: "source-drive", itemId: "stable-source" });
+  const stable = { driveId: "source-drive", itemId: "stable-source" };
+  await effects.readSourceItem(stable);
   await assert.rejects(
-    bytes(effects.openSourceContent("stable-source")),
+    bytes(effects.openSourceContent(stable)),
     (error: unknown) => error instanceof ProviderFault && error.code === "source_read_failed",
   );
   assert.equal(read, false);

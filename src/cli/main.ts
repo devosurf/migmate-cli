@@ -487,7 +487,7 @@ async function executeCommand(
         case "execute":
           return writer.execute({ signal: output.abort.signal });
         case "verify":
-          return writer.verify();
+          return writer.verify({ signal: output.abort.signal });
         case "accept":
           return writer.accept({
             verificationDigest: invocation.verificationDigest!,

@@ -10,6 +10,10 @@ File migration uses rclone copy rather than Migmate's per-item destination write
 
 Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. A job's route fixes one direction for every mapping: a row in the other direction, including any row of a mixed manifest, refuses at load with its row and `source.type`.
 
+`[options] acceptedOmissions` lists plan-phase planned omissions, such as `version_history_omitted` and `source_metadata_export_only`, that are accepted by approving the plan that discloses them. It is bound to the plan digest. Each verification records as accepted exceptions only the listed codes that the approved plan contained, attributed to its approver and approval time; everything else, including `content_verification_degraded`, still requires `accept` for that verification digest. Accepted codes keep their per-file evidence in the report.
+
+Several document libraries of one SharePoint site can be mapped in one job. Graph gives every library root in a site the same item ID, so Migmate tracks source items by drive and item ID together.
+
 Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back. Ordinary retries have a fresh cap; final settle catch-up passes retain the original cumulative deletion authorization. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
 
 Creation recovery adopts a sole exact-name match only when Google's `createdTime`
@@ -116,6 +120,28 @@ carry `sourceHash`, `destinationHash`, `sourceSize` and `destinationSize` and bl
 Engine, HTTP-transport and local-folder rclone tests cover this direction. The optional
 live suite runs a reverse probe for a reverse job config (copy, quickXorHash verification,
 and a replaced Office file and plain file); no credentialed run of it is claimed.
+
+### rclone proof
+
+`[options] proof = "rclone"` (SharePoint → Shared Drive only) replaces the per-file
+Graph inventory with rclone's own listings. Approval binds mapping roots, drives,
+members and options, not a file list. No preview, freshness comparison or per-file
+omission finding precedes copying. rclone checks each upload's size; SharePoint and
+Drive share no hash type, so neither rclone nor this mode compares content. Verification
+compares rclone listings by path and size, folders included, and flags a mapping whose
+last pass did not complete. Final passes settle on an empty rclone listing comparison.
+Mirror passes record each destination-only file as `to_be_deleted` from an rclone
+listing taken just before the pass, and delete at most that many, within
+`deleteLimit`. Exclusions, `verificationMode`, `deltaVerification = "changed"` and
+`oneNoteNotebooks = "omit"` refuse; notebooks are copied as their section files. A
+test-tenant run covered two small libraries through prestage, a mirror delta, a final
+pass and go-live, plus a copy-only run; no run at large-library scale is claimed.
+
+rclone listings and hash sums, in both proof levels, run as polled rclone jobs with no
+request deadline. rclone retries each Graph and Drive request up to 10 times, honoring
+`Retry-After`, and its own I/O timeouts still apply. One listing response is capped at
+256 MiB, roughly 900,000 files at the ~260 bytes per file observed on SharePoint. Split
+a larger library into folder mappings.
 
 ### Staged migrations and cutover evidence
 
@@ -350,6 +376,7 @@ These limits are operator-facing statements of decisions recorded elsewhere. The
 - [ADR-0003](adr/0003-site-scoped-file-route.md) — original site-scoped grant and the later tenant-wide migration design amendment.
 - [ADR-0004](adr/0004-drive-revision-concurrency.md) — historical file-writer revision checks; archive uploads retain that boundary.
 - [ADR-0010](adr/0010-rclone-executes-file-transfers.md) — rclone executes file transfers; implemented here for existing mappings and destinations.
+- [ADR-0013](adr/0013-rclone-proof-map-only-approval.md) — opt-in rclone proof approves the mapping roots and verifies by listing.
 - [ADR-0005](adr/0005-unrepresentable-path-proof.md) and [ADR-0006](adr/0006-capability-sample-proofs.md) — what the live test may claim when the source cannot hold a sample.
 - [ADR-0007](adr/0007-archive-scope-reads-and-window-filter.md) — what a Teams archive scope reads, and how its window survives an exclusive-only filter.
 - [ADR-0008](adr/0008-archive-cold-storage-destination.md) — the archive destination is a cold-storage copy, with one container per conversation.

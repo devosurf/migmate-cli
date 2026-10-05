@@ -763,10 +763,11 @@ export class FakeFileMigrationPort implements ProviderPort {
     return cloneSource(entry);
   }
 
-  async listSourceChildren(sourceItemId: string): Promise<SourceEntry[]> {
-    this.callLog.push(`listSourceChildren:${sourceItemId}`);
-    this.throwRetryAfter("listSourceChildren", sourceItemId);
-    const childIds = this.sourceChildrenByParent[sourceItemId] ?? [];
+  async listSourceChildren(input: { driveId: string; itemId: string }): Promise<SourceEntry[]> {
+    this.callLog.push(`listSourceChildren:${input.itemId}`);
+    this.throwRetryAfter("listSourceChildren", input.itemId);
+    if (this.sourceById[input.itemId]?.driveId !== input.driveId) return [];
+    const childIds = this.sourceChildrenByParent[input.itemId] ?? [];
     const children: SourceEntry[] = [];
     for (const childId of childIds) {
       const child = this.sourceById[childId];
@@ -778,14 +779,19 @@ export class FakeFileMigrationPort implements ProviderPort {
     return children;
   }
 
-  openSourceContent(sourceItemId: string): AsyncIterable<Uint8Array> {
-    this.callLog.push(`openSourceContent:${sourceItemId}`);
-    this.throwRetryAfter("openSourceContent", sourceItemId);
-    const entry = this.sourceById[sourceItemId];
-    if (!entry || entry.content === null || !entry.downloadable) {
+  openSourceContent(input: { driveId: string; itemId: string }): AsyncIterable<Uint8Array> {
+    this.callLog.push(`openSourceContent:${input.itemId}`);
+    this.throwRetryAfter("openSourceContent", input.itemId);
+    const entry = this.sourceById[input.itemId];
+    if (
+      !entry ||
+      entry.driveId !== input.driveId ||
+      entry.content === null ||
+      !entry.downloadable
+    ) {
       throw destinationFault("source_read_failed", entry ? 403 : 404);
     }
-    const fault = takeEffect(this.effects, "openSourceContent", sourceItemId, "before", true);
+    const fault = takeEffect(this.effects, "openSourceContent", input.itemId, "before", true);
     return scriptedStream(entry.content, fault);
   }
 
@@ -1222,7 +1228,9 @@ export class FakeFileMigrationPort implements ProviderPort {
           : !input.download && input.hashType === "sha256" && "reportedChecksum" in entry
             ? entry.reportedChecksum
             : fileHash(entry.content, input.hashType);
-      hashes.push({ path, size: entry.size ?? -1, hash, id: entry.id });
+      // rclone's OneDrive backend lists IDs as `driveId#itemId`.
+      const id = input.root.kind === "sharepoint" ? `${entry.driveId}#${entry.id}` : entry.id;
+      hashes.push({ path, size: entry.size ?? -1, hash, id });
     }
     return hashes;
   }

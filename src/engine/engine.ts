@@ -83,7 +83,7 @@ export interface JobWriter {
     freeze?: { by: string; at: string; how: string };
   }): Promise<Outcome<ApprovalRecord>>;
   execute(opts?: ExecuteOptions): Promise<Outcome<ExecuteResult>>;
-  verify(): Promise<Outcome<VerificationRevision>>;
+  verify(opts?: ExecuteOptions): Promise<Outcome<VerificationRevision>>;
   accept(x: {
     verificationDigest: string;
     codes: AcceptedException[];

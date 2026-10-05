@@ -186,6 +186,11 @@ function requireName(name: string): void {
   }
 }
 
+/** Graph item IDs are unique only within a drive: one site's library roots share an ID. */
+function sourceKey(driveId: string, itemId: string): string {
+  return JSON.stringify([driveId, itemId]);
+}
+
 function readMappings(config: unknown): Mapping[] {
   if (!config || typeof config !== "object")
     throw new ProviderFault("preflight_failed", "The file mapping configuration is invalid.");
@@ -233,7 +238,8 @@ export class FileEffects {
   readonly #graph: GraphTransport;
   readonly #graphDestination: GraphTransport;
   readonly #worker: SourceWorker;
-  readonly #sourceDrive = new Map<string, string>();
+  /** Source items resolved by stable ID, keyed by drive and item. */
+  readonly #resolvedSources = new Set<string>();
   readonly #destDrive = new Map<string, string>();
   /** Direction is decided once: reverse mappings read Google drives and write SharePoint ones. */
   readonly #googleSourceDrives = new Set<string>();
@@ -264,7 +270,8 @@ export class FileEffects {
     });
     this.#worker = input.worker;
     for (const mapping of this.mappings) {
-      if (mapping.sourceItemId) this.#sourceDrive.set(mapping.sourceItemId, mapping.sourceDriveId);
+      if (mapping.sourceItemId)
+        this.#resolvedSources.add(sourceKey(mapping.sourceDriveId, mapping.sourceItemId));
       if (mapping.sourceType === "google_shared_drive") {
         this.#googleSourceDrives.add(mapping.sourceDriveId);
         if (mapping.destDriveId) this.#sharepointDestinationDrives.add(mapping.destDriveId);
@@ -276,12 +283,7 @@ export class FileEffects {
   }
 
   async #source(raw: GraphItem, driveId: string): Promise<SourceEntry> {
-    if (this.#sourceDrive.has(raw.id) && this.#sourceDrive.get(raw.id) !== driveId)
-      throw new ProviderFault(
-        "preflight_failed",
-        "Source item identifiers are ambiguous across mappings.",
-      );
-    this.#sourceDrive.set(raw.id, driveId);
+    this.#resolvedSources.add(sourceKey(driveId, raw.id));
     const kind = raw.remoteItem
       ? "reference"
       : raw.package
@@ -350,7 +352,7 @@ export class FileEffects {
   #googleSource(raw: GoogleFile, driveId: string): SourceEntry {
     if (raw.driveId !== driveId)
       throw new ProviderFault("unsupported_route", "The source is not in the exact Shared Drive.");
-    this.#sourceDrive.set(raw.id, driveId);
+    this.#resolvedSources.add(sourceKey(driveId, raw.id));
     const kind =
       raw.mimeType === FOLDER_MIME
         ? "folder"
@@ -802,9 +804,9 @@ export class FileEffects {
     return this.readSourceItem({ driveId: input.sourceDriveId, itemId: input.sourceItemId });
   }
 
-  async listSourceChildren(sourceItemId: string): Promise<SourceEntry[]> {
-    const driveId = this.#sourceDrive.get(sourceItemId);
-    if (!driveId)
+  async listSourceChildren(input: { driveId: string; itemId: string }): Promise<SourceEntry[]> {
+    const { driveId, itemId: sourceItemId } = input;
+    if (!this.#resolvedSources.has(sourceKey(driveId, sourceItemId)))
       throw new ProviderFault(
         "preflight_failed",
         "The source parent has not been resolved by stable ID.",
@@ -856,9 +858,9 @@ export class FileEffects {
     return items;
   }
 
-  async *openSourceContent(sourceItemId: string): AsyncIterable<Uint8Array> {
-    const driveId = this.#sourceDrive.get(sourceItemId);
-    if (!driveId)
+  async *openSourceContent(input: { driveId: string; itemId: string }): AsyncIterable<Uint8Array> {
+    const { driveId, itemId: sourceItemId } = input;
+    if (!this.#resolvedSources.has(sourceKey(driveId, sourceItemId)))
       throw new ProviderFault("source_read_failed", "The source identity has not been resolved.");
     const before = await this.readSourceItem({ driveId, itemId: sourceItemId });
     if (this.#googleSourceDrives.has(driveId)) {
@@ -1183,7 +1185,7 @@ export class FileEffects {
           });
           if (!source || source.kind !== "folder")
             throw new ProviderFault("preflight_failed", "The source folder is inaccessible.");
-          await this.listSourceChildren(source.id);
+          await this.listSourceChildren({ driveId: source.driveId, itemId: source.id });
           const drive = await this.#graphDestination.request<{ id: string; driveType: string }>(
             `/v1.0/drives/${encodeURIComponent(root.destDriveId)}`,
           );
@@ -1230,7 +1232,7 @@ export class FileEffects {
               "preflight_failed",
               "The source root is not an enumerable folder.",
             );
-          await this.listSourceChildren(source.id);
+          await this.listSourceChildren({ driveId: source.driveId, itemId: source.id });
           if (mapping.sourceSiteId) {
             const initial = `/v1.0/sites/${encodeURIComponent(mapping.sourceSiteId)}/drives?$select=id`;
             let found = false;

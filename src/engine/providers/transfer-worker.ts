@@ -24,6 +24,8 @@ const READY_TIMEOUT = 15_000;
 const REQUEST_TIMEOUT = 30_000;
 const STOP_TIMEOUT = 3_000;
 const MAX_JSON_BYTES = 16 * 1024 * 1024;
+/** Listings grow with the library (~260 bytes per file); V8 strings stop near 512 MiB. */
+const LISTING_MAX_BYTES = 256 * 1024 * 1024;
 const REMOTE_NAME = /^[\p{L}\p{N}_.+@]+(?:[ -]+[\p{L}\p{N}_.+@-]+)*$/u;
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -284,9 +286,14 @@ function response(
   body: string | undefined,
   authorization: string | undefined,
   timeout: number,
+  signal?: AbortSignal,
 ): Promise<IncomingMessage> {
   return withSocketPath(socketPath, (connectPath) => {
     const deferred = Promise.withResolvers<IncomingMessage>();
+    if (signal?.aborted) {
+      deferred.reject(signal.reason);
+      return deferred.promise;
+    }
     try {
       const req = request(
         {
@@ -303,13 +310,24 @@ function response(
         },
         (res) => {
           clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
           deferred.resolve(res);
         },
       );
-      // A hard header deadline covers connect hangs as well as idle sockets.
-      const timer = setTimeout(() => req.destroy(), timeout);
+      // A hard header deadline covers connect hangs as well as idle sockets. Zero leaves a
+      // long listing to the caller's AbortSignal and rclone's own I/O timeouts.
+      const timer = timeout > 0 ? setTimeout(() => req.destroy(), timeout) : undefined;
+      // rclone runs a synchronous call in the request's context: closing it stops the work.
+      const abort = () => {
+        clearTimeout(timer);
+        req.destroy();
+        deferred.reject(signal!.reason);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
       req.once("error", (error) => {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        if (signal?.aborted) return deferred.reject(signal.reason);
         const denied = record(error) && (error.code === "EACCES" || error.code === "EPERM");
         deferred.reject(
           fail(
@@ -326,23 +344,32 @@ function response(
   });
 }
 
-async function readJson(res: IncomingMessage, timeout: number): Promise<unknown> {
-  const timer = setTimeout(() => res.destroy(), timeout);
+async function readJson(
+  res: IncomingMessage,
+  timeout: number,
+  maxBytes = MAX_JSON_BYTES,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const timer = timeout > 0 ? setTimeout(() => res.destroy(), timeout) : undefined;
+  const abort = () => res.destroy();
+  signal?.addEventListener("abort", abort, { once: true });
   try {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of res) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += bytes.length;
-      if (size > MAX_JSON_BYTES) throw fail("provider_failed", "worker_response_too_large");
+      if (size > maxBytes) throw fail("provider_failed", "worker_response_too_large");
       chunks.push(bytes);
     }
     return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
   } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     if (error instanceof ProviderFault) throw error;
     throw fail("provider_failed", "worker_response_invalid");
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
     res.destroy();
   }
 }
@@ -552,6 +579,8 @@ export function createTransferSupervisor(options: {
     input: Record<string, unknown>,
     worker: Worker | undefined,
     timeout = REQUEST_TIMEOUT,
+    maxBytes = MAX_JSON_BYTES,
+    signal?: AbortSignal,
   ): Promise<{ status: number; value: unknown }> {
     let body: string;
     try {
@@ -566,13 +595,14 @@ export function createTransferSupervisor(options: {
       body,
       worker === undefined ? undefined : basic(worker),
       timeout,
+      signal,
     );
     const status = res.statusCode ?? 0;
     if (status !== 200 || worker === undefined) {
       res.destroy();
       return { status, value: null };
     }
-    return { status, value: await readJson(res, timeout) };
+    return { status, value: await readJson(res, timeout, maxBytes, signal) };
   }
 
   async function authenticated(
@@ -580,13 +610,29 @@ export function createTransferSupervisor(options: {
     method: string,
     input: Record<string, unknown> = {},
     timeout = REQUEST_TIMEOUT,
+    maxBytes = MAX_JSON_BYTES,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (!worker.child.alive) throw fail("provider_failed", "worker_exited");
     await verifySocket(worker);
-    const result = await rc(worker.socketPath, method, input, worker, timeout);
+    const result = await rc(worker.socketPath, method, input, worker, timeout, maxBytes, signal);
     if (result.status !== 200)
       throw fail("provider_failed", "worker_request_failed", { status: result.status });
     return result.value;
+  }
+
+  /**
+   * Listings and hash sums grow with the library, so no client deadline applies; rclone's
+   * own I/O timeouts and retries still do. rclone runs a synchronous call in the request's
+   * context and keeps one copy of its result, so aborting the signal stops the work.
+   */
+  function longCall(
+    worker: Worker,
+    method: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> {
+    return authenticated(worker, method, input, 0, LISTING_MAX_BYTES, signal);
   }
 
   function passWorker({ socketPath, pass }: CopyPassReference): Worker {
@@ -729,14 +775,17 @@ export function createTransferSupervisor(options: {
           "--disable=WriteDirMetadata",
           "--onedrive-disable-site-permission=true",
           "--onedrive-expose-onenote-files=true",
-          "--retries=1",
-          "--low-level-retries=1",
+          // Backend pacers retry each Graph/Drive request this many times, honoring
+          // Retry-After; one throttled request otherwise fails a file or a whole listing.
+          // rclone's command-level `--retries` loop never runs for rc jobs.
+          "--low-level-retries=10",
           "--rc-job-expire-duration",
           options.jobExpiry ?? "24h",
           "--rc-server-read-timeout",
           "1h",
           "--rc-server-write-timeout",
-          "1h",
+          // Listings and hash sums answer only when finished; callers bound them instead.
+          "0",
         ],
         {
           ...systemEnvironment(),
@@ -919,12 +968,17 @@ export function createTransferSupervisor(options: {
         durationNs(main.ModifyWindow),
       ].reduce((largest, value) => (value > largest ? value : largest));
       const list = async (fs: string): Promise<PreviewFile[]> => {
-        const result = await authenticated(worker, "operations/list", {
-          fs,
-          remote: "",
-          opt: { recurse: true, filesOnly: true, noMimeType: true },
-          ...passFilter(input.excludePaths),
-        });
+        const result = await longCall(
+          worker,
+          "operations/list",
+          {
+            fs,
+            remote: "",
+            opt: { recurse: true, filesOnly: true, noMimeType: true },
+            ...passFilter(input.excludePaths),
+          },
+          input.signal,
+        );
         if (!record(result) || !Array.isArray(result.list))
           throw fail("provider_failed", "worker_response_invalid");
         return result.list.map((file: unknown) => {
@@ -973,19 +1027,24 @@ export function createTransferSupervisor(options: {
       }
       if (commonHash && input.destination && hashCandidates.length > 0) {
         const hashes = async (fs: string, paths: string[]) => {
-          const result = await authenticated(worker, "operations/list", {
-            fs,
-            remote: "",
-            opt: {
-              recurse: true,
-              filesOnly: true,
-              noModTime: true,
-              noMimeType: true,
-              showHash: true,
-              hashTypes: [commonHash],
+          const result = await longCall(
+            worker,
+            "operations/list",
+            {
+              fs,
+              remote: "",
+              opt: {
+                recurse: true,
+                filesOnly: true,
+                noModTime: true,
+                noMimeType: true,
+                showHash: true,
+                hashTypes: [commonHash],
+              },
+              _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) },
             },
-            _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) },
-          });
+            input.signal,
+          );
           if (!record(result) || !Array.isArray(result.list))
             throw fail("provider_failed", "worker_response_invalid");
           const byPath = new Map<string, string>();
@@ -1036,12 +1095,17 @@ export function createTransferSupervisor(options: {
         entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
       return preview;
     },
-    async listFolders({ socketPath, root }) {
-      const listing = await authenticated(owned(socketPath), "operations/list", {
-        fs: root.fs,
-        remote: "",
-        opt: { recurse: true, dirsOnly: true, noModTime: true, noMimeType: true },
-      });
+    async listFolders({ socketPath, root, signal }) {
+      const listing = await longCall(
+        owned(socketPath),
+        "operations/list",
+        {
+          fs: root.fs,
+          remote: "",
+          opt: { recurse: true, dirsOnly: true, noModTime: true, noMimeType: true },
+        },
+        signal,
+      );
       if (!record(listing) || !Array.isArray(listing.list))
         throw fail("provider_failed", "worker_response_invalid");
       return listing.list
@@ -1053,30 +1117,29 @@ export function createTransferSupervisor(options: {
         .filter((path: string) => path !== "" && path !== ".")
         .sort();
     },
-    async listFileHashes({ socketPath, root, hashType, download, paths }) {
+    async listFileHashes({ socketPath, root, hashType, download, paths, signal }) {
       const worker = owned(socketPath);
       if (paths?.length === 0) return [];
       const filter =
         paths === undefined
           ? {}
           : { _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) } };
-      const listing = await authenticated(worker, "operations/list", {
-        fs: root.fs,
-        remote: "",
-        opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true },
-        ...filter,
-      });
-      const hashes = await authenticated(
+      const listing = await longCall(
         worker,
-        "operations/hashsum",
+        "operations/list",
         {
           fs: root.fs,
-          hashType,
-          download,
-          base64: false,
+          remote: "",
+          opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true },
           ...filter,
         },
-        60 * 60 * 1_000,
+        signal,
+      );
+      const hashes = await longCall(
+        worker,
+        "operations/hashsum",
+        { fs: root.fs, hashType, download, base64: false, ...filter },
+        signal,
       );
       if (
         !record(listing) ||

@@ -248,6 +248,106 @@ describe("engine durability seam", () => {
     assert.deepEqual(new Map(revision.findings.map((facet) => [facet.code, facet.count])), counts);
   });
 
+  it("records approved route omissions as accepted exceptions on every verification", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        {
+          id: "metadata-file",
+          parentId: "source-root",
+          name: "metadata-file",
+          kind: "file",
+          content: "bytes",
+          metadata: { versionCount: 3, listItemFields: { Title: "retained evidence" } },
+        },
+      ]),
+      {
+        ...config(),
+        options: { acceptedOmissions: ["version_history_omitted", "source_metadata_export_only"] },
+      },
+    );
+    const planDigest = await approve(h);
+    await execute(h);
+    const executed = value(await h.engine.reader(h.ref).status());
+    assert.equal(executed.state, "verified");
+    assert.deepEqual(executed.outstandingFindings, []);
+    const reverified = value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
+    assert.equal(reverified.clean, true);
+    assert.deepEqual(reverified.acceptedCodes, [
+      "source_metadata_export_only",
+      "version_history_omitted",
+    ]);
+    const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+    const evidence = JSON.parse(
+      await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+    );
+    assert.deepEqual(
+      evidence.acceptedExceptions.map((a: { code: string; approver: string; note: string }) => [
+        a.code,
+        a.approver,
+        a.note.includes(planDigest),
+      ]),
+      [
+        ["source_metadata_export_only", "engine-contract-test", true],
+        ["version_history_omitted", "engine-contract-test", true],
+      ],
+    );
+    assert.equal(
+      value(await h.engine.withWriterResult(h.ref, (writer) => writer.close())).outcome,
+      "completed_with_accepted_exceptions",
+    );
+  });
+
+  it("leaves an approved omission code outstanding when the approved plan did not disclose it", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        {
+          id: "metadata-file",
+          parentId: "source-root",
+          name: "metadata-file",
+          kind: "file",
+          content: "bytes",
+          metadata: { versionCount: 1, listItemFields: { Title: "retained evidence" } },
+        },
+      ]),
+      {
+        ...config(),
+        options: { acceptedOmissions: ["version_history_omitted", "source_metadata_export_only"] },
+      },
+    );
+    await approve(h);
+    await execute(h);
+    h.port.mutateSourceItem("metadata-file", {
+      metadata: { versionCount: 3, listItemFields: { Title: "retained evidence" } },
+    });
+    const verified = value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
+    assert.equal(verified.clean, false);
+    assert.deepEqual(verified.acceptedCodes, ["source_metadata_export_only"]);
+    assert.deepEqual(
+      value(await h.engine.reader(h.ref).status()).outstandingFindings.map((f) => f.code),
+      ["version_history_omitted"],
+    );
+  });
+
+  it("refuses advance acceptance of verification-only or unknown codes", async (t) => {
+    for (const acceptedOmissions of [
+      ["content_verification_degraded"],
+      ["content_mismatch"],
+      ["version_history_omitted", "version_history_omitted"],
+    ]) {
+      const home = await mkdtemp(join(tmpdir(), "migmate-accepted-omissions-"));
+      t.after(() => rm(home, { recursive: true, force: true }));
+      const engine = openEngine({ home, provider: new FakeFileMigrationPort(fixture()) });
+      const init = await engine.initJob({
+        type: "file_migration",
+        config: { ...config(), options: { acceptedOmissions } },
+      });
+      refused(init, "configuration_invalid");
+      if (!init.ok) assert.equal(init.refusal.detail?.field, "options.acceptedOmissions");
+    }
+  });
+
   it("exposes one verification gate with execution already complete to a live reader", async (t) => {
     const h = await harness(t);
     await approve(h);

@@ -4,6 +4,8 @@ Read each row's `kind`, `phase`, path and evidence, not its code alone. Present 
 
 After the skill's acceptance gate, use `accept --job ID --verification-digest DIGEST --approver IDENTITY --code CODE --output json`, repeating `--code` for each explicitly accepted code. Acceptance is code-wide for that verification: show all matching paths before asking. Optional `--note` records the reason per code. A missing digest refuses `verification_unaccepted`; missing approver or codes is `usage`. Repair and reverify when the evidence is unacceptable, then use the new verification digest.
 
+`[options] acceptedOmissions` accepts plan-phase planned omissions in advance, for example `version_history_omitted` and `source_metadata_export_only` on SharePoint → Shared Drive. It is a strategy decision: confirm with the human before manifest load that current-version-only content and exported list fields meet retention needs. The plan digest binds it. Each verification records only the listed codes that the approved plan disclosed as accepted exceptions under the plan approver; read `acceptedCodes` and the report notes back. Any other finding, including a listed code that the plan did not disclose and `content_verification_degraded`, still goes through `accept`.
+
 ## File evidence
 
 | Code                              | Meaning and typical cause                                                                                                                           | Recommended decision                                                                                                      |

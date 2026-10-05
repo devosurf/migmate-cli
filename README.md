@@ -112,7 +112,21 @@ flowchart LR
 
 For file verification, a source that changed between copy and verify can raise three findings for one path: `source_size_inconsistent`, `size_mismatch`, and `content_mismatch`. `sourceSize` reports the size actually compared with `destinationSize`; when the listing contradicts served bytes, `listedSize` preserves the listing and the inconsistency finding also carries `servedSize`. The dependent size and content findings carry `cause: "source_size_inconsistent"` so they can be reviewed together. All three still block `close` until explicitly accepted; accepting the cause alone does not accept the other findings.
 
+File jobs may accept route-inherent omissions in advance with `[options] acceptedOmissions`, for example `["version_history_omitted", "source_metadata_export_only"]` on SharePoint → Shared Drive, where Drive cannot hold version history or list-item fields. Only plan-phase planned omissions qualify: `content_verification_degraded` and every verification finding still need `accept`. The option is part of the approved plan digest, and the plan discloses it. Each verification then records each listed code that the approved plan actually disclosed as an accepted exception, under the plan's approver and approval time, with a note naming the plan digest. Its evidence stays in the report, and `clean` and `close` reflect only the remaining findings. A listed code that the plan did not disclose, such as version history that appeared after approval, still needs explicit acceptance.
+
 File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member, or an approved excluded item moving outside that subtree within the mapping, requires replanning before any copy starts. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
+
+### rclone proof: approve the map, let rclone copy
+
+By default every file job runs a per-file Graph inventory: two metadata calls per source file (versions and retention label), repeated by `plan`, before `execute` copies anything, and by `verify`. Large libraries spend hours there. `[options] proof = "rclone"` (SharePoint → Shared Drive only) drops that inventory:
+
+- `plan` resolves each mapping's source and destination roots, the drives to create, their members and the options. The approved digest binds that map, not a file list. `execute` starts rclone right away.
+- rclone picks files by size and modification time and checks each upload's size. SharePoint and Drive share no hash type, so rclone cannot compare content hashes on this route, and Migmate doesn't either.
+- `verify` compares rclone listings of both sides by path and size, folders included, without re-reading content. It raises `destination_missing`, `size_mismatch`, `destination_type_conflict`, and `destination_write_failed` for a mapping whose last copy pass did not complete. Each verified file row records the source quickXorHash and the destination's stored hash as evidence.
+- Staged jobs work as usual. The final pass settles by repeating rclone's listing comparison until nothing is left to copy or delete.
+- Mirror still requires job-created drives and `deleteLimit`. Before a pass that finds files in the destination, rclone lists both sides and records each destination-only file as an execute-phase `to_be_deleted` row. The pass may delete exactly those, and more than `deleteLimit` refuses `plan_revision_required`.
+
+Not available with `proof = "rclone"`: exclusions, `verificationMode`, `deltaVerification = "changed"` and `oneNoteNotebooks = "omit"`. OneNote notebooks are copied as their section files. Version history, list-item fields, retention labels and permissions are not copied, and they are not listed per file as omissions. The plan and report state this proof level.
 
 ### Staged cutover: keep one job open
 
