@@ -63,6 +63,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     return createTransferSupervisor({
       configPath,
       jobDirectory: input.jobDirectory,
+      stopOnUploadLimit:
+        input.jobType === "file_migration" && config.route !== "shared_drive_to_sharepoint_library",
       ...(binary ? { binary } : {}),
     });
   }

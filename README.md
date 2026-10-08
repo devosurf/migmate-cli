@@ -528,7 +528,21 @@ transfersPerMapping = 4
 
 These are conservative defaults: two active mappings, each with up to four file transfers (eight in total). Both settings accept positive safe integers; set `mappingsInFlight = 1` for serial mapping copies. Raising them increases simultaneous provider work and may increase throttling; they are not tenant-throughput guarantees. The next queued mapping starts as a slot frees, rather than waiting for a whole batch.
 
-`status` exposes durable `mappingPasses`: mapping and pass number, mode, rclone handle, state, timestamps, last stats and error. rclone's backend pacer handles throttling within each pass. A failed pass retains rclone's error and counts against the run's retry budget without stopping other active or queued mappings; the run remains blocked if any pass fails. Run `execute` again to retry failed or interrupted mappings; completed mappings in the approved revision are skipped. On writer-open recovery, every unfinished pass whose worker is gone becomes interrupted, including all passes active at a crash. A retried copy lets rclone skip identical files instead of recovering per-file uploads.
+`status` exposes durable `mappingPasses`: mapping and pass number, mode, rclone handle, state, timestamps, last stats and error. rclone's backend pacer handles throttling within each pass. An ordinary failed pass retains rclone's error and counts against the run's retry budget without stopping other active or queued mappings; the run remains blocked if any pass fails. Run `execute` again to retry failed or interrupted mappings; completed mappings in the approved revision are skipped. On writer-open recovery, every unfinished pass whose worker is gone becomes interrupted, including all passes active at a crash. A retried copy lets rclone skip identical files instead of recovering per-file uploads.
+
+**Google upload quota is different.** Google documents [750 GB per user per day](https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints) across My Drive and Shared Drives. For file uploads into Drive, the worker uses `--drive-stop-on-upload-limit`. On the first detected upload-quota failure, Migmate cooperatively stops the other active passes, starts no queued mapping, and returns `blocked` (exit **5**). All mappings share the job's acting Google account. The execute result and terminal event carry `uploadQuota`; the failed pass retains it in `status.mappingPasses[].uploadQuota`, alongside the original error:
+
+```json
+{
+  "code": "upload_quota_exceeded",
+  "hitAt": "2026-10-08T12:00:00.000Z",
+  "actingGoogleAccount": "files@example.com",
+  "earliestResumeAt": "2026-10-09T12:00:00.000Z",
+  "resumeTimeIsEstimate": true
+}
+```
+
+`hitAt` is when Migmate observed the failure. The account comes from plan evidence, falling back to the impersonation subject (or `null` for an older non-impersonated plan without that evidence). `earliestResumeAt` is hit time plus 24 hours, an **estimate**, not Google's reset clock or a guaranteed allowance. Wait until that estimate before retrying `execute` on the same job; an earlier manual retry is allowed. There is no automatic quota resume, allowance warning or trailing-24-hour byte accounting. Quota stops do not count against the ordinary failure budget. Because rclone's aggregate cannot separate quota errors from file failures, the quota pass's final `lastStats.errors` and progress `errors` are `null` (unknown), with the raw aggregate preserved as `rcloneErrors`, not an ordinary per-file failure count. Other Drive limits (storage, Shared Drive file count, downloads, ordinary API throttling) do not receive this daily-upload classification.
 
 Ctrl-C stops active passes cooperatively, returns exit **130**, and leaves the job resumable. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
 
