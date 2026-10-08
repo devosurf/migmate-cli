@@ -507,6 +507,12 @@ describe("Google Shared Drives to SharePoint", () => {
   it("copies into SharePoint, verifies quickXorHash and names rewritten Office files", async (t) => {
     const h = await harness(t, fixture(), reverse);
     value(await load(h, [both[0]]));
+    const plan = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+    assert.ok(
+      plan.sections
+        .find((section) => section.title === "Acting Google account")
+        ?.body.includes("service-account@example.com"),
+    );
     await approve(h);
     await execute(h);
     assert.equal(
@@ -545,6 +551,11 @@ describe("Google Shared Drives to SharePoint", () => {
     });
     assert.equal(evidence("destination_only_retained").hashType, "quickxor");
     assert.match(JSON.stringify(json), /shared_drive_to_sharepoint_library/);
+    assert.ok(
+      json.sections
+        .find((section: { title: string }) => section.title === "Acting Google account")
+        ?.body.includes("service-account@example.com"),
+    );
   });
 
   it("keeps corrupted plain files as content_mismatch", async (t) => {
@@ -1745,7 +1756,16 @@ describe("file migration through the engine", () => {
     assert.match(contents, /Delete the service-account key/);
     assert.match(contents, /Delete the domain-wide delegation entry/);
   });
-  it("refuses delegation failures before planning and leaves impersonation off unchanged", async (t) => {
+  it("refuses planning when Google cannot identify the service account", async (t) => {
+    const input = fixture();
+    input.googleAbout = new Error("Google identity unavailable");
+    const h = await harness(t, input);
+    const result = value(await h.engine.withWriter(h.ref, (writer) => writer.plan()));
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("An unidentified acting account must refuse");
+    assert.equal(result.refusal.code, "preflight_failed");
+  });
+  it("refuses delegation failures and names the acting service account without delegation", async (t) => {
     for (const googleAbout of [
       { user: { emailAddress: "other@example.com" }, canCreateDrives: true },
       new Error("Google refused the delegated token"),
@@ -1765,19 +1785,39 @@ describe("file migration through the engine", () => {
       assert.match(JSON.stringify(result), /https:\/\/www.googleapis.com\/auth\/drive/);
     }
     const input = fixture();
-    input.googleAbout = new Error("Impersonation off must not query about");
     const h = await harness(t, input, {
       ...config,
       impersonate: false,
       subject: "ignored@example.com",
     });
     const plan = value(value(await h.engine.withWriter(h.ref, (w) => w.plan())));
-    assert.match(JSON.stringify(plan), /service account acts as itself/);
-    assert.doesNotMatch(JSON.stringify(plan.sections), /delegation entry|ignored@example.com/);
+    const actingAccount = plan.sections.find(
+      (section) => section.title === "Acting Google account",
+    );
+    assert.ok(actingAccount?.body.includes("service-account@example.com"));
+    assert.doesNotMatch(
+      JSON.stringify(plan.sections),
+      /Delete the service-account key|delegation entry|ignored@example.com/,
+    );
     await approve(h);
     await execute(h);
     value(value(await h.engine.withWriter(h.ref, (w) => w.verify())));
     value(value(await h.engine.withWriter(h.ref, (w) => w.close())));
+    t.mock.method(h.port, "googleAbout", async () => {
+      throw new Error("Reports must retain the identity observed for the approved plan");
+    });
+    const report = value(value(await h.engine.withWriter(h.ref, (w) => w.report())));
+    const contents = JSON.parse(
+      await readFile(
+        report.artifacts.find((artifact) => artifact.name === "report.json")!.path,
+        "utf8",
+      ),
+    );
+    assert.ok(
+      contents.sections
+        .find((section: { title: string }) => section.title === "Acting Google account")
+        ?.body.includes("service-account@example.com"),
+    );
   });
   it("loads and plans 1000 mappings with bounded resources and pages filtered mapping rows", async (t) => {
     const ids = Array.from({ length: 1000 }, (_, i) => `library-${String(i).padStart(4, "0")}`);

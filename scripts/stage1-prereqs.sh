@@ -366,7 +366,7 @@ chmod 600 "$MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE"
 write_env MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE "$MIGMATE_GOOGLE_SERVICE_ACCOUNT_KEY_FILE"
 say "Optional file-job impersonation: set top-level impersonate = true and subject = \"files@example.com\" in job TOML before any table header. Otherwise the service account acts as itself."
 say "For impersonation, a Workspace admin must authorize domain-wide delegation for the service account's numeric client id (JSON client_id, not its email), with ONLY https://www.googleapis.com/auth/drive. Choose an ordinary non-admin subject and share the destination with that subject instead. Migmate cannot check admin status without Admin SDK scopes and never requests them."
-say "Delegation is a domain-wide key. Preflight proves token issuance and about.user.emailAddress equals the subject. Plan and report show the acting account; after the job, delete the service-account key and delegation entry listed as open report items. Keep impersonate out of rclone.conf: Migmate injects it per mapping; operator overrides refuse. This does not enable drive creation."
+say "Delegation is a domain-wide key. Preflight proves token issuance and about.user.emailAddress equals the subject. Plan and report show the acting account; after the job, delete the service-account key and delegation entry listed as open report items. Keep impersonate out of rclone.conf: Migmate injects it per mapping; operator overrides refuse. Creating Shared Drives from a manifest also requires about.canCreateDrives = true for the acting account in preflight."
 step "Share the destination Shared Drive folder as Content manager with the acting account: the service-account email by default, or the configured subject when impersonating."
 step "Capture the destination Shared Drive id and the destination folder id. The folder id is the last path segment in the folder URL. If your UI does not surface the Shared Drive id clearly, do not guess."
 if ! confirm "The destination is a Shared Drive folder, not My Drive?"; then
@@ -387,7 +387,7 @@ write_env MIGMATE_DESTINATION_FOLDER_ID_FILE "$MIGMATE_DESTINATION_FOLDER_ID_FIL
 pause "Press Enter once the folder share is complete."
 
 stage "rclone.conf"
-say "Migmate runs sequential rclone copy passes using these two remotes with per-mapping connection overrides. The remotes name no drive or folder: every pass supplies its mapping's approved roots. SharePoint is addressed by path within a drive pinned by id, never root_folder_id. Copies preserve supported timestamps and empty folders, with owner, permission and label metadata off."
+say "Migmate runs rclone copy passes concurrently up to mappingsInFlight (default 2), using these two remotes with per-mapping connection overrides. The remotes name no drive or folder: every pass supplies its mapping's approved roots. SharePoint is addressed by path within a drive pinned by id, never root_folder_id. Copies preserve supported timestamps and empty folders, with owner, permission and label metadata off."
 open_url "https://rclone.org/onedrive/"
 open_url "https://rclone.org/drive/"
 if ! confirm "Write the operator-owned rclone.conf now?"; then

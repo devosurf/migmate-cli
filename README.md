@@ -222,7 +222,8 @@ impersonate = true
 subject = "files@example.com"
 ```
 
-With impersonation omitted or `false`, the service account acts as itself.
+With impersonation omitted or `false`, the service account acts as itself; the plan
+and report name its email address observed in preflight.
 For delegation, a Workspace administrator authorizes the service account's **numeric
 client id** (from its JSON key, not its email) with only
 `https://www.googleapis.com/auth/drive`. Choose an ordinary **non-admin subject**

@@ -13,6 +13,7 @@ import type {
   FilePassRoot,
   DriveMembership,
   FileHashEntry,
+  GoogleAbout,
   ProviderPort,
   SourceEntry,
 } from "../providers/port.ts";
@@ -2187,13 +2188,14 @@ async function* verify(ctx: FileContext): AsyncIterable<CommitUnit> {
 
 async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
   const provider = ctx.provider;
+  let about: GoogleAbout | undefined;
+  try {
+    about = await provider.googleAbout();
+  } catch {
+    // An inaccessible identity cannot be bound into the plan.
+  }
+  const actualSubject = about?.user.emailAddress ?? null;
   if (ctx.config.impersonate) {
-    let actualSubject: string | null = null;
-    try {
-      actualSubject = (await provider.googleAbout()).user.emailAddress;
-    } catch {
-      // Token refusal and inaccessible identity are both delegation prerequisites.
-    }
     const pass = actualSubject === ctx.config.subject;
     yield {
       id: "google.delegation",
@@ -2211,12 +2213,19 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
       },
     };
     if (!pass) return;
+  } else {
+    const pass = Boolean(actualSubject);
+    yield {
+      id: "google.actingAccount",
+      title: "Google identifies the acting service account",
+      status: pass ? "pass" : "fail",
+      ...(pass ? {} : { code: "preflight_failed" }),
+      evidence: { actualSubject },
+    };
+    if (!pass) return;
   }
   if (ctx.config.mappings.some((m) => m.createDrive)) {
-    let canCreateDrives = false;
-    try {
-      canCreateDrives = (await provider.googleAbout()).canCreateDrives;
-    } catch {}
+    const canCreateDrives = about?.canCreateDrives ?? false;
     yield {
       id: "google.canCreateDrives",
       title: "Acting account may create Shared Drives",
@@ -2345,7 +2354,9 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     format: "text",
     body: ctx.config.impersonate
       ? `Acting account: ${ctx.config.subject} (domain-wide delegation).`
-      : "The service account acts as itself (impersonation off).",
+      : ctx.actingGoogleAccount
+        ? `Acting account: ${ctx.actingGoogleAccount} (service account; impersonation off).`
+        : "The service-account address was not recorded in this plan (impersonation off).",
   };
   if (ctx.config.impersonate)
     yield {

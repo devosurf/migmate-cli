@@ -14,7 +14,8 @@ it as restricted to the subject. `doctor` proves token issuance and exact
 of rclone.conf: Migmate injects it per mapping and refuses operator-file overrides.
 Read back the plan's acting account before approval, and hand the closing report's
 open key/delegation deletion items to the administrator. With impersonation off,
-the service account acts as itself. See README's **Acting Google account**.
+the service account acts as itself; the plan and report name its email address
+observed in preflight. See README's **Acting Google account**.
 
 The rclone remotes need no seed root. `drive_id`, `team_drive` and `root_folder_id`
 are optional because every pass overrides them with the approved mapping's roots;

@@ -30,6 +30,8 @@ export interface DriverContext<Cfg> {
   config: Cfg;
   revision: number;
   stage?: "prestage" | "delta" | "final";
+  /** Observed in preflight and retained in the plan, never refreshed while reporting. */
+  actingGoogleAccount?: string;
   verificationBaseline?: {
     revision: number;
     rows: CommitRow[];

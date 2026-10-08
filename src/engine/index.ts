@@ -1506,11 +1506,16 @@ function makeWriter(
         }
       }
     }
-    const stage = store.readPlanRevision(revision)?.stage ?? pendingStage;
+    const plan = store.readPlanRevision(revision);
+    const stage = plan?.stage ?? pendingStage;
+    const actingGoogleAccount = plan
+      ? object(plan.evidence, "plan.evidence").actingGoogleAccount
+      : undefined;
     return {
       config: config as never,
       revision,
       ...(stage ? { stage } : {}),
+      ...(typeof actingGoogleAccount === "string" ? { actingGoogleAccount } : {}),
       ...(verificationBaseline ? { verificationBaseline } : {}),
       jobDirectory: paths.dir,
       resume: { ...store.readResume(revision), checkpoint: job().lastCheckpoint },
@@ -1646,10 +1651,12 @@ function makeWriter(
     p: ProviderPort,
     config: JobConfig,
     revision: number,
+    actingGoogleAccount?: string,
   ): Promise<ReportSection[]> {
     const result: ReportSection[] = [];
-    for await (const section of driverFor(job().type).reportSections(context(p, config, revision)))
-      result.push(section);
+    const ctx = context(p, config, revision);
+    if (actingGoogleAccount !== undefined) ctx.actingGoogleAccount = actingGoogleAccount;
+    for await (const section of driverFor(job().type).reportSections(ctx)) result.push(section);
     return result;
   }
   async function drain(
@@ -2258,7 +2265,12 @@ function makeWriter(
           config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
         const inputs = inputFields(config, evidence, rows, resume.archivePlan),
           inputsDigest = digestJson(inputs);
-        const reportSections = await sections(p, config, revision);
+        const observedAccount = ready.value.checks.find(
+          (check) => check.id === "google.actingAccount" || check.id === "google.delegation",
+        )?.evidence.actualSubject;
+        const actingGoogleAccount =
+          typeof observedAccount === "string" ? observedAccount : undefined;
+        const reportSections = await sections(p, config, revision, actingGoogleAccount);
         const disclosures = reportSections
           .filter((s) => !s.body.startsWith("{") && !s.body.startsWith("["))
           .flatMap((s) => s.body.split("\n"));
@@ -2283,7 +2295,11 @@ function makeWriter(
           sourceInventoryAt,
           rowCount: rows.length,
           inputs,
-          evidence: { binding: evidence, reportSections },
+          evidence: {
+            binding: evidence,
+            reportSections,
+            ...(actingGoogleAccount !== undefined ? { actingGoogleAccount } : {}),
+          },
           disclosures,
           sections: reportSections.map((s, i) => ({
             id: `section-${i}`,
