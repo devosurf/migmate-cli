@@ -65,12 +65,13 @@ The copied folder is a read-only reference, not a working Google notebook: downl
 
 These codes can also be refusals. Acceptance cannot substitute for satisfying a lifecycle or destructive-authorization gate.
 
-| Code                       | Meaning and typical cause                                                                                            | Recommended decision                                                                                  |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `cutover_incomplete`       | A staged job lacks the latest final, settled, fully verified revision; settling can also exhaust its bound.          | Keep the job open and complete [STAGED.md](STAGED.md)'s final lifecycle.                              |
-| `delete_limit_exceeded`    | Predicted mirror deletions exceed the approved per-mapping limit.                                                    | Inspect every deletion; revise scope or obtain deliberate new limit/plan approval, not a blind retry. |
-| `go_live_started`          | Deferred go-live has durably fenced transfers. A failed or interrupted close may already have granted access.        | Resolve drift/access manually and resume close, never another copy or mirror pass.                    |
-| `drive_creation_ambiguous` | Recovery cannot safely identify the created drive: multiple exact-name matches, or no qualifying creation timestamp. | Surface candidate IDs/timestamps and stop; never adopt an older drive or infer a missing timestamp.   |
+| Code                       | Meaning and typical cause                                                                                            | Recommended decision                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `cutover_incomplete`       | A staged job lacks the latest final, settled, fully verified revision; settling can also exhaust its bound.          | Keep the job open and complete [STAGED.md](STAGED.md)'s final lifecycle.                               |
+| `delete_limit_exceeded`    | Predicted mirror deletions exceed the approved per-mapping limit.                                                    | Inspect every deletion; revise scope or obtain deliberate new limit/plan approval, not a blind retry.  |
+| `go_live_started`          | Deferred go-live has durably fenced transfers. A failed or interrupted close may already have granted access.        | Resolve drift/access manually and resume close, never another copy or mirror pass.                     |
+| `drive_creation_ambiguous` | Recovery cannot safely identify the created drive: multiple exact-name matches, or no qualifying creation timestamp. | Surface candidate IDs/timestamps and stop; never adopt an older drive or infer a missing timestamp.    |
+| `upload_quota_exceeded`    | A Drive upload pass hit the account's daily-upload limit; execution is blocked and other passes stop.                | Read quota evidence and follow [ROUTES.md](ROUTES.md)'s quota recovery; retry execute, not acceptance. |
 
 ## Teams archive evidence
 

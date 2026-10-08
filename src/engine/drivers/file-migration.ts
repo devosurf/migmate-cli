@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
 import { canonicalJson } from "../store/digest.ts";
-import type { CheckResult, MappingPass } from "../types.ts";
+import type { CheckResult, MappingPass, UploadQuotaStop } from "../types.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
 import type {
   CopyPassReference,
@@ -1086,6 +1086,11 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
 
 async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
   yield* provision(ctx);
+  const quotaStop = new AbortController();
+  ctx = {
+    ...ctx,
+    signal: ctx.signal ? AbortSignal.any([ctx.signal, quotaStop.signal]) : quotaStop.signal,
+  };
   const mappings = ctx.config.mappings[Symbol.iterator]();
   const active = new Set<AsyncGenerator<CommitUnit>>();
   const limit = ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight;
@@ -1107,6 +1112,7 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
           continue;
         }
         const pass = next.value.mappingPass;
+        if (pass?.uploadQuota && !quotaStop.signal.aborted) quotaStop.abort();
         if (!pass || pass.status !== "running" || !pass.lastStats) progressed = true;
         yield next.value;
       }
@@ -1380,6 +1386,35 @@ async function* copyMapping(
   }
 }
 
+function uploadQuotaStop(ctx: FileContext, error: string | null): UploadQuotaStop | undefined {
+  if (ctx.config.route === "shared_drive_to_sharepoint_library" || !error) return;
+  // Match v1.75.0's daily-upload heuristic, not every API rate limit or storage/file cap:
+  // https://github.com/rclone/rclone/blob/v1.75.0/backend/drive/drive.go#L945-L982
+  // FatalError preserves the Google error text; RC Job.finish serializes err.Error().
+  // "Received upload limit error" is a log prefix, NOT a new RC fatal-error message.
+  // https://github.com/rclone/rclone/blob/v1.75.0/fs/fserrors/error.go#L98-L130
+  // https://github.com/rclone/rclone/blob/v1.75.0/fs/rc/jobs/job.go#L55-L74
+  if (
+    !/\bquotaExceeded\b/.test(error) &&
+    !(
+      /\b(?:userRateLimitExceeded|rateLimitExceeded)\b/.test(error) &&
+      error.includes("User rate limit exceeded.")
+    )
+  )
+    return;
+  const hitAt = ctx.now();
+  return {
+    code: "upload_quota_exceeded",
+    hitAt: hitAt.toISOString(),
+    actingGoogleAccount:
+      ctx.actingGoogleAccount ?? (ctx.config.impersonate ? (ctx.config.subject ?? null) : null),
+    // Google documents a daily allowance, not a reset clock; this is not a retry fence.
+    // https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints
+    earliestResumeAt: new Date(hitAt.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+    resumeTimeIsEstimate: true,
+  };
+}
+
 async function* copyPass(
   ctx: FileContext,
   mapping: FileMappingConfig,
@@ -1441,11 +1476,16 @@ async function* copyPass(
       ctx.signal?.throwIfAborted();
       const status = await ctx.provider.copyPassStatus(reference);
       const lastStats = await ctx.provider.copyPassStats(reference);
+      const uploadQuota =
+        status.state === "failed" ? uploadQuotaStop(ctx, status.error) : undefined;
       pass = {
         ...pass,
         status: status.state,
         error: status.error,
-        lastStats,
+        lastStats: uploadQuota
+          ? { ...lastStats, errors: null, rcloneErrors: lastStats.errors }
+          : lastStats,
+        ...(uploadQuota ? { uploadQuota } : {}),
         endedAt: status.state === "running" ? null : ctx.now().toISOString(),
       };
       yield unit();
@@ -1458,10 +1498,24 @@ async function* copyPass(
       await ctx.provider.stopCopyPass(reference);
       reference = undefined;
     }
+    const message = interrupted ? null : error instanceof Error ? error.message : String(error);
+    const uploadQuota = uploadQuotaStop(ctx, message);
     pass = {
       ...pass,
       status: interrupted ? "interrupted" : "failed",
-      error: interrupted ? null : error instanceof Error ? error.message : String(error),
+      error: message,
+      ...(uploadQuota
+        ? {
+            uploadQuota,
+            lastStats: pass.lastStats
+              ? {
+                  ...pass.lastStats,
+                  errors: null,
+                  rcloneErrors: pass.lastStats.rcloneErrors ?? pass.lastStats.errors ?? 0,
+                }
+              : null,
+          }
+        : {}),
       endedAt: ctx.now().toISOString(),
     };
     yield unit();

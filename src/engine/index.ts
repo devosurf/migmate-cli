@@ -36,6 +36,7 @@ import {
   type CheckResult,
   type Closure,
   type ExecuteResult,
+  type UploadQuotaStop,
   type FacetCount,
   type JobEvent,
   type JobRef,
@@ -1697,9 +1698,15 @@ function makeWriter(
     budget: RetryBudget,
     signal?: AbortSignal,
     verificationRun?: number,
-  ): Promise<{ committed: number; interrupted: boolean; blocked: boolean }> {
+  ): Promise<{
+    committed: number;
+    interrupted: boolean;
+    blocked: boolean;
+    uploadQuota?: UploadQuotaStop;
+  }> {
     let committed = 0;
     let mappingFailed = false;
+    let uploadQuota: UploadQuotaStop | undefined;
     let lastUnit = job().lastCheckpoint ?? "start";
     for (;;) {
       if (signal?.aborted) return { committed, interrupted: true, blocked: false };
@@ -1720,7 +1727,9 @@ function makeWriter(
           if (store.commit(unit).applied) {
             committed++;
             store.publishProgress();
-            if (unit.mappingPass?.status === "failed") {
+            if (unit.mappingPass?.uploadQuota) {
+              uploadQuota ??= unit.mappingPass.uploadQuota;
+            } else if (unit.mappingPass?.status === "failed") {
               budget.mappingFailure(unit.mappingPass.mappingId);
               mappingFailed = true;
             }
@@ -1731,8 +1740,15 @@ function makeWriter(
         }
         if (signal?.aborted) return { committed, interrupted: true, blocked: false };
         store.appendEvent({ verb: phase, phase, kind: "phase_completed", payload: { committed } });
-        return { committed, interrupted: false, blocked: mappingFailed };
+        return {
+          committed,
+          interrupted: false,
+          blocked: mappingFailed || uploadQuota !== undefined,
+          ...(uploadQuota ? { uploadQuota } : {}),
+        };
       } catch (error) {
+        if (uploadQuota && error instanceof Error && error.name === "AbortError")
+          return { committed, interrupted: false, blocked: true, uploadQuota };
         if (signal?.aborted || (error instanceof Error && error.name === "AbortError"))
           return { committed, interrupted: true, blocked: false };
         const expected = expectedFailure(error);
@@ -1926,6 +1942,7 @@ function makeWriter(
     outcome: ExecuteResult["outcome"],
     committedUnits: number,
     budget: RetryBudget,
+    uploadQuota?: UploadQuotaStop,
   ): Outcome<ExecuteResult> {
     const resumable = outcome !== "completed";
     store.atomic(() => {
@@ -1935,7 +1952,12 @@ function makeWriter(
         verb: "execute",
         phase: "execute",
         kind: "terminal",
-        payload: { state: outcome, resumable, resumeVerb: resumable ? "execute" : null },
+        payload: {
+          state: outcome,
+          resumable,
+          resumeVerb: resumable ? "execute" : null,
+          ...(uploadQuota ? { uploadQuota } : {}),
+        },
       });
     });
     return ok({
@@ -1944,6 +1966,7 @@ function makeWriter(
       checkpoint: job().lastCheckpoint,
       committedUnits,
       ...(outcome === "blocked" ? { budget: budget.summary() } : {}),
+      ...(uploadQuota ? { uploadQuota } : {}),
     });
   }
   async function createReport(): Promise<Outcome<ArtifactSet>> {
@@ -2539,13 +2562,14 @@ function makeWriter(
             if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
           }
           const drained = archiveVerificationResume
-            ? { committed: 0, interrupted: false, blocked: false }
+            ? { committed: 0, interrupted: false, blocked: false, uploadQuota: undefined }
             : await drain(p, config, plan.revision, "execute", budget, signal);
           if (drained.interrupted || drained.blocked)
             return terminalResult(
               drained.interrupted ? "interrupted" : "blocked",
               drained.committed,
               budget,
+              drained.uploadQuota,
             );
           store.writeJob({ ...job(), executionCompleted: true });
           store.appendEvent({

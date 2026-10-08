@@ -558,6 +558,33 @@ describe("Google Shared Drives to SharePoint", () => {
     );
   });
 
+  it("does not classify Google source errors as upload quota on the reverse route", async (t) => {
+    const input = withSecondDrive();
+    input.copyPasses = [
+      {
+        sourceRootId: "source-root",
+        error: "googleapi: Error 403: User rate limit exceeded., userRateLimitExceeded",
+      },
+    ];
+    const h = await harness(t, input, reverse);
+    value(await load(h, both));
+    await approve(h);
+    const result = value(await h.engine.withWriterResult(h.ref, (writer) => writer.execute()));
+    assert.equal(result.outcome, "blocked");
+    assert.equal(result.uploadQuota, undefined);
+    assert.equal(result.budget?.failedAttempts, 1);
+    assert.deepEqual(
+      value(await h.engine.reader(h.ref).status()).mappingPasses.map((pass) => [
+        pass.mappingId,
+        pass.status,
+      ]),
+      [
+        ["first", "failed"],
+        ["second", "completed"],
+      ],
+    );
+  });
+
   it("keeps corrupted plain files as content_mismatch", async (t) => {
     const input = fixture();
     input.sourceItems.push({
@@ -2328,6 +2355,115 @@ describe("file migration through the engine", () => {
     );
     assert.ok(progress.every((event) => typeof event.payload.speed === "number"));
   });
+
+  for (const error of [
+    "googleapi: Error 403: User rate limit exceeded., userRateLimitExceeded",
+    "googleapi: Error 403: User rate limit exceeded., rateLimitExceeded",
+    "googleapi: Error 403: Quota exceeded., quotaExceeded",
+  ]) {
+    it(`blocks all mappings on a Drive upload quota stop: ${error}`, async (t) => {
+      const { input, selected } = multiMapping(["a", "b", "c"]);
+      const recordedAccount = error.endsWith("quotaExceeded")
+        ? "service@project.iam.gserviceaccount.com"
+        : undefined;
+      input.googleAbout = {
+        user: { emailAddress: recordedAccount ?? "files@example.test" },
+        canCreateDrives: false,
+      };
+      input.copyPasses = [
+        { sourceRootId: "a", error },
+        { sourceRootId: "b", pause: true, afterFiles: 0 },
+      ];
+      const h = await harness(t, input, {
+        ...selected,
+        ...(recordedAccount ? {} : { impersonate: true, subject: "files@example.test" }),
+      });
+      await approve(h);
+      const result = value(
+        await h.engine.withWriterResult(h.ref, (writer) =>
+          writer.execute({ signal: AbortSignal.timeout(2000) }),
+        ),
+      );
+      assert.equal(result.outcome, "blocked");
+      const quota = {
+        code: "upload_quota_exceeded",
+        hitAt: now,
+        actingGoogleAccount: recordedAccount ?? "files@example.test",
+        earliestResumeAt: "2026-09-02T00:00:00.000Z",
+        resumeTimeIsEstimate: true,
+      };
+      assert.deepEqual(result.uploadQuota, quota);
+      assert.equal(result.budget?.failedAttempts, 0);
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.equal(status.state, "blocked");
+      assert.equal(status.worker.active, false);
+      assert.deepEqual(
+        status.mappingPasses.map((pass) => [pass.mappingId, pass.status]),
+        [
+          ["a", "failed"],
+          ["b", "interrupted"],
+          ["c", "pending"],
+        ],
+      );
+      assert.deepEqual(status.mappingPasses[0]?.uploadQuota, quota);
+      assert.equal(status.mappingPasses[0]?.lastStats?.errors, null);
+      assert.equal(status.mappingPasses[0]?.lastStats?.rcloneErrors, 1);
+      const events = [];
+      for await (const event of h.engine.reader(h.ref).events({})) events.push(event);
+      assert.ok(
+        events.some(
+          (event) =>
+            event.kind === "mapping_progress" &&
+            event.payload.mappingId === "a" &&
+            event.payload.status === "failed" &&
+            event.payload.errors === null,
+        ),
+      );
+      // No enforced cooldown: even with the same clock, unfinished mappings can resume.
+      await execute(h);
+      const resumed = value(await h.engine.reader(h.ref).status());
+      assert.equal(resumed.state, "verified");
+      assert.deepEqual(
+        resumed.mappingPasses.map((pass) => [pass.mappingId, pass.passNumber, pass.status]),
+        [
+          ["a", 1, "failed"],
+          ["a", 2, "completed"],
+          ["b", 1, "interrupted"],
+          ["b", 2, "completed"],
+          ["c", 1, "completed"],
+        ],
+      );
+    });
+  }
+
+  for (const error of [
+    "googleapi: Error 403: User Rate Limit Exceeded, userRateLimitExceeded",
+    "googleapi: Error 403: Rate Limit Exceeded, rateLimitExceeded",
+    "googleapi: Error 403: Storage quota exceeded, storageQuotaExceeded",
+    "googleapi: Error 403: Shared Drive file limit exceeded, teamDriveFileLimitExceeded",
+    "googleapi: Error 403: Download quota exceeded, downloadQuotaExceeded",
+  ]) {
+    it(`does not report other Drive limits as daily upload quota: ${error}`, async (t) => {
+      const { input, selected } = multiMapping(["a", "b", "c"]);
+      input.copyPasses = [{ sourceRootId: "a", error }];
+      const h = await harness(t, input, selected);
+      await approve(h);
+      const result = value(await h.engine.withWriterResult(h.ref, (writer) => writer.execute()));
+      assert.equal(result.outcome, "blocked");
+      assert.equal(result.uploadQuota, undefined);
+      assert.equal(result.budget?.failedAttempts, 1);
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.deepEqual(
+        status.mappingPasses.map((pass) => [pass.mappingId, pass.status]),
+        [
+          ["a", "failed"],
+          ["b", "completed"],
+          ["c", "completed"],
+        ],
+      );
+      assert.equal(status.mappingPasses[0]?.lastStats?.errors, 1);
+    });
+  }
 
   it("records rclone's failed mapping, continues other mappings, and retries only unfinished mappings", async (t) => {
     const { input, selected } = multiMapping();

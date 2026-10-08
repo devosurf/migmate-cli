@@ -450,6 +450,7 @@ export function createTransferSupervisor(options: {
   jobDirectory: string;
   binary?: BinarySpec;
   jobExpiry?: string;
+  stopOnUploadLimit?: boolean;
 }): TransferSupervisor {
   const workers = new Map<string, Worker>();
   const starting = new Set<Promise<TransferWorkerHandle>>();
@@ -766,6 +767,10 @@ export function createTransferSupervisor(options: {
           "--drive-metadata-owner=off",
           "--drive-metadata-permissions=off",
           "--drive-metadata-labels=off",
+          // v1.75.0 wraps upload-limit errors in fserrors.FatalError, stopping sync
+          // rather than retrying the backend pacer. Downloads keep their normal policy.
+          // https://github.com/rclone/rclone/blob/v1.75.0/backend/drive/drive.go#L945-L982
+          ...(options.stopOnUploadLimit ? ["--drive-stop-on-upload-limit"] : []),
           "--metadata=false",
           // Passes enable metadata for files only. rclone v1.75.0's Drive backend
           // applies a folder's `content-type` (OneDrive reports `inode/directory`)

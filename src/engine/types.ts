@@ -7,6 +7,16 @@
 import type { CopyPassStats, DriveMember } from "./providers/port.ts";
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 
+export interface UploadQuotaStop {
+  code: "upload_quota_exceeded";
+  /** Time Migmate first observed the failed upload pass. */
+  hitAt: string;
+  /** Null only for older plans that did not record a non-impersonated account. */
+  actingGoogleAccount: string | null;
+  earliestResumeAt: string;
+  resumeTimeIsEstimate: true;
+}
+
 export interface MappingPass {
   revision: number;
   mappingId: string;
@@ -18,8 +28,15 @@ export interface MappingPass {
   status: "pending" | "running" | "completed" | "failed" | "interrupted";
   startedAt: string | null;
   endedAt: string | null;
-  lastStats: CopyPassStats | null;
+  lastStats:
+    | (Omit<CopyPassStats, "errors"> & {
+        /** Unknown when rclone's aggregate includes upload-quota errors. */
+        errors: number | null;
+        rcloneErrors?: number;
+      })
+    | null;
   error: string | null;
+  uploadQuota?: UploadQuotaStop;
 }
 
 export interface CreatedDrive {
@@ -244,6 +261,7 @@ export interface ExecuteResult {
   committedUnits: number;
   /** Populated when the run stopped in `blocked`. */
   budget?: { failedAttempts: number; failedUnitRatio: number };
+  uploadQuota?: UploadQuotaStop;
 }
 
 export interface CheckResult {

@@ -69,6 +69,7 @@ export const CODES: readonly CodeEntry[] = [
   // ---- file migration: execution / verification findings -------------------
   entry("source_read_failed", "finding", "execute", FILE, true),
   entry("destination_write_failed", "finding", "execute", FILE, true),
+  entry("upload_quota_exceeded", "finding", "execute", FILE, true),
   entry("drive_creation_ambiguous", "finding", "execute", FILE),
   entry("go_live_started", "finding", "execute", FILE),
   entry("drive_membership_mismatch", "finding", "verify", FILE),
