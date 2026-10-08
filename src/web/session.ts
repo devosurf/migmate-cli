@@ -298,8 +298,12 @@ export class WebSession {
           break;
         }
         case "plan": {
-          const outcome = await writer.plan(input.final === true ? { final: true } : {});
+          const outcome = await writer.plan({
+            ...(input.final === true ? { final: true } : {}),
+            signal: this.abort.signal,
+          });
           if (outcome.ok) this.#plan = outcome.value;
+          this.interrupted = !outcome.ok && outcome.refusal.detail?.interrupted === true;
           this.#verification = null;
           result = outcome;
           break;

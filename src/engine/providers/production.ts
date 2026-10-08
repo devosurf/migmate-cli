@@ -136,11 +136,11 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async request<T>(path: string, init?: RequestInit): Promise<T> {
       return (await state()).graph.request<T>(path, init);
     },
-    async *stream(path: string) {
-      yield* (await state()).graph.stream(path);
+    async *stream(path: string, signal?: AbortSignal) {
+      yield* (await state()).graph.stream(path, signal);
     },
-    async evidence() {
-      return (await state()).graph.evidence();
+    async evidence(signal) {
+      return (await state()).graph.evidence(signal);
     },
   };
 
@@ -156,11 +156,12 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
         );
       return discoverSharePoint((await state()).graph);
     },
-    async *preflight(): AsyncIterable<CheckResult> {
+    async *preflight({ signal }): AsyncIterable<CheckResult> {
       let loaded: ProviderState | undefined;
+      signal?.throwIfAborted();
       try {
         loaded = await state();
-        const evidence = await loaded.session.evidence();
+        const evidence = await loaded.session.evidence(signal);
         yield {
           id: "provider.credentials",
           title: "File-backed application credentials",
@@ -168,6 +169,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
           evidence,
         };
       } catch (error) {
+        signal?.throwIfAborted();
         yield failedCheck("provider.credentials", "File-backed application credentials", error, {});
       }
       if (needsTransferWorker) {
@@ -182,11 +184,11 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
         } catch (error) {
           yield failedCheck("provider.transfer_binary", "Exact managed transfer binary", error, {});
         }
-        if (loaded) yield* loaded.files!.preflight();
+        if (loaded) yield* loaded.files!.preflight(signal);
       }
     },
-    async applicationIdentity() {
-      return (await state()).session.identity();
+    async applicationIdentity(signal) {
+      return (await state()).session.identity(signal);
     },
     async binaryEvidence() {
       return { ...(await binaryProof()) };
@@ -225,8 +227,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async resolveDestinationPath(value) {
       return (await files()).resolveDestinationPath(value);
     },
-    async readSharedDrive(driveId) {
-      return (await files()).readSharedDrive(driveId);
+    async readSharedDrive(driveId, signal) {
+      return (await files()).readSharedDrive(driveId, signal);
     },
     async resolveSourceRoot(value) {
       return (await files()).resolveSourceRoot(value);
@@ -246,8 +248,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async readDestinationObject(value) {
       return (await files()).readDestinationObject(value);
     },
-    async listDestinationChildren(id) {
-      return (await files()).listDestinationChildren(id);
+    async listDestinationChildren(id, signal) {
+      return (await files()).listDestinationChildren(id, signal);
     },
     async reserveDestinationId() {
       return (await files()).reserveDestinationId();
@@ -279,8 +281,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async stopCopyPass(value) {
       await (await state()).worker.stopCopyPass(value);
     },
-    async googleAbout() {
-      return (await files()).googleAbout();
+    async googleAbout(signal) {
+      return (await files()).googleAbout(signal);
     },
     async createSharedDrive(input) {
       return (await files()).createSharedDrive(input);

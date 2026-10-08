@@ -72,6 +72,8 @@ Read the plan's **Copy concurrency** before approval. Job `[options]` settings `
 
 Read `status.mappingPasses` for durable outcomes and rclone errors. Re-run `execute` to retry failed/interrupted passes, skipping completed passes for that revision; writer recovery marks all unfinished passes interrupted after the worker is gone, including every pass active at a crash. rclone skips identical files on retry. Ctrl-C stops active passes cooperatively and exits 130. Use `--output jsonl` for `mapping_progress` events (`mappingId`, `passNumber`, `bytes`, `files`, `speed`, `errors`).
 
+If `plan` is interrupted (exit 130 for Ctrl-C or 143 for SIGTERM), read `status`, then rerun plain `plan --job ID`. File and Teams collection abort in-flight reads, release the lease and leave any earlier completed plan intact; partial collection is not approvable. Normal cooperative interruption needs neither `reclaim` nor `execute`. The web view's **Quit process safely** also interrupts planning.
+
 Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File migration uses no reserved IDs, private markers, move-by-id or local staging; Teams archive uploads retain their own protections. rclone copies empty directories and supported file timestamps/content type with owner, permission and label metadata off; folders get modification times only. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary.
 
 ## Teams archive destination

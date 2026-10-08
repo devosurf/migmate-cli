@@ -62,7 +62,7 @@ function setup(t: TestContext, type: JobType = "file_migration") {
     );
     rmSync(root, { recursive: true, force: true });
   });
-  const start = (argv: string[], slow = false): Running => {
+  const start = (argv: string[], slow: boolean | number = false): Running => {
     const child = spawn(
       process.execPath,
       [fileURLToPath(new URL("./cli-process-fixture.ts", import.meta.url)), ...argv],
@@ -71,7 +71,7 @@ function setup(t: TestContext, type: JobType = "file_migration") {
           ...process.env,
           CLI_TEST_HOME: home,
           CLI_TEST_DESTINATION: destination,
-          CLI_TEST_DELAY: slow ? "300" : "0",
+          CLI_TEST_DELAY: String(typeof slow === "number" ? slow : slow ? 300 : 0),
           CLI_TEST_NOW: new Date(now).toISOString(),
         },
         stdio: "pipe",
@@ -209,12 +209,48 @@ function setup(t: TestContext, type: JobType = "file_migration") {
     root,
     home,
     destination,
+    config,
     destinationRecords,
     start,
     command,
     approve,
     reclaimKilledWriter,
   };
+}
+
+for (const type of ["file_migration", "teams_archive"] as const) {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    it(
+      `long ${type} plan releases its lease within 10 seconds after ${signal}`,
+      { timeout: 30000 },
+      async (t) => {
+        const h = setup(t, type);
+        const init = await h.command<{ id: string }>([
+          "init",
+          "--type",
+          type,
+          "--config",
+          h.config,
+        ]);
+        const id = init.value.id;
+        const running = h.start(["plan", "--job", id, "--output", "jsonl"], 60000);
+        await running.event((event) => event.verb === "plan" && event.kind === "phase_started");
+        // The child has its own real event loop; a platform-clock deadline catches ignored signals.
+        const deadline = setTimeout(() => running.child.kill("SIGKILL"), 10000);
+        t.after(() => clearTimeout(deadline));
+        running.child.kill(signal);
+        const stopped = await running.done;
+        clearTimeout(deadline);
+        assert.equal(stopped.code, signal === "SIGINT" ? 130 : 143, stopped.stdout);
+        assert.equal(stopped.signal, null);
+        assert.equal(stopped.stderr, "");
+        const status = await h.command<JobStatus>(["status", "--job", id]);
+        assert.equal(status.value.ownership.held, false);
+        const plan = await h.command<PlanRevision>(["plan", "--job", id]);
+        assert.ok(plan.value.planDigest);
+      },
+    );
+  }
 }
 
 it(

@@ -75,7 +75,7 @@ export interface JobWriter {
   /** Validate and persist typed references, then immediately run the proof probes. */
   onboard(config: unknown): Promise<Outcome<PreflightReport>>;
   doctor(): Promise<Outcome<PreflightReport>>;
-  plan(input?: { final?: boolean }): Promise<Outcome<PlanRevision>>;
+  plan(input?: { final?: boolean; signal?: AbortSignal }): Promise<Outcome<PlanRevision>>;
   approve(a: {
     approver: string;
     planDigest: string;

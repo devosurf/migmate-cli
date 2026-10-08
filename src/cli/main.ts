@@ -483,7 +483,10 @@ async function executeCommand(
         case "doctor":
           return writer.doctor();
         case "plan":
-          return writer.plan(invocation.final ? { final: true } : {});
+          return writer.plan({
+            ...(invocation.final ? { final: true } : {}),
+            signal: output.abort.signal,
+          });
         case "execute":
           return writer.execute({ signal: output.abort.signal });
         case "verify":

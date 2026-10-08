@@ -202,8 +202,8 @@ export interface DriveMembership {
 }
 
 export interface ProviderPort extends FilePassProvider {
-  googleAbout(): Promise<GoogleAbout>;
-  readSharedDrive(driveId: string): Promise<SharedDrive | null>;
+  googleAbout(signal?: AbortSignal): Promise<GoogleAbout>;
+  readSharedDrive(driveId: string, signal?: AbortSignal): Promise<SharedDrive | null>;
   /** A 409 replay returns null: the caller must reconcile by exact name. */
   createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null>;
   findSharedDrives(name: string): Promise<SharedDrive[]>;
@@ -227,8 +227,9 @@ export interface ProviderPort extends FilePassProvider {
     jobType: JobType;
     config: unknown;
     jobDirectory: string;
+    signal?: AbortSignal;
   }): AsyncIterable<CheckResult>;
-  applicationIdentity?(): Promise<string>;
+  applicationIdentity?(signal?: AbortSignal): Promise<string>;
   close?(): Promise<void>;
   binaryEvidence?(): Promise<Record<string, unknown>>;
   assertExecutionEvidence?(input: {
@@ -237,10 +238,15 @@ export interface ProviderPort extends FilePassProvider {
     binaryVersion: string;
   }): Promise<void>;
   reserveDestinationId?(): Promise<string>;
-  readSourceItem?(input: { driveId: string; itemId: string }): Promise<SourceEntry | null>;
+  readSourceItem?(input: {
+    driveId: string;
+    itemId: string;
+    signal?: AbortSignal;
+  }): Promise<SourceEntry | null>;
   readDestinationObject?(input: {
     driveId: string;
     objectId: string;
+    signal?: AbortSignal;
   }): Promise<DestinationEntry | null>;
   resolveSourceFolder(input: { driveId: string; folderPath: string }): Promise<SourceEntry | null>;
   resolveDestinationPath(input: {
@@ -250,16 +256,22 @@ export interface ProviderPort extends FilePassProvider {
   resolveSourceRoot(input: {
     sourceDriveId: string;
     sourceItemId: string;
+    signal?: AbortSignal;
   }): Promise<SourceEntry | null>;
   /** Graph item IDs are unique only within a drive: every source read names both. */
-  listSourceChildren(input: { driveId: string; itemId: string }): Promise<SourceEntry[]>;
+  listSourceChildren(input: {
+    driveId: string;
+    itemId: string;
+    signal?: AbortSignal;
+  }): Promise<SourceEntry[]>;
   openSourceContent(input: { driveId: string; itemId: string }): AsyncIterable<Uint8Array>;
 
   resolveDestinationFolder(input: {
     destDriveId: string;
     destFolderId: string;
+    signal?: AbortSignal;
   }): Promise<DestinationEntry | null>;
-  listDestinationChildren(destFolderId: string): Promise<DestinationEntry[]>;
+  listDestinationChildren(destFolderId: string, signal?: AbortSignal): Promise<DestinationEntry[]>;
   createDestinationFolder(input: {
     destinationId?: string;
     marker?: ProvenanceRecord;

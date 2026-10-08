@@ -73,6 +73,58 @@ const source = [
   `root_folder_id = ${mapping.sourceItemId}`,
 ];
 
+for (const provider of ["microsoft", "google"] as const) {
+  test(
+    `plan preflight can interrupt ${provider} authentication without disposing credentials`,
+    { timeout: 5000 },
+    async (t) => {
+      const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
+      const session = await createCredentialSession({
+        jobType: "file_migration",
+        config,
+        jobDirectory,
+      });
+      t.after(() => session.dispose());
+      const controller = new AbortController();
+      const entered = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<Response>();
+      t.after(() => response.reject(new Error("Test ended")));
+      let blocked = true;
+      t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
+        const microsoft = String(target).startsWith("https://login.microsoftonline.com/");
+        if (blocked && microsoft === (provider === "microsoft")) {
+          const abort = () => response.reject(init?.signal?.reason);
+          init?.signal?.addEventListener("abort", abort, { once: true });
+          entered.resolve();
+          try {
+            init?.signal?.throwIfAborted();
+            return await response.promise;
+          } finally {
+            init?.signal?.removeEventListener("abort", abort);
+          }
+        }
+        return Response.json(
+          microsoft
+            ? graphToken(["Sites.Selected"])
+            : {
+                access_token: "google-token",
+                token_type: "Bearer",
+                expires_in: 3600,
+              },
+        );
+      });
+      const stopped = assert.rejects(session.evidence(controller.signal), ProviderFault);
+      await entered.promise;
+      controller.abort();
+      await stopped;
+      blocked = false;
+      const evidence = await session.evidence();
+      assert.ok(evidence.graph);
+      assert.ok(evidence.google);
+    },
+  );
+}
+
 test("onboards the operator config rclone itself runs with", async (t) => {
   // rclone sends client_secret verbatim and writes its own token cache back into
   // the config the managed worker passed to --config, so a config that has ever

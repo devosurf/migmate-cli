@@ -135,7 +135,7 @@ export class PersistentCliPort extends FakeFileMigrationPort {
       // Real subprocess signal tests need an in-flight external read. Their
       // synchronization is the durable event, not a sleep in the test driver.
       this.archive.page = async (input) => {
-        await delay(delayMs);
+        await delay(delayMs, undefined, { signal: input.signal });
         return page(input);
       };
     }
@@ -152,6 +152,10 @@ export class PersistentCliPort extends FakeFileMigrationPort {
     const stats = await super.copyPassStats(reference);
     await this.persist();
     return stats;
+  }
+  override async listSourceChildren(input: Parameters<ProviderPort["listSourceChildren"]>[0]) {
+    if (this.delayMs) await delay(this.delayMs, undefined, { signal: input.signal });
+    return super.listSourceChildren(input);
   }
   override async *openSourceContent(input: { driveId: string; itemId: string }) {
     // Cross-process SIGINT/SIGKILL cannot be driven by an in-process fake clock.

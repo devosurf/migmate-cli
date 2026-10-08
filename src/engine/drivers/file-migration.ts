@@ -88,14 +88,17 @@ const SHAREPOINT_REWRITTEN_TYPES =
 export async function unreadableSourceDrives(
   provider: Pick<ProviderPort, "readSharedDrive">,
   mappings: { sourceType?: string; sourceDriveId: string }[],
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const unreadable: string[] = [];
   for (const driveId of new Set(
     mappings.filter((m) => m.sourceType === "google_shared_drive").map((m) => m.sourceDriveId),
   )) {
     try {
-      if ((await provider.readSharedDrive(driveId))?.id !== driveId) unreadable.push(driveId);
+      if ((await provider.readSharedDrive(driveId, signal))?.id !== driveId)
+        unreadable.push(driveId);
     } catch {
+      signal?.throwIfAborted();
       unreadable.push(driveId);
     }
   }
@@ -542,7 +545,7 @@ function rcloneProof(ctx: FileContext): boolean {
 }
 
 async function sourceRoot(ctx: FileContext, mapping: FileMappingConfig): Promise<SourceView> {
-  const root = await ctx.provider.resolveSourceRoot(mapping);
+  const root = await ctx.provider.resolveSourceRoot({ ...mapping, ...abortable(ctx) });
   if (!root || root.kind !== "folder" || root.driveId !== mapping.sourceDriveId)
     throw Object.assign(new Error("The source root is missing or is not an ordinary folder"), {
       code: "unsupported_route",
@@ -554,7 +557,10 @@ async function destinationRoot(
   ctx: FileContext,
   mapping: FileMappingConfig,
 ): Promise<DestinationEntry> {
-  const root = await ctx.provider.resolveDestinationFolder(destinationMapping(mapping));
+  const root = await ctx.provider.resolveDestinationFolder({
+    ...destinationMapping(mapping),
+    ...abortable(ctx),
+  });
   if (!root || root.kind !== "folder" || root.driveId !== mapping.destDriveId)
     throw Object.assign(new Error("The destination root is missing or is not an ordinary folder"), {
       code: "unsupported_route",
@@ -697,6 +703,7 @@ async function sourceInventory(
     const children = await ctx.provider.listSourceChildren({
       driveId: parent.driveId,
       itemId: parent.id,
+      ...abortable(ctx),
     });
     children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : 1));
     for (const child of children) {
@@ -779,7 +786,7 @@ async function snapshot(ctx: FileContext, mapping: FileMappingConfig): Promise<S
     ctx.signal?.throwIfAborted();
     const parent = destinations[index]!;
     if (parent.kind !== "folder") continue;
-    const children = await ctx.provider.listDestinationChildren(parent.id);
+    const children = await ctx.provider.listDestinationChildren(parent.id, ctx.signal);
     children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : 1));
     for (const child of children) {
       if (
@@ -2190,8 +2197,9 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
   const provider = ctx.provider;
   let about: GoogleAbout | undefined;
   try {
-    about = await provider.googleAbout();
+    about = await provider.googleAbout(ctx.signal);
   } catch {
+    ctx.signal?.throwIfAborted();
     // An inaccessible identity cannot be bound into the plan.
   }
   const actualSubject = about?.user.emailAddress ?? null;
@@ -2235,7 +2243,7 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
     };
     if (!canCreateDrives) return;
   }
-  const unreadable = await unreadableSourceDrives(provider, ctx.config.mappings);
+  const unreadable = await unreadableSourceDrives(provider, ctx.config.mappings, ctx.signal);
   if (unreadable.length) {
     yield {
       id: "google.source_drives",
@@ -2251,11 +2259,15 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
     return;
   }
   for (const mapping of ctx.config.mappings) {
-    const source = await provider.resolveSourceRoot(mapping);
+    ctx.signal?.throwIfAborted();
+    const source = await provider.resolveSourceRoot({ ...mapping, ...abortable(ctx) });
     const destination =
       mapping.createDrive && !mapping.destDriveId
         ? null
-        : await provider.resolveDestinationFolder(destinationMapping(mapping));
+        : await provider.resolveDestinationFolder({
+            ...destinationMapping(mapping),
+            ...abortable(ctx),
+          });
     const pass =
       source?.kind === "folder" &&
       source.driveId === mapping.sourceDriveId &&

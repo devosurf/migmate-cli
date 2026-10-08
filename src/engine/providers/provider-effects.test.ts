@@ -6,7 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createCredentialSession, ProviderFault, type CredentialSession } from "./credentials.ts";
-import { createGraphTransport, HttpProviderFault, type GraphTransport } from "./http.ts";
+import {
+  createGraphTransport,
+  fetchProvider,
+  graphUrl,
+  responseJson,
+  HttpProviderFault,
+  type GraphTransport,
+} from "./http.ts";
 import { FileEffects } from "./file-effects.ts";
 import type { ProvenanceRecord } from "./port.ts";
 
@@ -85,6 +92,185 @@ async function bytes(content: AsyncIterable<Uint8Array>): Promise<Buffer> {
   const result: Uint8Array[] = [];
   for await (const chunk of content) result.push(chunk);
   return Buffer.concat(result);
+}
+
+for (const stalledCleanup of [false, true]) {
+  test(
+    `preflight interruption ${stalledCleanup ? "bounds stalled" : "finishes private probe"} cleanup`,
+    { timeout: 5000 },
+    async (t) => {
+      // Install before any request owns a timer; swapping clocks mid-request leaks real deadlines.
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const controller = new AbortController();
+      const entered = Promise.withResolvers<void>();
+      const cleaning = Promise.withResolvers<void>();
+      let probe: Record<string, unknown> | undefined;
+      const deleted: string[] = [];
+      t.mock.method(
+        globalThis,
+        "fetch",
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const url = new URL(String(input));
+          const waitForAbort = async () => {
+            const response = Promise.withResolvers<Response>();
+            const abort = () => response.reject(init?.signal?.reason);
+            init?.signal?.addEventListener("abort", abort, { once: true });
+            try {
+              init?.signal?.throwIfAborted();
+              return await response.promise;
+            } finally {
+              init?.signal?.removeEventListener("abort", abort);
+            }
+          };
+          if (url.pathname === "/v1.0/drives/source-drive")
+            return Response.json({ id: "source-drive", driveType: "documentLibrary" });
+          if (url.pathname.endsWith("/items/source-root"))
+            return Response.json({ id: "source-root", name: "root", folder: {} });
+          if (url.pathname.endsWith("/children")) return Response.json({ value: [] });
+          if (url.pathname.endsWith("/files/destination-root"))
+            return Response.json({
+              id: "destination-root",
+              driveId: "shared-drive",
+              name: "root",
+              mimeType: "application/vnd.google-apps.folder",
+              capabilities: { canAddChildren: true },
+            });
+          if (url.pathname.endsWith("/generateIds")) return Response.json({ ids: ["probe-root"] });
+          if (url.pathname === "/drive/v3/files" && init?.method === "POST") {
+            probe = JSON.parse(String(init.body));
+            entered.resolve();
+            return waitForAbort();
+          }
+          if (url.pathname.endsWith("/files/probe-root")) {
+            if (init?.method === "DELETE") {
+              deleted.push("probe-root");
+              return new Response(null, { status: 204 });
+            }
+            cleaning.resolve();
+            if (stalledCleanup) return waitForAbort();
+            return Response.json({ ...probe, driveId: "shared-drive" });
+          }
+          if (url.pathname === "/drive/v3/files") return Response.json({ files: [] });
+          throw new Error(`Unexpected probe request: ${url.pathname}`);
+        },
+      );
+      const files = new FileEffects({
+        config: { mappings: [mapping] },
+        session,
+        graph: {
+          ...graph,
+          async request<T>(path: string, init?: RequestInit): Promise<T> {
+            return responseJson<T>(await fetchProvider(graphUrl(path), init));
+          },
+        },
+        worker: {
+          async *read() {
+            throw new Error("Probe must not read source bytes");
+          },
+        },
+      });
+      const stopped = assert.rejects(async () => {
+        for await (const check of files.preflight(controller.signal))
+          assert.equal(check.status, "pass");
+      });
+      await entered.promise;
+      controller.abort();
+      await cleaning.promise;
+      if (stalledCleanup) t.mock.timers.tick(5000);
+      await stopped;
+      assert.deepEqual(deleted, stalledCleanup ? [] : ["probe-root"]);
+    },
+  );
+}
+
+for (const blocked of [
+  "page",
+  "next-page",
+  "versions",
+  "retentionLabel",
+  "notebook",
+  "destination",
+] as const) {
+  test(`inventory abort cancels an in-flight ${blocked} request`, { timeout: 5000 }, async (t) => {
+    const controller = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<Response>();
+    t.after(() => response.reject(new Error("Test ended")));
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (
+          (blocked === "page" && url.pathname.endsWith("/children")) ||
+          (blocked === "next-page" && url.searchParams.has("$skiptoken")) ||
+          (blocked === "versions" && url.pathname.endsWith("/versions")) ||
+          (blocked === "retentionLabel" && url.pathname.endsWith("/retentionLabel")) ||
+          (blocked === "notebook" && url.pathname.endsWith("/items/notebook/children")) ||
+          (blocked === "destination" && url.pathname === "/drive/v3/files")
+        ) {
+          const abort = () => response.reject(init?.signal?.reason);
+          init?.signal?.addEventListener("abort", abort, { once: true });
+          entered.resolve();
+          try {
+            init?.signal?.throwIfAborted();
+            return await response.promise;
+          } finally {
+            init?.signal?.removeEventListener("abort", abort);
+          }
+        }
+        if (url.pathname.endsWith("/items/source-root"))
+          return Response.json({ id: "source-root", name: "root", folder: {} });
+        if (url.pathname.endsWith("/files/destination-root"))
+          return Response.json({
+            id: "destination-root",
+            name: "root",
+            driveId: "shared-drive",
+            mimeType: "application/vnd.google-apps.folder",
+          });
+        if (url.pathname.endsWith("/items/source-root/children"))
+          return Response.json({
+            value:
+              blocked === "notebook"
+                ? [{ id: "notebook", name: "Notes", package: { type: "oneNote" } }]
+                : [{ id: "file", name: "file.txt", file: {}, size: 0 }],
+            ...(blocked === "next-page"
+              ? {
+                  "@odata.nextLink":
+                    "https://graph.microsoft.com/v1.0/drives/source-drive/items/source-root/children?$skiptoken=next",
+                }
+              : {}),
+          });
+        if (url.pathname.endsWith("/versions")) return Response.json({ value: [] });
+        if (url.pathname.endsWith("/retentionLabel")) return Response.json({});
+        throw new Error(`Unexpected request: ${url.pathname}`);
+      },
+    );
+    const files = new FileEffects({
+      config: { mappings: [mapping] },
+      session,
+      graph: createGraphTransport(session),
+      worker: {
+        async *read() {
+          throw new Error("Inventory must not read source bytes");
+        },
+      },
+    });
+    await files.resolveSourceRoot(mapping);
+    await files.resolveDestinationFolder(mapping);
+    const pending =
+      blocked === "destination"
+        ? files.listDestinationChildren(mapping.destFolderId, controller.signal)
+        : files.listSourceChildren({
+            driveId: mapping.sourceDriveId,
+            itemId: mapping.sourceItemId,
+            signal: controller.signal,
+          });
+    const rejected = assert.rejects(pending);
+    await entered.promise;
+    controller.abort();
+    await rejected;
+  });
 }
 
 test("SharePoint notebook sources retain their web URL and count sections across pages and section groups", async (t) => {

@@ -1150,8 +1150,12 @@ function readBoundEvidence(value: unknown): BoundEvidence {
 function needsTransferWorker(config: JobConfig): boolean {
   return "mappings" in config || config.destination !== undefined;
 }
-async function boundEvidence(provider: ProviderPort, config: JobConfig): Promise<BoundEvidence> {
-  const identity = provider.applicationIdentity ? await provider.applicationIdentity() : "";
+async function boundEvidence(
+  provider: ProviderPort,
+  config: JobConfig,
+  signal?: AbortSignal,
+): Promise<BoundEvidence> {
+  const identity = provider.applicationIdentity ? await provider.applicationIdentity(signal) : "";
   const binary: Record<string, unknown> =
     needsTransferWorker(config) && provider.binaryEvidence ? await provider.binaryEvidence() : {};
   return {
@@ -1402,7 +1406,11 @@ function makeWriter(
         message: "The job has reached an absorbing terminal state.",
       });
   }
-  async function operation<T>(verb: Verb, fn: () => Promise<Outcome<T>>): Promise<Outcome<T>> {
+  async function operation<T>(
+    verb: Verb,
+    fn: () => Promise<Outcome<T>>,
+    signal?: AbortSignal,
+  ): Promise<Outcome<T>> {
     let entered = false;
     let finish: (() => void) | undefined;
     const progressStop = new AbortController();
@@ -1443,8 +1451,19 @@ function makeWriter(
           executionInterrupt?.abort();
         }
       })();
-      return record(await fn());
+      signal?.throwIfAborted();
+      const outcome = await fn();
+      signal?.throwIfAborted();
+      return record(outcome);
     } catch (error) {
+      if (verb === "plan" && signal?.aborted)
+        return record(
+          refuse(
+            "retry_budget_exhausted",
+            "Plan collection was interrupted before a complete review could be produced.",
+            { detail: { interrupted: true } },
+          ),
+        );
       const failure = expectedFailure<T>(error);
       if (failure) return record(failure);
       throw error;
@@ -1551,7 +1570,11 @@ function makeWriter(
       });
     });
   }
-  async function preflight(config: JobConfig, p: ProviderPort): Promise<Outcome<PreflightReport>> {
+  async function preflight(
+    config: JobConfig,
+    p: ProviderPort,
+    signal?: AbortSignal,
+  ): Promise<Outcome<PreflightReport>> {
     const local = localFilesystem(paths.dir);
     if (!local.ok) return local;
     if (
@@ -1562,6 +1585,7 @@ function makeWriter(
       return refuse("unsupported_route", "The requested route is not implemented.");
     const checks: CheckResult[] = [];
     const recordCheck = (check: CheckResult) => {
+      signal?.throwIfAborted();
       checks.push(check);
       store.atomic(() => {
         store.writeCheckResult({ ...check, verb: "doctor", at: deps.now().toISOString() });
@@ -1579,10 +1603,15 @@ function makeWriter(
     };
     try {
       if (p.preflight)
-        for await (const c of p.preflight({ jobType: job().type, config, jobDirectory: paths.dir }))
+        for await (const c of p.preflight({
+          jobType: job().type,
+          config,
+          jobDirectory: paths.dir,
+          ...(signal ? { signal } : {}),
+        }))
           recordCheck(c);
       for await (const c of driverFor(job().type).preflight(
-        context(p, config, job().planRevision ?? 0),
+        context(p, config, job().planRevision ?? 0, signal),
       ))
         recordCheck(c);
       if (needsTransferWorker(config)) {
@@ -1611,11 +1640,12 @@ function makeWriter(
               },
             });
           } finally {
-            await stopWorker(p, worker);
+            await stopWorker(p, worker, signal?.aborted);
           }
         }
       }
     } catch (error) {
+      signal?.throwIfAborted();
       const known = expectedFailure(error),
         code = known && !known.ok ? known.refusal.code : "preflight_failed";
       if (!known && !errorCode(error) && !(error instanceof TypeError)) throw error;
@@ -1872,8 +1902,15 @@ function makeWriter(
     }
     return worker;
   }
-  async function stopWorker(p: ProviderPort, worker: TransferWorkerHandle): Promise<void> {
-    await p.stopTransferWorker({ socketPath: worker.socketPath });
+  async function stopWorker(
+    p: ProviderPort,
+    worker: TransferWorkerHandle,
+    interruptedPlan = false,
+  ): Promise<void> {
+    // Planning starts no copy passes. On abort, use the owned child's bounded
+    // TERM/KILL shutdown rather than waiting through idle RC stop/quit deadlines.
+    if (interruptedPlan) await p.terminateTransferWorker({ socketPath: worker.socketPath });
+    else await p.stopTransferWorker({ socketPath: worker.socketPath });
     const lease = store.readLease();
     if (lease)
       store.writeLease({
@@ -2169,151 +2206,156 @@ function makeWriter(
         return preflight(config, provider(config));
       }),
     plan: (input) =>
-      operation("plan", async () => {
-        if (job().type === "teams_archive" && job().executionCompleted)
-          return refuse(
-            "plan_revision_required",
-            "A completed archive requires a new job with an optional lineage pointer.",
-          );
-        let config = readConfig(paths, job().type, store);
-        requireFileMappings(config);
-        const previousPlan =
-          job().planRevision === null ? null : store.readPlanRevision(job().planRevision!);
-        if (
-          "mappings" in config &&
-          (previousPlan?.stage || store.hasApprovedStagedPlan()) &&
-          !config.options?.staged
-        )
-          return refuse(
-            "configuration_invalid",
-            "Staging remains within this open job; restore options.staged before planning.",
-            {
-              detail: { field: "options.staged" },
-            },
-          );
-        if (
-          "mappings" in config &&
-          config.options?.proof === "rclone" &&
-          config.mappings.some((mapping) => mapping.exclusions?.length)
-        )
-          return refuse(
-            "configuration_invalid",
-            "rclone proof copies whole mapping roots; exclusions need the full per-file inventory.",
-            { detail: { field: "exclusions" } },
-          );
-        if (input?.final !== undefined && typeof input.final !== "boolean")
-          return refuse("configuration_invalid", "Final intent must be a boolean.");
-        if (input?.final && (!("mappings" in config) || !config.options?.staged))
-          return refuse(
-            "configuration_invalid",
-            "Final revisions require a staged file migration.",
-          );
-        if (!("mappings" in config) && !config.window.to && job().planRevision !== null) {
-          const previous = store.readResume(job().planRevision!).archivePlan;
-          if (previous)
-            config = { ...config, window: { ...config.window, to: previous.window.to } };
-        }
-        const p = provider(config),
-          ready = await preflight(config, p);
-        if (!ready.ok) return ready;
-        const revision = store.nextPlanRevision();
-        // ADR-0012 A1: the destination is prestaged once an execution completes, so
-        // earlier unexecuted, unapproved or interrupted revisions do not make a delta.
-        const stage =
-          "mappings" in config && config.options?.staged
-            ? input?.final
-              ? ("final" as const)
-              : job().executionCompleted
-                ? ("delta" as const)
-                : ("prestage" as const)
-            : undefined;
-        pendingStage = stage;
-        const sourceInventoryAt = deps.now().toISOString();
-        store.appendEvent({
-          verb: "plan",
-          phase: "plan",
-          kind: "phase_started",
-          payload: { revision },
-        });
-        let planWorker: TransferWorkerHandle | undefined;
-        let drained: { committed: number; interrupted: boolean; blocked: boolean };
-        try {
-          if (needsTransferWorker(config)) planWorker = await startWorker(p);
-          drained = await drain(p, config, revision, "plan", new RetryBudget(200));
+      operation(
+        "plan",
+        async () => {
+          if (job().type === "teams_archive" && job().executionCompleted)
+            return refuse(
+              "plan_revision_required",
+              "A completed archive requires a new job with an optional lineage pointer.",
+            );
+          let config = readConfig(paths, job().type, store);
+          requireFileMappings(config);
+          const previousPlan =
+            job().planRevision === null ? null : store.readPlanRevision(job().planRevision!);
           if (
             "mappings" in config &&
-            !drained.blocked &&
-            !drained.interrupted &&
-            !store.readFindings(revision, "plan").some((finding) => finding.kind === "finding")
+            (previousPlan?.stage || store.hasApprovedStagedPlan()) &&
+            !config.options?.staged
           )
-            await assertSourceInventoryFresh(context(p, config, revision));
-        } finally {
-          if (planWorker) await stopWorker(p, planWorker);
-        }
-        if (drained.interrupted)
-          return refuse(
-            "retry_budget_exhausted",
-            "Plan collection was interrupted before a complete review could be produced.",
-            { detail: { interrupted: true } },
-          );
-        if (drained.blocked)
-          return refuse("retry_budget_exhausted", "Plan collection exhausted its retry budget.");
-        const rows = store.readAllRows(revision, "plan"),
-          resume = store.readResume(revision),
-          evidence = await boundEvidence(p, config);
-        if (!("mappings" in config) && !config.window.to && resume.archivePlan)
-          config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
-        const inputs = inputFields(config, evidence, rows, resume.archivePlan),
-          inputsDigest = digestJson(inputs);
-        const observedAccount = ready.value.checks.find(
-          (check) => check.id === "google.actingAccount" || check.id === "google.delegation",
-        )?.evidence.actualSubject;
-        const actingGoogleAccount =
-          typeof observedAccount === "string" ? observedAccount : undefined;
-        const reportSections = await sections(p, config, revision, actingGoogleAccount);
-        const disclosures = reportSections
-          .filter((s) => !s.body.startsWith("{") && !s.body.startsWith("["))
-          .flatMap((s) => s.body.split("\n"));
-        const planDigest = digestJson({
-          inputsDigest,
-          stage,
-          rows: contentDigest(rows),
-          findings: contentDigest(
-            store.readFindings(revision).map(({ id: _id, ...finding }) => finding),
-          ),
-          archive: semantic(resume.archivePlan ?? null),
-          disclosures,
-        });
-        const createdAt = deps.now().toISOString();
-        const record = {
-          revision,
-          ...(stage ? { stage } : {}),
-          ...("mappings" in config ? { manifestDigest: config.manifestDigest } : {}),
-          planDigest,
-          inputsDigest,
-          createdAt,
-          sourceInventoryAt,
-          rowCount: rows.length,
-          inputs,
-          evidence: {
-            binding: evidence,
-            reportSections,
-            ...(actingGoogleAccount !== undefined ? { actingGoogleAccount } : {}),
-          },
-          disclosures,
-          sections: reportSections.map((s, i) => ({
-            id: `section-${i}`,
-            title: s.title,
-            body: s.body,
-          })),
-        };
-        store.atomic(() => {
-          store.writePlanRevision(record);
-          store.writeJob({ ...job(), planRevision: revision, verificationRevision: null });
-          transition("plan", "plan", { revision, planDigest });
-        });
-        return ok({ ...record, review: store.rows({ revision, phase: "plan", limit: 200 }) });
-      }),
+            return refuse(
+              "configuration_invalid",
+              "Staging remains within this open job; restore options.staged before planning.",
+              {
+                detail: { field: "options.staged" },
+              },
+            );
+          if (
+            "mappings" in config &&
+            config.options?.proof === "rclone" &&
+            config.mappings.some((mapping) => mapping.exclusions?.length)
+          )
+            return refuse(
+              "configuration_invalid",
+              "rclone proof copies whole mapping roots; exclusions need the full per-file inventory.",
+              { detail: { field: "exclusions" } },
+            );
+          if (input?.final !== undefined && typeof input.final !== "boolean")
+            return refuse("configuration_invalid", "Final intent must be a boolean.");
+          if (input?.final && (!("mappings" in config) || !config.options?.staged))
+            return refuse(
+              "configuration_invalid",
+              "Final revisions require a staged file migration.",
+            );
+          if (!("mappings" in config) && !config.window.to && job().planRevision !== null) {
+            const previous = store.readResume(job().planRevision!).archivePlan;
+            if (previous)
+              config = { ...config, window: { ...config.window, to: previous.window.to } };
+          }
+          const p = provider(config),
+            ready = await preflight(config, p, input?.signal);
+          if (!ready.ok) return ready;
+          const revision = store.nextPlanRevision();
+          // ADR-0012 A1: the destination is prestaged once an execution completes, so
+          // earlier unexecuted, unapproved or interrupted revisions do not make a delta.
+          const stage =
+            "mappings" in config && config.options?.staged
+              ? input?.final
+                ? ("final" as const)
+                : job().executionCompleted
+                  ? ("delta" as const)
+                  : ("prestage" as const)
+              : undefined;
+          pendingStage = stage;
+          const sourceInventoryAt = deps.now().toISOString();
+          store.appendEvent({
+            verb: "plan",
+            phase: "plan",
+            kind: "phase_started",
+            payload: { revision },
+          });
+          let planWorker: TransferWorkerHandle | undefined;
+          let drained: { committed: number; interrupted: boolean; blocked: boolean };
+          try {
+            if (needsTransferWorker(config)) planWorker = await startWorker(p);
+            drained = await drain(p, config, revision, "plan", new RetryBudget(200), input?.signal);
+            if (
+              "mappings" in config &&
+              !drained.blocked &&
+              !drained.interrupted &&
+              !store.readFindings(revision, "plan").some((finding) => finding.kind === "finding")
+            )
+              await assertSourceInventoryFresh(context(p, config, revision, input?.signal));
+          } finally {
+            if (planWorker) await stopWorker(p, planWorker, input?.signal?.aborted);
+          }
+          if (drained.interrupted)
+            return refuse(
+              "retry_budget_exhausted",
+              "Plan collection was interrupted before a complete review could be produced.",
+              { detail: { interrupted: true } },
+            );
+          if (drained.blocked)
+            return refuse("retry_budget_exhausted", "Plan collection exhausted its retry budget.");
+          const rows = store.readAllRows(revision, "plan"),
+            resume = store.readResume(revision),
+            evidence = await boundEvidence(p, config, input?.signal);
+          if (!("mappings" in config) && !config.window.to && resume.archivePlan)
+            config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
+          const inputs = inputFields(config, evidence, rows, resume.archivePlan),
+            inputsDigest = digestJson(inputs);
+          const observedAccount = ready.value.checks.find(
+            (check) => check.id === "google.actingAccount" || check.id === "google.delegation",
+          )?.evidence.actualSubject;
+          const actingGoogleAccount =
+            typeof observedAccount === "string" ? observedAccount : undefined;
+          const reportSections = await sections(p, config, revision, actingGoogleAccount);
+          const disclosures = reportSections
+            .filter((s) => !s.body.startsWith("{") && !s.body.startsWith("["))
+            .flatMap((s) => s.body.split("\n"));
+          const planDigest = digestJson({
+            inputsDigest,
+            stage,
+            rows: contentDigest(rows),
+            findings: contentDigest(
+              store.readFindings(revision).map(({ id: _id, ...finding }) => finding),
+            ),
+            archive: semantic(resume.archivePlan ?? null),
+            disclosures,
+          });
+          const createdAt = deps.now().toISOString();
+          const record = {
+            revision,
+            ...(stage ? { stage } : {}),
+            ...("mappings" in config ? { manifestDigest: config.manifestDigest } : {}),
+            planDigest,
+            inputsDigest,
+            createdAt,
+            sourceInventoryAt,
+            rowCount: rows.length,
+            inputs,
+            evidence: {
+              binding: evidence,
+              reportSections,
+              ...(actingGoogleAccount !== undefined ? { actingGoogleAccount } : {}),
+            },
+            disclosures,
+            sections: reportSections.map((s, i) => ({
+              id: `section-${i}`,
+              title: s.title,
+              body: s.body,
+            })),
+          };
+          store.atomic(() => {
+            input?.signal?.throwIfAborted();
+            store.writePlanRevision(record);
+            store.writeJob({ ...job(), planRevision: revision, verificationRevision: null });
+            transition("plan", "plan", { revision, planDigest });
+          });
+          return ok({ ...record, review: store.rows({ revision, phase: "plan", limit: 200 }) });
+        },
+        input?.signal,
+      ),
     approve: (a) =>
       operation("approve", async () => {
         if (
