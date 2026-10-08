@@ -12,6 +12,76 @@ import type {
 } from "../src/engine/providers/archive.ts";
 import type { ConversationManifest, PackageManifest } from "../src/engine/archive/package.ts";
 import { ArchiveEffectError } from "../src/engine/providers/archive.ts";
+import { cliArchiveFixture, CLI_ARCHIVE_CONFIG } from "./cli-fixture.ts";
+import { fileFixture, value } from "./engine-fixture.ts";
+
+for (const stage of ["scope", "preflight", "collection"] as const) {
+  test(
+    `aborted archive plan stops during ${stage} and can be planned again`,
+    { timeout: 5000 },
+    async (t) => {
+      const home = await mkdtemp(join(tmpdir(), "migmate-archive-abort-"));
+      const port = new FakeFileMigrationPort({ ...fileFixture(), archive: cliArchiveFixture() });
+      const archive = port.archive!;
+      const engine = openEngine({ home, provider: port });
+      const ref = value(
+        await engine.initJob({ type: "teams_archive", config: CLI_ARCHIVE_CONFIG }),
+      );
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const waitForAbort = async (signal?: AbortSignal) => {
+        entered.resolve();
+        const abort = () => release.resolve();
+        signal?.addEventListener("abort", abort, { once: true });
+        try {
+          signal?.throwIfAborted();
+          await release.promise;
+          signal?.throwIfAborted();
+        } finally {
+          signal?.removeEventListener("abort", abort);
+        }
+      };
+      const expand = archive.expand.bind(archive);
+      const preflight = archive.preflight.bind(archive);
+      const page = archive.page.bind(archive);
+      archive.expand = async (config, signal) => {
+        if (stage === "scope") await waitForAbort(signal);
+        return expand(config, signal);
+      };
+      archive.preflight = async function* (config, plan, signal) {
+        if (stage === "preflight") await waitForAbort(signal);
+        yield* preflight(config, plan, signal);
+      };
+      archive.page = async (input) => {
+        if (stage === "collection") await waitForAbort(input.signal);
+        return page(input);
+      };
+      t.after(async () => {
+        release.resolve();
+        engine.close();
+        await rm(home, { recursive: true, force: true });
+      });
+      const planning = engine.withWriterResult(ref, (writer) =>
+        writer.plan({ signal: controller.signal }),
+      );
+      await entered.promise;
+      controller.abort();
+      const stopped = await planning;
+      assert.equal(stopped.ok, false);
+      if (stopped.ok) return;
+      assert.equal(stopped.refusal.code, "retry_budget_exhausted");
+      assert.deepEqual(stopped.refusal.detail, { interrupted: true });
+      const status = value(await engine.reader(ref).status());
+      assert.equal(status.ownership.held, false);
+      assert.equal(status.planDigest, null);
+      archive.expand = expand;
+      archive.preflight = preflight;
+      archive.page = page;
+      assert.ok(value(await engine.withWriterResult(ref, (writer) => writer.plan())).planDigest);
+    },
+  );
+}
 
 // The fake sits at the same provider-effects seam as production. No driver or
 // store mocks: frozen scope, commit replay and offline verification cross engine.
@@ -424,11 +494,13 @@ test("private current and retained versions survive collection and packaging wit
     const planned = await writer.plan();
     assert.ok(planned.ok);
     assert.ok(
-      (await writer.approve({
-        planDigest: planned.value.planDigest,
-        approver: "test",
-        mode: "unattended",
-      })).ok,
+      (
+        await writer.approve({
+          planDigest: planned.value.planDigest,
+          approver: "test",
+          mode: "unattended",
+        })
+      ).ok,
     );
     const execution = await writer.execute();
     assert.ok(execution.ok);
@@ -436,9 +508,7 @@ test("private current and retained versions survive collection and packaging wit
   });
   assert.ok(run.ok);
   const root = join(home, "jobs", ref.id, "archive");
-  const manifest: PackageManifest = JSON.parse(
-    await readFile(join(root, "manifest.json"), "utf8"),
-  );
+  const manifest: PackageManifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
   assert.deepEqual(
     manifest.conversations.map(({ id, recordCount }) => ({ id, recordCount })),
     [
@@ -465,7 +535,12 @@ test("private current and retained versions survive collection and packaging wit
   );
   const jsonl = await readFile(join(root, conversationManifest.parts[0]!.jsonl.path), "utf8");
   assert.deepEqual(
-    new Set(jsonl.trim().split("\n").map((line) => JSON.parse(line))),
+    new Set(
+      jsonl
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ),
     new Set([current, retained]),
   );
 });

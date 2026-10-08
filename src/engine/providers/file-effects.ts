@@ -265,8 +265,10 @@ export class FileEffects {
     // The write app is paced and authenticated as itself, never as the read-only source app.
     this.#graphDestination = createGraphTransport({
       ...input.session,
-      graphToken: () => input.session.graphDestinationToken(),
-      evidence: async () => ({ graph: (await input.session.evidence()).graphDestination }),
+      graphToken: (signal) => input.session.graphDestinationToken(signal),
+      evidence: async (signal) => ({
+        graph: (await input.session.evidence(signal)).graphDestination,
+      }),
     });
     this.#worker = input.worker;
     for (const mapping of this.mappings) {
@@ -282,7 +284,8 @@ export class FileEffects {
     }
   }
 
-  async #source(raw: GraphItem, driveId: string): Promise<SourceEntry> {
+  async #source(raw: GraphItem, driveId: string, signal?: AbortSignal): Promise<SourceEntry> {
+    signal?.throwIfAborted();
     this.#resolvedSources.add(sourceKey(driveId, raw.id));
     const kind = raw.remoteItem
       ? "reference"
@@ -307,7 +310,7 @@ export class FileEffects {
             const page = await this.#graph.request<{
               value: GraphItem[];
               "@odata.nextLink"?: string;
-            }>(cursor!);
+            }>(cursor!, { signal: signal ?? null });
             return { value: page.value, next: page["@odata.nextLink"] };
           },
           () =>
@@ -430,21 +433,27 @@ export class FileEffects {
 
   async #google(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
-    headers.set("Authorization", `Bearer ${await this.#session.googleToken()}`);
+    init.signal?.throwIfAborted();
+    headers.set(
+      "Authorization",
+      `Bearer ${await this.#session.googleToken(init.signal ?? undefined)}`,
+    );
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     return fetchProvider(googleUrl(path), { ...init, headers });
   }
 
-  async #getRaw(objectId: string): Promise<{ file: GoogleFile }> {
+  async #getRaw(objectId: string, signal?: AbortSignal): Promise<{ file: GoogleFile }> {
     const response = await this.#google(
       `/drive/v3/files/${encodeURIComponent(objectId)}?supportsAllDrives=true&fields=${FILE_FIELDS}`,
+      { signal: signal ?? null },
     );
     const file = await responseJson<GoogleFile>(response);
     if (file.trashed) throw new HttpProviderFault(404);
     return { file };
   }
 
-  async #sourceMetadata(entry: SourceEntry): Promise<SourceEntry> {
+  async #sourceMetadata(entry: SourceEntry, signal?: AbortSignal): Promise<SourceEntry> {
+    signal?.throwIfAborted();
     if (entry.kind !== "file") return entry;
     const base = `/v1.0/drives/${encodeURIComponent(entry.driveId)}/items/${encodeURIComponent(entry.id)}`;
     let versionCount = 0;
@@ -453,6 +462,7 @@ export class FileEffects {
       async (cursor) => {
         const page = await this.#graph.request<{ value: unknown[]; "@odata.nextLink"?: string }>(
           cursor!,
+          { signal: signal ?? null },
         );
         return { value: page.value, next: page["@odata.nextLink"] };
       },
@@ -463,7 +473,9 @@ export class FileEffects {
     }
     let retentionLabel: unknown = null;
     try {
-      retentionLabel = await this.#graph.request(`${base}/retentionLabel`);
+      retentionLabel = await this.#graph.request(`${base}/retentionLabel`, {
+        signal: signal ?? null,
+      });
     } catch (error) {
       // A missing label is not a missing source item. Authorization/transient faults still escape.
       if (!(error instanceof HttpProviderFault && error.status === 404)) throw error;
@@ -472,7 +484,9 @@ export class FileEffects {
     return entry;
   }
 
-  async readSourceItem(input: { driveId: string; itemId: string }): Promise<SourceEntry | null> {
+  async readSourceItem(
+    input: Parameters<NonNullable<ProviderPort["readSourceItem"]>>[0],
+  ): Promise<SourceEntry | null> {
     if (!this.mappings.some((mapping) => mapping.sourceDriveId === input.driveId))
       throw new ProviderFault(
         "preflight_failed",
@@ -480,11 +494,18 @@ export class FileEffects {
       );
     try {
       if (this.#googleSourceDrives.has(input.driveId))
-        return this.#googleSource((await this.#getRaw(input.itemId)).file, input.driveId);
+        return this.#googleSource(
+          (await this.#getRaw(input.itemId, input.signal)).file,
+          input.driveId,
+        );
       const item = await this.#graph.request<GraphItem>(
         `/v1.0/drives/${encodeURIComponent(input.driveId)}/items/${encodeURIComponent(input.itemId)}?$expand=listItem($expand=fields)`,
+        { signal: input.signal ?? null },
       );
-      return await this.#sourceMetadata(await this.#source(item, input.driveId));
+      return await this.#sourceMetadata(
+        await this.#source(item, input.driveId, input.signal),
+        input.signal,
+      );
     } catch (error) {
       if (error instanceof HttpProviderFault && error.status === 404) return null;
       throw error;
@@ -536,11 +557,12 @@ export class FileEffects {
     return path;
   }
 
-  async readSharedDrive(driveId: string): Promise<SharedDrive | null> {
+  async readSharedDrive(driveId: string, signal?: AbortSignal): Promise<SharedDrive | null> {
     try {
       return await responseJson<SharedDrive>(
         await this.#google(
           `/drive/v3/drives/${encodeURIComponent(driveId)}?fields=id,name,createdTime`,
+          { signal: signal ?? null },
         ),
       );
     } catch (error) {
@@ -550,9 +572,10 @@ export class FileEffects {
     }
   }
 
-  async googleAbout(): Promise<GoogleAbout> {
+  async googleAbout(signal?: AbortSignal): Promise<GoogleAbout> {
     const response = await this.#google(
       "/drive/v3/about?fields=user(emailAddress),canCreateDrives",
+      { signal: signal ?? null },
     );
     const about = await responseJson<GoogleAbout>(response);
     if (typeof about?.user?.emailAddress !== "string" || typeof about.canCreateDrives !== "boolean")
@@ -797,14 +820,19 @@ export class FileEffects {
     }
   }
 
-  async resolveSourceRoot(input: {
-    sourceDriveId: string;
-    sourceItemId: string;
-  }): Promise<SourceEntry | null> {
-    return this.readSourceItem({ driveId: input.sourceDriveId, itemId: input.sourceItemId });
+  async resolveSourceRoot(
+    input: Parameters<ProviderPort["resolveSourceRoot"]>[0],
+  ): Promise<SourceEntry | null> {
+    return this.readSourceItem({
+      driveId: input.sourceDriveId,
+      itemId: input.sourceItemId,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
   }
 
-  async listSourceChildren(input: { driveId: string; itemId: string }): Promise<SourceEntry[]> {
+  async listSourceChildren(
+    input: Parameters<ProviderPort["listSourceChildren"]>[0],
+  ): Promise<SourceEntry[]> {
     const { driveId, itemId: sourceItemId } = input;
     if (!this.#resolvedSources.has(sourceKey(driveId, sourceItemId)))
       throw new ProviderFault(
@@ -830,7 +858,7 @@ export class FileEffects {
             files: GoogleFile[];
             nextPageToken?: string;
             incompleteSearch?: boolean;
-          }>(await this.#google(`/drive/v3/files?${query}`));
+          }>(await this.#google(`/drive/v3/files?${query}`, { signal: input.signal ?? null }));
           if (page.incompleteSearch)
             throw new ProviderFault("source_read_failed", "Source listing was incomplete.");
           return { value: page.files, next: page.nextPageToken };
@@ -847,13 +875,16 @@ export class FileEffects {
       async (cursor) => {
         const page = await this.#graph.request<{ value: GraphItem[]; "@odata.nextLink"?: string }>(
           cursor!,
+          { signal: input.signal ?? null },
         );
         return { value: page.value, next: page["@odata.nextLink"] };
       },
       () => new ProviderFault("provider_request_failed", "Source paging repeated a cursor."),
     )) {
       for (const raw of page)
-        items.push(await this.#sourceMetadata(await this.#source(raw, driveId)));
+        items.push(
+          await this.#sourceMetadata(await this.#source(raw, driveId, input.signal), input.signal),
+        );
     }
     return items;
   }
@@ -902,10 +933,9 @@ export class FileEffects {
     }
   }
 
-  async readDestinationObject(input: {
-    driveId: string;
-    objectId: string;
-  }): Promise<DestinationEntry | null> {
+  async readDestinationObject(
+    input: Parameters<NonNullable<ProviderPort["readDestinationObject"]>>[0],
+  ): Promise<DestinationEntry | null> {
     if (!this.#destinationRoots.some((root) => root.destDriveId === input.driveId))
       throw new ProviderFault(
         "preflight_failed",
@@ -915,10 +945,11 @@ export class FileEffects {
       if (this.#sharepointDestinationDrives.has(input.driveId)) {
         const raw = await this.#graphDestination.request<GraphItem>(
           `/v1.0/drives/${encodeURIComponent(input.driveId)}/items/${encodeURIComponent(input.objectId)}`,
+          { signal: input.signal ?? null },
         );
         return this.#sharepointDestination(raw, input.driveId);
       }
-      const { file } = await this.#getRaw(input.objectId);
+      const { file } = await this.#getRaw(input.objectId, input.signal);
       if (file.driveId !== input.driveId)
         throw new ProviderFault(
           "unsupported_route",
@@ -932,14 +963,20 @@ export class FileEffects {
     }
   }
 
-  async resolveDestinationFolder(input: {
-    destDriveId: string;
-    destFolderId: string;
-  }): Promise<DestinationEntry | null> {
-    return this.readDestinationObject({ driveId: input.destDriveId, objectId: input.destFolderId });
+  async resolveDestinationFolder(
+    input: Parameters<ProviderPort["resolveDestinationFolder"]>[0],
+  ): Promise<DestinationEntry | null> {
+    return this.readDestinationObject({
+      driveId: input.destDriveId,
+      objectId: input.destFolderId,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
   }
 
-  async listDestinationChildren(destFolderId: string): Promise<DestinationEntry[]> {
+  async listDestinationChildren(
+    destFolderId: string,
+    signal?: AbortSignal,
+  ): Promise<DestinationEntry[]> {
     let driveId = this.#destDrive.get(destFolderId);
     if (driveId && this.#sharepointDestinationDrives.has(driveId)) {
       const items: DestinationEntry[] = [];
@@ -949,7 +986,7 @@ export class FileEffects {
           const page = await this.#graphDestination.request<{
             value: GraphItem[];
             "@odata.nextLink"?: string;
-          }>(cursor!);
+          }>(cursor!, { signal: signal ?? null });
           return { value: page.value, next: page["@odata.nextLink"] };
         },
         () => new ProviderFault("provider_request_failed", "Destination paging repeated a cursor."),
@@ -958,7 +995,7 @@ export class FileEffects {
       return items;
     }
     if (!driveId) {
-      const parent = await this.#getRaw(destFolderId);
+      const parent = await this.#getRaw(destFolderId, signal);
       driveId = parent.file.driveId;
     }
     if (!driveId || !this.#destinationRoots.some((root) => root.destDriveId === driveId))
@@ -984,7 +1021,7 @@ export class FileEffects {
           files: GoogleFile[];
           nextPageToken?: string;
           incompleteSearch?: boolean;
-        }>(await this.#google(`/drive/v3/files?${query}`));
+        }>(await this.#google(`/drive/v3/files?${query}`, { signal: signal ?? null }));
         if (page.incompleteSearch)
           throw new ProviderFault("provider_request_failed", "Destination listing was incomplete.");
         return { value: page.files, next: page.nextPageToken };
@@ -996,9 +1033,11 @@ export class FileEffects {
     return items;
   }
 
-  async reserveDestinationId(): Promise<string> {
+  async reserveDestinationId(signal?: AbortSignal): Promise<string> {
     const result = await responseJson<{ ids: string[] }>(
-      await this.#google("/drive/v3/files/generateIds?count=1&space=drive&type=files"),
+      await this.#google("/drive/v3/files/generateIds?count=1&space=drive&type=files", {
+        signal: signal ?? null,
+      }),
     );
     if (result.ids.length !== 1 || !result.ids[0])
       throw new ProviderFault(
@@ -1138,8 +1177,11 @@ export class FileEffects {
     return readMarker((await this.#getRaw(objectId)).file.appProperties);
   }
 
-  async *streamDestinationContent(objectId: string): AsyncIterable<Uint8Array> {
-    const { file } = await this.#getRaw(objectId);
+  async *streamDestinationContent(
+    objectId: string,
+    signal?: AbortSignal,
+  ): AsyncIterable<Uint8Array> {
+    const { file } = await this.#getRaw(objectId, signal);
     if (file.mimeType.startsWith("application/vnd.google-apps."))
       throw new ProviderFault(
         "content_verification_degraded",
@@ -1147,12 +1189,14 @@ export class FileEffects {
       );
     yield* authenticatedStream(
       googleUrl(`/drive/v3/files/${encodeURIComponent(objectId)}?alt=media&supportsAllDrives=true`),
-      await this.#session.googleToken(),
+      await this.#session.googleToken(signal),
+      signal,
     );
   }
 
-  async *preflight(): AsyncIterable<CheckResult> {
+  async *preflight(signal?: AbortSignal): AsyncIterable<CheckResult> {
     for (const root of this.mappings.length ? this.mappings : this.#destinationRoots) {
+      signal?.throwIfAborted();
       const mapping = "sourceDriveId" in root ? root : undefined;
       const evidence = {
         ...(mapping
@@ -1168,7 +1212,7 @@ export class FileEffects {
       const title = mapping ? "Exact source and destination access" : "Exact destination access";
       if (mapping?.sourceType === "google_shared_drive") {
         try {
-          if (!(await this.readSharedDrive(mapping.sourceDriveId)))
+          if (!(await this.readSharedDrive(mapping.sourceDriveId, signal)))
             throw new ProviderFault(
               "preflight_failed",
               "The acting account cannot read this source Shared Drive.",
@@ -1182,12 +1226,18 @@ export class FileEffects {
           const source = await this.resolveSourceRoot({
             sourceDriveId: mapping.sourceDriveId,
             sourceItemId: mapping.sourceItemId,
+            ...(signal ? { signal } : {}),
           });
           if (!source || source.kind !== "folder")
             throw new ProviderFault("preflight_failed", "The source folder is inaccessible.");
-          await this.listSourceChildren({ driveId: source.driveId, itemId: source.id });
+          await this.listSourceChildren({
+            driveId: source.driveId,
+            itemId: source.id,
+            ...(signal ? { signal } : {}),
+          });
           const drive = await this.#graphDestination.request<{ id: string; driveType: string }>(
             `/v1.0/drives/${encodeURIComponent(root.destDriveId)}`,
+            { signal: signal ?? null },
           );
           if (drive.id !== root.destDriveId || drive.driveType !== "documentLibrary")
             throw new ProviderFault(
@@ -1197,12 +1247,14 @@ export class FileEffects {
           const destination = await this.resolveDestinationFolder({
             destDriveId: root.destDriveId,
             destFolderId: root.destFolderId,
+            ...(signal ? { signal } : {}),
           });
           if (!destination || destination.kind !== "folder")
             throw new ProviderFault("preflight_failed", "The destination folder is inaccessible.");
-          await this.listDestinationChildren(destination.id);
+          await this.listDestinationChildren(destination.id, signal);
           yield { id: checkId, title, status: "pass", evidence };
         } catch (error) {
+          signal?.throwIfAborted();
           yield failedCheck(checkId, title, error, evidence);
         }
         continue;
@@ -1215,7 +1267,9 @@ export class FileEffects {
             driveType: string;
             sharepointIds?: { siteId?: string };
             webUrl?: string;
-          }>(`/v1.0/drives/${encodeURIComponent(mapping.sourceDriveId)}`);
+          }>(`/v1.0/drives/${encodeURIComponent(mapping.sourceDriveId)}`, {
+            signal: signal ?? null,
+          });
           if (drive.id !== mapping.sourceDriveId || drive.driveType !== "documentLibrary")
             throw new ProviderFault(
               "unsupported_route",
@@ -1226,13 +1280,18 @@ export class FileEffects {
           const source = await this.resolveSourceRoot({
             sourceDriveId: mapping.sourceDriveId,
             sourceItemId: mapping.sourceItemId,
+            ...(signal ? { signal } : {}),
           });
           if (!source || source.kind !== "folder")
             throw new ProviderFault(
               "preflight_failed",
               "The source root is not an enumerable folder.",
             );
-          await this.listSourceChildren({ driveId: source.driveId, itemId: source.id });
+          await this.listSourceChildren({
+            driveId: source.driveId,
+            itemId: source.id,
+            ...(signal ? { signal } : {}),
+          });
           if (mapping.sourceSiteId) {
             const initial = `/v1.0/sites/${encodeURIComponent(mapping.sourceSiteId)}/drives?$select=id`;
             let found = false;
@@ -1242,7 +1301,7 @@ export class FileEffects {
                 const page = await this.#graph.request<{
                   value: { id: string }[];
                   "@odata.nextLink"?: string;
-                }>(cursor!);
+                }>(cursor!, { signal: signal ?? null });
                 return { value: page.value, next: page["@odata.nextLink"] };
               },
               () =>
@@ -1273,7 +1332,7 @@ export class FileEffects {
           };
           continue;
         }
-        const destination = await this.#getRaw(root.destFolderId);
+        const destination = await this.#getRaw(root.destFolderId, signal);
         if (
           destination.file.driveId !== root.destDriveId ||
           destination.file.mimeType !== FOLDER_MIME ||
@@ -1291,6 +1350,7 @@ export class FileEffects {
           evidence: { ...evidence, ...sourceEvidence },
         };
       } catch (error) {
+        signal?.throwIfAborted();
         yield failedCheck(checkId, title, error, evidence);
         continue;
       }
@@ -1301,6 +1361,7 @@ export class FileEffects {
             destFolderId: root.destFolderId!,
           },
           mapping,
+          signal,
         );
         yield {
           id: `provider.probe.${root.destFolderId}`,
@@ -1309,6 +1370,7 @@ export class FileEffects {
           evidence: { ...evidence, ...result },
         };
       } catch (error) {
+        signal?.throwIfAborted();
         yield failedCheck(
           `provider.probe.${root.destFolderId}`,
           "Disposable destination capability probe",
@@ -1333,6 +1395,7 @@ export class FileEffects {
   async #probeDestination(
     root: DestinationRoot,
     mapping?: Mapping,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const marker = randomUUID();
     const ids: string[] = [];
@@ -1340,10 +1403,11 @@ export class FileEffects {
     const createdTime = "2001-02-03T04:05:06.000Z";
     const modifiedTime = "2002-03-04T05:06:07.000Z";
     try {
-      const rootId = await this.reserveDestinationId();
+      const rootId = await this.reserveDestinationId(signal);
       ids.push(rootId);
       const probeRoot = await responseJson<GoogleFile>(
         await this.#google(`/drive/v3/files?supportsAllDrives=true&fields=${FILE_FIELDS}`, {
+          signal: signal ?? null,
           method: "POST",
           body: JSON.stringify({
             id: rootId,
@@ -1355,10 +1419,11 @@ export class FileEffects {
         }),
       );
       this.#destination(probeRoot);
-      const childId = await this.reserveDestinationId();
+      const childId = await this.reserveDestinationId(signal);
       ids.push(childId);
       await responseJson(
         await this.#google(`/drive/v3/files?supportsAllDrives=true&fields=id`, {
+          signal: signal ?? null,
           method: "POST",
           body: JSON.stringify({
             id: childId,
@@ -1370,7 +1435,7 @@ export class FileEffects {
         }),
       );
       const bytes = Buffer.from([0, 255, 17, 0, 85, 128]);
-      const fileId = await this.reserveDestinationId();
+      const fileId = await this.reserveDestinationId(signal);
       ids.push(fileId);
       const boundary = `migmate${randomUUID().replaceAll("-", "")}`;
       const metadata = {
@@ -1409,18 +1474,20 @@ export class FileEffects {
         await this.#google(
           `/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id`,
           {
+            signal: signal ?? null,
             method: "POST",
             headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
             body: multipart,
           },
         ),
       );
-      const observed = await this.#getRaw(fileId);
+      const observed = await this.#getRaw(fileId, signal);
       const entry = this.#destination(observed.file);
       const expectedHash = createHash("sha256").update(bytes).digest("hex");
       const streamHash = createHash("sha256");
-      for await (const chunk of this.streamDestinationContent(fileId)) streamHash.update(chunk);
-      const folder = await this.#getRaw(childId);
+      for await (const chunk of this.streamDestinationContent(fileId, signal))
+        streamHash.update(chunk);
+      const folder = await this.#getRaw(childId, signal);
       if (
         entry.kind !== "file" ||
         entry.size !== bytes.length ||
@@ -1449,38 +1516,51 @@ export class FileEffects {
         destinationStreamProof: true,
       };
     } finally {
-      // Only IDs reserved by this invocation, only while their private disposable marker matches.
-      for (const id of ids.reverse()) {
-        try {
-          const current = await this.#getRaw(id);
-          if (current.file.appProperties?.migmateProbe !== marker)
-            throw new ProviderFault(
-              "preflight_failed",
-              "A disposable probe object no longer has this run's private marker.",
+      // Cancellation still gives privately marked probe objects a bounded cleanup attempt.
+      const cleanup = new AbortController();
+      let deadline: NodeJS.Timeout | undefined;
+      const interruptCleanup = () => {
+        deadline ??= setTimeout(() => cleanup.abort(), 5000);
+      };
+      signal?.addEventListener("abort", interruptCleanup, { once: true });
+      if (signal?.aborted) interruptCleanup();
+      try {
+        // Only IDs reserved by this invocation, only while their private disposable marker matches.
+        for (const id of ids.reverse()) {
+          try {
+            const current = await this.#getRaw(id, cleanup.signal);
+            if (current.file.appProperties?.migmateProbe !== marker)
+              throw new ProviderFault(
+                "preflight_failed",
+                "A disposable probe object no longer has this run's private marker.",
+              );
+            if (
+              current.file.mimeType === FOLDER_MIME &&
+              (await this.listDestinationChildren(id, cleanup.signal)).length !== 0
+            ) {
+              throw new ProviderFault(
+                "preflight_failed",
+                "A disposable probe folder contains objects not eligible for cleanup.",
+              );
+            }
+            const response = await this.#google(
+              `/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`,
+              { method: "DELETE", signal: cleanup.signal },
             );
-          if (
-            current.file.mimeType === FOLDER_MIME &&
-            (await this.listDestinationChildren(id)).length !== 0
-          ) {
-            throw new ProviderFault(
-              "preflight_failed",
-              "A disposable probe folder contains objects not eligible for cleanup.",
-            );
+            await requireSuccess(response);
+            await response.body?.cancel();
+          } catch (error) {
+            if (!(error instanceof HttpProviderFault && error.status === 404))
+              throw new ProviderFault(
+                "preflight_failed",
+                "Disposable destination probe cleanup could not be proven.",
+                { probeCleanup: false },
+              );
           }
-          const response = await this.#google(
-            `/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`,
-            { method: "DELETE" },
-          );
-          await requireSuccess(response);
-          await response.body?.cancel();
-        } catch (error) {
-          if (!(error instanceof HttpProviderFault && error.status === 404))
-            throw new ProviderFault(
-              "preflight_failed",
-              "Disposable destination probe cleanup could not be proven.",
-              { probeCleanup: false },
-            );
         }
+      } finally {
+        clearTimeout(deadline);
+        signal?.removeEventListener("abort", interruptCleanup);
       }
     }
   }

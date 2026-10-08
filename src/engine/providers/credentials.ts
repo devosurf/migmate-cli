@@ -27,11 +27,11 @@ export interface FileCredentialReference {
 }
 
 export interface CredentialSession {
-  graphToken(): Promise<string>;
-  graphDestinationToken(): Promise<string>;
-  googleToken(): Promise<string>;
-  identity(): Promise<string>;
-  evidence(): Promise<Record<string, unknown>>;
+  graphToken(signal?: AbortSignal): Promise<string>;
+  graphDestinationToken(signal?: AbortSignal): Promise<string>;
+  googleToken(signal?: AbortSignal): Promise<string>;
+  identity(signal?: AbortSignal): Promise<string>;
+  evidence(signal?: AbortSignal): Promise<Record<string, unknown>>;
   readonly rcloneConfigPath: string | null;
   readonly sourceRemote: string | null;
   readonly destinationRemote: string | null;
@@ -864,7 +864,8 @@ export async function createCredentialSession(input: {
     return state;
   }
 
-  async function graphToken(): Promise<string> {
+  async function graphToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     active();
     if (graphCache && graphCache.expiresAt > Date.now() + 60_000) return graphCache.value;
     if (graphPending) return graphPending;
@@ -881,7 +882,7 @@ export async function createCredentialSession(input: {
           client_secret: current.graph.secret.toString("utf8"),
           scope: GRAPH_SCOPE,
         }),
-        controller.signal,
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
         "microsoft",
       );
       active();
@@ -897,7 +898,8 @@ export async function createCredentialSession(input: {
     }
   }
 
-  async function graphDestinationToken(): Promise<string> {
+  async function graphDestinationToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const credential = active().graphDestination;
     if (!credential?.secret) throw refused("credential_graph_unavailable");
     if (destinationCache && destinationCache.expiresAt > Date.now() + 60_000)
@@ -913,7 +915,7 @@ export async function createCredentialSession(input: {
           client_secret: credential.secret!.toString("utf8"),
           scope: GRAPH_SCOPE,
         }),
-        controller.signal,
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
         "microsoft",
       );
       active();
@@ -929,7 +931,8 @@ export async function createCredentialSession(input: {
     }
   }
 
-  async function googleToken(): Promise<string> {
+  async function googleToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const credential = active().google;
     if (!credential) throw refused("credential_google_unavailable");
     if (googleCache && googleCache.expiresAt > Date.now() + 60_000) return googleCache.value;
@@ -964,7 +967,7 @@ export async function createCredentialSession(input: {
             grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
             assertion: `${signingInput}.${signature}`,
           }),
-          controller.signal,
+          signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
           "google",
         );
         active();
@@ -987,12 +990,12 @@ export async function createCredentialSession(input: {
     }
   }
 
-  async function authenticate(): Promise<CredentialState> {
+  async function authenticate(signal?: AbortSignal): Promise<CredentialState> {
     const current = active();
     await Promise.all([
-      ...(current.graph ? [graphToken()] : []),
-      ...(current.graphDestination ? [graphDestinationToken()] : []),
-      ...(current.google ? [googleToken()] : []),
+      ...(current.graph ? [graphToken(signal)] : []),
+      ...(current.graphDestination ? [graphDestinationToken(signal)] : []),
+      ...(current.google ? [googleToken(signal)] : []),
     ]);
     return active();
   }
@@ -1004,9 +1007,9 @@ export async function createCredentialSession(input: {
       return active().google?.delegatedSubject;
     },
     googleToken,
-    async identity() {
-      if (input.mode === "archive_verification") await googleToken();
-      else await authenticate();
+    async identity(signal) {
+      if (input.mode === "archive_verification") await googleToken(signal);
+      else await authenticate(signal);
       const current = active();
       // Key/secret rotation changes no identity. SA principal/client drift does.
       const identity = {
@@ -1033,8 +1036,8 @@ export async function createCredentialSession(input: {
       };
       return `sha256:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
     },
-    async evidence() {
-      const current = await authenticate();
+    async evidence(signal) {
+      const current = await authenticate(signal);
       return {
         ...(current.graph
           ? {

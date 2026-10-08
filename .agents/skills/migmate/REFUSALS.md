@@ -15,7 +15,7 @@ Match the exit status first, then the code.
 | 6, 7 | Already closed, already cancelled                | The job is terminal. Start a new one.                                |
 | 8    | Durable state written by a newer build           | Stop: this build cannot read that job.                               |
 
-Exit 5 also covers a _successful_ `execute` whose outcome is `blocked`, so a checkpoint report is the finishing move either way. Statuses `130` (interrupt, including an interrupted `execute`), `141` (broken stdout) and `143` (SIGTERM) are process outcomes carrying no refusal to read.
+Exit 5 also covers a _successful_ `execute` whose outcome is `blocked`, so a checkpoint report is the finishing move either way. Statuses `130` (SIGINT), `141` (broken stdout) and `143` (SIGTERM) are process outcomes; inspect any accompanying result. An interrupted `plan` returns `retry_budget_exhausted` with `detail.interrupted: true`, releases its lease, and needs a fresh `plan`, not `reclaim` or `execute`. An interrupted `execute` remains resumable from its durable checkpoint.
 
 Codes worth recognising:
 

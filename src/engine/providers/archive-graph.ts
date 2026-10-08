@@ -17,8 +17,8 @@ import {
  * HTTPS redirect handling and unauthenticated CDN streaming belong to that adapter. */
 export interface ArchiveGraphTransport {
   request<T>(path: string, init?: RequestInit): Promise<T>;
-  stream(path: string): AsyncIterable<Uint8Array>;
-  evidence(): Promise<Record<string, unknown>>;
+  stream(path: string, signal?: AbortSignal): AsyncIterable<Uint8Array>;
+  evidence(signal?: AbortSignal): Promise<Record<string, unknown>>;
 }
 
 type Json = Record<string, unknown>;
@@ -447,7 +447,7 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
   ): AsyncIterable<Uint8Array> {
     abort(signal);
     try {
-      for await (const chunk of transport.stream(graphUrl(path, code).href)) {
+      for await (const chunk of transport.stream(graphUrl(path, code).href, signal)) {
         abort(signal);
         if (!(chunk instanceof Uint8Array)) throw new ArchiveEffectError(code);
         yield chunk;
@@ -683,7 +683,7 @@ export function createArchiveProvider(transport: ArchiveGraphTransport): Archive
       }
       const requiredRoles = archiveRequirements(config).permissions;
       try {
-        const identity = await transport.evidence();
+        const identity = await transport.evidence(signal);
         abort(signal);
         const granted = new Set(
           Array.isArray(identity.grantedPermissions)

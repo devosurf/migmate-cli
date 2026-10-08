@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -11,6 +11,8 @@ import {
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
 import { fileConfig as jobConfig, fileFixture } from "./engine-fixture.ts";
+import type { ProviderPort } from "../src/engine/providers/port.ts";
+import { value } from "./engine-fixture.ts";
 
 const FIXED_NOW = new Date("2026-09-01T00:00:00.000Z");
 
@@ -67,6 +69,77 @@ async function initialised(h: Harness): Promise<JobRef> {
 }
 
 describe("engine seam", () => {
+  for (const stage of ["preflight", "source", "destination", "freshness"] as const) {
+    it(
+      `aborted full-inventory plan stops during ${stage} and can be planned again`,
+      { timeout: 5000 },
+      async (t) => {
+        const h = harness();
+        const ref = await initialised(h);
+        const controller = new AbortController();
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const waitForAbort = async (signal?: AbortSignal) => {
+          entered.resolve();
+          const abort = () => release.resolve();
+          signal?.addEventListener("abort", abort, { once: true });
+          try {
+            signal?.throwIfAborted();
+            await release.promise;
+            signal?.throwIfAborted();
+          } finally {
+            signal?.removeEventListener("abort", abort);
+          }
+        };
+        const source = h.port.listSourceChildren.bind(h.port);
+        const destination = h.port.listDestinationChildren.bind(h.port);
+        const preflight = h.port.preflight.bind(h.port);
+        let inventories = 0;
+        h.port.listSourceChildren = async (
+          input: Parameters<ProviderPort["listSourceChildren"]>[0],
+        ) => {
+          if (input.itemId === "source-root") {
+            inventories++;
+            if (stage === "source" || (stage === "freshness" && inventories === 2))
+              await waitForAbort(input.signal);
+          }
+          return source(input);
+        };
+        h.port.listDestinationChildren = async (id: string, signal?: AbortSignal) => {
+          if (stage === "destination") await waitForAbort(signal);
+          return destination(id);
+        };
+        h.port.preflight = async function* (input) {
+          if (stage === "preflight") await waitForAbort(input.signal);
+          yield* preflight(input);
+        };
+        t.after(async () => {
+          release.resolve();
+          await h.engine.close();
+          rmSync(h.home, { recursive: true, force: true });
+        });
+        const planning = h.engine.withWriter(ref, (writer) =>
+          writer.plan({ signal: controller.signal }),
+        );
+        await entered.promise;
+        controller.abort();
+        const stopped = value(await planning);
+        assert.equal(stopped.ok, false);
+        if (stopped.ok) return;
+        assert.equal(stopped.refusal.code, "retry_budget_exhausted");
+        assert.deepEqual(stopped.refusal.detail, { interrupted: true });
+        const status = value(await h.engine.reader(ref).status());
+        assert.equal(status.ownership.held, false);
+        assert.equal(status.planDigest, null);
+        assert.equal(status.worker.active, false);
+        h.port.listSourceChildren = source;
+        h.port.listDestinationChildren = destination;
+        h.port.preflight = preflight;
+        const planned = value(value(await h.engine.withWriter(ref, (writer) => writer.plan())));
+        assert.ok(planned.planDigest);
+      },
+    );
+  }
   it("drives a file migration job from init to close", async () => {
     const h = harness();
     const ref = await initialised(h);

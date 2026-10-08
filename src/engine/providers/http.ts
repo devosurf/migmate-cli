@@ -61,8 +61,8 @@ export class HttpProviderFault extends ProviderFault {
 
 export interface GraphTransport {
   request<T>(path: string, init?: RequestInit): Promise<T>;
-  stream(path: string): AsyncIterable<Uint8Array>;
-  evidence(): Promise<Record<string, unknown>>;
+  stream(path: string, signal?: AbortSignal): AsyncIterable<Uint8Array>;
+  evidence(signal?: AbortSignal): Promise<Record<string, unknown>>;
 }
 
 const SAFE_CODES: Record<string, true> = {
@@ -259,8 +259,15 @@ export async function* responseBytes(response: Response): AsyncIterable<Uint8Arr
   }
 }
 
-export async function* authenticatedStream(url: URL, token: string): AsyncIterable<Uint8Array> {
-  let response = await fetchProvider(url, { headers: { Authorization: `Bearer ${token}` } });
+export async function* authenticatedStream(
+  url: URL,
+  token: string,
+  signal?: AbortSignal,
+): AsyncIterable<Uint8Array> {
+  let response = await fetchProvider(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: signal ?? null,
+  });
   for (let redirects = 0; response.status >= 300 && response.status < 400; redirects++) {
     const location = response.headers.get("location");
     await response.body?.cancel();
@@ -269,7 +276,7 @@ export async function* authenticatedStream(url: URL, token: string): AsyncIterab
         "provider_request_failed",
         "The provider content redirect did not resolve.",
       );
-    response = await fetchProvider(contentUrl(location));
+    response = await fetchProvider(contentUrl(location), { signal: signal ?? null });
   }
   await requireSuccess(response);
   yield* responseBytes(response);
@@ -284,8 +291,9 @@ const graphPacing = new Map<string, GraphPacing>();
 export function createGraphTransport(session: CredentialSession): GraphTransport {
   let clocks: { app: GraphPacing; tenant: GraphPacing } | undefined;
   async function pace(signal?: AbortSignal | null): Promise<void> {
+    signal?.throwIfAborted();
     if (!clocks) {
-      const evidence = await session.evidence();
+      const evidence = await session.evidence(signal ?? undefined);
       const graph = evidence.graph as { tenantId: string; clientId: string };
       const keys = [`app:${graph.clientId}`, `tenant:${graph.clientId}:${graph.tenantId}`];
       const entries = keys.map((key) => {
@@ -322,7 +330,7 @@ export function createGraphTransport(session: CredentialSession): GraphTransport
     async request<T>(path: string, init: RequestInit = {}): Promise<T> {
       await pace(init.signal);
       const headers = new Headers(init.headers);
-      headers.set("Authorization", `Bearer ${await session.graphToken()}`);
+      headers.set("Authorization", `Bearer ${await session.graphToken(init.signal ?? undefined)}`);
       if (init.body && !headers.has("Content-Type"))
         headers.set("Content-Type", "application/json");
       try {
@@ -331,16 +339,16 @@ export function createGraphTransport(session: CredentialSession): GraphTransport
         return noteThrottle(error);
       }
     },
-    async *stream(path: string) {
-      await pace();
+    async *stream(path: string, signal?: AbortSignal) {
+      await pace(signal);
       try {
-        yield* authenticatedStream(graphUrl(path), await session.graphToken());
+        yield* authenticatedStream(graphUrl(path), await session.graphToken(signal), signal);
       } catch (error) {
         noteThrottle(error);
       }
     },
-    async evidence() {
-      const evidence = await session.evidence();
+    async evidence(signal) {
+      const evidence = await session.evidence(signal);
       const graph = evidence.graph;
       return typeof graph === "object" && graph !== null ? { ...graph } : evidence;
     },

@@ -19,6 +19,7 @@ import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { createProtocolHandler, allowedNavigation } from "../src/web/protocol.ts";
 import { WebSession } from "../src/web/session.ts";
 import { fileConfig, fileFixture } from "./engine-fixture.ts";
+import type { ProviderPort } from "../src/engine/providers/port.ts";
 
 const JOB = { id: "one-job" };
 type HtmlNode = DefaultTreeAdapterMap["node"];
@@ -679,6 +680,54 @@ describe("windowless native protocol", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it(
+    "safe process quit interrupts plan collection and releases the real writer lease",
+    { timeout: 5000 },
+    async (t) => {
+      const home = mkdtempSync(join(tmpdir(), "migmate-web-plan-abort-"));
+      const provider = new FakeFileMigrationPort(fileFixture());
+      const engine = openEngine({ home, provider, adapter: "web" });
+      const created = await engine.initJob({ type: "file_migration", config: fileConfig() });
+      assert.ok(created.ok);
+      const session = new WebSession({ engine, job: created.value });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const list = provider.listSourceChildren.bind(provider);
+      provider.listSourceChildren = async (
+        input: Parameters<ProviderPort["listSourceChildren"]>[0],
+      ) => {
+        const abort = () => release.resolve();
+        input.signal?.addEventListener("abort", abort, { once: true });
+        entered.resolve();
+        try {
+          input.signal?.throwIfAborted();
+          await release.promise;
+          input.signal?.throwIfAborted();
+          return list(input);
+        } finally {
+          input.signal?.removeEventListener("abort", abort);
+        }
+      };
+      t.after(async () => {
+        release.resolve();
+        await session.close();
+        engine.close();
+        rmSync(home, { recursive: true, force: true });
+      });
+      await session.open();
+      assert.ok(session.command({ action: "plan", input: {} }).ok);
+      await entered.promise;
+      await session.close(true);
+      assert.equal(session.interrupted, true);
+      const status = await engine.reader(created.value).status();
+      assert.ok(status.ok);
+      assert.equal(status.value.ownership.held, false);
+      assert.equal(status.value.planDigest, null);
+      provider.listSourceChildren = list;
+      assert.ok((await engine.withWriterResult(created.value, (writer) => writer.plan())).ok);
+    },
+  );
 
   it("keeps an in-flight execute inside the writer scope after window close, but interrupts on process quit", async () => {
     for (const interrupt of [false, true]) {

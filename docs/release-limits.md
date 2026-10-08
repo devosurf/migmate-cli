@@ -215,6 +215,8 @@ Job `[options]` settings `mappingsInFlight` (default **2**) and `transfersPerMap
 
 On writer-open recovery, all unfinished passes whose worker is gone become interrupted, including every pass active at a crash. The next `execute` retries failed/interrupted mappings and skips completed passes for the approved revision. rclone compares files and skips identical ones on retry; this is not replay of a durable rclone job. Ctrl-C stops all active passes cooperatively and exits 130, leaving the job resumable.
 
+Planning is interruptible during preflight, full file inventory and Teams archive collection, including provider paging and per-file metadata requests. SIGINT exits 130 and SIGTERM exits 143 after worker cleanup and lease release. Re-run `plan` directly: interrupted collection publishes no new approvable revision and needs no `reclaim`. The existing `retry_budget_exhausted` refusal carries `detail.interrupted: true`; it is not a tenant prerequisite failure. Disposable preflight probes receive up to five seconds of cleanup after interruption; an unavailable destination can still leave privately marked `.migmate-probe-*` objects for operator cleanup. There is no process-kill deadline that bypasses durable cleanup.
+
 `execute --output jsonl` emits `mapping_progress` with `mappingId`, `passNumber`, `bytes`, `files`, `speed` and `errors`. Copy statistics are not verification proof. Hash verification is a point-in-time statement, not a source freeze or future-drift guarantee.
 
 One lifecycle writer holds a job. Automatic same-host takeover requires a heartbeat at least 30 seconds stale and the owner process and worker proven gone. Stop a recorded orphan worker with explicit `reclaim --confirm --stop-worker`; do not delete lease files.
