@@ -374,6 +374,8 @@ same artifact set and digests. Teams archive reports and packages are unchanged.
   recorded mapping/drive/member/timestamp objects; before-copy grants are not
   presented as go-live. Freeze cells contain the current final approval's human
   attestation, not an assertion that Migmate locked the source.
+  A destination's planned creation name is available before execute, but
+  `created_by_job` becomes `true` only once a created drive ID is recorded.
 - **`exceptions.csv`** has one row per current planned omission or verification
   finding, including accepted exceptions without duplicating them. Columns:
   `mapping_id`, `path`, `code`, `status`, `approver`, `note`, `reason`.

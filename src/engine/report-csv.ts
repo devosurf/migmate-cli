@@ -120,7 +120,7 @@ export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
       undefined,
       sourceType === "sharepoint" ? "google_shared_drive" : "sharepoint",
       drive?.driveId ?? mapping.destDriveId,
-      drive?.name,
+      drive?.name ?? mapping.createDrive?.name,
       undefined,
       Boolean(drive?.driveId),
       pass?.lastStats?.files,

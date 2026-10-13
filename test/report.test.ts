@@ -181,6 +181,13 @@ it("exports mapping totals and accepted omissions and findings without inventing
   );
   await approve(h);
   const approvedReport = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+  const plannedMappings: Record<string, string>[] = parse(
+    await readFile(approvedReport.artifacts.find((a) => a.name === "mappings.csv")!.path, "utf8"),
+    { columns: true },
+  );
+  assert.equal(plannedMappings[0]!.destination_name, '+Drive,"quoted"');
+  assert.equal(plannedMappings[0]!.destination_drive_id, "");
+  assert.equal(plannedMappings[0]!.created_by_job, "false");
   const plannedExceptions: Record<string, string>[] = parse(
     await readFile(approvedReport.artifacts.find((a) => a.name === "exceptions.csv")!.path, "utf8"),
     { columns: true },
