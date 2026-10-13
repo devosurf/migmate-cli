@@ -3,6 +3,7 @@ import type { ProviderPort } from "../providers/port.ts";
 
 import type { CommitFinding, CommitRow, CommitUnit } from "../commit.ts";
 import type { ArchiveResumeState } from "../providers/archive.ts";
+import type { ReportArray, ReportText } from "../report.ts";
 
 export type {
   CommitFinding,
@@ -39,6 +40,12 @@ export interface DriverContext<Cfg> {
     acceptedCodes: string[];
   };
   resume: DriverResumeState;
+  reportEvidence?: {
+    settled(mappingId: string): unknown;
+    preview(mappingId: string): { value: unknown; byteTotals: unknown } | undefined;
+    coverage: ReportArray;
+    sourceMetadata: ReportArray;
+  };
   provider: ProviderPort;
   now: () => Date;
   signal?: AbortSignal;
@@ -47,7 +54,7 @@ export interface DriverContext<Cfg> {
 
 export interface ReportSection {
   title: string;
-  body: string;
+  body: string | ReportText;
   format: "markdown" | "text";
 }
 

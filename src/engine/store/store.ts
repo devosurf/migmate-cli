@@ -60,6 +60,9 @@ import type {
 } from "../providers/archive.ts";
 import { canonicalJson, digestJson } from "./digest.ts";
 import type { StoredMappings } from "../manifest.ts";
+import { readReportJson } from "./report.ts";
+import { ReportArray } from "../report.ts";
+import type { DriverContext } from "../drivers/types.ts";
 
 export const SCHEMA_VERSION = 5;
 const BUSY_TIMEOUT_MS = 5_000;
@@ -184,6 +187,12 @@ export interface Store {
   readCheckResults(verb?: Verb): CheckResultRecord[];
   writeCheckResult(record: CheckResultRecord): void;
   readResume(revision: number): ResumeRecord;
+  readReportResume(revision: number): ResumeRecord;
+  readReportPlan(revision: number): Record<string, unknown> | null;
+  readReportArchive(revision: number): unknown;
+  iterateReportRows(revision: number, phase?: RowPhase): Iterable<Record<string, unknown>>;
+  reportEvidence(revision: number): NonNullable<DriverContext<never>["reportEvidence"]>;
+  iterateCurrentFindings(revision: number, phase: RowPhase): Iterable<FindingRecord>;
   readMappingPasses(revision: number): MappingPass[];
   readCreatedDrives(): CreatedDrive[];
   readAllRows(revision: number, phase?: RowPhase): CommitRow[];
@@ -1112,6 +1121,23 @@ class StoreImpl implements Store {
       params: [revision, ...phases],
     };
   }
+  *iterateCurrentFindings(revision: number, phase: RowPhase): Iterable<FindingRecord> {
+    const selection = this.#currentFindingIds(revision, phase);
+    for (const row of this.db
+      .prepare(
+        `SELECT id,rev,phase,code,kind,subject_kind,subject_id,at,CASE WHEN length(evidence)<65536 THEN evidence END AS evidence FROM finding WHERE id IN (${selection.sql}) ORDER BY id`,
+      )
+      .iterate(...selection.params)) {
+      const finding = rowToFinding(row);
+      if (row.evidence === null)
+        finding.evidence = readReportJson(
+          this.db,
+          "SELECT CASE WHEN json_valid(evidence) THEN evidence ELSE json_quote(evidence) END AS document FROM finding WHERE id=?",
+          [Number(row.id)],
+        );
+      yield finding;
+    }
+  }
   readCurrentFindings(revision: number, phase: RowPhase): FindingRecord[] {
     const selection = this.#currentFindingIds(revision, phase);
     return this.db
@@ -1173,6 +1199,174 @@ class StoreImpl implements Store {
         canonicalJson(record.evidence),
         record.at,
       );
+  }
+  *iterateReportRows(revision: number, phase?: RowPhase): Iterable<Record<string, unknown>> {
+    for (const table of ["item", "conversation"] as const) {
+      for (const row of this.db
+        .prepare(
+          `SELECT id,phase,payload IS NULL AS legacy,CASE WHEN length(payload)<65536 THEN payload END AS payload FROM ${table} WHERE rev=?${phase === undefined ? "" : " AND phase=?"} ORDER BY phase,id`,
+        )
+        .iterate(...(phase === undefined ? [revision] : [revision, phase]))) {
+        if (row.legacy) {
+          yield {
+            ...rowToCommit(
+              table,
+              this.db
+                .prepare(`SELECT * FROM ${table} WHERE rev=? AND phase=? AND id=?`)
+                .get(revision, String(row.phase), String(row.id))!,
+            ),
+          };
+          continue;
+        }
+        yield typeof row.payload === "string"
+          ? (JSON.parse(row.payload) as Record<string, unknown>)
+          : (readReportJson(
+              this.db,
+              `SELECT payload AS document FROM ${table} WHERE rev=? AND phase=? AND id=?`,
+              [revision, String(row.phase), String(row.id)],
+            ) as Record<string, unknown>);
+      }
+    }
+  }
+  reportEvidence(revision: number): NonNullable<DriverContext<never>["reportEvidence"]> {
+    const db = this.db;
+    const rows = () => this.iterateReportRows(revision);
+    return {
+      settled(mappingId) {
+        return readReportJson(
+          db,
+          "SELECT value AS document FROM watermark WHERE rev=? AND unit_key=? AND json_extract(value,'$.revision')=?",
+          [revision, `file-settle:${mappingId}`, revision],
+        );
+      },
+      preview(mappingId) {
+        const value = readReportJson(
+          db,
+          "SELECT json_extract(payload,'$.fileScope.preview') AS document FROM item WHERE rev=? AND phase='plan' AND mapping_id=? AND json_type(payload,'$.fileScope.preview') IS NOT NULL ORDER BY id LIMIT 1",
+          [revision, mappingId],
+        );
+        if (!value) return undefined;
+        const byteTotals: Record<string, number> = {};
+        for (const kind of ["new", "changed", "unchanged", "deleted", "retained", "timestampOnly"])
+          byteTotals[kind] = Number(
+            db
+              .prepare(
+                "SELECT COALESCE(SUM(json_extract(entry.value,'$.size')),0) AS total FROM item,json_each(item.payload,?) AS entry WHERE rev=? AND phase='plan' AND mapping_id=?",
+              )
+              .get(`$.fileScope.preview.${kind}`, revision, mappingId)?.total,
+          );
+        return { value, byteTotals };
+      },
+      coverage: new ReportArray(function* () {
+        for (const row of db
+          .prepare(
+            "SELECT id,mapping_id FROM item WHERE rev=? AND phase='verify' AND json_type(payload,'$.fileScope.verification') IS NOT NULL ORDER BY id",
+          )
+          .iterate(revision)) {
+          const verification = readReportJson(
+            db,
+            "SELECT json_remove(json_extract(payload,'$.fileScope.verification'),'$.sourceInventory') AS document FROM item WHERE rev=? AND phase='verify' AND id=?",
+            [revision, String(row.id)],
+          );
+          yield { mappingId: String(row.mapping_id), ...(verification as Record<string, unknown>) };
+        }
+      }),
+      sourceMetadata: new ReportArray(function* () {
+        for (const item of rows()) {
+          if (item.jobType !== "file_migration" || item.sourceEvidence === undefined) continue;
+          yield {
+            mappingId: item.mappingId,
+            sourceDriveId: item.sourceDriveId,
+            sourceItemId: item.sourceItemId,
+            relativePath: item.relativePath,
+            phase: item.phase,
+            sourceEvidence: item.sourceEvidence,
+          };
+        }
+      }),
+    };
+  }
+  readReportPlan(revision: number): Record<string, unknown> | null {
+    const row = this.db
+      .prepare(
+        "SELECT rev,plan_digest,inputs_digest,created_at,source_inventory_at FROM plan_revision WHERE rev=?",
+      )
+      .get(revision);
+    if (!row) return null;
+    const payload = readReportJson(
+      this.db,
+      "SELECT payload AS document FROM plan_revision WHERE rev=?",
+      [revision],
+    ) as Record<string, unknown> | undefined;
+    const inputs: Record<string, unknown> = {};
+    for (const entry of this.db
+      .prepare("SELECT key FROM plan_input WHERE rev=? ORDER BY key")
+      .iterate(revision)) {
+      const key = String(entry.key);
+      inputs[key] = readReportJson(
+        this.db,
+        "SELECT json_quote(value) AS document FROM plan_input WHERE rev=? AND key=?",
+        [revision, key],
+      );
+    }
+    const count = this.db
+      .prepare(
+        "SELECT (SELECT COUNT(*) FROM item WHERE rev=? AND phase='plan') + (SELECT COUNT(*) FROM conversation WHERE rev=? AND phase='plan') AS count",
+      )
+      .get(revision, revision)!;
+    return {
+      ...payload,
+      revision,
+      planDigest: String(row.plan_digest),
+      inputsDigest: String(row.inputs_digest),
+      createdAt: String(row.created_at),
+      sourceInventoryAt: String(row.source_inventory_at),
+      rowCount: Number(count.count),
+      inputs,
+      evidence:
+        readReportJson(
+          this.db,
+          "SELECT CASE WHEN json_valid(evidence) THEN evidence ELSE json_quote(evidence) END AS document FROM plan_revision WHERE rev=?",
+          [revision],
+        ) ?? null,
+      disclosures: payload?.disclosures ?? [],
+      sections: payload?.sections ?? [],
+    };
+  }
+  readReportArchive(revision: number): unknown {
+    return (
+      readReportJson(this.db, "SELECT payload AS document FROM archive_plan WHERE rev=?", [
+        revision,
+      ]) ?? null
+    );
+  }
+  readReportResume(revision: number): ResumeRecord {
+    const plan = this.db
+      .prepare(
+        "SELECT json_set(payload,'$.conversations',json('[]')) AS payload FROM archive_plan WHERE rev=?",
+      )
+      .get(revision);
+    return {
+      rows: this.db
+        .prepare(
+          "SELECT json_remove(payload,'$.fileScope.preview','$.fileScope.verification.sourceInventory','$.fileScope.verification.coveredPaths','$.fileScope.verification.deletedPaths') AS payload FROM item WHERE rev=? AND json_type(payload,'$.fileScope') IS NOT NULL ORDER BY phase,id",
+        )
+        .all(revision)
+        .map((row) => rowToCommit("item", row)),
+      watermarks: Object.fromEntries(
+        this.db
+          .prepare(
+            "SELECT unit_key,json_remove(value,'$.copiedInventory','$.observations') AS value FROM watermark WHERE rev=? AND unit_key LIKE 'file-settle:%' ORDER BY unit_key",
+          )
+          .all(revision)
+          .map((row) => [String(row.unit_key), String(row.value)]),
+      ),
+      committedUnits: [],
+      mappingPasses: this.readMappingPasses(revision),
+      createdDrives: this.readCreatedDrives(),
+      memberGrants: this.readMemberGrants(),
+      ...(plan ? { archivePlan: JSON.parse(String(plan.payload)) as ArchivePlan } : {}),
+    };
   }
   readAllRows(revision: number, phase?: RowPhase): CommitRow[] {
     return this.#snapshot(() => {
@@ -2237,6 +2431,34 @@ class StoreImpl implements Store {
           : job.state === "verified" || job.state === "needs_attention" || job.state === "closed"
             ? "completed"
             : null;
+      const createdDrives = this.readCreatedDrives();
+      const goLiveDrives = createdDrives.filter((drive) => drive.goLive);
+      const incompleteClose: JobStatus["incompleteClose"] =
+        job.state !== "closed" && goLiveDrives.length
+          ? {
+              accessMayExist: true,
+              transfersFenced: true,
+              checksPassed: goLiveDrives.every((drive) => drive.goLive?.check?.status === "passed"),
+              reporting:
+                Number(
+                  this.db
+                    .prepare(
+                      "SELECT COALESCE(MAX(cursor),0) AS cursor FROM event WHERE verb='report' AND kind='phase_completed'",
+                    )
+                    .get()?.cursor,
+                ) >
+                Number(
+                  this.db
+                    .prepare(
+                      "SELECT COALESCE(MAX(cursor),0) AS cursor FROM event WHERE kind='unit_committed'",
+                    )
+                    .get()?.cursor,
+                )
+                  ? "complete"
+                  : "unfinished",
+              nextAction: "close",
+            }
+          : undefined;
       return {
         jobId: job.id,
         jobType: job.type,
@@ -2257,7 +2479,8 @@ class StoreImpl implements Store {
         verificationDigest: verification?.verificationDigest ?? null,
         progress,
         mappingPasses: this.readMappingPasses(job.planRevision ?? 0),
-        createdDrives: this.readCreatedDrives(),
+        createdDrives,
+        ...(incompleteClose ? { incompleteClose } : {}),
         memberGrants: this.readMemberGrants(),
         lastCheckpoint: job.lastCheckpoint ?? lease?.lastCheckpoint ?? null,
         outstandingFindings: findings.filter(
