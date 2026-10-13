@@ -193,6 +193,13 @@ export interface Store {
   iterateReportRows(revision: number, phase?: RowPhase): Iterable<Record<string, unknown>>;
   reportEvidence(revision: number): NonNullable<DriverContext<never>["reportEvidence"]>;
   iterateCurrentFindings(revision: number, phase: RowPhase): Iterable<FindingRecord>;
+  reportItemPath(
+    revision: number,
+    phase: RowPhase,
+    mappingId: string,
+    sourceDriveId: string,
+    subjectId: string,
+  ): string | undefined;
   readMappingPasses(revision: number): MappingPass[];
   readCreatedDrives(): CreatedDrive[];
   readAllRows(revision: number, phase?: RowPhase): CommitRow[];
@@ -1137,6 +1144,20 @@ class StoreImpl implements Store {
         );
       yield finding;
     }
+  }
+  reportItemPath(
+    revision: number,
+    phase: RowPhase,
+    mappingId: string,
+    sourceDriveId: string,
+    subjectId: string,
+  ): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT relative_path FROM item WHERE source_drive_id=? AND source_item_id=? AND rev=? AND phase=? AND mapping_id=?",
+      )
+      .get(sourceDriveId, subjectId, revision, phase, mappingId);
+    return row ? String(row.relative_path) : undefined;
   }
   readCurrentFindings(revision: number, phase: RowPhase): FindingRecord[] {
     const selection = this.#currentFindingIds(revision, phase);

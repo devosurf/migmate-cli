@@ -355,6 +355,45 @@ existing header shape: that first record can itself exceed a runtime's string
 limit, so large-report consumers must parse it incrementally rather than load a
 whole line or file.
 
+File-migration reports also publish two incremental, digest-bound handover files.
+`report --output json` and the reader's artifact list include both alongside
+`report.json`, `report.jsonl` and `report.html`; unchanged evidence produces the
+same artifact set and digests. Teams archive reports and packages are unchanged.
+
+- **`mappings.csv`** has one row per mapping in the current revision. Columns:
+  `mapping_id`, `source_type`, `source_drive_id`, `source_folder_path`,
+  `source_site_name`, `source_library_name`, `destination_type`,
+  `destination_drive_id`, `destination_name`, `destination_web_link`,
+  `created_by_job`, `files`, `bytes`, `verification_outcome`,
+  `outstanding_exceptions`, `accepted_exceptions`, `go_live_member_grants`,
+  `freeze_by`, `freeze_at`, `freeze_how`. Files and bytes are the latest completed
+  pass's recorded totals, not an inventory or a sum of attempts. Verification is
+  `clean` or `findings` (acceptance does not turn findings into proof), or empty
+  before verification. Counts refer to the exception rows below and accepted
+  counts include advance acceptance. Go-live grants are a JSON array of the
+  recorded mapping/drive/member/timestamp objects; before-copy grants are not
+  presented as go-live. Freeze cells contain the current final approval's human
+  attestation, not an assertion that Migmate locked the source.
+  A destination's planned creation name is available before execute, but
+  `created_by_job` becomes `true` only once a created drive ID is recorded.
+- **`exceptions.csv`** has one row per current planned omission or verification
+  finding, including accepted exceptions without duplicating them. Columns:
+  `mapping_id`, `path`, `code`, `status`, `approver`, `note`, `reason`.
+  Status is `outstanding`, `accepted in advance`, or `accepted`. Approver and note
+  come from recorded acceptance (or the approval for an advance-accepted plan
+  omission); reason is the finding's recorded reason text. With `proof = "rclone"`,
+  a single-cell disclosure row precedes the column header: **per-file omission
+  findings are not collected at this proof level**. CSV consumers must skip that
+  first row for rclone-proof reports; full-proof reports start at the column header.
+
+These are views of existing report evidence, not additional provider observations.
+Unknown values are empty cells: in particular, existing destination names, source
+site/library names and destination web links are not synthesized from IDs or URLs.
+Every field is double-quoted, internal quotes are doubled, and commas, newlines
+and leading `=`, `+`, `-` or `@` remain verbatim, matching the archive CSV convention.
+Import cells as **text** in spreadsheet software rather than allowing formula
+interpretation; CSV quoting preserves data but is not a spreadsheet execution policy.
+
 In either mode, plan/report warn that mirror can overwrite or delete existing
 writers' files. Deferring manifest grants does not revoke or exclude external
 access, administrators, existing drive members or members of pre-populated groups.

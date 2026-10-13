@@ -18,6 +18,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { Engine, EngineOptions, JobReader, JobWriter, ReclaimDecision } from "./engine.ts";
+import { mappingsCsv, exceptionsCsv } from "./report-csv.ts";
 import {
   FILE_ROUTE_SOURCES,
   ManifestError,
@@ -2037,33 +2038,49 @@ function makeWriter(
       acceptedExceptions: accepted,
       archive: store.readReportArchive(revision),
     };
-    const contents = [
-      {
-        name: "report.json",
-        format: "json" as const,
-        chunks: function* () {
-          yield* reportJson(report);
-          yield "\n";
-        },
-      },
-      {
-        name: "report.jsonl",
-        format: "jsonl" as const,
-        chunks: function* () {
-          yield* reportJson({ kind: "report", ...report, rows: undefined, findings: undefined });
-          yield "\n";
-          for (const row of report.rows.entries()) {
-            yield* reportJson({ kind: "row", row });
+    const contents: { name: string; format: Artifact["format"]; chunks: () => Iterable<string> }[] =
+      [
+        {
+          name: "report.json",
+          format: "json" as const,
+          chunks: function* () {
+            yield* reportJson(report);
             yield "\n";
-          }
-          for (const finding of findings.entries()) {
-            yield* reportJson({ kind: "finding", finding });
-            yield "\n";
-          }
+          },
         },
-      },
-      { name: "report.html", format: "html" as const, chunks: () => reportHtml(report) },
-    ];
+        {
+          name: "report.jsonl",
+          format: "jsonl" as const,
+          chunks: function* () {
+            yield* reportJson({ kind: "report", ...report, rows: undefined, findings: undefined });
+            yield "\n";
+            for (const row of report.rows.entries()) {
+              yield* reportJson({ kind: "row", row });
+              yield "\n";
+            }
+            for (const finding of findings.entries()) {
+              yield* reportJson({ kind: "finding", finding });
+              yield "\n";
+            }
+          },
+        },
+        { name: "report.html", format: "html" as const, chunks: () => reportHtml(report) },
+      ];
+    if (job().type === "file_migration") {
+      const csvEvidence = {
+        store,
+        revision,
+        config: config as FileMigrationConfig | undefined,
+        findings: () => store.iterateCurrentFindings(revision, phase),
+        accepted,
+        approval: report.approval,
+        verification,
+      };
+      contents.push(
+        { name: "mappings.csv", format: "csv", chunks: () => mappingsCsv(csvEvidence) },
+        { name: "exceptions.csv", format: "csv", chunks: () => exceptionsCsv(csvEvidence) },
+      );
+    }
     const archiveArtifacts: Artifact[] = [];
     if (job().type === "teams_archive")
       for (const [name, format] of [

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it, type TestContext } from "node:test";
+import { parse } from "csv-parse/sync";
 import { openEngine, type Engine, type JobRef } from "../src/engine/index.ts";
 import {
   FakeFileMigrationPort,
@@ -965,6 +966,18 @@ describe("deferred member go-live", () => {
     const closed = value(await h.engine.reader(h.ref).status());
     assert.equal(closed.state, "closed");
     assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
+    const artifacts = value(await h.engine.reader(h.ref).artifacts());
+    const mappings: Record<string, string>[] = parse(
+      await readFile(
+        artifacts.artifacts.find((artifact) => artifact.name === "mappings.csv")!.path,
+        "utf8",
+      ),
+      { columns: true },
+    );
+    assert.equal(mappings[0]!.freeze_by, "operator@example.com");
+    assert.equal(mappings[0]!.freeze_at, now);
+    assert.equal(mappings[0]!.freeze_how, "Editors locked out at source");
+    assert.deepEqual(JSON.parse(mappings[0]!.go_live_member_grants!), closed.memberGrants);
     assert.equal((await h.port.listDriveMembers(driveId)).length, 2);
   });
   for (const timing of ["before", "after"] as const)
