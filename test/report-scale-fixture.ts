@@ -5,6 +5,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { parse } from "csv-parse";
 import { openEngine } from "../src/engine/index.ts";
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { fileFixture, value, approve } from "./engine-fixture.ts";
@@ -141,7 +142,7 @@ try {
   }, 10);
   sample.unref();
   const report = value(await engine.withWriterResult(ref, (w) => w.report()));
-  assert.equal(report.artifacts.length, 3);
+  assert.equal(report.artifacts.length, 5);
   let bytes = 0;
   for (const artifact of report.artifacts) {
     bytes += (await stat(artifact.path)).size;
@@ -193,6 +194,16 @@ try {
   assert.equal(rows, expectedRows);
   assert.equal(findings, 1000);
   assert.equal(acceptedItems, 1000);
+  let csvExceptions = 0;
+  for await (const exception of createReadStream(
+    report.artifacts.find((artifact) => artifact.name === "exceptions.csv")!.path,
+  ).pipe(parse({ columns: true, from_line: 2 }))) {
+    assert.match(exception.mapping_id, /^mapping-[012]$/u);
+    assert.equal(exception.status, "accepted");
+    assert.equal(exception.reason, "reviewed omission");
+    csvExceptions++;
+  }
+  assert.equal(csvExceptions, 1000);
   assert.equal(pending, "");
   value(await engine.withWriterResult(ref, (w) => w.close()));
   assert.equal(value(await engine.reader(ref).status()).state, "closed");

@@ -47,6 +47,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "csv-parse": "^7.0.3",
     "prettier": "^3.4.2",
     "typescript": "^5.9.2"
   }
