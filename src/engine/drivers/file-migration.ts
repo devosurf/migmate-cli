@@ -18,6 +18,7 @@ import type {
   SourceEntry,
 } from "../providers/port.ts";
 import type { CommitFinding, CommitUnit, JobTypeDriver, ReportSection } from "./types.ts";
+import { ReportArray, ReportText, reportJson } from "../report.ts";
 import {
   FilePlanRevisionRequiredError,
   hashStream,
@@ -2392,18 +2393,23 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     yield {
       title: "Settled confirmation",
       format: "text",
-      body: JSON.stringify(
-        ctx.config.mappings.map(
-          (mapping) =>
-            settleState(ctx, mapping) ?? {
-              mappingId: mapping.id,
-              revision: ctx.revision,
-              outcome: "pending",
-              maxPasses: ctx.config.options?.settleMaxPasses ?? 3,
-              consistencyIntervalMs: ctx.config.options?.consistencyIntervalMs ?? 30_000,
-              passes: 0,
-              observations: [],
-            },
+      body: new ReportText(() =>
+        reportJson(
+          ctx.config.mappings.map(
+            (mapping) =>
+              (ctx.reportEvidence
+                ? ctx.reportEvidence.settled(mapping.id)
+                : settleState(ctx, mapping)) ?? {
+                mappingId: mapping.id,
+                revision: ctx.revision,
+                outcome: "pending",
+                maxPasses: ctx.config.options?.settleMaxPasses ?? 3,
+                consistencyIntervalMs: ctx.config.options?.consistencyIntervalMs ?? 30_000,
+                passes: 0,
+                observations: [],
+              },
+          ),
+          false,
         ),
       ),
     };
@@ -2415,13 +2421,18 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
   yield {
     title: "Verification scope",
     format: "text",
-    body: JSON.stringify({
-      requested: ctx.config.options?.deltaVerification ?? "full",
-      proof: coverage.some((item) => item.scope === "partial") ? "partial proof" : "full",
-      mappings: coverage,
-      limitation:
-        "Partial proof does not recheck independent destination damage to unchanged paths. Earlier exceptions remain visible; final verification is always full.",
-    }),
+    body: new ReportText(() =>
+      reportJson(
+        {
+          requested: ctx.config.options?.deltaVerification ?? "full",
+          proof: coverage.some((item) => item.scope === "partial") ? "partial proof" : "full",
+          mappings: ctx.reportEvidence?.coverage ?? coverage,
+          limitation:
+            "Partial proof does not recheck independent destination damage to unchanged paths. Earlier exceptions remain visible; final verification is always full.",
+        },
+        false,
+      ),
+    ),
   };
   const drives = ctx.config.mappings
     .filter((m) => m.createDrive)
@@ -2587,36 +2598,48 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
           ),
         )
       : undefined;
+    const reportPreview = ctx.reportEvidence?.preview(mapping.id);
     yield {
       title: `Mapping ${mapping.id}`,
       format: "text",
-      body: JSON.stringify({
-        sourceDriveId: mapping.sourceDriveId,
-        sourceItemId: mapping.sourceItemId,
-        destDriveId: mapping.destDriveId,
-        destFolderId: mapping.destFolderId,
-        revision: ctx.revision,
-        preview,
-        byteTotals,
-        passes: (ctx.resume.mappingPasses ?? []).filter((pass) => pass.mappingId === mapping.id),
-      }),
+      body: new ReportText(() =>
+        reportJson(
+          {
+            sourceDriveId: mapping.sourceDriveId,
+            sourceItemId: mapping.sourceItemId,
+            destDriveId: mapping.destDriveId,
+            destFolderId: mapping.destFolderId,
+            revision: ctx.revision,
+            preview: reportPreview?.value ?? preview,
+            byteTotals: reportPreview?.byteTotals ?? byteTotals,
+            passes: (ctx.resume.mappingPasses ?? []).filter(
+              (pass) => pass.mappingId === mapping.id,
+            ),
+          },
+          false,
+        ),
+      ),
     };
   }
-  const evidence = (ctx.resume.rows ?? [])
-    .filter((item): item is FileEvidenceRow => item.jobType === "file_migration")
-    .filter((item) => item.sourceEvidence !== undefined)
-    .map((item) => ({
-      mappingId: item.mappingId,
-      sourceDriveId: item.sourceDriveId,
-      sourceItemId: item.sourceItemId,
-      relativePath: item.relativePath,
-      phase: item.phase,
-      sourceEvidence: item.sourceEvidence,
-    }));
+  const evidence =
+    ctx.reportEvidence?.sourceMetadata ??
+    new ReportArray(function* () {
+      for (const item of ctx.resume.rows ?? []) {
+        if (item.jobType !== "file_migration" || item.sourceEvidence === undefined) continue;
+        yield {
+          mappingId: item.mappingId,
+          sourceDriveId: item.sourceDriveId,
+          sourceItemId: item.sourceItemId,
+          relativePath: item.relativePath,
+          phase: item.phase,
+          sourceEvidence: item.sourceEvidence,
+        };
+      }
+    });
   yield {
     title: "Structured source-only metadata evidence",
     format: "text",
-    body: JSON.stringify(evidence),
+    body: new ReportText(() => reportJson(evidence, false)),
   };
 }
 

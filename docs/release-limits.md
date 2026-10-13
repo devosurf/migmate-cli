@@ -67,6 +67,15 @@ checks and reporting, not transfers. Some access may already exist after a faile
 close; resolve drift manually without another transfer pass against that drive,
 and do not treat failed post-grant checks as successful go-live.
 
+An unfinished deferred close is also durable status evidence:
+`status.incompleteClose` reports that access may exist, transfers remain fenced,
+whether recorded checks passed, and `reporting = "unfinished"` or `"complete"`.
+It remains distinct from the job's verification state and disappears only when
+close completes. Grant timestamps and check details remain available after
+reopening. Correct a reporting failure (including output storage problems) and
+retry `close`; the retry resumes grants → checks → report → closed, never another
+copy pass or a report bypass.
+
 The short drift check re-lists destination file paths, sizes, stored hashes and
 object IDs, plus folder paths, against the listing recorded by verification. It
 does not re-download content or prove inherited permissions, effective group
@@ -142,6 +151,24 @@ request deadline. rclone retries each Graph and Drive request up to 10 times, ho
 `Retry-After`, and its own I/O timeouts still apply. One listing response is capped at
 256 MiB, roughly 900,000 files at the ~260 bytes per file observed on SharePoint. Split
 a larger library into folder mappings.
+
+Report generation does not build whole-job row/finding arrays, execution resume
+state, settled-inventory section strings or complete artifact strings. It reads
+evidence incrementally, writes and hashes bounded output buffers, and atomically
+publishes a complete immutable artifact directory before registering the set.
+Existing report content, ordering and SHA-256 digest rules are unchanged. A failed
+serialization or write cannot replace a previously published set or complete
+deferred close. Disk usage still scales with complete evidence; unchanged reports
+are regenerated into staging before the existing immutable set is reused.
+
+The local report regression uses synthetic evidence for 250,000 files across
+three mappings after prestage, delta and final settling, with a 192 MiB Node heap.
+It includes large settled inventories, findings and accepted exceptions, and
+artifacts exceeding the runtime's single-string limit. This qualifies reporting,
+not a 250,000-file live-provider migration, provider listing memory, or the memory
+needed to perform execution/verification. JSONL's compatible header contains
+complete driver evidence and accepted exceptions; consume large headers with a
+streaming JSON parser, not a line-sized string.
 
 ### Staged migrations and cutover evidence
 

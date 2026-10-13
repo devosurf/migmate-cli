@@ -998,6 +998,41 @@ describe("deferred member go-live", () => {
       assert.equal(closed.memberGrants.length, 1);
       assert.deepEqual(closed.mappingPasses, before);
     });
+  it("discloses unfinished reporting after go-live across reopen and retries close without copying", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    const reviewed = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    t.mock.method(fileMigrationDriver, "reportSections", async function* () {
+      throw new Error("injected report serialization failure");
+    });
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, (w) => w.close()),
+      /injected report serialization failure/,
+    );
+    h.engine.close();
+    h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.state, "verified");
+    assert.deepEqual(status.incompleteClose, {
+      accessMayExist: true,
+      transfersFenced: true,
+      checksPassed: true,
+      reporting: "unfinished",
+      nextAction: "close",
+    });
+    assert.equal(status.memberGrants.length, 1);
+    assert.ok(status.createdDrives.every((drive) => drive.goLive?.check?.status === "passed"));
+    assert.deepEqual(value(await h.engine.reader(h.ref).artifacts()), reviewed);
+    const refused = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.refusal.code, "go_live_started");
+    t.mock.restoreAll();
+    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.state, "closed");
+    assert.equal(closed.incompleteClose, undefined);
+    assert.deepEqual(closed.mappingPasses, status.mappingPasses);
+  });
   for (const drift of ["membership", "content"] as const)
     it(`blocks go-live on ${drift} drift and never reopens transfers`, async (t) => {
       const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });

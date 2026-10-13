@@ -435,6 +435,14 @@ export interface JobStatus {
   mappingPasses: MappingPass[];
   createdDrives: CreatedDrive[];
   memberGrants: MemberGrant[];
+  /** Durable deferred go-live has begun, but close has not completed. */
+  incompleteClose?: {
+    accessMayExist: true;
+    transfersFenced: true;
+    checksPassed: boolean;
+    reporting: "unfinished" | "complete";
+    nextAction: "close";
+  };
   lastCheckpoint: string | null;
   outstandingFindings: FacetCount[];
   worker: { active: boolean; group: string | null };

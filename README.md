@@ -338,6 +338,23 @@ folder paths with verification; it is not another content download or a guarante
 against later writes. Its permission check covers explicit drive membership, not
 inherited permissions or effective group membership.
 
+After deferred go-live starts, `status.incompleteClose` survives reopening and
+explicitly reports `accessMayExist`, the permanent transfer fence, whether checks
+passed, and whether reporting is `unfinished` or `complete`. A `verified` state
+with this disclosure is **not a completed close**. Recorded grants and checks
+remain in `status.memberGrants` and `status.createdDrives[].goLive`. If report
+generation fails (for example, insufficient disk space), correct that failure and
+repeat `close`; do not re-copy, mirror, or bypass the report.
+
+Reports stream complete rows, findings, accepted exceptions and driver evidence,
+including settled inventories, into JSON, JSONL and HTML while hashing the bytes.
+The whole artifact set is published only after every artifact finishes; a failed
+attempt leaves earlier immutable reports intact. Large reports still need disk
+space for the complete set and its temporary staging copy. JSONL keeps its
+existing header shape: that first record can itself exceed a runtime's string
+limit, so large-report consumers must parse it incrementally rather than load a
+whole line or file.
+
 In either mode, plan/report warn that mirror can overwrite or delete existing
 writers' files. Deferring manifest grants does not revoke or exclude external
 access, administrators, existing drive members or members of pre-populated groups.
