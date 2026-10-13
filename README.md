@@ -381,7 +381,11 @@ same artifact set and digests. Teams archive reports and packages are unchanged.
   `mapping_id`, `path`, `code`, `status`, `approver`, `note`, `reason`.
   Status is `outstanding`, `accepted in advance`, or `accepted`. Approver and note
   come from recorded acceptance (or the approval for an advance-accepted plan
-  omission); reason is the finding's recorded reason text. With `proof = "rclone"`,
+  omission); reason is the finding's recorded reason text. Advance acceptance is
+  bound to the approved plan's options: later edits to `job.toml` cannot add or
+  revoke it. Current-revision planned omissions remain present during execution
+  and after verification, without duplicating omissions verification re-emits;
+  `mappings.csv` counts those same exceptions. With `proof = "rclone"`,
   a single-cell disclosure row precedes the column header: **per-file omission
   findings are not collected at this proof level**. CSV consumers must skip that
   first row for rclone-proof reports; full-proof reports start at the column header.
@@ -825,7 +829,11 @@ Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL
 
 `package.json` holds the scripts; the ones with non-obvious cost:
 
-- `npm test` — behavioural suites, no network.
+- `npm test` — behavioural suites, no network, followed by the fixed-heap 250,000-file
+  report/close regression in a separate test-runner invocation. The scale test
+  remains in the default CI gate but never competes with the main suite's
+  timing-sensitive tests. It writes roughly 1–1.5 GB of temporary artifacts and
+  removes them on completion.
 - `npm run check:vendor` — verifies the vendored binary hashes.
 - `npm run check:worker` — opt-in locally, required in CI's four platform cells. Spawns the vendored `rclone` worker and proves authentication, lifecycle, asynchronous copy, per-pass status/stats, cooperative stop and resumable copy, capped mirror deletions, and stored/downloaded hash listings against disposable local folders.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.

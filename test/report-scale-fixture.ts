@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { constants } from "node:buffer";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdtemp, rm, stat } from "node:fs/promises";
@@ -11,6 +12,7 @@ import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { fileFixture, value, approve } from "./engine-fixture.ts";
 
 const home = await mkdtemp(join(tmpdir(), "migmate-report-scale-"));
+const started = performance.now();
 const now = () => new Date("2026-09-01T00:00:00.000Z");
 const files = Number(process.argv[2] ?? 250_000);
 const fixture = fileFixture(
@@ -76,37 +78,41 @@ try {
     .prepare("SELECT * FROM item WHERE rev=? AND phase='verify' AND item_type='file' LIMIT 1")
     .get(plan.revision)!;
   const columns = Object.keys(template);
-  const insert = db.prepare(
-    `INSERT INTO item (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
-  );
   const row = JSON.parse(String(template.payload));
+  // Enough escaped evidence to exceed the single-string limit in aggregate,
+  // without manufacturing gigabytes of repeated text per artifact.
+  row.sourceEvidence = { description: '<&>"'.repeat(8) };
   db.exec("BEGIN");
-  for (let i = 0; i < files; i++) {
-    const id = `synthetic-${String(i).padStart(6, "0")}`;
-    const mappingId = `mapping-${i % 3}`;
-    const payload = {
-      ...row,
-      id,
-      sourceItemId: id,
-      mappingId,
-      relativePath: `${id}.txt`,
-      sourceEvidence: { description: '<&>"'.repeat(256) },
-    };
-    insert.run(
-      ...columns.map((column) =>
+  db.prepare(
+    `WITH RECURSIVE sequence(i) AS (
+      SELECT 0 UNION ALL SELECT i+1 FROM sequence WHERE i+1 < ?
+    ), synthetic AS (
+      SELECT printf('synthetic-%06d', i) AS id,
+        printf('mapping-%d', i % 3) AS mapping_id,
+        printf('synthetic-%06d.txt', i) AS relative_path
+      FROM sequence
+    )
+    INSERT INTO item (${columns.join(",")})
+    SELECT ${columns
+      .map((column) =>
         column === "id" || column === "source_item_id"
-          ? id
-          : column === "mapping_id"
-            ? mappingId
-            : column === "relative_path"
-              ? payload.relativePath
-              : column === "payload"
-                ? JSON.stringify(payload)
-                : template[column]!,
-      ),
-    );
-  }
-  db.exec("COMMIT");
+          ? "synthetic.id"
+          : column === "mapping_id" || column === "relative_path"
+            ? `synthetic.${column}`
+            : column === "payload"
+              ? "json_set(?, '$.id', synthetic.id, '$.sourceItemId', synthetic.id, '$.mappingId', synthetic.mapping_id, '$.relativePath', synthetic.relative_path)"
+              : "?",
+      )
+      .join(",")}
+    FROM synthetic`,
+  ).run(
+    files,
+    ...columns.flatMap((column) =>
+      ["id", "source_item_id", "mapping_id", "relative_path"].includes(column)
+        ? []
+        : [column === "payload" ? JSON.stringify(row) : template[column]!],
+    ),
+  );
   db.prepare(
     `UPDATE watermark SET value=json_set(value, '$.copiedInventory', json((
     SELECT json_group_array(json_object('id',source_item_id,'path',relative_path,'evidence',json_object('description',json_extract(payload,'$.sourceEvidence.description'))))
@@ -122,6 +128,7 @@ try {
     JSON.stringify([{ code: "omitted_by_rule", kind: "omission", count: 1000 }]),
     plan.revision,
   );
+  db.exec("COMMIT");
   const expectedRows = Number(
     db.prepare("SELECT COUNT(*) AS count FROM item WHERE rev=?").get(plan.revision)!.count,
   );
@@ -141,16 +148,22 @@ try {
     peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
   }, 10);
   sample.unref();
-  const report = value(await engine.withWriterResult(ref, (w) => w.report()));
+  // Deferred close itself generates the complete report; do not serialize the
+  // same large inventory once here and then a second time inside close.
+  value(await engine.withWriterResult(ref, (w) => w.close()));
+  assert.equal(value(await engine.reader(ref).status()).state, "closed");
+  const report = value(await engine.reader(ref).artifacts());
   assert.equal(report.artifacts.length, 5);
   let bytes = 0;
   for (const artifact of report.artifacts) {
     bytes += (await stat(artifact.path)).size;
+    if (artifact.name === "report.jsonl") continue; // Hash while validating records below.
     const hash = createHash("sha256");
     for await (const chunk of createReadStream(artifact.path)) hash.update(chunk);
     assert.equal(hash.digest("hex"), artifact.digest);
   }
-  if (files >= 250_000) assert.ok(bytes > 536_870_888, `aggregate artifact bytes: ${bytes}`);
+  if (files >= 250_000)
+    assert.ok(bytes > constants.MAX_STRING_LENGTH, `aggregate artifact bytes: ${bytes}`);
   let firstLine = true,
     pending = "",
     rows = 0,
@@ -159,10 +172,10 @@ try {
     headerBytes = 0;
   const needle = '"subjectId":"synthetic-';
   let suffix = "";
-  for await (const chunk of createReadStream(
-    report.artifacts.find((artifact) => artifact.name === "report.jsonl")!.path,
-    { encoding: "utf8" },
-  )) {
+  const jsonl = report.artifacts.find((artifact) => artifact.name === "report.jsonl")!;
+  const jsonlHash = createHash("sha256");
+  for await (const chunk of createReadStream(jsonl.path, { encoding: "utf8" })) {
+    jsonlHash.update(chunk);
     let text = String(chunk);
     if (firstLine) {
       const newline = text.indexOf("\n");
@@ -191,6 +204,7 @@ try {
       }
     }
   }
+  assert.equal(jsonlHash.digest("hex"), jsonl.digest);
   assert.equal(rows, expectedRows);
   assert.equal(findings, 1000);
   assert.equal(acceptedItems, 1000);
@@ -205,11 +219,16 @@ try {
   }
   assert.equal(csvExceptions, 1000);
   assert.equal(pending, "");
-  value(await engine.withWriterResult(ref, (w) => w.close()));
-  assert.equal(value(await engine.reader(ref).status()).state, "closed");
   clearInterval(sample);
   console.log(
-    JSON.stringify({ files, bytes, headerBytes, peakHeap, maxRSS: process.resourceUsage().maxRSS }),
+    JSON.stringify({
+      files,
+      bytes,
+      headerBytes,
+      peakHeap,
+      maxRSS: process.resourceUsage().maxRSS,
+      wallTimeMs: performance.now() - started,
+    }),
   );
 } finally {
   engine.close();

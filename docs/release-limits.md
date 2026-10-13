@@ -164,7 +164,10 @@ are regenerated into staging before the existing immutable set is reused.
 The local report regression uses synthetic evidence for 250,000 files across
 three mappings after prestage, delta and final settling, with a 192 MiB Node heap.
 It includes large settled inventories, findings and accepted exceptions, and
-artifacts exceeding the runtime's single-string limit. This qualifies reporting,
+aggregate artifact bytes exceeding the runtime's single-string limit. Fixtures
+are bulk-inserted transactionally, and deferred close generates the artifacts once.
+The default `npm test` gate runs this regression after the other suites to avoid
+I/O contention with timing-sensitive tests. This qualifies reporting,
 not a 250,000-file live-provider migration, provider listing memory, or the memory
 needed to perform execution/verification. JSONL's compatible header contains
 complete driver evidence and accepted exceptions; consume large headers with a

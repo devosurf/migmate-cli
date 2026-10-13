@@ -189,10 +189,15 @@ export interface Store {
   readResume(revision: number): ResumeRecord;
   readReportResume(revision: number): ResumeRecord;
   readReportPlan(revision: number): Record<string, unknown> | null;
+  readPlanAcceptedOmissions(revision: number): string[];
   readReportArchive(revision: number): unknown;
   iterateReportRows(revision: number, phase?: RowPhase): Iterable<Record<string, unknown>>;
   reportEvidence(revision: number): NonNullable<DriverContext<never>["reportEvidence"]>;
-  iterateCurrentFindings(revision: number, phase: RowPhase): Iterable<FindingRecord>;
+  iterateCurrentFindings(
+    revision: number,
+    phase: RowPhase,
+    options?: { includePlannedOmissions?: boolean },
+  ): Iterable<FindingRecord>;
   reportItemPath(
     revision: number,
     phase: RowPhase,
@@ -1112,6 +1117,7 @@ class StoreImpl implements Store {
   #currentFindingIds(
     revision: number,
     phase: RowPhase,
+    includePlannedOmissions = false,
   ): { sql: string; params: (number | string)[] } {
     const archive = this.readJob()?.type === "teams_archive";
     const phases: RowPhase[] = archive
@@ -1124,12 +1130,16 @@ class StoreImpl implements Store {
     return {
       // Collection evidence is permanent; destination observations are reassessed
       // by each verification, just like the file route's destination findings.
-      sql: `SELECT MAX(id) FROM finding WHERE rev=? AND phase IN (${phases.map(() => "?").join(",")})${archive && phase === "verify" ? " AND NOT (phase='execute' AND subject_kind='archive_object')" : ""} GROUP BY code,subject_kind,subject_id`,
+      sql: `SELECT MAX(id) FROM finding WHERE rev=? AND (phase IN (${phases.map(() => "?").join(",")})${includePlannedOmissions ? " OR (phase='plan' AND kind='planned_omission')" : ""})${archive && phase === "verify" ? " AND NOT (phase='execute' AND subject_kind='archive_object')" : ""} GROUP BY code,subject_kind,subject_id`,
       params: [revision, ...phases],
     };
   }
-  *iterateCurrentFindings(revision: number, phase: RowPhase): Iterable<FindingRecord> {
-    const selection = this.#currentFindingIds(revision, phase);
+  *iterateCurrentFindings(
+    revision: number,
+    phase: RowPhase,
+    options?: { includePlannedOmissions?: boolean },
+  ): Iterable<FindingRecord> {
+    const selection = this.#currentFindingIds(revision, phase, options?.includePlannedOmissions);
     for (const row of this.db
       .prepare(
         `SELECT id,rev,phase,code,kind,subject_kind,subject_id,at,CASE WHEN length(evidence)<65536 THEN evidence END AS evidence FROM finding WHERE id IN (${selection.sql}) ORDER BY id`,
@@ -1306,6 +1316,16 @@ class StoreImpl implements Store {
         }
       }),
     };
+  }
+  readPlanAcceptedOmissions(revision: number): string[] {
+    return this.db
+      .prepare(
+        `SELECT omission.value FROM plan_input,
+        json_each(plan_input.value, '$.options.acceptedOmissions') AS omission
+        WHERE rev=? AND plan_input.key='configuration'`,
+      )
+      .all(revision)
+      .map((row) => String(row.value));
   }
   readReportPlan(revision: number): Record<string, unknown> | null {
     const row = this.db

@@ -15,6 +15,7 @@ interface CsvEvidence {
 
 function* exceptions(evidence: CsvEvidence) {
   const { store, config, approval, accepted } = evidence;
+  const acceptedOmissions = store.readPlanAcceptedOmissions(evidence.revision);
   for (const finding of evidence.findings()) {
     if (finding.kind === "policy_outcome") continue;
     const details =
@@ -23,9 +24,7 @@ function* exceptions(evidence: CsvEvidence) {
         : {};
     const recorded = accepted.find((entry) => entry.code === finding.code);
     const plannedAcceptance =
-      finding.phase === "plan" &&
-      approval &&
-      config?.options?.acceptedOmissions?.includes(finding.code);
+      finding.phase === "plan" && approval && acceptedOmissions.includes(finding.code);
     const inAdvance =
       plannedAcceptance ||
       recorded?.note ===
