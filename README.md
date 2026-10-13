@@ -546,6 +546,10 @@ These are conservative defaults: two active mappings, each with up to four file 
 
 Ctrl-C stops active passes cooperatively, returns exit **130**, and leaves the job resumable. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
 
+Routine mapping statistics are durably sampled at most once per **10 seconds per revision, mapping and pass**. The first available snapshot, status/error changes and final statistics are captured immediately, even for a short or interrupted pass. Polling for completion and cancellation continues independently of sampling; suppressed observations create no commits or events. Status, the web view and reports show the latest durable sample.
+
+New snapshots and `mapping_progress` events include at most **five** `transferring` entries. `transferringTotal` gives the complete in-flight count and `transferringTruncated` indicates omitted detail; byte, file and error totals are not truncated. Events also retain the pass's `error` message (or `null`). Older stored evidence remains readable and is not compacted. Live JSONL and cursor replay still read the same durable log and return identical event envelopes.
+
 `plan` also stops cooperatively on Ctrl-C (exit **130**) or SIGTERM (exit **143**), including full file inventories and Teams archive collection. In-flight provider reads are aborted and the writer lease is released; an incomplete collection does not become an approvable plan. Run plain `plan --job ID` again, not `reclaim` or `execute`, to collect a complete revision. An earlier completed plan is retained until a new one completes.
 
 The web view's **execute** and **status** stages show each mapping's pass number, state, bytes, files, speed, error count, and failure message. Pending passes show unknown statistics until rclone reports them; earlier attempts remain visible alongside resumed passes.
