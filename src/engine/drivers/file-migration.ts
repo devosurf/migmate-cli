@@ -1093,7 +1093,7 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
     signal: ctx.signal ? AbortSignal.any([ctx.signal, quotaStop.signal]) : quotaStop.signal,
   };
   const mappings = ctx.config.mappings[Symbol.iterator]();
-  const active = new Set<AsyncGenerator<CommitUnit>>();
+  const active = new Set<AsyncGenerator<CommitUnit | null>>();
   const limit = ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight;
   let exhausted = false;
   try {
@@ -1112,6 +1112,8 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
           progressed = true;
           continue;
         }
+        // A suppressed stats observation still yields its scheduler turn.
+        if (next.value === null) continue;
         const pass = next.value.mappingPass;
         if (pass?.uploadQuota && !quotaStop.signal.aborted) quotaStop.abort();
         if (!pass || pass.status !== "running" || !pass.lastStats) progressed = true;
@@ -1262,7 +1264,7 @@ async function passPreview(
 async function* copyMapping(
   ctx: FileContext,
   mapping: FileMappingConfig,
-): AsyncGenerator<CommitUnit> {
+): AsyncGenerator<CommitUnit | null> {
   const previous = (ctx.resume.mappingPasses ?? [])
     .filter((pass) => pass.mappingId === mapping.id)
     .at(-1);
@@ -1340,8 +1342,8 @@ async function* copyMapping(
       }
       let completed = false;
       for await (const unit of copyPass(ctx, mapping, sources, passNumber, authorized)) {
-        completed = unit.mappingPass?.status === "completed";
-        if (completed && state) {
+        completed = unit?.mappingPass?.status === "completed";
+        if (completed && state && unit) {
           state.copyPending = false;
           unit.watermark = settleUnit(ctx, state).watermark;
         }
@@ -1422,7 +1424,7 @@ async function* copyPass(
   sources: SourceView[],
   passNumber: number,
   authorizedDeletions: number,
-): AsyncGenerator<CommitUnit> {
+): AsyncGenerator<CommitUnit | null> {
   let pass = pendingPass(
     ctx.revision,
     mapping.id,
@@ -1431,6 +1433,7 @@ async function* copyPass(
   );
   pass = { ...pass, startedAt: ctx.now().toISOString() };
   let sequence = 0;
+  let publishedAt: number | undefined;
   const unit = (): CommitUnit => ({
     rev: ctx.revision,
     phase: "execute",
@@ -1476,9 +1479,21 @@ async function* copyPass(
     for (;;) {
       ctx.signal?.throwIfAborted();
       const status = await ctx.provider.copyPassStatus(reference);
-      const lastStats = await ctx.provider.copyPassStats(reference);
+      const stats = await ctx.provider.copyPassStats(reference);
+      const transferring = stats.transferring.slice(0, 5);
+      const transferringTotal = stats.transferringTotal ?? stats.transferring.length;
+      const lastStats = {
+        ...stats,
+        transferring,
+        transferringTotal,
+        transferringTruncated: transferringTotal > transferring.length,
+      };
       const uploadQuota =
         status.state === "failed" ? uploadQuotaStop(ctx, status.error) : undefined;
+      const evidenceChanged =
+        pass.status !== status.state ||
+        pass.error !== status.error ||
+        pass.lastStats?.errors !== lastStats.errors;
       pass = {
         ...pass,
         status: status.state,
@@ -1489,7 +1504,18 @@ async function* copyPass(
         ...(uploadQuota ? { uploadQuota } : {}),
         endedAt: status.state === "running" ? null : ctx.now().toISOString(),
       };
-      yield unit();
+      const observedAt = ctx.now().getTime();
+      if (
+        publishedAt === undefined ||
+        status.state !== "running" ||
+        evidenceChanged ||
+        observedAt - publishedAt >= 10_000
+      ) {
+        publishedAt = observedAt;
+        yield unit();
+      } else {
+        yield null;
+      }
       if (status.state !== "running") break;
     }
   } catch (error) {

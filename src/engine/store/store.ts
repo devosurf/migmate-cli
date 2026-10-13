@@ -1830,6 +1830,7 @@ class StoreImpl implements Store {
               mappingId: pass.mappingId,
               passNumber: pass.passNumber,
               status: pass.status,
+              error: pass.error,
               ...pass.lastStats,
             },
           });

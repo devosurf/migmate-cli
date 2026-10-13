@@ -98,6 +98,10 @@ export interface CopyPassStats {
   errors: number;
   speed: number;
   transferring: { path: string; bytes: number; size: number }[];
+  /** Complete in-flight count; absent on raw provider stats and older evidence. */
+  transferringTotal?: number;
+  /** Whether the persisted in-flight sample omits entries. */
+  transferringTruncated?: boolean;
 }
 
 export interface FileHashEntry {
