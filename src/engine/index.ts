@@ -2071,7 +2071,8 @@ function makeWriter(
         store,
         revision,
         config: config as FileMigrationConfig | undefined,
-        findings: () => store.iterateCurrentFindings(revision, phase),
+        findings: () =>
+          store.iterateCurrentFindings(revision, phase, { includePlannedOmissions: true }),
         accepted,
         approval: report.approval,
         verification,

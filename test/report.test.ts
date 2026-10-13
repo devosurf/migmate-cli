@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it, type TestContext } from "node:test";
 import { parse } from "csv-parse/sync";
+import { stringify as stringifyToml } from "smol-toml";
 import type { FileMigrationConfig } from "../src/engine/drivers/file-migration.ts";
 import { openEngine } from "../src/engine/index.ts";
 import { fileMigrationDriver } from "../src/engine/drivers/file-migration.ts";
@@ -138,6 +139,90 @@ for (const failure of ["serialization", "write"] as const)
     assert.notEqual(value(await h.engine.reader(h.ref).status()).state, "closed");
     for (const [index, artifact] of first.artifacts.entries())
       assert.deepEqual(await readFile(artifact.path), before[index]);
+  });
+
+for (const approved of [false, true])
+  it(`keeps advance acceptance ${approved ? "granted" : "absent"} when job.toml changes after approval`, async (t) => {
+    const config = {
+      ...fileConfig(),
+      options: { acceptedOmissions: approved ? ["source_package_omitted"] : [] },
+    };
+    const h = await fixture(
+      t,
+      fileFixture([{ id: "notes", parentId: "source-root", name: "Notes", kind: "package" }]),
+      config,
+    );
+    await approve(h);
+    await writeFile(
+      join(h.home, "jobs", h.ref.id, "job.toml"),
+      stringifyToml({
+        ...config,
+        options: { acceptedOmissions: approved ? [] : ["source_package_omitted"] },
+      }),
+    );
+    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    const csv = async (name: string): Promise<Record<string, string>[]> =>
+      parse(await readFile(report.artifacts.find((a) => a.name === name)!.path, "utf8"), {
+        columns: true,
+      });
+    const exceptions = await csv("exceptions.csv");
+    assert.equal(exceptions.length, 1);
+    assert.equal(exceptions[0]!.code, "source_package_omitted");
+    assert.equal(exceptions[0]!.status, approved ? "accepted in advance" : "outstanding");
+    assert.equal(exceptions[0]!.approver, approved ? "engine-contract-test" : "");
+    const mappings = await csv("mappings.csv");
+    assert.equal(mappings[0]!.accepted_exceptions, approved ? "1" : "0");
+    assert.equal(mappings[0]!.outstanding_exceptions, approved ? "0" : "1");
+  });
+
+for (const accepted of [false, true])
+  it(`retains ${accepted ? "accepted" : "outstanding"} planned omissions across plan, execute and verify without duplicates`, async (t) => {
+    const input = fileFixture([
+      { id: "notes", parentId: "source-root", name: "Notes", kind: "package" },
+      { id: "file", parentId: "source-root", name: "file.txt", kind: "file", content: "hello" },
+    ]);
+    input.copyPasses = [{ pause: true, afterFiles: 1 }];
+    const h = await fixture(t, input, {
+      ...fileConfig(),
+      options: { acceptedOmissions: accepted ? ["source_package_omitted"] : [] },
+    });
+    await approve(h);
+    for (const phase of ["plan", "execute", "verify"] as const) {
+      if (phase === "execute") {
+        // Execute normally verifies automatically. Stop a real copy pass so the
+        // intermediate report has execution evidence but no verification yet.
+        const controller = new AbortController();
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]);
+        const executing = h.engine.withWriterResult(h.ref, (w) => w.execute({ signal }));
+        try {
+          for await (const event of h.engine.reader(h.ref).events({ follow: true, signal })) {
+            if (event.kind === "mapping_progress") break;
+          }
+        } finally {
+          controller.abort();
+          assert.equal(value(await executing).outcome, "interrupted");
+        }
+        assert.equal(value(await h.engine.reader(h.ref).status()).verificationDigest, null);
+      } else if (phase === "verify") {
+        value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+        value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      }
+      const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+      const csv = async (name: string): Promise<Record<string, string>[]> =>
+        parse(await readFile(report.artifacts.find((a) => a.name === name)!.path, "utf8"), {
+          columns: true,
+        });
+      const omissions = (await csv("exceptions.csv")).filter(
+        (row) => row.code === "source_package_omitted",
+      );
+      assert.equal(omissions.length, 1, phase);
+      assert.equal(omissions[0]!.mapping_id, "mapping", phase);
+      assert.equal(omissions[0]!.path, "Notes", phase);
+      assert.equal(omissions[0]!.status, accepted ? "accepted in advance" : "outstanding", phase);
+      const mappings = await csv("mappings.csv");
+      assert.equal(mappings[0]!.accepted_exceptions, accepted ? "1" : "0", phase);
+      assert.equal(mappings[0]!.outstanding_exceptions, accepted ? "0" : "1", phase);
+    }
   });
 
 it("exports mapping totals and accepted omissions and findings without inventing missing metadata", async (t) => {
