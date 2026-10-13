@@ -53,6 +53,36 @@ function fault(code: string, reason?: string) {
 }
 
 describe("real rclone transfer supervisor", { skip: !enabled }, () => {
+  it("enables fast-list for rooted Drive traversal and preserves unsupported backend fallback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mm-fast-list-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: root,
+      binary: suppliedBinary(),
+    });
+    try {
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      assert.partialDeepStrictEqual(await supervisor.call(worker.socketPath, "options/get"), {
+        main: { UseListR: true },
+      });
+      const drive = `:drive,root_folder_id='mapping-root',token='{"access_token":"test","expiry":"2099-01-01T00:00:00Z"}':`;
+      assert.partialDeepStrictEqual(
+        await supervisor.call(worker.socketPath, "operations/fsinfo", { fs: drive }),
+        { Features: { ListR: true } },
+      );
+      // HTTP has no ListR: rclone must retain its ordinary recursive traversal.
+      assert.partialDeepStrictEqual(
+        await supervisor.call(worker.socketPath, "operations/fsinfo", {
+          fs: ":http,url='http://127.0.0.1:1':",
+        }),
+        { Features: { ListR: false } },
+      );
+    } finally {
+      await supervisor.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("completes preflight and repeated engine worker lifetimes without a cleanup refusal", async () => {
     const root = await mkdtemp(join(tmpdir(), "mm-engine-rc-"));
     const supervisor = createTransferSupervisor({

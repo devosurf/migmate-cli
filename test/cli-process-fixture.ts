@@ -22,6 +22,11 @@ const release = (message: unknown) => {
 const disconnected = () => process.kill(process.pid, "SIGTERM");
 process.on("message", release);
 process.once("disconnect", disconnected);
+if (process.env.CLI_TEST_BLOCK_ON_ABORT) {
+  const write = transport.io.stdout.write;
+  transport.io.stdout.write = (chunk) =>
+    write(transport.io.signal?.aborted ? `${" ".repeat(8 * 1024 * 1024)}${chunk}` : chunk);
+}
 try {
   process.exitCode = await run(process.argv.slice(2), transport.io, engine);
 } finally {
@@ -32,3 +37,4 @@ try {
   if (process.connected) process.disconnect();
   transport.dispose();
 }
+if (transport.io.signal?.aborted) process.exit(process.exitCode);

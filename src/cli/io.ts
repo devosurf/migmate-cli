@@ -29,6 +29,8 @@ export function processIo(): { io: Io; dispose(): void } {
     controller.abort(Object.assign(new Error("Interrupted"), { code: "SIGINT" }));
   const terminate = () =>
     controller.abort(Object.assign(new Error("Terminated"), { code: "SIGTERM" }));
+  const hangup = () =>
+    controller.abort(Object.assign(new Error("Terminal disconnected"), { code: "SIGHUP" }));
   const brokenPipe = () => {
     failure = Object.assign(new Error("Output unavailable"), { code: "EPIPE" });
     controller.abort(failure);
@@ -39,6 +41,7 @@ export function processIo(): { io: Io; dispose(): void } {
   };
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", terminate);
+  process.on("SIGHUP", hangup);
   process.on("SIGPIPE", brokenPipe);
   process.stdout.on("error", onError);
   process.stderr.on("error", onError);
@@ -75,7 +78,10 @@ export function processIo(): { io: Io; dispose(): void } {
             finish(failure);
             return;
           }
-          timer ??= setTimeout(() => finish(controller.signal.reason), 5000);
+          timer ??= setTimeout(() => {
+            failure = controller.signal.reason;
+            finish(failure);
+          }, 5000);
         };
         target.on("error", onWriteError);
         target.on("drain", onDrain);
@@ -120,6 +126,7 @@ export function processIo(): { io: Io; dispose(): void } {
     dispose() {
       process.off("SIGINT", interrupt);
       process.off("SIGTERM", terminate);
+      process.off("SIGHUP", hangup);
       process.off("SIGPIPE", brokenPipe);
       // Writable emits its error after invoking the failed write callback.
       setImmediate(() => {

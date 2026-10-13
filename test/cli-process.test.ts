@@ -70,7 +70,7 @@ function setup(t: TestContext, type: JobType = "file_migration", signal = t.sign
     await Promise.all([...children].map((running) => running.done));
     rmSync(root, { recursive: true, force: true });
   });
-  const start = (argv: string[], held = false): Running => {
+  const start = (argv: string[], held = false, blockOnAbort = false): Running => {
     signal.throwIfAborted();
     const child = spawn(
       process.execPath,
@@ -82,6 +82,7 @@ function setup(t: TestContext, type: JobType = "file_migration", signal = t.sign
           CLI_TEST_DESTINATION: destination,
           CLI_TEST_HOLD: held ? "1" : "0",
           CLI_TEST_NOW: new Date(now).toISOString(),
+          CLI_TEST_BLOCK_ON_ABORT: blockOnAbort ? "1" : "",
         },
         stdio: ["pipe", "pipe", "pipe", "ipc"],
       },
@@ -346,7 +347,7 @@ for (const type of ["file_migration", "teams_archive"] as const) {
 }
 
 for (const type of ["file_migration", "teams_archive"] as const) {
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     it(
       `long ${type} plan releases its lease within 10 seconds after ${signal}`,
       { timeout: 30000 },
@@ -370,11 +371,16 @@ for (const type of ["file_migration", "teams_archive"] as const) {
         running.child.kill(signal);
         const stopped = await running.done;
         clearTimeout(deadline);
-        assert.equal(stopped.code, signal === "SIGINT" ? 130 : 143, stopped.stdout);
+        assert.equal(
+          stopped.code,
+          signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143,
+          stopped.stdout,
+        );
         assert.equal(stopped.signal, null);
         assert.equal(stopped.stderr, "");
         const status = await h.command<JobStatus>(["status", "--job", id]);
         assert.equal(status.value.ownership.held, false);
+        assert.equal(status.value.currentPlan, null);
         const plan = await h.command<PlanRevision>(["plan", "--job", id]);
         assert.ok(plan.value.planDigest);
       },
@@ -382,71 +388,147 @@ for (const type of ["file_migration", "teams_archive"] as const) {
   }
 }
 
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  it(
+    `${signal} checkpoints before exit; resume emits one new terminal and no duplicate writes`,
+    { timeout: 120000 },
+    async (t) => {
+      const h = setup(t);
+      const id = await h.approve();
+      const first = h.start(["execute", "--job", id, "--output", "jsonl"], true);
+      const progress = await first.checkpoint(
+        (event) => event.kind === "mapping_progress" && event.payload.files === 1,
+      );
+      assert.equal(
+        first.events.find((event) => event.kind === "mapping_progress")?.payload.files,
+        1,
+      );
+      assert.equal(progress.payload.mappingId, "map-1");
+      assert.equal(progress.payload.bytes, 9);
+      assert.equal(progress.payload.errors, 0);
+      assert.equal(typeof progress.payload.speed, "number");
+      first.child.kill(signal);
+      const stopped = await first.done;
+      assert.equal(stopped.code, signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143);
+      assert.equal(stopped.stderr, "");
+      const terminals = first.events.filter((event) => event.kind === "terminal");
+      assert.equal(terminals.length, 1);
+      assert.equal(terminals[0]?.payload.state, "interrupted");
+      assert.equal(terminals[0]?.payload.resumable, true);
+      const status = await h.command<JobStatus>(["status", "--job", id]);
+      assert.equal(status.value.state, "interrupted");
+      assert.equal(status.value.resumable, true);
+      assert.notEqual(status.value.lastCheckpoint, null);
+      assert.equal(status.value.mappingPasses[0]?.status, "interrupted");
+      assert.equal(status.value.worker.active, false);
+      assert.equal(status.value.ownership.held, false);
+      const resumed = h.start(["execute", "--job", id, "--output", "jsonl"]);
+      const finished = await resumed.done;
+      assert.equal(finished.code, 0, finished.stdout);
+      assert.equal(finished.stderr, "");
+      assert.deepEqual(
+        resumed.events
+          .filter((event) => event.kind === "terminal")
+          .map((event) => event.payload.state),
+        ["completed"],
+      );
+      const destination: Array<{ id: string; name: string; kind: string }> = JSON.parse(
+        readFileSync(h.destination, "utf8"),
+      );
+      assert.equal(destination.filter((row) => row.kind === "file").length, 8);
+      assert.equal(new Set(destination.map((row) => row.id)).size, destination.length);
+      assert.equal(new Set(destination.map((row) => row.name)).size, destination.length);
+      const cursor = first.events.at(-1)!.cursor;
+      const replay = h.start([
+        "status",
+        "--job",
+        id,
+        "--output",
+        "jsonl",
+        "--from",
+        String(cursor),
+      ]);
+      assert.equal((await replay.done).code, 0);
+      assert.ok(replay.events.every((event) => event.cursor > cursor));
+      assert.deepEqual(
+        replay.events.map(({ cursor, verb, kind, phase, payload }) => ({
+          cursor,
+          verb,
+          kind,
+          phase,
+          payload,
+        })),
+        resumed.events.map(({ cursor, verb, kind, phase, payload }) => ({
+          cursor,
+          verb,
+          kind,
+          phase,
+          payload,
+        })),
+      );
+      const completed = await h.command<JobStatus>(["status", "--job", id]);
+      assert.deepEqual(
+        completed.value.mappingPasses.map((pass) => pass.status),
+        ["interrupted", "completed"],
+      );
+      assert.equal(completed.value.mappingPasses[1]?.lastStats?.files, 7);
+      const records = h.destinationRecords();
+      await h.command(["execute", "--job", id]);
+      const repeated = await h.command<JobStatus>(["status", "--job", id]);
+      assert.deepEqual(repeated.value.mappingPasses, completed.value.mappingPasses);
+      assert.deepEqual(h.destinationRecords(), records);
+    },
+  );
+}
+
+it("SIGHUP exits129 after cleanup even when stdout cannot flush", { timeout: 30000 }, async (t) => {
+  const h = setup(t);
+  const id = await h.approve();
+  const running = h.start(["execute", "--job", id, "--output", "jsonl"], true, true);
+  await running.checkpoint(
+    (event) => event.kind === "mapping_progress" && event.payload.files === 1,
+  );
+  running.child.stdout.pause();
+  running.child.once("exit", () => running.child.stdout.resume());
+  // A real subprocess's pending OS pipe write cannot be tested with a fake clock.
+  const deadline = setTimeout(() => running.child.kill("SIGKILL"), 15000);
+  t.after(() => clearTimeout(deadline));
+  running.child.kill("SIGHUP");
+  const stopped = await running.done;
+  clearTimeout(deadline);
+  assert.equal(stopped.code, 129);
+  assert.equal(stopped.signal, null);
+  const status = await h.command<JobStatus>(["status", "--job", id]);
+  assert.equal(status.value.state, "interrupted");
+  assert.equal(status.value.resumable, true);
+  assert.equal(status.value.worker.active, false);
+  assert.equal(status.value.ownership.held, false);
+  assert.equal((await h.start(["execute", "--job", id, "--output", "json"]).done).code, 0);
+});
+
 it(
-  "SIGINT checkpoints before exit130; resume emits one new terminal and no duplicate writes",
-  { timeout: 120000 },
+  "SIGHUP during verification publishes no successful verification",
+  { timeout: 30000 },
   async (t) => {
     const h = setup(t);
     const id = await h.approve();
-    const first = h.start(["execute", "--job", id, "--output", "jsonl"], true);
-    const progress = await first.checkpoint(
-      (event) => event.kind === "mapping_progress" && event.payload.files === 1,
-    );
-    assert.equal(first.events.find((event) => event.kind === "mapping_progress")?.payload.files, 1);
-    assert.equal(progress.payload.mappingId, "map-1");
-    assert.equal(progress.payload.bytes, 9);
-    assert.equal(progress.payload.errors, 0);
-    assert.equal(typeof progress.payload.speed, "number");
-    first.child.kill("SIGINT");
-    const stopped = await first.done;
-    assert.equal(stopped.code, 130);
-    assert.equal(stopped.stderr, "");
-    const terminals = first.events.filter((event) => event.kind === "terminal");
-    assert.equal(terminals.length, 1);
-    assert.equal(terminals[0]?.payload.state, "interrupted");
-    assert.equal(terminals[0]?.payload.resumable, true);
+    await h.command(["execute", "--job", id]);
+    const running = h.start(["verify", "--job", id, "--output", "jsonl"], true);
+    await running.checkpoint((event) => event.verb === "verify" && event.kind === "phase_started");
+    running.child.kill("SIGHUP");
+    const stopped = await running.done;
+    assert.equal(stopped.code, 129, stopped.stdout);
+    assert.equal(stopped.signal, null);
     const status = await h.command<JobStatus>(["status", "--job", id]);
-    assert.equal(status.value.state, "interrupted");
-    assert.equal(status.value.resumable, true);
-    assert.notEqual(status.value.lastCheckpoint, null);
-    assert.equal(status.value.mappingPasses[0]?.status, "interrupted");
-    assert.equal(status.value.worker.active, false);
-    const resumed = h.start(["execute", "--job", id, "--output", "jsonl"]);
-    const finished = await resumed.done;
-    assert.equal(finished.code, 0, finished.stdout);
-    assert.equal(finished.stderr, "");
-    assert.deepEqual(
-      resumed.events
-        .filter((event) => event.kind === "terminal")
-        .map((event) => event.payload.state),
-      ["completed"],
+    assert.equal(status.value.verificationDigest, null);
+    assert.equal(status.value.ownership.held, false);
+    assert.equal(
+      running.events.some((event) => event.verb === "verify" && event.kind === "phase_completed"),
+      false,
     );
-    const destination: Array<{ id: string; name: string; kind: string }> = JSON.parse(
-      readFileSync(h.destination, "utf8"),
-    );
-    assert.equal(destination.filter((row) => row.kind === "file").length, 8);
-    assert.equal(new Set(destination.map((row) => row.id)).size, destination.length);
-    assert.equal(new Set(destination.map((row) => row.name)).size, destination.length);
-    const cursor = first.events.at(-1)!.cursor;
-    const replay = h.start(["status", "--job", id, "--output", "jsonl", "--from", String(cursor)]);
-    assert.equal((await replay.done).code, 0);
-    assert.ok(replay.events.every((event) => event.cursor > cursor));
-    assert.deepEqual(
-      replay.events.map(({ cursor, verb, kind, phase, payload }) => ({
-        cursor,
-        verb,
-        kind,
-        phase,
-        payload,
-      })),
-      resumed.events.map(({ cursor, verb, kind, phase, payload }) => ({
-        cursor,
-        verb,
-        kind,
-        phase,
-        payload,
-      })),
-    );
+    await h.command(["verify", "--job", id]);
+    const verified = await h.command<JobStatus>(["status", "--job", id]);
+    assert.ok(verified.value.verificationDigest);
   },
 );
 
