@@ -160,6 +160,7 @@ interface FakeCopyPass {
   stats: CopyPassStats;
   stopped: boolean;
   done: Promise<void>;
+  paused?: Promise<void>;
   release?: () => void;
 }
 
@@ -1025,7 +1026,9 @@ export class FakeFileMigrationPort implements ProviderPort {
     );
     const scenario =
       scenarioIndex < 0 ? undefined : this.copyPassScenarios.splice(scenarioIndex, 1)[0];
-    pass.done = this.executeCopyPass(input, pass, scenario);
+    const paused = scenario?.pause ? Promise.withResolvers<void>() : undefined;
+    if (paused) pass.paused = paused.promise;
+    pass.done = this.executeCopyPass(input, pass, scenario, paused?.resolve);
     return { ...handle };
   }
 
@@ -1033,6 +1036,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     input: Parameters<ProviderPort["startCopyPass"]>[0],
     pass: FakeCopyPass,
     scenario?: FakeCopyPassScenario,
+    paused?: () => void,
   ): Promise<void> {
     const active = () => {
       if (pass.stopped || pass.handle.executeId !== this.workerExecuteId)
@@ -1046,6 +1050,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       if (scenario.pause) {
         await new Promise<void>((resolve) => {
           pass.release = resolve;
+          paused?.();
         });
         delete pass.release;
       }
@@ -1243,6 +1248,18 @@ export class FakeFileMigrationPort implements ProviderPort {
     entry.size = entry.content.byteLength;
     entry.reportedChecksum = this.withheldChecksums.has(id) ? null : hashBytes(entry.content);
     entry.revision = this.nextRevision();
+  }
+
+  /** Wait for a scripted pause, without racing progress sampling or elapsed time. */
+  async waitForCopyPassPaused(jobid: number): Promise<void> {
+    const pass = this.passes.get(jobid);
+    if (!pass?.paused) throw new Error("Fake copy pass has no scripted pause");
+    await Promise.race([
+      pass.paused,
+      pass.done.then(() => {
+        throw new Error("Fake copy pass ended before its paused checkpoint");
+      }),
+    ]);
   }
 
   releaseCopyPasses(jobid?: number): void {
