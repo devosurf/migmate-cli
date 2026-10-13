@@ -518,6 +518,8 @@ unsafe: notebooks must sync through OneNote itself, not a file-sync client.
 
 Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying.
 
+The managed worker enables rclone's `--fast-list` for copy/mirror previews and passes, folder listings, and hash listings. Backends such as Google Drive can use recursive ListR traversal to reduce listing API requests; backends without ListR retain ordinary traversal. This trades additional memory for fewer listing requests, not a measured tenant throughput guarantee. Mapping roots, literal exclusions, empty-folder coverage and mirror deletion caps are unchanged. Verification still makes fresh observations: preview/copy listings are not reused as verification evidence. Failed mappings still retry their whole scope; this is not per-file retry or adaptive throttling.
+
 The job's `[options]` controls both limits, shown in the immutable plan's **Copy concurrency** section and the report:
 
 ```toml
