@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2136,19 +2135,26 @@ describe("file migration through the engine", () => {
           `
       import { openEngine } from ${JSON.stringify(new URL("../src/engine/index.ts", import.meta.url).href)};
       import { FakeFileMigrationPort } from ${JSON.stringify(new URL("../src/engine/providers/fake.ts", import.meta.url).href)};
+      const provider = new FakeFileMigrationPort(JSON.parse(process.env.COPY_FIXTURE));
+      const startCopyPass = provider.startCopyPass.bind(provider);
+      provider.startCopyPass = async (input) => {
+        const handle = await startCopyPass(input);
+        await provider.waitForCopyPassPaused(handle.jobid);
+        return handle;
+      };
       const engine = openEngine({
         home: process.env.COPY_HOME,
         now: () => new Date(${JSON.stringify(now)}),
-        provider: new FakeFileMigrationPort(JSON.parse(process.env.COPY_FIXTURE)),
+        provider,
       });
       const ref = { id: process.env.COPY_JOB };
       const executing = engine.withWriterResult(ref, (writer) => writer.execute());
       const active = new Set();
       for await (const event of engine.reader(ref).events({ follow: true })) {
-        if (event.kind === "mapping_progress" && event.payload.status === "running") {
+        if (event.kind === "mapping_progress" && event.payload.status === "running" && event.payload.files === 1) {
           active.add(event.payload.mappingId);
           if (active.size === 3) {
-            process.stdout.write("ready");
+            process.stdout.write("checkpoint:3\\n");
             break;
           }
         }
@@ -2166,25 +2172,73 @@ describe("file migration through the engine", () => {
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
-      const closed = once(child, "close");
-      let stderr = "";
+      let stdout = "",
+        stderr = "";
+      const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolve) => {
+          child.once("error", (error) => {
+            stderr += error.message;
+          });
+          child.once("close", (code, signal) => resolve({ code, signal }));
+        },
+      );
       child.stderr.setEncoding("utf8").on("data", (chunk) => {
         stderr += chunk;
       });
+      const abort = () => {
+        child.kill("SIGKILL");
+      };
+      t.signal.addEventListener("abort", abort, { once: true });
       t.after(async () => {
+        t.signal.removeEventListener("abort", abort);
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
         await closed;
       });
-      await Promise.race([
-        once(child.stdout, "data"),
-        closed.then(() => {
-          throw new Error(`Writer exited before concurrent passes: ${stderr}`);
-        }),
-      ]);
-      const running = value(await h.engine.reader(h.ref).status()).mappingPasses;
+      await new Promise<void>((resolve, reject) => {
+        const onData = (chunk: string) => {
+          stdout += chunk;
+          if (stdout.includes("checkpoint:3\n")) {
+            cleanup();
+            resolve();
+          }
+        };
+        const fail = async (reason: string) => {
+          cleanup();
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          const result = await closed;
+          reject(
+            new Error(
+              `${reason}: code=${result.code} signal=${result.signal} stdout=${stdout} stderr=${stderr}`,
+            ),
+          );
+        };
+        const onClose = () => {
+          void fail("Writer exited before concurrent checkpoint");
+        };
+        const timer = setTimeout(() => {
+          void fail("Timed out waiting for concurrent checkpoint");
+        }, 10000);
+        const cleanup = () => {
+          clearTimeout(timer);
+          child.stdout.off("data", onData);
+          child.off("close", onClose);
+        };
+        child.stdout.setEncoding("utf8").on("data", onData);
+        child.once("close", onClose);
+      });
+      const checkpoint = value(await h.engine.reader(h.ref).status());
+      assert.equal(checkpoint.state, "executing");
+      assert.equal(checkpoint.ownership.held, true);
+      assert.equal(checkpoint.ownership.pid, child.pid);
+      assert.equal(checkpoint.ownership.heldByThisProcess, false);
+      const running = checkpoint.mappingPasses;
       assert.deepEqual(
         running.map((pass) => pass.status),
         ["running", "running", "running", "pending"],
+      );
+      assert.deepEqual(
+        running.map((pass) => pass.lastStats?.files ?? null),
+        [1, 1, 1, null],
       );
       assert.equal(
         new Set(running.filter((pass) => pass.status === "running").map((pass) => pass.executeId))
@@ -2192,7 +2246,7 @@ describe("file migration through the engine", () => {
         1,
       );
       child.kill("SIGKILL");
-      assert.equal((await closed)[1], "SIGKILL");
+      assert.equal((await closed).signal, "SIGKILL");
       h.engine.close();
       // Only the injected engine clock advances; the writer really is dead.
       const port = new FakeFileMigrationPort({ ...input, copyPasses: [] });
@@ -2501,18 +2555,35 @@ describe("file migration through the engine", () => {
       const input = fixture();
       input.copyPasses = [{ pause: true, afterFiles: 1 }];
       const h = await harness(t, input);
+      const startCopyPass = h.port.startCopyPass.bind(h.port);
+      const pausedStart = t.mock.method(
+        h.port,
+        "startCopyPass",
+        async (input: Parameters<typeof startCopyPass>[0]) => {
+          const handle = await startCopyPass(input);
+          await h.port.waitForCopyPassPaused(handle.jobid);
+          return handle;
+        },
+      );
       await approve(h);
       const controller = new AbortController();
       const executing = h.engine.withWriterResult(h.ref, (writer) =>
-        writer.execute({ signal: controller.signal }),
+        writer.execute({ signal: AbortSignal.any([controller.signal, t.signal]) }),
       );
-      for await (const event of h.engine
-        .reader(h.ref)
-        .events({ follow: true, signal: AbortSignal.timeout(5000) })) {
-        if (event.kind === "mapping_progress" && event.payload.files === 1) {
-          controller.abort();
-          break;
+      try {
+        for await (const event of h.engine.reader(h.ref).events({
+          follow: true,
+          signal: AbortSignal.any([t.signal, AbortSignal.timeout(5000)]),
+        })) {
+          if (event.kind === "mapping_progress") {
+            assert.equal(event.payload.files, 1);
+            break;
+          }
         }
+      } finally {
+        controller.abort();
+        await executing;
+        pausedStart.mock.restore();
       }
       assert.equal(value(await executing).outcome, "interrupted");
       const partial = h.port.snapshotDestination().filter((item) => item.kind === "file");
