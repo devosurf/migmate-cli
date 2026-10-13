@@ -1,6 +1,6 @@
 import { openEngine } from "../src/engine/index.ts";
 import { run } from "../src/cli/main.ts";
-import { processIo } from "../src/cli/io.ts";
+import { errorCode, processIo } from "../src/cli/io.ts";
 import { PersistentCliPort } from "./cli-fixture.ts";
 
 const home = process.env.CLI_TEST_HOME;
@@ -16,8 +16,17 @@ const provider = new PersistentCliPort(
 );
 const engine = openEngine({ home, provider, adapter: "cli", now: () => new Date(now) });
 const transport = processIo();
-const release = (message: unknown) => {
+const release = async (message: unknown) => {
   if (message === "release") provider.release();
+  if (message === "write-stdout") {
+    try {
+      // Whitespace is valid between JSONL records; this goes through the real
+      // process transport, not a synthetic error or an injected abort signal.
+      await transport.io.stdout.write("\n");
+    } catch (error) {
+      if (errorCode(error) !== "EPIPE") throw error;
+    }
+  }
 };
 const disconnected = () => process.kill(process.pid, "SIGTERM");
 process.on("message", release);

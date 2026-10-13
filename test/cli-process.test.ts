@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,6 +39,7 @@ interface Running {
   event(predicate: (event: WireEvent) => boolean, timeoutMs?: number): Promise<WireEvent>;
   checkpoint(predicate: (event: WireEvent) => boolean): Promise<WireEvent>;
   release(): Promise<void>;
+  breakStdout(): Promise<void>;
 }
 function assertPiped(child: ChildProcess): asserts child is ChildProcessWithoutNullStreams {
   assert.ok(child.stdin);
@@ -188,6 +189,16 @@ function setup(t: TestContext, type: JobType = "file_migration", signal = t.sign
         new Promise<void>((resolve, reject) => {
           child.send("release", (error) => (error ? reject(error) : resolve()));
         }),
+      async breakStdout() {
+        const closed = once(child.stdout, "close");
+        child.stdout.destroy();
+        await closed;
+        // Provoke a real OS EPIPE while provider work remains held. Releasing
+        // the whole pass could finish it before the JSONL follower writes again.
+        await new Promise<void>((resolve, reject) => {
+          child.send("write-stdout", (error) => (error ? reject(error) : resolve()));
+        });
+      },
     };
     children.add(running);
     return running;
@@ -324,26 +335,33 @@ it(
 );
 
 for (const type of ["file_migration", "teams_archive"] as const) {
-  it(
-    `a delayed parent retains the ${type} executing checkpoint and writer`,
-    { timeout: 30000 },
-    async (t) => {
-      const h = setup(t, type);
-      const id = await h.approve();
-      const running = h.start(["execute", "--job", id, "--output", "jsonl"], true);
-      await running.checkpoint((event) => event.kind === "unit_committed");
-      // Deliberately exceed the old fixture's 300ms * 8 auto-release window.
-      // This is the regression stimulus, not synchronization or a longer fixture delay.
-      await delay(3000, undefined, { signal: t.signal });
-      const status = await h.command<JobStatus>(["status", "--job", id]);
-      assert.equal(status.value.state, "executing");
-      assert.equal(status.value.ownership.held, true);
-      assert.equal(status.value.ownership.pid, running.child.pid);
-      assert.equal(status.value.ownership.heldByThisProcess, false);
-      running.child.kill("SIGINT");
-      assert.equal((await running.done).code, 130);
-    },
-  );
+  for (const stop of ["SIGINT", "EPIPE"] as const) {
+    it(
+      `a delayed parent retains the ${type} executing checkpoint and writer before ${stop}`,
+      { timeout: 30000 },
+      async (t) => {
+        const h = setup(t, type);
+        const id = await h.approve();
+        const running = h.start(["execute", "--job", id, "--output", "jsonl"], true);
+        await running.checkpoint((event) => event.kind === "unit_committed");
+        // Deliberately exceed the old fixture's 300ms * 8 auto-release window.
+        // This is the regression stimulus, not synchronization or a longer fixture delay.
+        await delay(3000, undefined, { signal: t.signal });
+        const status = await h.command<JobStatus>(["status", "--job", id]);
+        assert.equal(status.value.state, "executing");
+        assert.equal(status.value.ownership.held, true);
+        assert.equal(status.value.ownership.pid, running.child.pid);
+        assert.equal(status.value.ownership.heldByThisProcess, false);
+        if (stop === "EPIPE") await running.breakStdout();
+        else running.child.kill(stop);
+        const stopped = await running.done;
+        assert.equal(stopped.code, stop === "SIGINT" ? 130 : 141, JSON.stringify(stopped));
+        const interrupted = await h.command<JobStatus>(["status", "--job", id]);
+        assert.equal(interrupted.value.state, "interrupted");
+        assert.equal(interrupted.value.ownership.held, false);
+      },
+    );
+  }
 }
 
 for (const type of ["file_migration", "teams_archive"] as const) {
@@ -540,12 +558,11 @@ it(
     const id = await h.approve();
     const running = h.start(["execute", "--job", id, "--output", "jsonl"], true);
     await running.checkpoint(
-      (event) => event.verb === "execute" && event.kind === "unit_committed",
+      (event) => event.kind === "mapping_progress" && event.payload.files === 1,
     );
-    running.child.stdout.destroy();
-    await running.release();
+    await running.breakStdout();
     const stopped = await running.done;
-    assert.equal(stopped.code, 141);
+    assert.equal(stopped.code, 141, JSON.stringify(stopped));
     assert.equal(stopped.stderr, "");
     const status = await h.command<JobStatus>(["status", "--job", id]);
     assert.equal(status.value.state, "interrupted");
@@ -683,10 +700,8 @@ for (const stop of ["SIGINT", "SIGKILL", "EPIPE"] as const) {
       assert.equal(status.value.ownership.held, true);
       assert.equal(status.value.ownership.pid, running.child.pid);
       assert.equal(status.value.ownership.heldByThisProcess, false);
-      if (stop === "EPIPE") {
-        running.child.stdout.destroy();
-        await running.release();
-      } else running.child.kill(stop);
+      if (stop === "EPIPE") await running.breakStdout();
+      else running.child.kill(stop);
       const stopped = await running.done;
       assert.equal(stopped.stderr, "");
       if (stop === "SIGKILL") {

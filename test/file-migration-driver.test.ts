@@ -2555,18 +2555,35 @@ describe("file migration through the engine", () => {
       const input = fixture();
       input.copyPasses = [{ pause: true, afterFiles: 1 }];
       const h = await harness(t, input);
+      const startCopyPass = h.port.startCopyPass.bind(h.port);
+      const pausedStart = t.mock.method(
+        h.port,
+        "startCopyPass",
+        async (input: Parameters<typeof startCopyPass>[0]) => {
+          const handle = await startCopyPass(input);
+          await h.port.waitForCopyPassPaused(handle.jobid);
+          return handle;
+        },
+      );
       await approve(h);
       const controller = new AbortController();
       const executing = h.engine.withWriterResult(h.ref, (writer) =>
-        writer.execute({ signal: controller.signal }),
+        writer.execute({ signal: AbortSignal.any([controller.signal, t.signal]) }),
       );
-      for await (const event of h.engine
-        .reader(h.ref)
-        .events({ follow: true, signal: AbortSignal.timeout(5000) })) {
-        if (event.kind === "mapping_progress" && event.payload.files === 1) {
-          controller.abort();
-          break;
+      try {
+        for await (const event of h.engine.reader(h.ref).events({
+          follow: true,
+          signal: AbortSignal.any([t.signal, AbortSignal.timeout(5000)]),
+        })) {
+          if (event.kind === "mapping_progress") {
+            assert.equal(event.payload.files, 1);
+            break;
+          }
         }
+      } finally {
+        controller.abort();
+        await executing;
+        pausedStart.mock.restore();
       }
       assert.equal(value(await executing).outcome, "interrupted");
       const partial = h.port.snapshotDestination().filter((item) => item.kind === "file");
