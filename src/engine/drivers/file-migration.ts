@@ -18,6 +18,7 @@ import type {
   SourceEntry,
 } from "../providers/port.ts";
 import type { CommitFinding, CommitUnit, JobTypeDriver, ReportSection } from "./types.ts";
+import { ReportArray, ReportText, reportJson } from "../report.ts";
 import {
   FilePlanRevisionRequiredError,
   hashStream,
@@ -1092,7 +1093,7 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
     signal: ctx.signal ? AbortSignal.any([ctx.signal, quotaStop.signal]) : quotaStop.signal,
   };
   const mappings = ctx.config.mappings[Symbol.iterator]();
-  const active = new Set<AsyncGenerator<CommitUnit>>();
+  const active = new Set<AsyncGenerator<CommitUnit | null>>();
   const limit = ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight;
   let exhausted = false;
   try {
@@ -1111,6 +1112,8 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
           progressed = true;
           continue;
         }
+        // A suppressed stats observation still yields its scheduler turn.
+        if (next.value === null) continue;
         const pass = next.value.mappingPass;
         if (pass?.uploadQuota && !quotaStop.signal.aborted) quotaStop.abort();
         if (!pass || pass.status !== "running" || !pass.lastStats) progressed = true;
@@ -1261,7 +1264,7 @@ async function passPreview(
 async function* copyMapping(
   ctx: FileContext,
   mapping: FileMappingConfig,
-): AsyncGenerator<CommitUnit> {
+): AsyncGenerator<CommitUnit | null> {
   const previous = (ctx.resume.mappingPasses ?? [])
     .filter((pass) => pass.mappingId === mapping.id)
     .at(-1);
@@ -1339,8 +1342,8 @@ async function* copyMapping(
       }
       let completed = false;
       for await (const unit of copyPass(ctx, mapping, sources, passNumber, authorized)) {
-        completed = unit.mappingPass?.status === "completed";
-        if (completed && state) {
+        completed = unit?.mappingPass?.status === "completed";
+        if (completed && state && unit) {
           state.copyPending = false;
           unit.watermark = settleUnit(ctx, state).watermark;
         }
@@ -1421,7 +1424,7 @@ async function* copyPass(
   sources: SourceView[],
   passNumber: number,
   authorizedDeletions: number,
-): AsyncGenerator<CommitUnit> {
+): AsyncGenerator<CommitUnit | null> {
   let pass = pendingPass(
     ctx.revision,
     mapping.id,
@@ -1430,6 +1433,7 @@ async function* copyPass(
   );
   pass = { ...pass, startedAt: ctx.now().toISOString() };
   let sequence = 0;
+  let publishedAt: number | undefined;
   const unit = (): CommitUnit => ({
     rev: ctx.revision,
     phase: "execute",
@@ -1475,9 +1479,21 @@ async function* copyPass(
     for (;;) {
       ctx.signal?.throwIfAborted();
       const status = await ctx.provider.copyPassStatus(reference);
-      const lastStats = await ctx.provider.copyPassStats(reference);
+      const stats = await ctx.provider.copyPassStats(reference);
+      const transferring = stats.transferring.slice(0, 5);
+      const transferringTotal = stats.transferringTotal ?? stats.transferring.length;
+      const lastStats = {
+        ...stats,
+        transferring,
+        transferringTotal,
+        transferringTruncated: transferringTotal > transferring.length,
+      };
       const uploadQuota =
         status.state === "failed" ? uploadQuotaStop(ctx, status.error) : undefined;
+      const evidenceChanged =
+        pass.status !== status.state ||
+        pass.error !== status.error ||
+        pass.lastStats?.errors !== lastStats.errors;
       pass = {
         ...pass,
         status: status.state,
@@ -1488,7 +1504,18 @@ async function* copyPass(
         ...(uploadQuota ? { uploadQuota } : {}),
         endedAt: status.state === "running" ? null : ctx.now().toISOString(),
       };
-      yield unit();
+      const observedAt = ctx.now().getTime();
+      if (
+        publishedAt === undefined ||
+        status.state !== "running" ||
+        evidenceChanged ||
+        observedAt - publishedAt >= 10_000
+      ) {
+        publishedAt = observedAt;
+        yield unit();
+      } else {
+        yield null;
+      }
       if (status.state !== "running") break;
     }
   } catch (error) {
@@ -2366,18 +2393,23 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     yield {
       title: "Settled confirmation",
       format: "text",
-      body: JSON.stringify(
-        ctx.config.mappings.map(
-          (mapping) =>
-            settleState(ctx, mapping) ?? {
-              mappingId: mapping.id,
-              revision: ctx.revision,
-              outcome: "pending",
-              maxPasses: ctx.config.options?.settleMaxPasses ?? 3,
-              consistencyIntervalMs: ctx.config.options?.consistencyIntervalMs ?? 30_000,
-              passes: 0,
-              observations: [],
-            },
+      body: new ReportText(() =>
+        reportJson(
+          ctx.config.mappings.map(
+            (mapping) =>
+              (ctx.reportEvidence
+                ? ctx.reportEvidence.settled(mapping.id)
+                : settleState(ctx, mapping)) ?? {
+                mappingId: mapping.id,
+                revision: ctx.revision,
+                outcome: "pending",
+                maxPasses: ctx.config.options?.settleMaxPasses ?? 3,
+                consistencyIntervalMs: ctx.config.options?.consistencyIntervalMs ?? 30_000,
+                passes: 0,
+                observations: [],
+              },
+          ),
+          false,
         ),
       ),
     };
@@ -2389,13 +2421,18 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
   yield {
     title: "Verification scope",
     format: "text",
-    body: JSON.stringify({
-      requested: ctx.config.options?.deltaVerification ?? "full",
-      proof: coverage.some((item) => item.scope === "partial") ? "partial proof" : "full",
-      mappings: coverage,
-      limitation:
-        "Partial proof does not recheck independent destination damage to unchanged paths. Earlier exceptions remain visible; final verification is always full.",
-    }),
+    body: new ReportText(() =>
+      reportJson(
+        {
+          requested: ctx.config.options?.deltaVerification ?? "full",
+          proof: coverage.some((item) => item.scope === "partial") ? "partial proof" : "full",
+          mappings: ctx.reportEvidence?.coverage ?? coverage,
+          limitation:
+            "Partial proof does not recheck independent destination damage to unchanged paths. Earlier exceptions remain visible; final verification is always full.",
+        },
+        false,
+      ),
+    ),
   };
   const drives = ctx.config.mappings
     .filter((m) => m.createDrive)
@@ -2561,36 +2598,48 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
           ),
         )
       : undefined;
+    const reportPreview = ctx.reportEvidence?.preview(mapping.id);
     yield {
       title: `Mapping ${mapping.id}`,
       format: "text",
-      body: JSON.stringify({
-        sourceDriveId: mapping.sourceDriveId,
-        sourceItemId: mapping.sourceItemId,
-        destDriveId: mapping.destDriveId,
-        destFolderId: mapping.destFolderId,
-        revision: ctx.revision,
-        preview,
-        byteTotals,
-        passes: (ctx.resume.mappingPasses ?? []).filter((pass) => pass.mappingId === mapping.id),
-      }),
+      body: new ReportText(() =>
+        reportJson(
+          {
+            sourceDriveId: mapping.sourceDriveId,
+            sourceItemId: mapping.sourceItemId,
+            destDriveId: mapping.destDriveId,
+            destFolderId: mapping.destFolderId,
+            revision: ctx.revision,
+            preview: reportPreview?.value ?? preview,
+            byteTotals: reportPreview?.byteTotals ?? byteTotals,
+            passes: (ctx.resume.mappingPasses ?? []).filter(
+              (pass) => pass.mappingId === mapping.id,
+            ),
+          },
+          false,
+        ),
+      ),
     };
   }
-  const evidence = (ctx.resume.rows ?? [])
-    .filter((item): item is FileEvidenceRow => item.jobType === "file_migration")
-    .filter((item) => item.sourceEvidence !== undefined)
-    .map((item) => ({
-      mappingId: item.mappingId,
-      sourceDriveId: item.sourceDriveId,
-      sourceItemId: item.sourceItemId,
-      relativePath: item.relativePath,
-      phase: item.phase,
-      sourceEvidence: item.sourceEvidence,
-    }));
+  const evidence =
+    ctx.reportEvidence?.sourceMetadata ??
+    new ReportArray(function* () {
+      for (const item of ctx.resume.rows ?? []) {
+        if (item.jobType !== "file_migration" || item.sourceEvidence === undefined) continue;
+        yield {
+          mappingId: item.mappingId,
+          sourceDriveId: item.sourceDriveId,
+          sourceItemId: item.sourceItemId,
+          relativePath: item.relativePath,
+          phase: item.phase,
+          sourceEvidence: item.sourceEvidence,
+        };
+      }
+    });
   yield {
     title: "Structured source-only metadata evidence",
     format: "text",
-    body: JSON.stringify(evidence),
+    body: new ReportText(() => reportJson(evidence, false)),
   };
 }
 

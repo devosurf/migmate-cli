@@ -18,6 +18,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { Engine, EngineOptions, JobReader, JobWriter, ReclaimDecision } from "./engine.ts";
+import { mappingsCsv, exceptionsCsv } from "./report-csv.ts";
 import {
   FILE_ROUTE_SOURCES,
   ManifestError,
@@ -98,6 +99,14 @@ import { parseArchiveConfig } from "./archive/config.ts";
 import type { ArchiveConfig } from "./providers/archive.ts";
 import type { CommitRow } from "./commit.ts";
 import type { DriverContext, JobTypeDriver, ReportSection } from "./drivers/types.ts";
+import {
+  ReportArray,
+  ReportText,
+  reportJson,
+  escapeReportHtml,
+  writeReportArtifact,
+  hashReportArtifact,
+} from "./report.ts";
 
 export type { Engine, JobReader, JobWriter, EngineOptions, ReclaimDecision } from "./engine.ts";
 export * from "./types.ts";
@@ -1504,9 +1513,10 @@ function makeWriter(
     config: JobConfig,
     revision: number,
     signal?: AbortSignal,
+    reporting = false,
   ): DriverContext<never> {
     let verificationBaseline: DriverContext<never>["verificationBaseline"];
-    if ("mappings" in config && config.options?.deltaVerification === "changed") {
+    if (!reporting && "mappings" in config && config.options?.deltaVerification === "changed") {
       const considered = new Set<number>();
       for (let run = store.nextVerificationRun() - 1; run > 0; run--) {
         const verified = store.readVerificationRevision(run);
@@ -1526,7 +1536,7 @@ function makeWriter(
         }
       }
     }
-    const plan = store.readPlanRevision(revision);
+    const plan = reporting ? store.readReportPlan(revision) : store.readPlanRevision(revision);
     const stage = plan?.stage ?? pendingStage;
     const actingGoogleAccount = plan
       ? object(plan.evidence, "plan.evidence").actingGoogleAccount
@@ -1534,11 +1544,15 @@ function makeWriter(
     return {
       config: config as never,
       revision,
-      ...(stage ? { stage } : {}),
+      ...(stage === "prestage" || stage === "delta" || stage === "final" ? { stage } : {}),
       ...(typeof actingGoogleAccount === "string" ? { actingGoogleAccount } : {}),
       ...(verificationBaseline ? { verificationBaseline } : {}),
       jobDirectory: paths.dir,
-      resume: { ...store.readResume(revision), checkpoint: job().lastCheckpoint },
+      resume: {
+        ...(reporting ? store.readReportResume(revision) : store.readResume(revision)),
+        checkpoint: job().lastCheckpoint,
+      },
+      ...(reporting ? { reportEvidence: store.reportEvidence(revision) } : {}),
       provider: p,
       now: deps.now,
       ...(deps.waitForConsistency ? { waitForConsistency: deps.waitForConsistency } : {}),
@@ -1683,11 +1697,15 @@ function makeWriter(
     config: JobConfig,
     revision: number,
     actingGoogleAccount?: string,
-  ): Promise<ReportSection[]> {
-    const result: ReportSection[] = [];
+  ): Promise<Array<ReportSection & { body: string }>> {
+    const result: Array<ReportSection & { body: string }> = [];
     const ctx = context(p, config, revision);
     if (actingGoogleAccount !== undefined) ctx.actingGoogleAccount = actingGoogleAccount;
-    for await (const section of driverFor(job().type).reportSections(ctx)) result.push(section);
+    for await (const section of driverFor(job().type).reportSections(ctx))
+      result.push({
+        ...section,
+        body: typeof section.body === "string" ? section.body : [...section.body.chunks()].join(""),
+      });
     return result;
   }
   async function drain(
@@ -1973,30 +1991,37 @@ function makeWriter(
     const revision = job().planRevision ?? 0,
       verification = currentVerification(store);
     const config = revision > 0 ? readConfig(paths, job().type, store) : undefined;
-    const reportSections = config ? await sections(provider(config), config, revision) : [];
+    const reportSections: ReportSection[] = [];
+    if (config)
+      for await (const section of driverFor(job().type).reportSections(
+        context(provider(config), config, revision, undefined, true),
+      ))
+        reportSections.push(section);
     const phase: RowPhase = verification ? "verify" : store.currentPhase(revision);
-    const findings = store.readCurrentFindings(revision, phase),
-      rows = store.readAllRows(revision);
+    const findings = new ReportArray(() => store.iterateCurrentFindings(revision, phase));
     const accepted = verification
       ? store.readAcceptances(verification.verificationDigest).map((a) => ({
           ...a,
           evidenceDigest: verification.evidenceDigest ?? verification.verificationDigest,
-          items: findings
-            .filter((f) => f.code === a.code)
-            .map((f) => ({
-              subjectKind: f.subjectKind,
-              subjectId: f.subjectId,
-              phase: f.phase,
-              evidence: f.evidence,
-              consequence: consequence(f.code),
-            })),
+          items: new ReportArray(function* () {
+            for (const f of store.iterateCurrentFindings(revision, phase)) {
+              if (f.code !== a.code) continue;
+              yield {
+                subjectKind: f.subjectKind,
+                subjectId: f.subjectId,
+                phase: f.phase,
+                evidence: f.evidence,
+                consequence: consequence(f.code),
+              };
+            }
+          }),
         }))
       : [];
     const acceptedCodes = new Set(accepted.map((a) => a.code));
     const report = {
       schemaVersion: 1,
       job: { id: job().id, type: job().type, label: job().label, state: job().state },
-      plan: revision ? store.readPlanRevision(revision) : null,
+      plan: revision ? store.readReportPlan(revision) : null,
       approval: revision ? store.readApproval(revision) : null,
       verification,
       sections: reportSections,
@@ -2005,24 +2030,58 @@ function makeWriter(
         "Same-user processes are not isolated; local state has no application-level at-rest encryption.",
       ],
       checks: store.readCheckResults(),
-      rows: rows.map((r) => ({ ...r, accepted: acceptedCodes.has(r.code) })),
+      rows: new ReportArray(function* () {
+        for (const row of store.iterateReportRows(revision))
+          yield { ...row, accepted: acceptedCodes.has(String(row.code)) };
+      }),
       findings,
       acceptedExceptions: accepted,
-      archive: store.readResume(revision).archivePlan ?? null,
+      archive: store.readReportArchive(revision),
     };
-    const json = `${canonicalJson(report)}\n`;
-    const jsonl =
+    const contents: { name: string; format: Artifact["format"]; chunks: () => Iterable<string> }[] =
       [
-        canonicalJson({ kind: "report", ...report, rows: undefined, findings: undefined }),
-        ...report.rows.map((row) => canonicalJson({ kind: "row", row })),
-        ...findings.map((finding) => canonicalJson({ kind: "finding", finding })),
-      ].join("\n") + "\n";
-    const html = reportHtml(report),
-      contents = [
-        { name: "report.json", format: "json" as const, body: json },
-        { name: "report.jsonl", format: "jsonl" as const, body: jsonl },
-        { name: "report.html", format: "html" as const, body: html },
+        {
+          name: "report.json",
+          format: "json" as const,
+          chunks: function* () {
+            yield* reportJson(report);
+            yield "\n";
+          },
+        },
+        {
+          name: "report.jsonl",
+          format: "jsonl" as const,
+          chunks: function* () {
+            yield* reportJson({ kind: "report", ...report, rows: undefined, findings: undefined });
+            yield "\n";
+            for (const row of report.rows.entries()) {
+              yield* reportJson({ kind: "row", row });
+              yield "\n";
+            }
+            for (const finding of findings.entries()) {
+              yield* reportJson({ kind: "finding", finding });
+              yield "\n";
+            }
+          },
+        },
+        { name: "report.html", format: "html" as const, chunks: () => reportHtml(report) },
       ];
+    if (job().type === "file_migration") {
+      const csvEvidence = {
+        store,
+        revision,
+        config: config as FileMigrationConfig | undefined,
+        findings: () =>
+          store.iterateCurrentFindings(revision, phase, { includePlannedOmissions: true }),
+        accepted,
+        approval: report.approval,
+        verification,
+      };
+      contents.push(
+        { name: "mappings.csv", format: "csv", chunks: () => mappingsCsv(csvEvidence) },
+        { name: "exceptions.csv", format: "csv", chunks: () => exceptionsCsv(csvEvidence) },
+      );
+    }
     const archiveArtifacts: Artifact[] = [];
     if (job().type === "teams_archive")
       for (const [name, format] of [
@@ -2036,37 +2095,50 @@ function makeWriter(
             name: `archive/${name}`,
             format,
             path,
-            digest: createHash("sha256").update(readFileSync(path)).digest("hex"),
+            digest: hashReportArtifact(path),
           });
       }
-    const manifest = [
-      ...contents.map((c) => ({
-        name: c.name,
-        format: c.format,
-        digest: createHash("sha256").update(c.body).digest("hex"),
-      })),
-      ...archiveArtifacts.map(({ name, format, digest }) => ({ name, format, digest })),
-    ];
-    const reportDigest = digestJson(manifest),
-      dir = join(
+    mkdirSync(paths.artifactsDir, { recursive: true, mode: 0o700 });
+    const staging = join(paths.artifactsDir, `.report-${randomUUID()}`);
+    mkdirSync(staging, { mode: 0o700 });
+    let result: ArtifactSet;
+    try {
+      const manifest: Array<Omit<Artifact, "path">> = [];
+      for (const c of contents) {
+        manifest.push({
+          name: c.name,
+          format: c.format,
+          digest: await writeReportArtifact(join(staging, c.name), c.chunks()),
+        });
+        guard("report");
+      }
+      manifest.push(
+        ...archiveArtifacts.map(({ name, format, digest }) => ({ name, format, digest })),
+      );
+      const reportDigest = digestJson(manifest);
+      const dir = join(
         paths.artifactsDir,
         `report-${revision}-${verification?.revision ?? 0}-${reportDigest}`,
       );
-    const artifacts: Artifact[] = [];
-    for (const c of contents) {
-      const path = join(dir, c.name);
-      if (!existsSync(path)) atomicFile(path, c.body);
-      else if (readFileSync(path, "utf8") !== c.body)
-        throw new Error("Immutable report artifact was modified");
-      artifacts.push({
-        name: c.name,
-        format: c.format,
-        path,
-        digest: createHash("sha256").update(c.body).digest("hex"),
-      });
+      if (existsSync(dir)) {
+        for (const artifact of manifest.slice(0, contents.length))
+          if (hashReportArtifact(join(dir, artifact.name)) !== artifact.digest)
+            throw new Error("Immutable report artifact was modified");
+      } else {
+        renameSync(staging, dir);
+        syncDirectory(dir);
+        syncDirectory(paths.artifactsDir);
+      }
+      const artifacts: Artifact[] = manifest.slice(0, contents.length).map((artifact) => ({
+        ...artifact,
+        path: join(dir, artifact.name),
+      }));
+      artifacts.push(...archiveArtifacts);
+      result = { reportDigest, artifacts };
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
     }
-    artifacts.push(...archiveArtifacts);
-    const result = { reportDigest, artifacts };
+    const { reportDigest, artifacts } = result;
     store.atomic(() => {
       store.writeArtifactSet(result);
       store.appendEvent({
@@ -2734,7 +2806,7 @@ function makeWriter(
           "mappings" in closeConfig &&
           (closeConfig.options?.staged || finalPlan?.stage || store.hasApprovedStagedPlan())
         ) {
-          const watermarks = revision === null ? {} : store.readResume(revision).watermarks;
+          const watermarks = revision === null ? {} : store.readReportResume(revision).watermarks;
           const settled = closeConfig.mappings.every((mapping) => {
             const raw = watermarks[`file-settle:${mapping.id}`];
             if (!raw) return false;
@@ -2819,7 +2891,10 @@ function makeWriter(
                   "The live worker version changed after approval.",
                 );
             }
-            for await (const unit of goLive(context(p, config, revision), verification.at)) {
+            for await (const unit of goLive(
+              context(p, config, revision, undefined, true),
+              verification.at,
+            )) {
               guard("close");
               store.commit(unit);
             }
@@ -3003,19 +3078,38 @@ function escapeHtml(value: unknown): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 }
-function reportHtml(report: {
+function* reportHtml(report: {
   job: unknown;
   sections: ReportSection[];
   disclosures: string[];
-  rows: unknown[];
-  findings: unknown[];
+  rows: ReportArray;
+  findings: ReportArray;
   acceptedExceptions: unknown[];
   checks: unknown[];
   plan: unknown;
   approval: unknown;
   verification: unknown;
-}): string {
-  const section = (title: string, value: unknown) =>
-    `<section><h2>${escapeHtml(title)}</h2><pre>${escapeHtml(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre></section>`;
-  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Migmate evidence report</title></head><body><h1>Migmate evidence report</h1>${section("Job", report.job)}${section("Standing disclosures", report.disclosures.join("\n"))}${section("Plan and approval", { plan: report.plan, approval: report.approval })}${report.sections.map((s) => section(s.title, s.body)).join("")}${section("Preflight evidence", report.checks)}${section("Verification", report.verification)}${section("All item and conversation rows", report.rows)}${section("Complete findings", report.findings)}${section("Accepted exceptions, affected items and consequences", report.acceptedExceptions)}</body></html>\n`;
+}): Generator<string> {
+  function* section(title: string, value: unknown): Generator<string> {
+    yield `<section><h2>${escapeHtml(title)}</h2><pre>`;
+    yield* escapeReportHtml(
+      typeof value === "string"
+        ? [value]
+        : value instanceof ReportText
+          ? value.chunks()
+          : reportJson(value, false, true),
+    );
+    yield "</pre></section>";
+  }
+  yield '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Migmate evidence report</title></head><body><h1>Migmate evidence report</h1>';
+  yield* section("Job", report.job);
+  yield* section("Standing disclosures", report.disclosures.join("\n"));
+  yield* section("Plan and approval", { plan: report.plan, approval: report.approval });
+  for (const item of report.sections) yield* section(item.title, item.body);
+  yield* section("Preflight evidence", report.checks);
+  yield* section("Verification", report.verification);
+  yield* section("All item and conversation rows", report.rows);
+  yield* section("Complete findings", report.findings);
+  yield* section("Accepted exceptions, affected items and consequences", report.acceptedExceptions);
+  yield "</body></html>\n";
 }

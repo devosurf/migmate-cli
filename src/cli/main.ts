@@ -91,7 +91,14 @@ Exit codes: 0 success; 1 internal defect or unknown code/enum; 2 usage/configura
 (including unavailable web runtime); 3 lease/recovery refusal; 4 preflight/approval/
 route/verification gate; 5 retry budget exhausted, blocked at a checkpoint;
 6 already closed; 7 already cancelled; 8 unsupported state version;
-130 SIGINT; 141 broken pipe; 143 SIGTERM. Successful cancel exits 0.
+129 SIGHUP; 130 SIGINT; 141 broken pipe; 143 SIGTERM. Successful cancel exits 0.
+
+SIGHUP/SIGINT/SIGTERM stop foreground work cooperatively, including plan,
+execute and verify. After successful cleanup, inspect status and repeat the
+interrupted command; execute stays resumable, not cancelled. Partial planning
+is not approvable and interrupted verification is not success. SIGHUP exits
+129 even if output cannot flush. SIGKILL, host loss or failed worker cleanup
+may still require recovery/reclaim; this is not detached execution.
 `;
 
 class Output {
@@ -561,9 +568,11 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     io.signal?.removeEventListener("abort", onAbort);
   }
   const signal = errorCode(io.signal?.reason);
-  if (signal === "EPIPE" || errorCode(output.failed) === "EPIPE") return 141;
-  if (output.failed) return signal === "SIGINT" ? 130 : 1;
-  let code = output.unknown ? 1 : outcomeExit(invocation?.command ?? output.command, result);
+  const signalExit =
+    signal === "SIGHUP" ? 129 : signal === "SIGTERM" ? 143 : signal === "SIGINT" ? 130 : undefined;
+  if (signal === "EPIPE" || errorCode(output.failed) === "EPIPE") return signalExit ?? 141;
+  if (output.failed) return signalExit ?? 1;
+  const code = output.unknown ? 1 : outcomeExit(invocation?.command ?? output.command, result);
   try {
     // JSONL has no synthetic cursor or synthetic terminal. A pre-lease refusal
     // still needs a result envelope when no matching durable refusal was logged.
@@ -577,21 +586,19 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     )
       await output.outcome(result);
   } catch (error) {
-    if (errorCode(error) === "EPIPE") return 141;
+    if (errorCode(error) === "EPIPE") return signalExit ?? 141;
     if (!output.failed && !output.attempted) {
       try {
         await output.outcome(
           refusal("internal_defect", "The command result could not be serialized."),
         );
       } catch (failure) {
-        if (errorCode(failure) === "EPIPE") return 141;
+        if (errorCode(failure) === "EPIPE") return signalExit ?? 141;
       }
     }
-    return signal === "SIGINT" ? 130 : 1;
+    return signalExit ?? 1;
   }
-  if (signal === "SIGINT") code = 130;
-  if (signal === "SIGTERM") code = 143;
-  return code;
+  return signalExit ?? code;
 }
 
 // npm's POSIX bin is a symlink; emitted .js and source .ts share the same guard.
@@ -610,4 +617,7 @@ if (direct) {
   } finally {
     transport.dispose();
   }
+  // Engine cleanup and bounded output writes have finished. A pending OS pipe
+  // write must not keep an interrupted foreground process alive.
+  if (transport.io.signal?.aborted) process.exit(process.exitCode);
 }

@@ -101,6 +101,72 @@ it(
 );
 
 it(
+  "observes fresh destination hashes and folders after a fast-list copy without widening roots",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-fresh-list-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(join(source, "empty"), { recursive: true });
+      await mkdir(destination);
+      await writeFile(join(source, "file.txt"), "hello");
+      await writeFile(join(directory, "outside.txt"), "never in the mapping");
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: source, kind: "local" as const },
+        destination: { fs: destination, kind: "google_drive" as const },
+        mode: "copy" as const,
+      };
+      assert.deepEqual((await supervisor.previewCopyPass(input)).new, [
+        { path: "file.txt", size: 5 },
+      ]);
+      const pass = await supervisor.startCopyPass({ ...input, transfers: 1 });
+      assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass }), {
+        state: "completed",
+        error: null,
+      });
+      const listing = {
+        socketPath: worker.socketPath,
+        root: input.destination,
+        hashType: "sha256" as const,
+        download: false,
+      };
+      assert.deepEqual(await supervisor.listFileHashes(listing), [
+        {
+          path: "file.txt",
+          size: 5,
+          hash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        },
+      ]);
+      assert.deepEqual(await supervisor.listFolders(listing), ["empty"]);
+      // Same-size mutation defeats size-only/cached copy evidence.
+      await writeFile(join(destination, "file.txt"), "world");
+      await rm(join(destination, "empty"), { recursive: true });
+      await mkdir(join(destination, "new-empty"));
+      assert.deepEqual(await supervisor.listFileHashes(listing), [
+        {
+          path: "file.txt",
+          size: 5,
+          hash: "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7",
+        },
+      ]);
+      assert.deepEqual(await supervisor.listFolders(listing), ["new-empty"]);
+      assert.equal(await readFile(join(directory, "outside.txt"), "utf8"), "never in the mapping");
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
   "previews disjoint-hash copies and mirror deletions at the exact modify-window boundary",
   { skip: !enabled },
   async () => {

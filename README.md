@@ -338,6 +338,66 @@ folder paths with verification; it is not another content download or a guarante
 against later writes. Its permission check covers explicit drive membership, not
 inherited permissions or effective group membership.
 
+After deferred go-live starts, `status.incompleteClose` survives reopening and
+explicitly reports `accessMayExist`, the permanent transfer fence, whether checks
+passed, and whether reporting is `unfinished` or `complete`. A `verified` state
+with this disclosure is **not a completed close**. Recorded grants and checks
+remain in `status.memberGrants` and `status.createdDrives[].goLive`. If report
+generation fails (for example, insufficient disk space), correct that failure and
+repeat `close`; do not re-copy, mirror, or bypass the report.
+
+Reports stream complete rows, findings, accepted exceptions and driver evidence,
+including settled inventories, into JSON, JSONL and HTML while hashing the bytes.
+The whole artifact set is published only after every artifact finishes; a failed
+attempt leaves earlier immutable reports intact. Large reports still need disk
+space for the complete set and its temporary staging copy. JSONL keeps its
+existing header shape: that first record can itself exceed a runtime's string
+limit, so large-report consumers must parse it incrementally rather than load a
+whole line or file.
+
+File-migration reports also publish two incremental, digest-bound handover files.
+`report --output json` and the reader's artifact list include both alongside
+`report.json`, `report.jsonl` and `report.html`; unchanged evidence produces the
+same artifact set and digests. Teams archive reports and packages are unchanged.
+
+- **`mappings.csv`** has one row per mapping in the current revision. Columns:
+  `mapping_id`, `source_type`, `source_drive_id`, `source_folder_path`,
+  `source_site_name`, `source_library_name`, `destination_type`,
+  `destination_drive_id`, `destination_name`, `destination_web_link`,
+  `created_by_job`, `files`, `bytes`, `verification_outcome`,
+  `outstanding_exceptions`, `accepted_exceptions`, `go_live_member_grants`,
+  `freeze_by`, `freeze_at`, `freeze_how`. Files and bytes are the latest completed
+  pass's recorded totals, not an inventory or a sum of attempts. Verification is
+  `clean` or `findings` (acceptance does not turn findings into proof), or empty
+  before verification. Counts refer to the exception rows below and accepted
+  counts include advance acceptance. Go-live grants are a JSON array of the
+  recorded mapping/drive/member/timestamp objects; before-copy grants are not
+  presented as go-live. Freeze cells contain the current final approval's human
+  attestation, not an assertion that Migmate locked the source.
+  A destination's planned creation name is available before execute, but
+  `created_by_job` becomes `true` only once a created drive ID is recorded.
+- **`exceptions.csv`** has one row per current planned omission or verification
+  finding, including accepted exceptions without duplicating them. Columns:
+  `mapping_id`, `path`, `code`, `status`, `approver`, `note`, `reason`.
+  Status is `outstanding`, `accepted in advance`, or `accepted`. Approver and note
+  come from recorded acceptance (or the approval for an advance-accepted plan
+  omission); reason is the finding's recorded reason text. Advance acceptance is
+  bound to the approved plan's options: later edits to `job.toml` cannot add or
+  revoke it. Current-revision planned omissions remain present during execution
+  and after verification, without duplicating omissions verification re-emits;
+  `mappings.csv` counts those same exceptions. With `proof = "rclone"`,
+  a single-cell disclosure row precedes the column header: **per-file omission
+  findings are not collected at this proof level**. CSV consumers must skip that
+  first row for rclone-proof reports; full-proof reports start at the column header.
+
+These are views of existing report evidence, not additional provider observations.
+Unknown values are empty cells: in particular, existing destination names, source
+site/library names and destination web links are not synthesized from IDs or URLs.
+Every field is double-quoted, internal quotes are doubled, and commas, newlines
+and leading `=`, `+`, `-` or `@` remain verbatim, matching the archive CSV convention.
+Import cells as **text** in spreadsheet software rather than allowing formula
+interpretation; CSV quoting preserves data but is not a spreadsheet execution policy.
+
 In either mode, plan/report warn that mirror can overwrite or delete existing
 writers' files. Deferring manifest grants does not revoke or exclude external
 access, administrators, existing drive members or members of pre-populated groups.
@@ -518,6 +578,8 @@ unsafe: notebooks must sync through OneNote itself, not a file-sync client.
 
 Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying.
 
+The managed worker enables rclone's `--fast-list` for copy/mirror previews and passes, folder listings, and hash listings. Backends such as Google Drive can use recursive ListR traversal to reduce listing API requests; backends without ListR retain ordinary traversal. This trades additional memory for fewer listing requests, not a measured tenant throughput guarantee. Mapping roots, literal exclusions, empty-folder coverage and mirror deletion caps are unchanged. Verification still makes fresh observations: preview/copy listings are not reused as verification evidence. Failed mappings still retry their whole scope; this is not per-file retry or adaptive throttling.
+
 The job's `[options]` controls both limits, shown in the immutable plan's **Copy concurrency** section and the report:
 
 ```toml
@@ -544,9 +606,15 @@ These are conservative defaults: two active mappings, each with up to four file 
 
 `hitAt` is when Migmate observed the failure. The account comes from plan evidence, falling back to the impersonation subject (or `null` for an older non-impersonated plan without that evidence). `earliestResumeAt` is hit time plus 24 hours, an **estimate**, not Google's reset clock or a guaranteed allowance. Wait until that estimate before retrying `execute` on the same job; an earlier manual retry is allowed. There is no automatic quota resume, allowance warning or trailing-24-hour byte accounting. Quota stops do not count against the ordinary failure budget. Because rclone's aggregate cannot separate quota errors from file failures, the quota pass's final `lastStats.errors` and progress `errors` are `null` (unknown), with the raw aggregate preserved as `rcloneErrors`, not an ordinary per-file failure count. Other Drive limits (storage, Shared Drive file count, downloads, ordinary API throttling) do not receive this daily-upload classification.
 
-Ctrl-C stops active passes cooperatively, returns exit **130**, and leaves the job resumable. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
+Ctrl-C (SIGINT, exit **130**), SIGTERM (exit **143**) and terminal hangup (SIGHUP, exit **129**) stop foreground work cooperatively. Active passes are checkpointed and stopped; after successful worker cleanup and lease release the job remains resumable, not cancelled. Read `status`, then repeat `execute` without `reclaim`: interrupted/failed passes resume and completed passes are skipped. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
 
-`plan` also stops cooperatively on Ctrl-C (exit **130**) or SIGTERM (exit **143**), including full file inventories and Teams archive collection. In-flight provider reads are aborted and the writer lease is released; an incomplete collection does not become an approvable plan. Run plain `plan --job ID` again, not `reclaim` or `execute`, to collect a complete revision. An earlier completed plan is retained until a new one completes.
+Routine mapping statistics are durably sampled at most once per **10 seconds per revision, mapping and pass**. The first available snapshot, status/error changes and final statistics are captured immediately, even for a short or interrupted pass. Polling for completion and cancellation continues independently of sampling; suppressed observations create no commits or events. Status, the web view and reports show the latest durable sample.
+
+New snapshots and `mapping_progress` events include at most **five** `transferring` entries. `transferringTotal` gives the complete in-flight count and `transferringTruncated` indicates omitted detail; byte, file and error totals are not truncated. Events also retain the pass's `error` message (or `null`). Older stored evidence remains readable and is not compacted. Live JSONL and cursor replay still read the same durable log and return identical event envelopes.
+
+`plan` also stops cooperatively on those signals, including full file inventories and Teams archive collection. In-flight provider reads are aborted and the writer lease is released; an incomplete collection does not become an approvable plan. Run plain `plan --job ID` again, not `reclaim` or `execute`, to collect a complete revision. An earlier completed plan is retained until a new one completes. An interrupted `verify` publishes no successful verification; read `status` and repeat `verify`.
+
+A full or disconnected output pipe does not prevent cooperative cleanup; SIGHUP still exits **129** when its output cannot flush. This is foreground interruption, not detached execution or cross-process cancellation. SIGKILL, machine loss and failed worker cleanup cannot guarantee lease release or recovery without `reclaim`; inspect durable `status` and worker ownership before recovery.
 
 The web view's **execute** and **status** stages show each mapping's pass number, state, bytes, files, speed, error count, and failure message. Pending passes show unknown statistics until rclone reports them; earlier attempts remain visible alongside resumed passes.
 
@@ -751,7 +819,7 @@ Every command takes `--output text|json|jsonl` and answers with a versioned enve
 
 `ok: false` replaces `value` with `refusal`, carrying a stable `code` — branch on that code and on the exit status, not on message text. In `json` and `jsonl` a refusal is written to stdout like any other envelope; only text mode sends one to stderr. `--output jsonl` streams durable events live during a verb, and `--from CURSOR` resumes exclusively; `status --output jsonl` replays the log and exits rather than watching.
 
-Exit codes are meaningful: `0` success, `1` internal defect or an unmappable code, `2` usage or configuration, `3` lease or recovery refusal, `4` a preflight, approval, route, or verification gate, `5` blocked at a checkpoint, `6`/`7` already closed or cancelled, `8` durable state written by a newer build; `130`, `141` and `143` are interrupt, broken stdout and terminate. `migmate --help` is the full reference for flags, row-query options, and the complete exit table — it is kept accurate, so read it rather than trusting a copy. `migmate --version` prints the installed release (`value.version` with `--output json`); like `--help`, it answers without a store and on any Node runtime, so include it in bug reports.
+Exit codes are meaningful: `0` success, `1` internal defect or an unmappable code, `2` usage or configuration, `3` lease or recovery refusal, `4` a preflight, approval, route, or verification gate, `5` blocked at a checkpoint, `6`/`7` already closed or cancelled, `8` durable state written by a newer build; `129`, `130`, `141` and `143` are terminal hangup, interrupt, broken stdout and terminate. `migmate --help` is the full reference for flags, row-query options, and the complete exit table — it is kept accurate, so read it rather than trusting a copy. `migmate --version` prints the installed release (`value.version` with `--output json`); like `--help`, it answers without a store and on any Node runtime, so include it in bug reports.
 
 Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Text mode prompts only when stdin and stderr are terminals and those two flags were not both given; the prompt has no default answer and accepts only `yes`, so an agent can never approve a plan by accident.
 
@@ -761,7 +829,11 @@ Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL
 
 `package.json` holds the scripts; the ones with non-obvious cost:
 
-- `npm test` — behavioural suites, no network.
+- `npm test` — behavioural suites, no network, followed by the fixed-heap 250,000-file
+  report/close regression in a separate test-runner invocation. The scale test
+  remains in the default CI gate but never competes with the main suite's
+  timing-sensitive tests. It writes roughly 1–1.5 GB of temporary artifacts and
+  removes them on completion.
 - `npm run check:vendor` — verifies the vendored binary hashes.
 - `npm run check:worker` — opt-in locally, required in CI's four platform cells. Spawns the vendored `rclone` worker and proves authentication, lifecycle, asynchronous copy, per-pass status/stats, cooperative stop and resumable copy, capped mirror deletions, and stored/downloaded hash listings against disposable local folders.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.

@@ -29,7 +29,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/**/*.test.ts\" \"src/**/*.test.ts\"",
+    "test": "node --test \"test/**/!(report-scale).test.ts\" \"src/**/*.test.ts\" && node --test test/report-scale.test.ts",
     "build": "node scripts/build-package.ts",
     "check:vendor": "node scripts/check-vendor.ts",
     "check:worker": "node scripts/check-worker.ts",
@@ -47,6 +47,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "csv-parse": "^7.0.3",
     "prettier": "^3.4.2",
     "typescript": "^5.9.2"
   }

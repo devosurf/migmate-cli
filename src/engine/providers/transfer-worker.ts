@@ -761,6 +761,9 @@ export function createTransferSupervisor(options: {
           directory,
           "--temp-dir",
           directory,
+          // Prefer recursive ListR for each fresh traversal; rclone falls back to
+          // ordinary listing on backends without ListR. No listings cross phases.
+          "--fast-list",
           "--drive-skip-gdocs=true",
           "--drive-skip-shortcuts=true",
           "--drive-import-formats=",

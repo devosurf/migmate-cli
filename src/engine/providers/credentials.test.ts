@@ -216,6 +216,8 @@ test("loads file credentials before mappings are supplied by a manifest", async 
 });
 
 test("uses the configured route for credential privileges before mappings exist", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const { config, jobDirectory } = await operatorFiles(
     t,
     source.filter((line) => !line.startsWith("root_folder_id")).join("\n"),
@@ -225,19 +227,19 @@ test("uses the configured route for credential privileges before mappings exist"
     destinationRemote: config.rclone.destinationRemote,
     sharepointDestinationRemote: config.rclone.sourceRemote,
   };
-  t.mock.method(globalThis, "fetch", async () =>
-    Response.json(graphToken(["Sites.ReadWrite.All"])),
-  );
+  const token = graphToken(["Sites.ReadWrite.All"]);
+  t.mock.method(globalThis, "fetch", async () => {
+    // Force the assertion into the next JWT expiry second without sleeping.
+    now += 1000;
+    return Response.json(token);
+  });
   const session = await createCredentialSession({
     jobType: "file_migration",
     config: { route: "shared_drive_to_sharepoint_library", rclone },
     jobDirectory,
   });
   t.after(() => session.dispose());
-  assert.equal(
-    await session.graphDestinationToken(),
-    graphToken(["Sites.ReadWrite.All"]).access_token,
-  );
+  assert.equal(await session.graphDestinationToken(), token.access_token);
   await assert.rejects(session.graphToken(), { code: "credential_graph_unavailable" });
   for (const route of [undefined, "sharepoint_library_to_shared_drive"]) {
     for (const remotes of [rclone, { ...config.rclone, sourceRemote: undefined }]) {
