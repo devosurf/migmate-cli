@@ -18,7 +18,9 @@ import { fileFixture, value } from "./engine-fixture.ts";
 for (const stage of ["scope", "preflight", "collection"] as const) {
   test(
     `aborted archive plan stops during ${stage} and can be planned again`,
-    { timeout: 5000 },
+    // This budget includes creating the job and a complete second plan under
+    // suite load. The interruption itself is driven by the entered checkpoint.
+    { timeout: 30000 },
     async (t) => {
       const home = await mkdtemp(join(tmpdir(), "migmate-archive-abort-"));
       const port = new FakeFileMigrationPort({ ...fileFixture(), archive: cliArchiveFixture() });
@@ -57,15 +59,22 @@ for (const stage of ["scope", "preflight", "collection"] as const) {
         if (stage === "collection") await waitForAbort(input.signal);
         return page(input);
       };
+      const planning = engine.withWriterResult(ref, (writer) =>
+        writer.plan({ signal: AbortSignal.any([controller.signal, t.signal]) }),
+      );
       t.after(async () => {
+        controller.abort();
         release.resolve();
+        await planning;
         engine.close();
         await rm(home, { recursive: true, force: true });
       });
-      const planning = engine.withWriterResult(ref, (writer) =>
-        writer.plan({ signal: controller.signal }),
-      );
-      await entered.promise;
+      await Promise.race([
+        entered.promise,
+        planning.then((result) => {
+          throw new Error(`Plan ended before the ${stage} checkpoint: ${JSON.stringify(result)}`);
+        }),
+      ]);
       controller.abort();
       const stopped = await planning;
       assert.equal(stopped.ok, false);

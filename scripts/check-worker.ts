@@ -34,6 +34,7 @@ try {
       [
         "--test",
         fileURLToPath(new URL("../src/engine/providers/copy-pass.test.ts", import.meta.url)),
+        fileURLToPath(new URL("../src/engine/providers/transfer-worker.test.ts", import.meta.url)),
       ],
       {
         stdio: "inherit",

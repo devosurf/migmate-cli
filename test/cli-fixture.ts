@@ -8,7 +8,6 @@ import {
   fsyncSync,
   closeSync,
 } from "node:fs";
-import { setTimeout as delay } from "node:timers/promises";
 import {
   FakeFileMigrationPort,
   type FakeFileMigrationFixture,
@@ -120,47 +119,71 @@ export function cliArchiveFixture(): FakeArchiveFixture {
  */
 export class PersistentCliPort extends FakeFileMigrationPort {
   readonly destinationPath: string;
-  readonly delayMs: number;
-  constructor(destinationPath: string, delayMs: number) {
+  private readonly control: { verb: string; ready: () => void } | undefined;
+  private readonly barriers = new Set<() => void>();
+  private released = false;
+  private copyReady = false;
+  constructor(destinationPath: string, control?: { verb: string; ready: () => void }) {
     const fixture = cliFixture();
     fixture.archive = cliArchiveFixture();
-    if (delayMs) fixture.copyPasses = [{ pause: true, afterFiles: 1 }];
+    if (control) fixture.copyPasses = [{ pause: true, afterFiles: 1 }];
     if (existsSync(destinationPath))
       fixture.destinationItems = JSON.parse(readFileSync(destinationPath, "utf8"));
     super(fixture);
     this.destinationPath = destinationPath;
-    this.delayMs = delayMs;
-    if (this.archive && delayMs) {
+    this.control = control;
+    if (this.archive && control) {
       const page = this.archive.page.bind(this.archive);
-      // Real subprocess signal tests need an in-flight external read. Their
-      // synchronization is the durable event, not a sleep in the test driver.
       this.archive.page = async (input) => {
-        await delay(delayMs, undefined, { signal: input.signal });
+        // Execution commits the first page before the next external read blocks.
+        if (control.verb !== "execute" || input.cursor !== null) await this.hold(input.signal);
         return page(input);
       };
     }
   }
+  private async hold(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (!this.control || this.released) return;
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        this.barriers.delete(release);
+        signal?.removeEventListener("abort", abort);
+      };
+      const release = () => {
+        cleanup();
+        resolve();
+      };
+      const abort = () => {
+        cleanup();
+        reject(signal?.reason);
+      };
+      this.barriers.add(release);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.control!.ready();
+    });
+  }
+  release(): void {
+    this.released = true;
+    for (const release of this.barriers) release();
+    this.releaseCopyPasses();
+  }
   override async startCopyPass(input: Parameters<ProviderPort["startCopyPass"]>[0]) {
     const handle = await super.startCopyPass(input);
-    if (this.delayMs) {
-      const timer = setTimeout(() => this.releaseCopyPasses(), this.delayMs * 8);
-      timer.unref();
-    }
+    if (this.control) await this.waitForCopyPassPaused(handle.jobid);
     return handle;
   }
   override async copyPassStats(reference: CopyPassReference) {
     const stats = await super.copyPassStats(reference);
     await this.persist();
+    if (this.control && !this.copyReady && stats.files === 1) {
+      this.copyReady = true;
+      this.control.ready();
+    }
     return stats;
   }
   override async listSourceChildren(input: Parameters<ProviderPort["listSourceChildren"]>[0]) {
-    if (this.delayMs) await delay(this.delayMs, undefined, { signal: input.signal });
+    if (this.control?.verb !== "execute") await this.hold(input.signal);
     return super.listSourceChildren(input);
-  }
-  override async *openSourceContent(input: { driveId: string; itemId: string }) {
-    // Cross-process SIGINT/SIGKILL cannot be driven by an in-process fake clock.
-    if (this.delayMs) await delay(this.delayMs);
-    yield* super.openSourceContent(input);
   }
   override async uploadDestinationContent(input: {
     destinationId?: string;
