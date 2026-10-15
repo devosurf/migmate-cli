@@ -1,6 +1,6 @@
 # ADR-0013: Opt-in rclone proof approves the map and verifies by listing
 
-- Status: accepted
+- Status: superseded by [ADR-0014](0014-map-approval-and-listing-verification.md)
 - Date: 2026-10-04
 - Accepted: Morgan, 2026-10-04, after measuring an ~8 hour plan for ~45k files.
 - Amends: [ADR-0010](0010-rclone-executes-file-transfers.md) (size-only proof without a named finding) and [ADR-0012](0012-staged-migrations-and-access-timing.md) A2 and A5 (no pre-approval preview or source freshness comparison), for jobs that set `[options] proof = "rclone"` only.
