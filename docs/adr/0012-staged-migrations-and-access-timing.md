@@ -5,7 +5,7 @@
 - Accepted: Morgan, 2026-10-04, as written. Implementation is tracked in #58 and #59.
 - Issues: [#58](https://github.com/devosurf/migmate-cli/issues/58), [#59](https://github.com/devosurf/migmate-cli/issues/59); downstream [#60](https://github.com/devosurf/migmate-cli/issues/60)
 - Amends: [ADR-0010](0010-rclone-executes-file-transfers.md), for staged verification scope and provisioning timing only.
-- Amended by: [ADR-0013](0013-rclone-proof-map-only-approval.md), for opt-in rclone proof: no pre-approval preview or source freshness comparison; [ADR-0014](0014-map-approval-and-listing-verification.md), for every file migration: no A2 preview, A4 settles by listing comparison, no A5 freshness fence, no A7 partial verification.
+- Amended by: [ADR-0013](0013-rclone-proof-map-only-approval.md), for opt-in rclone proof: no pre-approval preview or source freshness comparison; [ADR-0014](0014-map-approval-and-listing-verification.md), for every file migration: no A2 preview, A4 settles by listing comparison, no A5 freshness fence, no A7 partial verification; [ADR-0015](0015-close-report-readiness-and-resume.md), for A6: close renders the report before the first fence, a retry keeps passed go-live checks and resumes at the first unfinished step, and once go-live starts only close ends the job.
 
 A staged file migration remains one finite job: prestage, approved deltas, freeze, settled final delta, full verification, then go-live. We decide on explicit stages and deferred member grants at `close`, because a successful bulk copy is neither a completed cutover nor permission to expose a still-mirrored destination. The commands and guarantees described here ship with #58 and #59; until then they are decisions, not documented behaviour.
 

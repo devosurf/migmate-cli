@@ -60,6 +60,10 @@ _Avoid_: Last sync, go-live
 The deliberate opening of the verified destination to its intended users. It is distinct from finishing a copy or observing a quiet source.
 _Avoid_: Final delta, copy complete
 
+**Final report**:
+The report produced at close after go-live, carrying the timestamped grant and go-live check evidence; it is the closure evidence handed over. A report produced before go-live is a pre-close report: it can show that a job is ready to close, never that go-live happened.
+_Avoid_: Close report, handover report
+
 **Preflight**:
 The set of checks that must pass before a job may be planned, covering prerequisites only an administrator can satisfy. Preflight failures are refusals, never retries.
 _Avoid_: Health check, validation
