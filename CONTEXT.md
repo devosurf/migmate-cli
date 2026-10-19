@@ -115,3 +115,7 @@ _Avoid_: workspace, project folder, run directory
 **Credential reference**:
 A typed pointer in a job folder's operator config to an operator-owned file holding a secret or secret-bearing config. Migmate resolves it just in time and never copies the bytes into durable state.
 _Avoid_: Secret value, credential blob
+
+**Diagnostic**:
+The private record of a command that failed on an internal defect, kept in the job folder (or engine home when no job is known) and referenced from the refusal. It records where the failure happened, never what the error said, so it is safe to attach to a bug report. It is never part of a report.
+_Avoid_: crash log, debug log, error dump
