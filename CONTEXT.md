@@ -88,6 +88,10 @@ _Avoid_: Inventory, spreadsheet
 An opt-in mode in which a repeat pass makes a destination the job created match its source, including deletions. Without it a pass only copies and never deletes.
 _Avoid_: Sync
 
+**Throttling**:
+A provider's temporary demand to slow down, which the transfer waits out and retries. It slows a pass without failing it. It is distinct from an upload quota stop, which halts uploads until the provider's daily allowance resets, and from a failed file, which the pass gave up on.
+_Avoid_: Rate-limit error, quota, hang
+
 **Provenance**:
 Durable evidence tying a destination item to the authoritative source item and file mapping that produced it. A matching path alone is not provenance.
 _Avoid_: Ownership, path match
