@@ -31,45 +31,85 @@ export const CLIENT = `"use strict";
     connection.hidden = false;
   }
 
-  function install(html,responseQuery) {
+  function install(html,responseQuery,preserveReview = true) {
     const old = root.querySelector("#workspace");
-    const plan = old?.dataset.planDigest;
-    const verification = old?.dataset.verificationDigest;
     const preserveFilters = renderedQuery === responseQuery;
-    const drafts = [];
     const active = document.activeElement;
+    const selection = active && {start:active.selectionStart,end:active.selectionEnd};
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const current = template.content.querySelector("#workspace");
+    const oldStage = root.querySelector("#stage");
+    const decision = oldStage?.querySelector('form[data-action="approve"],form[data-action="accept"],form[data-action="close"]');
+    const retainReview = preserveReview && preserveFilters && decision &&
+      old?.dataset.access === "writer" && current?.dataset.access === "writer" &&
+      (decision.dataset.reviewCaptured === "true" ||
+        !old.dataset.busy && !decision.querySelector("fieldset").disabled);
+    const drafts = [];
     root.querySelectorAll("form input[name],form textarea[name],form select[name]").forEach(field => {
       if (field.type === "hidden" || field.readOnly) return;
       const action = field.closest("form").dataset.action ?? "filter";
-      if (action === "filter" && !preserveFilters) return;
-      drafts.push({action,name:field.name,value:field.value,checked:field.checked,type:field.type,focus:field === active,start:field.selectionStart,end:field.selectionEnd});
+      // Decision forms are retained intact, never transplanted onto newly reviewed evidence.
+      if (["approve","accept","close"].includes(action) || action === "filter" && !preserveFilters) return;
+      drafts.push({action,name:field.name,value:field.value,checked:field.checked,type:field.type});
     });
-    // A single DOM replacement updates stage, header, and ownership column together.
-    root.innerHTML = html;
+    if (retainReview) {
+      decision.dataset.reviewCaptured = "true";
+      oldStage.querySelectorAll("form[data-action] > fieldset").forEach(fieldset => {
+        if (fieldset.dataset.reviewDisabled === undefined)
+          fieldset.dataset.reviewDisabled = String(fieldset.disabled);
+        fieldset.disabled = Boolean(current.dataset.busy) || fieldset.dataset.reviewDisabled === "true";
+      });
+      let activity = oldStage.querySelector("[data-review-busy]");
+      if (current.dataset.busy) {
+        if (!activity) {
+          activity = document.createElement("p");
+          activity.dataset.reviewBusy = "";
+          activity.setAttribute("role","status");
+          oldStage.prepend(activity);
+        }
+        activity.textContent = current.dataset.busy + " is running. Your captured review is unchanged; actions are disabled until it finishes.";
+      } else activity?.remove();
+      const binding = decision.querySelector('input[name="planDigest"],input[name="verificationDigest"],input[name="evidenceDigest"]');
+      const latest = decision.dataset.action === "approve" ? current.dataset.planDigest :
+        decision.dataset.action === "accept" ? current.dataset.verificationDigest : current.dataset.closeDigest;
+      if (binding && binding.value !== latest && !oldStage.querySelector("[data-review-changed]")) {
+        const notice = document.createElement("p");
+        notice.dataset.reviewChanged = "";
+        notice.setAttribute("role","alert");
+        notice.textContent = "Evidence changed. This review and its captured digest have not changed; a stale submission will be refused. ";
+        const reload = document.createElement("button");
+        reload.type = "button";
+        reload.dataset.reviewRefresh = "";
+        reload.textContent = "Discard draft and review current evidence";
+        notice.append(reload);
+        oldStage.prepend(notice);
+      }
+      template.content.querySelector("#stage").replaceWith(oldStage);
+    }
+    root.replaceChildren(template.content);
     renderedQuery = responseQuery;
-    const current = root.querySelector("#workspace");
     for (const draft of drafts) {
-      const changed = draft.action === "approve" && plan !== current?.dataset.planDigest || draft.action === "accept" && verification !== current?.dataset.verificationDigest;
       for (const field of root.querySelectorAll("form input[name],form textarea[name],form select[name]")) {
         if ((field.closest("form").dataset.action ?? "filter") !== draft.action || field.name !== draft.name || field.type !== draft.type || (field.type === "checkbox" && field.value !== draft.value)) continue;
-        if (field.type === "checkbox") { if (!changed) field.checked = draft.checked; }
+        if (field.type === "checkbox") field.checked = draft.checked;
         else field.value = draft.value;
-        if (draft.focus && !field.disabled) {
-          field.focus({preventScroll:true});
-          if (draft.start !== null && draft.start !== undefined && typeof field.setSelectionRange === "function") {
-            try { field.setSelectionRange(draft.start,draft.end); } catch { /* Search/input types may not support selection. */ }
-          }
-        }
+      }
+    }
+    if (retainReview && active?.isConnected && !active.disabled) {
+      active.focus({preventScroll:true});
+      if (selection?.start !== null && selection?.start !== undefined && typeof active.setSelectionRange === "function") {
+        try { active.setSelectionRange(selection.start,selection.end); } catch { /* Non-text inputs do not support selection. */ }
       }
     }
     connection.hidden = true;
   }
 
-  async function refresh() {
+  async function refresh(preserveReview = true) {
     const requestQuery = query.toString();
     const response = await fetch("/view?" + requestQuery, {cache:"no-store"});
     if (!response.ok) throw new Error("Read refused");
-    install(await response.text(),requestQuery);
+    install(await response.text(),requestQuery,preserveReview);
   }
 
   function enqueue(work) {
@@ -85,7 +125,7 @@ export const CLIENT = `"use strict";
       body:JSON.stringify({action,input})
     });
     if (response.status !== 202 && response.status !== 409) throw new Error("Native command failed");
-    install(await response.text(),requestQuery);
+    install(await response.text(),requestQuery,false);
   }
 
   document.addEventListener("click", event => {
@@ -94,7 +134,8 @@ export const CLIENT = `"use strict";
     if (button.dataset.stage) {
       query = new URLSearchParams({stage:button.dataset.stage,limit:"50",sort:"natural"});
       enqueue(refresh);
-    } else if (button.hasAttribute("data-refresh")) enqueue(refresh);
+    } else if (button.hasAttribute("data-review-refresh")) enqueue(() => refresh(false));
+    else if (button.hasAttribute("data-refresh")) enqueue(refresh);
     else if (button.hasAttribute("data-reset-filters")) {
       query = new URLSearchParams({stage:query.get("stage"),limit:"50",sort:"natural"});
       enqueue(refresh);
@@ -121,10 +162,14 @@ export const CLIENT = `"use strict";
       try { input.config = JSON.parse(String(data.get("config"))); }
       catch { connection.textContent = "Configuration must be valid JSON containing typed references, never secret values."; connection.hidden = false; return; }
     } else if (action === "plan") input = data.has("final") ? {final:true} : {};
-    else if (action === "approve") input = {approver:data.get("approver"),planDigest:data.get("planDigest"),confirm:data.has("confirm"),...(data.has("freezeBy") ? {freezeBy:data.get("freezeBy"),freezeAt:data.get("freezeAt"),freezeHow:data.get("freezeHow")} : {})};
-    else if (action === "accept") input = {approver:data.get("approver"),verificationDigest:data.get("verificationDigest"),codes:data.getAll("codes").map(code => ({code,...(data.get("note:"+code) ? {note:data.get("note:"+code)} : {})}))};
+    else if (action === "approve") input = {approver:data.get("approver"),planDigest:data.get("planDigest"),confirm:data.has("confirm"),confirmMirror:data.has("confirmMirror"),confirmAccess:data.has("confirmAccess"),...(data.has("freezeBy") ? {freezeBy:data.get("freezeBy"),freezeAt:data.get("freezeAt"),freezeHow:data.get("freezeHow")} : {})};
+    else if (action === "accept") {
+      const codes = data.getAll("codes");
+      if (!codes.length) { connection.textContent = "Explicitly select at least one exception group."; connection.hidden = false; return; }
+      input = {approver:data.get("approver"),verificationDigest:data.get("verificationDigest"),codes,rationale:data.get("rationale"),confirm:data.has("confirm")};
+    }
     else if (action === "cancel") input = {reason:data.get("reason"),confirm:data.has("confirm")};
-    else if (action === "close") input = {confirm:data.has("confirm")};
+    else if (action === "close") input = data.has("recovery") ? {} : {approver:data.get("approver"),evidenceDigest:data.get("evidenceDigest"),confirmGoLive:data.has("confirmGoLive")};
     else if (action === "reclaim") input = {confirm:data.has("confirm"),stopWorker:data.has("stopWorker")};
     form.querySelector("fieldset").disabled = true;
     enqueue(async () => {
@@ -137,6 +182,12 @@ export const CLIENT = `"use strict";
 
   document.addEventListener("change", event => {
     const field = event.target;
+    const form = field.closest("form");
+    if (form?.dataset.action === "accept" && field.name === "codes") {
+      const count = form.querySelectorAll('input[name="codes"]:checked').length;
+      form.querySelector("[data-group-confirmation]").textContent = "I confirm acceptance of " + count + " selected groups with this rationale.";
+      form.querySelector('input[name="confirm"]').checked = false;
+    }
     if (!field.hasAttribute("data-config-file") || !field.files?.[0]) return;
     const file = field.files[0];
     if (file.size > 1024 * 1024) { connection.textContent = "Job configuration exceeds the 1 MiB limit."; connection.hidden = false; return; }

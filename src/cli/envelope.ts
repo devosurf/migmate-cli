@@ -52,7 +52,8 @@ const enums: Record<string, readonly unknown[]> = {
   state: [...JOB_STATES, ...EXECUTION_TERMINAL_STATES, ...VERB_STATES],
   terminalState: [...EXECUTION_TERMINAL_STATES, null],
   outcome: [...EXECUTION_TERMINAL_STATES, ...CLOSURE_OUTCOMES],
-  mode: ["interactive", "unattended", "copy", "mirror"],
+  mode: ["interactive", "unattended", "legacy_unknown", "copy", "mirror"],
+  identityAssurance: ["declared_unverified"],
   format: ["json", "jsonl", "html", "csv"],
   unit: PROGRESS_UNITS,
   status: ["pass", "fail", "skip", "pending", "running", "completed", "failed", "interrupted"],
@@ -89,12 +90,18 @@ export function knownContract(value: unknown): boolean {
         "refusal",
         "currentPlan",
         "plan",
+        "currentApproval",
+        "approvalAuthority",
+        "exceptionGroups",
+        "acceptedExceptions",
+        "closeReview",
+        "closeAuthorization",
       ].includes(key) &&
       !knownContract(entry)
     )
       return false;
     if (
-      ["acceptedCodes", "acceptedExceptions"].includes(key) &&
+      key === "acceptedCodes" &&
       Array.isArray(entry) &&
       entry.some((code) => typeof code !== "string" || !Object.hasOwn(CODE_BY_NAME, code))
     )

@@ -55,7 +55,11 @@ migmate plan --job ID --final               # staged final cutover revision
 migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
   [--freeze-by IDENTITY --freeze-at TIMESTAMP --freeze-how TEXT]
 migmate approve --job ID                    # human terminal: review, then type yes
-migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code CODE [--note NOTE]
+migmate accept --job ID                     # human terminal: select groups and rationale
+migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code CODE --note RATIONALE
+  [--code CODE ...]                          # unattended; one rationale for the selection
+migmate close --job ID                      # human go-live review, or authorized recovery
+migmate close --job ID --close-digest DIGEST --approver IDENTITY  # unattended initial close
 migmate cancel --job ID [--reason TEXT]
 migmate reclaim --job ID --confirm [--stop-worker]
 migmate web --job ID
@@ -83,9 +87,12 @@ JSONL streams durable events live during a verb. --from CURSOR resumes exclusive
 without --from a writer streams only its new attempt. status --output jsonl replays
 the log and exits; it is not a watcher. Terminals are durable, never synthesized.
 json and jsonl write refusals to stdout; only text mode diverts them to stderr.
-Text-mode approval prompts when stdin and stderr are TTYs, unless --approver and
---plan-digest are both given; it has no default and accepts only yes.
-Machine approval always requires both explicit identity and read-back plan digest.
+Text-mode approve, accept and initial close prompt only with stdin and stderr TTYs
+and no explicit evidence digest. Each displays an editable unverified declared identity.
+Confirmations have no affirmative default. Explicit digest and identity select unattended
+local attestation, not authenticated human authorization. JSON/JSONL never prompt.
+Acceptance requires named groups and one non-empty rationale. Matching durable close
+authorization permits recovery without a new decision. Freeze attestation flags are unchanged.
 
 Exit codes: 0 success; 1 internal defect or unknown code/enum; 2 usage/configuration
 (including unavailable web runtime); 3 lease/recovery refusal; 4 preflight/approval/
@@ -319,6 +326,49 @@ async function review(
   };
 }
 
+function interactiveDecision(invocation: Invocation, output: Output, digest?: string): boolean {
+  return (
+    digest === undefined &&
+    invocation.output === "text" &&
+    output.io.stdin.isTTY &&
+    output.io.stderr.isTTY
+  );
+}
+
+async function answer(output: Output, prompt: string): Promise<string | null> {
+  if (output.abort.signal.aborted) return null;
+  await output.io.stderr.write(prompt);
+  const value = await output.io.stdin.readLine(output.abort.signal);
+  return output.abort.signal.aborted ? null : (value?.trim() ?? null);
+}
+
+async function confirm(output: Output, prompt: string): Promise<boolean> {
+  return (await answer(output, `${prompt} Type yes to confirm: `))?.toLowerCase() === "yes";
+}
+
+async function declaredIdentity(
+  invocation: Invocation,
+  output: Output,
+  status: JobStatus,
+): Promise<string | null> {
+  const suggestion =
+    invocation.approver?.trim() ||
+    status.lastInteractiveIdentity ||
+    `${userInfo().username}@${hostname()}`;
+  const value = await answer(
+    output,
+    `Unverified declared identity [${suggestion}] (Enter to keep, or edit; /cancel to cancel): `,
+  );
+  return value === null || value === "/cancel" ? null : value || suggestion;
+}
+
+function interruptedDecision(): Outcome<never> {
+  return {
+    ok: false,
+    refusal: { code: "approval_required", message: "Decision interrupted before recording." },
+  };
+}
+
 async function approve(
   invocation: Invocation,
   output: Output,
@@ -326,47 +376,209 @@ async function approve(
   reader: JobReader,
   status: JobStatus,
 ): Promise<AdapterOutcome> {
-  // Both flags are a complete read-back approval; prompting would only repeat it.
-  // The review and prompt go to stderr, so stdout may be redirected.
-  const interactive =
-    (invocation.approver === undefined || invocation.planDigest === undefined) &&
-    invocation.output === "text" &&
-    output.io.stdin.isTTY &&
-    output.io.stderr.isTTY;
-  let approver = invocation.approver;
-  let planDigest = invocation.planDigest;
+  const interactive = interactiveDecision(invocation, output, invocation.planDigest);
+  let approver = invocation.approver?.trim();
+  const planDigest = interactive ? status.planDigest : invocation.planDigest;
+  const riskConfirmations: { mirror?: boolean; access?: boolean } = {};
   if (interactive) {
-    planDigest ??= status.planDigest ?? undefined;
-    if (!planDigest) return refusal("approval_required", "Review a plan before approving it.");
     const plan = status.currentPlan;
-    if (!plan || plan.planDigest !== planDigest)
-      return refusal("approval_required", "Read back the current plan before approving it.");
+    if (!planDigest || !plan || plan.planDigest !== planDigest)
+      return refusal("approval_required", "Review a current plan before approving it.");
     const preview = await review(reader, invocation, status, plan);
     if (!preview.ok) return preview;
-    await output.io.stderr.write(
-      `${JSON.stringify(redact(preview.value), null, 2)}\nApprove plan ${planDigest}. Type yes to approve: `,
-    );
-    const answer = await output.io.stdin.readLine(output.abort.signal);
-    if (answer?.trim().toLowerCase() !== "yes" || output.abort.signal.aborted)
-      return refusal("approval_required", "Approval requires typing yes.");
-    approver ??= `${userInfo().username}@${hostname()}`;
+    await output.io.stderr.write(`${JSON.stringify(redact(preview.value), null, 2)}\n`);
+    approver = (await declaredIdentity(invocation, output, status)) ?? undefined;
+    if (!approver) return refusal("approval_required", "Approval was cancelled.");
+    const authority = status.approvalAuthority;
+    if (authority?.mirrorChanges.length) {
+      await output.io.stderr.write(
+        `Expanded mirror deletion authority (limits, not predicted deletions):\n${JSON.stringify(redact(authority.mirrorChanges), null, 2)}\n`,
+      );
+      if (
+        !(await confirm(
+          output,
+          `Authorize this changed set of mirror mappings and deletion limits as ${approver} (unverified)?`,
+        ))
+      )
+        return refusal("approval_required", "Mirror authority was not confirmed.");
+      riskConfirmations.mirror = true;
+    }
+    if (authority?.accessChanges.length) {
+      await output.io.stderr.write(
+        `Expanded access authority (all new grants and escalations):\n${JSON.stringify(redact(authority.accessChanges), null, 2)}\n`,
+      );
+      if (
+        !(await confirm(
+          output,
+          `Authorize this changed set of identities, roles and grant timing as ${approver} (unverified)?`,
+        ))
+      )
+        return refusal("approval_required", "Access authority was not confirmed.");
+      riskConfirmations.access = true;
+    }
+    if (
+      !approver ||
+      !(await confirm(output, `Approve reviewed plan ${planDigest} as ${approver} (unverified)?`))
+    )
+      return refusal("approval_required", "Approval was not confirmed.");
   }
-  if (!approver?.trim() || !planDigest?.trim())
+  if (!approver || !planDigest?.trim() || output.abort.signal.aborted)
     return refusal(
       "approval_required",
-      "Unattended approval requires an explicit approver and the plan digest read from plan.",
+      "Unattended approval requires --approver and --plan-digest.",
     );
-  const approval = {
-    approver,
-    planDigest,
-    mode: interactive ? ("interactive" as const) : ("unattended" as const),
-    ...(invocation.freeze ? { freeze: invocation.freeze } : {}),
-  };
-  const result = await engine.withWriterResult({ id: invocation.jobId! }, (writer) =>
-    writer.approve(approval),
+  const result = await engine.withWriterResult({ id: invocation.jobId! }, async (writer) =>
+    output.abort.signal.aborted
+      ? interruptedDecision()
+      : writer.approve({
+          approver,
+          planDigest,
+          mode: interactive ? "interactive" : "unattended",
+          ...(interactive ? { riskConfirmations } : {}),
+          ...(invocation.freeze ? { freeze: invocation.freeze } : {}),
+        }),
   );
   if (!result.ok) return result;
   return review(reader, invocation, status, { ...result.value, plan: status.currentPlan });
+}
+
+async function accept(
+  invocation: Invocation,
+  output: Output,
+  engine: Engine,
+  status: JobStatus,
+): Promise<AdapterOutcome> {
+  const interactive = interactiveDecision(invocation, output, invocation.verificationDigest);
+  const verificationDigest = interactive
+    ? status.verificationDigest
+    : invocation.verificationDigest;
+  let approver = invocation.approver?.trim();
+  let codes = [...new Set(invocation.codes)];
+  let rationale = invocation.note?.trim();
+  if (interactive) {
+    if (!verificationDigest)
+      return refusal("verification_unaccepted", "Review current verification before acceptance.");
+    const groups = status.exceptionGroups ?? [];
+    await output.io.stderr.write(
+      `Verification ${verificationDigest}: named exception groups (counts may overlap):\n${JSON.stringify(redact(groups), null, 2)}\n`,
+    );
+    const selection = await answer(
+      output,
+      "Select exact codes separated by commas (no default; blank cancels): ",
+    );
+    codes = [...new Set(selection?.split(",").map((code) => code.trim()) ?? [])];
+    if (
+      !codes.length ||
+      codes.some(
+        (code) =>
+          !groups.some((group) => group.code === code && group.acceptable && !group.accepted),
+      )
+    )
+      return refusal(
+        "verification_unaccepted",
+        "Select only named, acceptable, unaccepted groups.",
+      );
+    rationale =
+      (await answer(output, "One required rationale for the selected groups: ")) ?? undefined;
+    if (!rationale || rationale === "/cancel")
+      return refusal("verification_unaccepted", "Acceptance requires a non-empty rationale.");
+    await output.io.stderr.write(
+      `Selected ${codes.length} groups; affected-item counts per group (not distinct totals):\n${JSON.stringify(redact(groups.filter((group) => codes.includes(group.code))), null, 2)}\nRationale: ${rationale}\n`,
+    );
+    approver = (await declaredIdentity(invocation, output, status)) ?? undefined;
+    if (
+      !approver ||
+      !(await confirm(
+        output,
+        `Accept ${codes.length} selected groups as ${approver} (unverified)?`,
+      ))
+    )
+      return refusal("verification_unaccepted", "Acceptance was not confirmed.");
+  }
+  if (
+    !verificationDigest?.trim() ||
+    !approver ||
+    !codes.length ||
+    codes.some((code) => !code.trim()) ||
+    !rationale ||
+    output.abort.signal.aborted
+  )
+    return refusal(
+      "verification_unaccepted",
+      "Unattended acceptance requires --verification-digest, --approver, named --code values and one non-empty --note rationale.",
+    );
+  return engine.withWriterResult({ id: invocation.jobId! }, async (writer) =>
+    output.abort.signal.aborted
+      ? interruptedDecision()
+      : writer.accept({
+          verificationDigest,
+          approver,
+          codes,
+          rationale,
+          mode: interactive ? "interactive" : "unattended",
+        }),
+  );
+}
+
+async function close(
+  invocation: Invocation,
+  output: Output,
+  engine: Engine,
+  status: JobStatus,
+): Promise<AdapterOutcome> {
+  const review = status.closeReview;
+  if (
+    invocation.closeDigest === undefined &&
+    review?.authorized &&
+    status.closeAuthorization?.evidenceDigest === review.evidenceDigest
+  )
+    return engine.withWriterResult({ id: invocation.jobId! }, async (writer) =>
+      output.abort.signal.aborted ? interruptedDecision() : writer.close(),
+    );
+  const interactive = interactiveDecision(invocation, output, invocation.closeDigest);
+  const evidenceDigest = interactive ? review?.evidenceDigest : invocation.closeDigest;
+  let approver = invocation.approver?.trim();
+  if (interactive) {
+    if (!review)
+      return refusal("approval_required", "Review current close evidence before go-live.");
+    await output.io.stderr.write(
+      `Go-live review:\n${JSON.stringify(
+        redact({
+          closeReview: review,
+          verificationDigest: status.verificationDigest,
+          exceptionGroups: status.exceptionGroups,
+          acceptedExceptions: status.acceptedExceptions,
+        }),
+        null,
+        2,
+      )}\n`,
+    );
+    approver = (await declaredIdentity(invocation, output, status)) ?? undefined;
+    if (
+      !approver ||
+      !(await confirm(
+        output,
+        `Authorize initial go-live and the reviewed access consequences as ${approver} (unverified)?`,
+      ))
+    )
+      return refusal("approval_required", "Go-live was not confirmed.");
+  }
+  if (!evidenceDigest?.trim() || !approver || output.abort.signal.aborted)
+    return refusal(
+      "approval_required",
+      "Initial unattended close requires --close-digest and --approver.",
+    );
+  return engine.withWriterResult({ id: invocation.jobId! }, async (writer) =>
+    output.abort.signal.aborted
+      ? interruptedDecision()
+      : writer.close({
+          evidenceDigest,
+          approver,
+          signal: output.abort.signal,
+          mode: interactive ? "interactive" : "unattended",
+          ...(interactive ? { confirmGoLive: true } : {}),
+        }),
+  );
 }
 
 async function executeCommand(
@@ -443,18 +655,11 @@ async function executeCommand(
       status.value,
       invocation.command === "plan" ? status.value.currentPlan : undefined,
     );
-  if (invocation.command === "accept") {
-    if (!invocation.verificationDigest)
-      return refusal(
-        "verification_unaccepted",
-        "Acceptance requires the exact verification digest.",
-      );
-    if (!invocation.approver?.trim() || !invocation.codes.length)
-      return refusal("usage", "Acceptance requires an approver and named codes.");
-  }
   const result = await withEvents(invocation, output, reader, async () => {
     if (invocation.command === "approve")
       return approve(invocation, output, engine, reader, status.value);
+    if (invocation.command === "accept") return accept(invocation, output, engine, status.value);
+    if (invocation.command === "close") return close(invocation, output, engine, status.value);
     if (invocation.command === "reclaim")
       return engine.reclaim(job, { confirm: true, stopWorker: invocation.stopWorker });
     return engine.withWriterResult(job, async (writer: JobWriter): Promise<Outcome<unknown>> => {
@@ -498,19 +703,8 @@ async function executeCommand(
           return writer.execute({ signal: output.abort.signal });
         case "verify":
           return writer.verify({ signal: output.abort.signal });
-        case "accept":
-          return writer.accept({
-            verificationDigest: invocation.verificationDigest!,
-            approver: invocation.approver!,
-            codes: invocation.codes.map((code, index) => ({
-              code,
-              ...(invocation.notes[index] === undefined ? {} : { note: invocation.notes[index] }),
-            })),
-          });
         case "report":
           return writer.report();
-        case "close":
-          return writer.close();
         case "cancel":
           return writer.cancel(invocation.reason ?? "Operator cancelled the job.");
         default:

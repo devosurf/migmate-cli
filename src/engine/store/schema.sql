@@ -176,6 +176,8 @@ CREATE TABLE acceptance (
   verification_digest TEXT NOT NULL,
   code               TEXT NOT NULL,
   approver           TEXT NOT NULL,
+  mode               TEXT NOT NULL DEFAULT 'legacy_unknown'
+                       CHECK (mode IN ('interactive','unattended','legacy_unknown')),
   note               TEXT,
   at                 TEXT NOT NULL
 ) STRICT;
@@ -390,4 +392,10 @@ CREATE TABLE member_grant (
   email TEXT NOT NULL,
   payload TEXT NOT NULL,
   PRIMARY KEY (mapping_id, email)
+) STRICT;
+
+-- Local decision evidence, never an authentication credential.
+CREATE TABLE IF NOT EXISTS decision_evidence (
+  key TEXT PRIMARY KEY,
+  payload TEXT NOT NULL
 ) STRICT;

@@ -4,6 +4,59 @@ This page separates shipped guarantees from historical live observations. File m
 
 The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclone-executes-file-transfers.md)). Earlier measurements of Migmate's per-item file writer do not prove this implementation. Archive uploads retain their own reserved IDs, private markers, revision checks and create-only behavior.
 
+## Human decisions are local attestations
+
+Interactive CLI and web approval, named exception acceptance and initial close
+capture the exact evidence digest shown in the review; there is no human digest
+transcription. The engine rechecks the binding before recording a decision.
+Declining, cancellation, interruption, failed confirmation and stale evidence
+create no new authority. Reverification invalidates explicit exception acceptance.
+
+Each interactive decision shows an editable, **unverified declared identity**.
+The initial suggestion is `user@host`; later suggestions use only the job's last
+interactive declaration, never an unattended identity. New records include mode
+(`interactive` or `unattended`), `declared_unverified` identity assurance, timestamp
+and evidence binding. Upgraded jobs retain the last approval explicitly recorded
+as interactive; historical unattended approvals do not replace it. Legacy acceptances
+without mode remain `legacy_unknown`. The acting Google account is not the approver.
+
+Every revision needs ordinary approval. Extra confirmation covers enabling or
+expanding mirror authority, increasing a mapping's deletion limit, and new member
+grants or role escalations, relative to the latest approved plan. Access changes
+are confirmed once as a set. Email/type/role declarations do not establish
+internal/external membership; no directory lookup is added. Unchanged authority
+remains visible without repeating the risk challenge. Changing only the source
+scope does not expand access to the same destination, but still expands mirror
+authority. Initial close separately confirms its access consequences.
+
+Acceptance requires explicit named groups and one non-empty rationale, retained
+with each code. Review shows consequences, per-group affected-item counts and
+examples. Groups may overlap; group count is not a distinct-item total. Accepted
+exceptions stay visible in status and reports. Unattended acceptance also requires
+a rationale; automation supplies explicit evidence identifiers and identity and
+uses the same engine gates, without claiming interactive questions were answered.
+
+The guided agent hands decisions to the human and observes durable evidence.
+This is a cooperative workflow, not an agent-proof or authenticated authority:
+shell, PTY, browser and writable job-folder access can bypass it. Web uses the
+same in-process engine. No external approval service, login, token storage or
+transfer-permission change is introduced. See
+[ADR-0016](adr/0016-human-handoff-without-digest-transcription.md).
+
+The all-file-plan map-only cutover in ADR-0014/#70 and informational account-activity
+snapshots in #78 remain separate work. This handoff adds no planning scan,
+file/deletion prediction, upload total, quota threshold or inventory-age gate.
+The current build still distinguishes default full inventory from opt-in rclone
+proof below.
+
+Local verification covers fake-provider stale submissions, cancelled confirmations,
+identity reuse, unattended labels, authority expansion, required rationale and
+close recovery. The real CLI was exercised through terminal prompts; the production
+web HTML/client/protocol was exercised in Chromium through a loopback bridge,
+including pending-review preservation across another window's replan/reverification.
+This is not native-window or live-tenant qualification. No tenant mutations or
+identity-provider calls were needed.
+
 ## 1. File copy is path-based, not collision-protected
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
@@ -55,26 +108,31 @@ default. Plan and report show the effective mode beside Mirror and Copy concurre
 and copies without manifest grants, and `status.memberGrants` remains empty through
 execution. Verified prestages and intermediate deltas do not grant access.
 
-Deferred go-live is authorized by confirming `close`, after the latest required
-verification and acceptance of all blocking findings (`verification_unaccepted`
-otherwise). Staged finality, settling and full verification are required before any
-grant. Close durably fences future copy/mirror work for each affected drive before
-the first grant request, grants approved members, checks membership and destination
-content/permission drift, records grant evidence after the verification timestamp,
-then produces the final report and closes. A crash, ambiguous response, partial
-grant or failed check leaves that fence in place. Repeating `close` resumes grants,
-checks and reporting, not transfers. Some access may already exist after a failed
-close; resolve drift manually without another transfer pass against that drive,
-and do not treat failed post-grant checks as successful go-live.
+Deferred go-live is authorized by a digest-bound initial `close` confirmation,
+after the latest required verification and acceptance of all blocking findings
+(`verification_unaccepted` otherwise). Staged finality, settling and full
+verification are required before any grant. Close renders and publishes the
+readiness report before new authorization, the first fence or grant; failure
+leaves access unchanged. It then records authorization, durably fences future
+copy/mirror work for each affected drive before the first grant request, grants
+approved members, checks membership and destination content/permission drift,
+records grant evidence, and produces the final report before closing. A crash,
+ambiguous response, partial grant or failed check leaves that fence in place.
+Some access may already exist; resolve failed checks manually without another
+transfer pass, and do not treat failed post-grant checks as successful go-live.
 
 An unfinished deferred close is also durable status evidence:
 `status.incompleteClose` reports that access may exist, transfers remain fenced,
 whether recorded checks passed, and `reporting = "unfinished"` or `"complete"`.
 It remains distinct from the job's verification state and disappears only when
 close completes. Grant timestamps and check details remain available after
-reopening. Correct a reporting failure (including output storage problems) and
-retry `close`; the retry resumes grants → checks → report → closed, never another
-copy pass or a report bypass.
+reopening. Matching `status.closeAuthorization` and `status.closeReview` establish
+recovery authority without another initial confirmation; conversation memory or
+an old approval does not. Recovery preserves checks that passed under their
+current fence and resumes the first unfinished step. Correct reporting/storage
+failures and retry `close`, never a copy pass or report bypass. Once a drive is
+fenced, `cancel` refuses `go_live_started`; only close with its final report ends
+the job.
 
 The short drift check re-lists destination file paths, sizes, stored hashes and
 object IDs, plus folder paths, against the listing recorded by verification. It
@@ -93,9 +151,10 @@ and member grants.
 
 The deferred go-live fence does not apply to legacy `before_copy` timing.
 Close uses the immutable plan's approved timing, not the current operator file.
-Already-verified legacy/before-copy plans retain their previous close behavior,
-including plans whose input digests contain retired qualification fields; only
-approved deferred grants require the close-time input re-check.
+Already-verified legacy/before-copy plans still require the new initial close
+decision, including plans whose input digests contain retired qualification
+fields. They retain their existing transfer/access behavior; deferred grants
+continue to require the approved close-time input re-check.
 In either mode, plan/report warn that mirror can overwrite or delete existing
 writers' files. Deferred grants do not exclude external access, administrators,
 existing drive members or members of pre-populated groups. The acting account
@@ -165,7 +224,7 @@ The local report regression uses synthetic evidence for 250,000 files across
 three mappings after prestage, delta and final settling, with a 192 MiB Node heap.
 It includes large settled inventories, findings and accepted exceptions, and
 aggregate artifact bytes exceeding the runtime's single-string limit. Fixtures
-are bulk-inserted transactionally, and deferred close generates the artifacts once.
+are bulk-inserted transactionally; deferred close renders readiness and final artifacts.
 The default `npm test` gate runs this regression after the other suites to avoid
 I/O contention with timing-sensitive tests. This qualifies reporting,
 not a 250,000-file live-provider migration, provider listing memory, or the memory

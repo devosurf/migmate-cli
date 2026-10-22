@@ -143,7 +143,7 @@ settleMaxPasses = 3
 deltaVerification = "full" # or "changed" for intermediate partial proof
 ```
 
-1. Load the manifest, run `plan`, review and approve its digest, then `execute`
+1. Load the manifest, run `plan`, review it and run interactive `approve --job "$ID"`, then `execute`
    and `verify`. Revisions are **prestage** until an execution completes, so
    replanning before then (unapproved, approved or interrupted) stays prestage;
    keep the job open.
@@ -155,13 +155,13 @@ deltaVerification = "full" # or "changed" for intermediate partial proof
    preview cannot be approved for execution. Copy retains destination-only paths.
    The preview predicts rclone actions; it is not content-equality proof.
 3. Arrange the source freeze with its accountable human, then make the final
-   revision and approve the exact digest with a freeze attestation:
+   revision and hand the human interactive approval with a freeze attestation:
 
    ```sh
    migmate plan --job "$ID" --final --output json
-   migmate approve --job "$ID" --approver "$APPROVER" --plan-digest "$DIGEST" \
+   migmate approve --job "$ID" \
      --freeze-by "$FREEZE_OWNER" --freeze-at "2026-10-04T12:00:00Z" \
-     --freeze-how "Source made read-only by the tenant administrator" --output json
+     --freeze-how "Source made read-only by the tenant administrator"
    migmate execute --job "$ID" --output json
    migmate verify --job "$ID" --output json
    migmate report --job "$ID" --output json
@@ -321,17 +321,26 @@ granting manifest members; `status.memberGrants` stays empty through execution.
 A verified prestage or intermediate delta does not grant access.
 
 Verify, review the pre-close report, and explicitly accept any blocking findings
-before confirming `close`. For staged jobs, the latest revision must also be final,
-settled and fully verified. Close is the go-live authorization: it durably fences
-further copy/mirror work for each affected drive **before the first grant request**,
-grants the approved members, checks membership and destination-content/permission
-drift, and writes timestamped grant evidence and the final report before closing.
+before the human runs `migmate close --job "$ID"` or confirms close in the web view.
+The confirmation captures the exact reviewed evidence and an editable, unverified
+declared identity. For staged jobs, the latest revision must also be final,
+settled and fully verified. Deferred close renders and publishes the readiness
+report before recording authorization, fencing or granting access. A readiness
+failure therefore grants nothing. Close then durably fences further copy/mirror
+work for each affected drive **before the first grant request**, grants approved
+members, checks membership and destination-content/permission drift, and writes
+timestamped grant evidence and the final report before closing.
 
-If close fails or is interrupted, repeat `close` to resume grants, checks and
-reporting, not transfers. **Some access may already exist after a failed close.**
-Resolve membership or destination drift manually; another copy/mirror pass against
-an affected drive is not a recovery path. Go-live is not successful until its
-post-grant checks pass.
+If close fails or is interrupted after authorization, unchanged durable authority
+permits `close` to resume without repeating the initial go-live challenge.
+`status.closeAuthorization.evidenceDigest` must match `status.closeReview.evidenceDigest`,
+with `closeReview.authorized = true`; conversation memory is not recovery authority.
+Recovery preserves checks that already passed under their fence and resumes the
+first unfinished grant, check or report. **Some access may already exist after a
+failed close.** Resolve failed membership or destination checks manually; another
+copy/mirror pass is not a recovery path. Passed checks record go-live at their
+original timestamps, not a guarantee that members never change content afterward.
+Once fenced, `cancel` also refuses `go_live_started`; the final report is mandatory.
 `execute` against a fenced drive refuses `go_live_started` (exit 4). The short
 destination drift check compares file paths, sizes, stored hashes and IDs plus
 folder paths with verification; it is not another content download or a guarantee
@@ -657,19 +666,19 @@ outside writes after the pass); mirror never suppresses that evidence.
 
 File migration no longer stages file bytes locally or uses reserved destination IDs, private provenance markers, or move-by-id. Teams archive uploads retain their separate create-only protections.
 
-A minimal file-migration run:
+A minimal file-migration job, with human decisions in their terminal:
 
 ```sh
 migmate init --type file_migration --config job.toml --output json  # -> job id
 migmate manifest load --job "$ID" --file mappings.json --output json
 migmate doctor --job "$ID" --output json
 migmate plan   --job "$ID" --output json                  # -> planDigest
-migmate approve --job "$ID" --approver "you@example.com" \
-  --plan-digest "$DIGEST" --output json
+migmate approve --job "$ID"                               # human review and confirmation
 migmate execute --job "$ID" --output json
 migmate verify  --job "$ID" --output json
+# If findings need acceptance: human runs migmate accept --job "$ID"
 migmate report  --job "$ID" --output json
-migmate close   --job "$ID" --output json
+migmate close   --job "$ID"                               # human go-live confirmation
 ```
 
 Read `plan` and `verify` evidence without taking a writer lease by adding `--review`. Only one writer holds a job at a time. The next writer automatically takes over a crashed writer's same-host lease once its heartbeat is 30 seconds stale and its process and worker are gone, recording recovery in the job's events. Use `reclaim --job ID --confirm --stop-worker` to stop a recorded orphan worker; explicit `reclaim --confirm` remains available for recovery without opening a writer. Never delete lease files by hand.
@@ -821,7 +830,63 @@ Every command takes `--output text|json|jsonl` and answers with a versioned enve
 
 Exit codes are meaningful: `0` success, `1` internal defect or an unmappable code, `2` usage or configuration, `3` lease or recovery refusal, `4` a preflight, approval, route, or verification gate, `5` blocked at a checkpoint, `6`/`7` already closed or cancelled, `8` durable state written by a newer build; `129`, `130`, `141` and `143` are terminal hangup, interrupt, broken stdout and terminate. `migmate --help` is the full reference for flags, row-query options, and the complete exit table — it is kept accurate, so read it rather than trusting a copy. `migmate --version` prints the installed release (`value.version` with `--output json`); like `--help`, it answers without a store and on any Node runtime, so include it in bug reports.
 
-Machine approval always requires both an explicit `--approver` identity and the read-back plan digest. Text mode prompts only when stdin and stderr are terminals and those two flags were not both given; the prompt has no default answer and accepts only `yes`, so an agent can never approve a plan by accident.
+### Human handoff and unattended automation
+
+For a human decision, run one of these in their terminal (text mode with terminal
+stdin/stderr), or use `migmate web --job "$ID"`:
+
+```sh
+migmate approve --job "$ID"
+migmate accept --job "$ID"
+migmate close --job "$ID"
+```
+
+CLI and web capture the digest of the evidence actually displayed; humans never
+transcribe it. The engine rechecks that binding when recording the decision.
+Cancellation, interruption, failed confirmation or stale evidence records no new
+authority. Every interactive decision displays an editable **unverified declared
+identity**, suggesting `user@host` initially and then this job's last interactive
+declaration. An unattended declaration does not replace that suggestion. The acting
+Google account is transfer attribution, not the approver.
+
+Every plan needs ordinary approval. Additional confirmation covers newly enabled
+or expanded mirror scope, increased per-mapping `deleteLimit`, and new member grants
+or role escalations. The comparison is against the latest **approved** plan, not a
+generated or declined revision. Unchanged authority stays visible without repeating
+the high-risk challenge. Access changes are confirmed once as a set, showing member
+email, user/group type, role and timing; no internal/external classification or
+directory lookup is implied. Initial close separately confirms go-live consequences.
+
+Exception acceptance shows groups by code, consequences, affected-item counts and
+examples. Select the named groups explicitly and supply one non-empty rationale,
+retained with every selected code. Group count is separate from affected-item
+counts: groups may overlap. There is no accept-all action, hidden selection or
+relabelling of exceptions as successful verification. Reverification invalidates
+previous explicit acceptances.
+
+Genuine unattended CI supplies explicit evidence and identity:
+
+```sh
+migmate approve --job "$ID" --plan-digest "$PLAN_DIGEST" --approver "$CI_ID" --output json
+migmate accept --job "$ID" --verification-digest "$VERIFY_DIGEST" --approver "$CI_ID" \
+  --code size_mismatch --code content_mismatch --note "Reviewed discrepancy retained in archive" --output json
+migmate close --job "$ID" --close-digest "$CLOSE_DIGEST" --approver "$CI_ID" --output json
+```
+
+Read `CLOSE_DIGEST` from `status.closeReview.evidenceDigest`. Noninteractive output
+never prompts or silently consents. New records label interaction mode as
+`interactive` or `unattended` and identity assurance as `declared_unverified`;
+legacy acceptances lacking mode are `legacy_unknown`. CI uses the same evidence,
+named-code and closure gates without claiming interactive questions were answered.
+
+The guided agent presents reviews, hands these decisions to the human and observes
+durable evidence afterward. It **does not invoke approve, accept or initial close
+for the human**, even after a conversational “yes.” It may resume close only from
+matching durable authorization. This is a cooperative-agent workflow, **not a
+security boundary**: shell, PTY, browser and writable job-folder access can bypass
+it. The local web view uses the same in-process engine, not an independent approval
+authority. No sign-in, approval tokens or transfer-permission changes are involved.
+See [ADR-0016](docs/adr/0016-human-handoff-without-digest-transcription.md).
 
 Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL.md`, discovered automatically from a clone; the [installer](#install) installs the same skill for the coding agents on the machine. It leads numbered decision rounds from scope through staged cutover, report acceptance, close-time go-live and cleanup, with credential, route, finding and refusal references disclosed on demand.
 

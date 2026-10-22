@@ -23,7 +23,13 @@ import {
   type FakeArchiveFixture,
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
-import { fileConfig as config, fileFixture, value, approve } from "./engine-fixture.ts";
+import {
+  fileConfig as config,
+  fileFixture,
+  value,
+  approve,
+  closeDecision,
+} from "./engine-fixture.ts";
 import type { ConversationManifest, PackageManifest } from "../src/engine/archive/package.ts";
 import { canonicalJson, digestJson } from "../src/engine/store/digest.ts";
 
@@ -194,7 +200,9 @@ describe("engine durability seam", () => {
         await h.engine.withWriterResult(h.ref, (writer) =>
           writer.accept({
             verificationDigest: result.verificationDigest,
-            codes: [{ code: "source_package_omitted" }],
+            codes: ["source_package_omitted"],
+            rationale: "Package omitted by policy",
+            mode: "unattended",
             approver: "operator",
           }),
         ),
@@ -293,7 +301,11 @@ describe("engine durability seam", () => {
       ],
     );
     assert.equal(
-      value(await h.engine.withWriterResult(h.ref, (writer) => writer.close())).outcome,
+      value(
+        await h.engine.withWriterResult(h.ref, async (writer) =>
+          writer.close(await closeDecision(h)),
+        ),
+      ).outcome,
       "completed_with_accepted_exceptions",
     );
   });
@@ -370,15 +382,26 @@ describe("engine durability seam", () => {
     assert.equal(observedVerification, true);
   });
 
-  it("binds same-count changed content while unchanged replans ignore observation time and revision", async (t) => {
+  it("binds every plan revision even when unchanged evidence retains the same inputs digest", async (t) => {
     const h = await harness(t);
     const first = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     h.now = "2026-09-02T00:00:00.000Z";
     reopen(h);
     const unchanged = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     assert.ok(unchanged.revision > first.revision);
-    assert.equal(unchanged.planDigest, first.planDigest);
+    assert.notEqual(unchanged.planDigest, first.planDigest);
     assert.equal(unchanged.inputsDigest, first.inputsDigest);
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.approve({
+          approver: "stale-reviewer",
+          mode: "interactive",
+          planDigest: first.planDigest,
+        }),
+      ),
+      "approval_digest_stale",
+    );
+    assert.equal(value(await h.engine.reader(h.ref).status()).currentApproval, null);
     h.port.mutateSourceItem("document", { content: "modified", etag: "source-v2" });
     const changed = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     assert.equal(changed.rowCount, first.rowCount);
@@ -442,7 +465,9 @@ describe("engine durability seam", () => {
       ),
     );
     refused(
-      await h.engine.withWriterResult(h.ref, (writer) => writer.close()),
+      await h.engine.withWriterResult(h.ref, async (writer) =>
+        writer.close(await closeDecision(h)),
+      ),
       "cutover_incomplete",
     );
     refused(
@@ -495,7 +520,9 @@ describe("engine durability seam", () => {
     }
     reopen(h);
     refused(
-      await h.engine.withWriterResult(h.ref, (writer) => writer.close()),
+      await h.engine.withWriterResult(h.ref, async (writer) =>
+        writer.close(await closeDecision(h)),
+      ),
       "cutover_incomplete",
     );
   });
@@ -571,7 +598,7 @@ describe("engine durability seam", () => {
     assert.equal(coverage.mappings[0].baselineRevision, null);
   });
 
-  it("keeps identical exception evidence stable when a new plan stores fresh finding records", async (t) => {
+  it("retains exception evidence but binds a fresh plan revision for review", async (t) => {
     const h = await harness(
       t,
       fixture(),
@@ -582,7 +609,8 @@ describe("engine durability seam", () => {
     reopen(h);
     const next = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     assert.ok(next.revision > first.revision);
-    assert.equal(next.planDigest, first.planDigest);
+    assert.notEqual(next.planDigest, first.planDigest);
+    assert.equal(next.inputsDigest, first.inputsDigest);
     assert.ok(
       value(await h.engine.reader(h.ref).rows({ phase: "plan" })).facets.some(
         (facet) => facet.code === "omitted_by_rule",
@@ -606,7 +634,9 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: first.verificationDigest,
-          codes: [{ code: "omitted_by_rule", note: "Keep this source outside the destination" }],
+          codes: ["omitted_by_rule"],
+          rationale: "Keep this source outside the destination",
+          mode: "unattended",
           approver: "operator",
         }),
       ),
@@ -633,27 +663,37 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: first.verificationDigest,
-          codes: [{ code: "omitted_by_rule" }],
+          codes: ["omitted_by_rule"],
+          rationale: "Out of scope",
+          mode: "unattended",
           approver: "operator",
         }),
       ),
       "verification_unaccepted",
     );
     refused(
-      await h.engine.withWriterResult(h.ref, (writer) => writer.close()),
+      await h.engine.withWriterResult(h.ref, async (writer) =>
+        writer.close(await closeDecision(h)),
+      ),
       "verification_unaccepted",
     );
     value(
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: fresh.verificationDigest,
-          codes: [{ code: "omitted_by_rule" }],
+          codes: ["omitted_by_rule"],
+          rationale: "Out of scope",
+          mode: "unattended",
           approver: "operator",
         }),
       ),
     );
     assert.deepEqual(
-      value(await h.engine.withWriterResult(h.ref, (writer) => writer.close())).acceptedExceptions,
+      value(
+        await h.engine.withWriterResult(h.ref, async (writer) =>
+          writer.close(await closeDecision(h)),
+        ),
+      ).acceptedExceptions,
       ["omitted_by_rule"],
     );
   });
@@ -672,12 +712,18 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: [{ code: "omitted_by_rule", note }],
+          codes: ["omitted_by_rule"],
+          rationale: note,
+          mode: "unattended",
           approver: "archive-owner",
         }),
       ),
     );
-    value(await h.engine.withWriterResult(h.ref, (writer) => writer.close()));
+    value(
+      await h.engine.withWriterResult(h.ref, async (writer) =>
+        writer.close(await closeDecision(h)),
+      ),
+    );
     const first = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
     const json = first.artifacts.find((artifact) => artifact.name === "report.json");
     const html = first.artifacts.find((artifact) => artifact.name === "report.html");
@@ -727,7 +773,9 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: [{ code: "omitted_by_rule" }, { code: "content_mismatch" }],
+          codes: ["omitted_by_rule", "content_mismatch"],
+          rationale: "Reviewed exception set",
+          mode: "unattended",
           approver: "operator",
         }),
       ),
@@ -741,12 +789,14 @@ describe("engine durability seam", () => {
     assert.equal(omissions.totalRows, 1);
     assert.equal(omissions.rows[0]?.accepted, false);
     refused(
-      await h.engine.withWriterResult(h.ref, (writer) => writer.close()),
+      await h.engine.withWriterResult(h.ref, async (writer) =>
+        writer.close(await closeDecision(h)),
+      ),
       "verification_unaccepted",
     );
   });
 
-  it("merges a repeated exception code and refuses only conflicting notes", async (t) => {
+  it("requires a rationale and records a repeated selected group only once", async (t) => {
     const h = await harness(
       t,
       fixture(),
@@ -759,10 +809,9 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: [
-            { code: "omitted_by_rule", note: "first" },
-            { code: "omitted_by_rule", note: "second" },
-          ],
+          codes: ["omitted_by_rule", "omitted_by_rule"],
+          rationale: "   ",
+          mode: "unattended",
           approver: "operator",
         }),
       ),
@@ -772,14 +821,20 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: [{ code: "omitted_by_rule" }, { code: "omitted_by_rule", note: "Out of scope" }],
+          codes: ["omitted_by_rule", "omitted_by_rule"],
+          rationale: "Out of scope",
+          mode: "unattended",
           approver: "operator",
         }),
       ),
     );
     assert.deepEqual(accepted.acceptedCodes, ["omitted_by_rule"]);
     assert.equal(accepted.clean, true);
-    value(await h.engine.withWriterResult(h.ref, (writer) => writer.close()));
+    value(
+      await h.engine.withWriterResult(h.ref, async (writer) =>
+        writer.close(await closeDecision(h)),
+      ),
+    );
     const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
     const json = report.artifacts.find((artifact) => artifact.name === "report.json");
     assert.ok(json);
@@ -1259,7 +1314,11 @@ describe("engine durability seam", () => {
       database.close();
     }
     reopen(h);
-    const closed = value(await h.engine.withWriterResult(h.ref, (writer) => writer.close()));
+    const closed = value(
+      await h.engine.withWriterResult(h.ref, async (writer) =>
+        writer.close(await closeDecision(h)),
+      ),
+    );
     assert.equal(closed.state, "closed");
     const after = value(await h.engine.reader(h.ref).status());
     assert.equal(after.planDigest, before.planDigest);
@@ -1655,4 +1714,172 @@ it("durably resumes archive pages and partial assets, deduplicates current/retai
     h.port.snapshotDestination().map((entry) => entry.path),
     ["."],
   );
+});
+
+describe("durable local decision attestations", () => {
+  it("retains bounded exception groups and interactive identity without inheriting unattended declarations", async (t) => {
+    const h = await harness(
+      t,
+      fixture(),
+      config([{ sourceItemId: "document", reason: "Out of scope" }]),
+    );
+    const firstPlan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          planDigest: firstPlan.planDigest,
+          approver: "reviewer@host",
+          mode: "interactive",
+        }),
+      ),
+    );
+    await execute(h);
+    const first = await verify(h);
+    const grouped = value(await h.engine.reader(h.ref).status()).exceptionGroups!;
+    assert.deepEqual(
+      grouped.map(({ code, count, acceptable, accepted }) => ({
+        code,
+        count,
+        acceptable,
+        accepted,
+      })),
+      [{ code: "omitted_by_rule", count: 1, acceptable: true, accepted: false }],
+    );
+    assert.ok(grouped[0]!.consequence.includes("absent"));
+    assert.deepEqual(grouped[0]!.examples, ["document"]);
+    refused(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.accept({
+          verificationDigest: first.verificationDigest,
+          codes: ["omitted_by_rule"],
+          rationale: "  ",
+          approver: "unrecorded@host",
+          mode: "interactive",
+        }),
+      ),
+      "verification_unaccepted",
+    );
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).lastInteractiveIdentity,
+      "reviewer@host",
+    );
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.accept({
+          verificationDigest: first.verificationDigest,
+          codes: ["omitted_by_rule"],
+          rationale: "  Keep excluded content at source  ",
+          approver: "exception-owner@host",
+          mode: "interactive",
+        }),
+      ),
+    );
+    const accepted = value(await h.engine.reader(h.ref).status()).acceptedExceptions!;
+    assert.equal(accepted[0]?.note, "Keep excluded content at source");
+    assert.equal(accepted[0]?.mode, "interactive");
+    assert.equal(accepted[0]?.identityAssurance, "declared_unverified");
+    const next = await verify(h);
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.accept({
+          verificationDigest: next.verificationDigest,
+          codes: ["omitted_by_rule"],
+          rationale: "Automated exception policy",
+          approver: "automation",
+          mode: "unattended",
+        }),
+      ),
+    );
+    reopen(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.lastInteractiveIdentity, "exception-owner@host");
+    assert.equal(status.acceptedExceptions?.[0]?.mode, "unattended");
+    assert.equal(status.exceptionGroups?.[0]?.accepted, true);
+    const staleDigest = status.closeReview!.evidenceDigest;
+    value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    refused(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.accept({
+          verificationDigest: next.verificationDigest,
+          codes: ["omitted_by_rule"],
+          rationale: "Old evidence",
+          approver: "stale@host",
+          mode: "interactive",
+        }),
+      ),
+      "verification_unaccepted",
+    );
+    assert.equal(value(await h.engine.reader(h.ref).status()).closeReview, null);
+    assert.notEqual(staleDigest, "");
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).lastInteractiveIdentity,
+      "exception-owner@host",
+    );
+  });
+
+  for (const historicalIdentity of [null, "historical-reviewer@host"]) {
+    it(`migrates legacy acceptance while preserving ${historicalIdentity ?? "no interactive identity"}`, async (t) => {
+      const h = await harness(
+        t,
+        fixture(),
+        config([{ sourceItemId: "document", reason: "Out of scope" }]),
+      );
+      if (historicalIdentity) {
+        for (const approver of ["earlier-reviewer@host", historicalIdentity]) {
+          const plan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+          value(
+            await h.engine.withWriterResult(h.ref, (w) =>
+              w.approve({ planDigest: plan.planDigest, approver, mode: "interactive" }),
+            ),
+          );
+        }
+      }
+      await approve(h);
+      await execute(h);
+      const verification = await verify(h);
+      value(
+        await h.engine.withWriterResult(h.ref, (w) =>
+          w.accept({
+            verificationDigest: verification.verificationDigest,
+            codes: ["omitted_by_rule"],
+            rationale: "Historical exception",
+            approver: "historical-operator",
+            mode: "unattended",
+          }),
+        ),
+      );
+      h.engine.close();
+      const db = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+      try {
+        db.exec(
+          "ALTER TABLE acceptance DROP COLUMN mode; DROP TABLE decision_evidence; UPDATE job SET schema_version=5",
+        );
+      } finally {
+        db.close();
+      }
+      reopen(h);
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.equal(status.acceptedExceptions?.[0]?.mode, "legacy_unknown");
+      assert.equal(status.acceptedExceptions?.[0]?.identityAssurance, "declared_unverified");
+      assert.equal(status.lastInteractiveIdentity, historicalIdentity);
+      assert.equal(status.closeAuthorization, null);
+      refused(await h.engine.withWriterResult(h.ref, (w) => w.close()), "approval_required");
+      const next = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+      value(
+        await h.engine.withWriterResult(h.ref, (w) =>
+          w.approve({
+            planDigest: next.planDigest,
+            approver: "current-reviewer@host",
+            mode: "interactive",
+          }),
+        ),
+      );
+      await approve(h);
+      reopen(h);
+      assert.equal(
+        value(await h.engine.reader(h.ref).status()).lastInteractiveIdentity,
+        "current-reviewer@host",
+      );
+    });
+  }
 });
