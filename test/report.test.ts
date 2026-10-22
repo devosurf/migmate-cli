@@ -52,8 +52,8 @@ for (const type of ["file_migration", "teams_archive"] as const)
       "Permissions and ownership were neither assessed nor migrated.",
       "Same-user processes are not isolated; local state has no application-level at-rest encryption.",
     ];
-    const json = `{"acceptedExceptions":[],"approval":null,"archive":null,"checks":[],"disclosures":${JSON.stringify(disclosures)},"findings":[],"job":${canonicalJob},"plan":null,"rows":[],"schemaVersion":1,"sections":[],"verification":null}\n`;
-    const jsonl = `{"acceptedExceptions":[],"approval":null,"archive":null,"checks":[],"disclosures":${JSON.stringify(disclosures)},"job":${canonicalJob},"kind":"report","plan":null,"schemaVersion":1,"sections":[],"verification":null}\n`;
+    const json = `{"acceptedExceptions":[],"approval":null,"archive":null,"checks":[],"closeAuthorization":null,"disclosures":${JSON.stringify(disclosures)},"findings":[],"job":${canonicalJob},"plan":null,"rows":[],"schemaVersion":1,"sections":[],"verification":null}\n`;
+    const jsonl = `{"acceptedExceptions":[],"approval":null,"archive":null,"checks":[],"closeAuthorization":null,"disclosures":${JSON.stringify(disclosures)},"job":${canonicalJob},"kind":"report","plan":null,"schemaVersion":1,"sections":[],"verification":null}\n`;
     const escape = (text: string) =>
       text
         .replaceAll("&", "&amp;")
@@ -68,6 +68,7 @@ for (const type of ["file_migration", "teams_archive"] as const)
       section("Job", JSON.stringify(job, null, 2)) +
       section("Standing disclosures", disclosures.join("\n")) +
       section("Plan and approval", '{\n  "plan": null,\n  "approval": null\n}') +
+      section("Go-live authorization (unverified declaration)", "null") +
       section("Preflight evidence", "[]") +
       section("Verification", "null") +
       section("All item and conversation rows", "[]") +
@@ -297,7 +298,9 @@ it("exports mapping totals and accepted omissions and findings without inventing
       w.accept({
         verificationDigest: verification.verificationDigest,
         approver: "@operator",
-        codes: [{ code: "content_verification_degraded", note: '-Approved,\n"as observed"' }],
+        codes: ["content_verification_degraded"],
+        rationale: '-Approved,\n"as observed"',
+        mode: "unattended",
       }),
     ),
   );

@@ -53,7 +53,8 @@ import {
   type VerificationRevision,
   type Verb,
 } from "./types.ts";
-import { CODE_BY_NAME, isAcceptable } from "./codes.ts";
+import { CODE_BY_NAME, isAcceptable, exceptionConsequence } from "./codes.ts";
+import { approvalAuthority } from "./decisions.ts";
 import {
   nextState,
   reconcileOnWriterOpen,
@@ -926,7 +927,22 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
         if (!deps.provider) await provider.close?.();
       }
     },
-    status: () => withStore((s) => s.status()),
+    status: () =>
+      withStore((s) => {
+        const status = s.status();
+        if (!status.currentPlan || !status.verificationDigest)
+          return { ...status, closeReview: null };
+        try {
+          return {
+            ...status,
+            closeReview: closeReview(s, readConfig(pathsFor(deps, ref), status.jobType, s)),
+          };
+        } catch (error) {
+          // Preserve read-only recovery evidence while operator configuration is broken.
+          if (expectedFailure(error)) return { ...status, closeReview: null };
+          throw error;
+        }
+      }),
     rows: (q) => withStore((s) => s.rows(q)),
     artifacts: () => withStore((s) => s.readArtifactSet()),
     async *events(q): AsyncIterable<JobEvent> {
@@ -1213,12 +1229,8 @@ function contentDigest(rows: unknown[]): string {
     hash.update(row).update("\n");
   return hash.digest("hex");
 }
-function inputFields(
-  config: JobConfig,
-  evidence: BoundEvidence,
-  rows: CommitRow[],
-  archivePlan: unknown,
-): Record<string, string> {
+/** The authority-bearing configuration, excluding credentials and runtime progress. */
+function configurationAuthority(config: JobConfig): string {
   const settings =
     "mappings" in config
       ? {
@@ -1239,6 +1251,14 @@ function inputFields(
           ...(config.destination ? { destination: config.destination } : {}),
           route: config.route,
         };
+  return canonicalJson(settings);
+}
+function inputFields(
+  config: JobConfig,
+  evidence: BoundEvidence,
+  rows: CommitRow[],
+  archivePlan: unknown,
+): Record<string, string> {
   const scopes = rows
     .filter((r) => r.jobType === "file_migration" && r.phase === "plan" && r.fileScope)
     .map((r) =>
@@ -1251,7 +1271,7 @@ function inputFields(
     .sort();
   const { binaryPath: _path, ...binding } = evidence;
   return {
-    configuration: canonicalJson(settings),
+    configuration: configurationAuthority(config),
     identity: canonicalJson(binding),
     scope: canonicalJson(scopes),
     archive: canonicalJson(semantic(archivePlan ?? null)),
@@ -1263,6 +1283,51 @@ function findingFacets(store: Store, revision: number): FacetCount[] {
 function currentVerification(store: Store): (VerificationRevision & { planRev: number }) | null {
   const rev = store.readJob()?.verificationRevision;
   return rev == null ? null : store.readVerificationRevision(rev);
+}
+
+function closeReview(store: Store, config: JobConfig) {
+  const job = store.readJob()!;
+  const plan = job.planRevision === null ? null : store.readPlanRevision(job.planRevision);
+  const verification = currentVerification(store);
+  const approval = plan ? store.readApproval(plan.revision) : null;
+  if (!plan || !approval || !verification || verification.planRev !== plan.revision) return null;
+  const bindingConfig =
+    "mappings" in config && plan.manifestDigest === undefined ? { ...config } : config;
+  if ("mappings" in bindingConfig && plan.manifestDigest === undefined)
+    delete bindingConfig.manifestDigest;
+  const evidenceDigest = digestJson({
+    jobId: job.id,
+    planDigest: plan.planDigest,
+    approvalDigest: approval.approvalDigest,
+    verificationDigest: verification.verificationDigest,
+    acceptedExceptions: store.readAcceptances(verification.verificationDigest),
+    configuration: configurationAuthority(bindingConfig),
+  });
+  const deferred =
+    "mappings" in config && memberGrantTiming(approvedOptions(plan)) === "after_verification";
+  const approvedConfig: Partial<FileMigrationConfig> = JSON.parse(
+    plan.inputs.configuration ?? "{}",
+  );
+  return {
+    evidenceDigest,
+    authorized: store.readCloseAuthorization()?.evidenceDigest === evidenceDigest,
+    consequences: deferred
+      ? [
+          "Grant the approved destination members access. Transfers become permanently fenced.",
+          ...(approvedConfig.mappings?.flatMap(
+            (mapping) =>
+              mapping.createDrive?.members.map(
+                (member) =>
+                  `${mapping.id}: ${mapping.createDrive!.name} — ${member.email} (${member.type}), role ${member.role}, timing after_verification.`,
+              ) ?? [],
+          ) ?? []),
+          "Close requires go-live membership and destination checks plus the final report. Access is never revoked automatically.",
+        ]
+      : [
+          "Complete this job with its current verification and explicitly recorded exceptions.",
+          "No deferred member access will be granted by close.",
+        ],
+  };
 }
 function outstanding(store: Store, revision: number, digest?: string): string[] {
   const accepted = new Set(digest ? store.readAcceptances(digest).map((a) => a.code) : []);
@@ -1882,6 +1947,8 @@ function makeWriter(
             verificationDigest,
             code,
             approver: approval.approver,
+            mode: approval.mode,
+            identityAssurance: "declared_unverified" as const,
             note: `Accepted in advance by approving plan ${plan.planDigest} with [options] acceptedOmissions.`,
             at: approval.at,
           })),
@@ -2011,7 +2078,7 @@ function makeWriter(
                 subjectId: f.subjectId,
                 phase: f.phase,
                 evidence: f.evidence,
-                consequence: consequence(f.code),
+                consequence: exceptionConsequence(f.code),
               };
             }
           }),
@@ -2023,6 +2090,7 @@ function makeWriter(
       job: { id: job().id, type: job().type, label: job().label, state: job().state },
       plan: revision ? store.readReportPlan(revision) : null,
       approval: revision ? store.readApproval(revision) : null,
+      closeAuthorization: store.readCloseAuthorization(),
       verification,
       sections: reportSections,
       disclosures: [
@@ -2409,6 +2477,7 @@ function makeWriter(
             .filter((s) => !s.body.startsWith("{") && !s.body.startsWith("["))
             .flatMap((s) => s.body.split("\n"));
           const planDigest = digestJson({
+            revision,
             inputsDigest,
             stage,
             rows: contentDigest(rows),
@@ -2507,11 +2576,26 @@ function makeWriter(
           });
         if (job().state !== "planned")
           return refuse("approval_required", "Only the current unapproved plan may be approved.");
+        const authority = approvalAuthority(plan, store.latestApprovedPlan());
+        if (
+          a.mode === "interactive" &&
+          ((authority.mirrorChanges.length > 0 && a.riskConfirmations?.mirror !== true) ||
+            (authority.accessChanges.length > 0 && a.riskConfirmations?.access !== true))
+        )
+          return refuse(
+            "approval_required",
+            "Confirm the changed mirror and access authority before approval.",
+            { detail: { ...authority } },
+          );
         const approval = {
           revision: plan.revision,
           planDigest: plan.planDigest,
           approver: text(a.approver, "approver"),
           mode: a.mode,
+          identityAssurance: "declared_unverified" as const,
+          ...(a.mode === "interactive" && a.riskConfirmations
+            ? { riskConfirmations: a.riskConfirmations }
+            : {}),
           at: deps.now().toISOString(),
           ...(a.freeze ? { freeze: a.freeze } : {}),
           sourceInventoryAt: plan.sourceInventoryAt,
@@ -2732,7 +2816,7 @@ function makeWriter(
           !x ||
           typeof x.verificationDigest !== "string" ||
           !Array.isArray(x.codes) ||
-          x.codes.some((code) => !code || typeof code !== "object" || typeof code.code !== "string")
+          x.codes.some((code) => typeof code !== "string")
         )
           return refuse(
             "verification_unaccepted",
@@ -2748,45 +2832,45 @@ function makeWriter(
             "verification_unaccepted",
             "Acceptance must name the current verification digest.",
           );
-        if (typeof x.approver !== "string" || !x.approver.trim() || x.codes.length === 0)
+        if (
+          typeof x.approver !== "string" ||
+          !x.approver.trim() ||
+          x.codes.length === 0 ||
+          typeof x.rationale !== "string" ||
+          !x.rationale.trim() ||
+          !["interactive", "unattended"].includes(x.mode)
+        )
           return refuse(
             "verification_unaccepted",
-            "Acceptance requires an approver and a nonempty named exception set.",
+            "Acceptance requires an approver, mode, explicit named codes and a non-empty rationale.",
           );
         const actual = new Set(current.findings.map((f) => f.code));
-        // A repeated code names the same exception again; only distinct notes conflict.
-        const named = new Map<string, string | undefined>();
-        for (const c of x.codes) {
-          if (
-            !isAcceptable(c.code) ||
-            !actual.has(c.code) ||
-            (c.note !== undefined && typeof c.note !== "string")
-          )
+        const named = new Set(x.codes);
+        for (const code of named)
+          if (!isAcceptable(code) || !actual.has(code))
             return refuse(
               "verification_unaccepted",
               "Every accepted code must occur in this verification.",
-              { detail: { code: c.code } },
+              { detail: { code } },
             );
-          const prior = named.get(c.code);
-          if (prior !== undefined && c.note !== undefined && prior !== c.note)
-            return refuse(
-              "verification_unaccepted",
-              "A repeated exception code carries conflicting notes.",
-              { detail: { code: c.code } },
-            );
-          named.set(c.code, c.note ?? prior);
-        }
         const at = deps.now().toISOString();
         return store.atomic(() => {
+          const existingCodes = new Set(
+            store.readAcceptances(current.verificationDigest).map((record) => record.code),
+          );
           store.writeAcceptances(
-            [...named].map(([code, note]) => ({
+            [...named].map((code) => ({
               verificationDigest: current.verificationDigest,
               code,
               approver: text(x.approver, "approver"),
-              note: note ?? null,
+              mode: x.mode,
+              identityAssurance: "declared_unverified" as const,
+              note: x.rationale.trim(),
               at,
             })),
           );
+          if (x.mode === "interactive" && [...named].some((code) => !existingCodes.has(code)))
+            store.recordInteractiveIdentity(x.approver.trim());
           const acceptedCodes = store
               .readAcceptances(current.verificationDigest)
               .map((a) => a.code),
@@ -2796,7 +2880,7 @@ function makeWriter(
         });
       }),
     report: () => operation("report", createReport),
-    close: () =>
+    close: (input) =>
       operation("close", async () => {
         const verification = currentVerification(store),
           revision = job().planRevision;
@@ -2863,7 +2947,82 @@ function makeWriter(
           )
             return refuse("plan_revision_required", "The approved close inputs have changed.");
         }
-        if ("mappings" in config && deferredGrants) {
+        const review = closeReview(store, config);
+        if (!review)
+          return refuse("approval_required", "Close requires current approved evidence.");
+        const authorization = store.readCloseAuthorization();
+        if (input !== undefined) {
+          if (
+            !input ||
+            typeof input.approver !== "string" ||
+            !input.approver.trim() ||
+            !["interactive", "unattended"].includes(input.mode) ||
+            (input.mode === "interactive" && input.confirmGoLive !== true)
+          )
+            return refuse(
+              "approval_required",
+              "Initial close requires a declared approver, mode and explicit go-live confirmation.",
+            );
+          if (input.evidenceDigest !== review.evidenceDigest)
+            return refuse("approval_digest_stale", "The reviewed close evidence has changed.");
+        } else if (!review.authorized) {
+          return refuse(
+            "approval_required",
+            "Initial close requires authorization of the current reviewed evidence.",
+          );
+        }
+        if (
+          authorization &&
+          !review.authorized &&
+          store.readCreatedDrives().some((drive) => drive.goLive)
+        )
+          return refuse(
+            "approval_digest_stale",
+            "The durable go-live authorization no longer matches current evidence.",
+          );
+        const authorizeClose = async (): Promise<Outcome<void>> => {
+          if (review.authorized) return ok(undefined);
+          input?.signal?.throwIfAborted();
+          if (deferredGrants) {
+            const readiness = await createReport();
+            if (!readiness.ok) return readiness;
+          }
+          // Recheck editable inputs after readiness, before any durable authority or fence.
+          if (
+            closeReview(store, readConfig(paths, job().type, store))?.evidenceDigest !==
+            review.evidenceDigest
+          )
+            return refuse(
+              "approval_digest_stale",
+              "Close evidence changed during report readiness.",
+            );
+          input?.signal?.throwIfAborted();
+          store.atomic(() =>
+            store.writeCloseAuthorization({
+              evidenceDigest: review.evidenceDigest,
+              approver: input!.approver.trim(),
+              mode: input!.mode,
+              identityAssurance: "declared_unverified",
+              at: deps.now().toISOString(),
+            }),
+          );
+          return ok(undefined);
+        };
+        const closeDrives = store.readCreatedDrives();
+        const pendingGoLive =
+          "mappings" in config &&
+          config.mappings.some(
+            (mapping) =>
+              mapping.createDrive &&
+              !closeDrives.some(
+                (drive) =>
+                  drive.mappingId === mapping.id &&
+                  drive.goLive?.revision === revision &&
+                  drive.goLive.verificationAt === verification.at &&
+                  drive.goLive.check?.status === "passed",
+              ),
+          );
+        if ("mappings" in config && deferredGrants && pendingGoLive) {
           const p = provider(config, true);
           let worker: TransferWorkerHandle | undefined;
           try {
@@ -2891,6 +3050,8 @@ function makeWriter(
                   "The live worker version changed after approval.",
                 );
             }
+            const authorized = await authorizeClose();
+            if (!authorized.ok) return authorized;
             for await (const unit of goLive(
               context(p, config, revision, undefined, true),
               verification.at,
@@ -2905,6 +3066,9 @@ function makeWriter(
           } finally {
             if (worker) await stopWorker(p, worker);
           }
+        } else {
+          const authorized = await authorizeClose();
+          if (!authorized.ok) return authorized;
         }
         if (deferredGrants) {
           const report = await createReport();
@@ -2937,6 +3101,11 @@ function makeWriter(
       }
       return operation("cancel", async () => {
         text(reason, "reason");
+        if (store.readCreatedDrives().some((drive) => drive.goLive))
+          return refuse(
+            "go_live_started",
+            "Go-live has started; only close with its final report can end this job.",
+          );
         const verification = currentVerification(store);
         const result: Closure = {
           state: "cancelled",
@@ -3065,11 +3234,6 @@ async function checkApprovedMappingScope(
     }
   }
 }
-function consequence(code: string): string {
-  return CODE_BY_NAME[code]?.kind === "planned_omission"
-    ? "The named items or fidelity are omitted from the promised result; acceptance does not restore them."
-    : "The named verification or collection guarantee is not established for these items; acceptance does not constitute proof.";
-}
 function escapeHtml(value: unknown): string {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -3088,6 +3252,7 @@ function* reportHtml(report: {
   checks: unknown[];
   plan: unknown;
   approval: unknown;
+  closeAuthorization: unknown;
   verification: unknown;
 }): Generator<string> {
   function* section(title: string, value: unknown): Generator<string> {
@@ -3105,6 +3270,7 @@ function* reportHtml(report: {
   yield* section("Job", report.job);
   yield* section("Standing disclosures", report.disclosures.join("\n"));
   yield* section("Plan and approval", { plan: report.plan, approval: report.approval });
+  yield* section("Go-live authorization (unverified declaration)", report.closeAuthorization);
   for (const item of report.sections) yield* section(item.title, item.body);
   yield* section("Preflight evidence", report.checks);
   yield* section("Verification", report.verification);

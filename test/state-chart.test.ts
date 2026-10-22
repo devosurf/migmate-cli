@@ -154,7 +154,6 @@ describe("engine lifecycle boundaries", () => {
     const replanned = await engine.withWriter(created.value, async (writer) => {
       const next = await writer.plan();
       assert.ok(next.ok);
-      assert.equal(next.value.planDigest, approved.value.planDigest);
       const execution = await writer.execute();
       assert.equal(execution.ok, false);
       if (execution.ok) throw new Error("new plan revision reused approval");

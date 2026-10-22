@@ -20,8 +20,9 @@ export interface Invocation {
   final?: boolean;
   freeze?: { by: string; at: string; how: string };
   verificationDigest?: string;
+  closeDigest?: string;
   codes: string[];
-  notes: string[];
+  note?: string;
   reason?: string;
   confirm: boolean;
   stopWorker: boolean;
@@ -116,6 +117,7 @@ export function parseInvocation(argv: string[]): Invocation {
     "--freeze-at",
     "--freeze-how",
     "--verification-digest",
+    "--close-digest",
     "--code",
     "--note",
     "--reason",
@@ -151,7 +153,7 @@ export function parseInvocation(argv: string[]): Invocation {
     const value = equal === -1 ? argv[++index] : token.slice(equal + 1);
     if (!value || value.startsWith("--") || /[\u0000]/u.test(value))
       throw new UsageFailure("An option needs a non-empty value.");
-    if (values.has(flag) && flag !== "--code" && flag !== "--note")
+    if (values.has(flag) && flag !== "--code")
       throw new UsageFailure("An option was supplied more than once.");
     const prior = values.get(flag);
     if (prior) prior.push(value);
@@ -228,7 +230,7 @@ export function parseInvocation(argv: string[]): Invocation {
     // Help and version never open a store and must remain available with a broken workspace.
     home: resolve(get("--home") ?? (help || version ? "." : defaultHome())),
     codes,
-    notes: values.get("--note") ?? [],
+    ...(get("--note") === undefined ? {} : { note: get("--note")! }),
     confirm: switches.has("--confirm"),
     stopWorker: switches.has("--stop-worker"),
     review: switches.has("--review") || cursor !== undefined || revision !== undefined,
@@ -244,6 +246,7 @@ export function parseInvocation(argv: string[]): Invocation {
     approver: "--approver",
     planDigest: "--plan-digest",
     verificationDigest: "--verification-digest",
+    closeDigest: "--close-digest",
     reason: "--reason",
   } as const;
   for (const [key, flag] of Object.entries(strings)) {
@@ -268,8 +271,9 @@ export function parseInvocation(argv: string[]): Invocation {
   for (const flag of ["--type", "--label"]) only(flag, ["init"]);
   only("--config", ["init", "creds init"]);
   only("--file", ["manifest load", "discover"]);
-  only("--approver", ["approve", "accept"]);
+  only("--approver", ["approve", "accept", "close"]);
   only("--plan-digest", ["approve"]);
+  only("--close-digest", ["close"]);
   only("--final", ["plan"]);
   for (const flag of ["--freeze-by", "--freeze-at", "--freeze-how"]) only(flag, ["approve"]);
   if (switches.has("--final")) {
@@ -313,8 +317,6 @@ export function parseInvocation(argv: string[]): Invocation {
     only(flag, ["plan", "status", "verify"]);
   if (from !== undefined && output !== "jsonl")
     throw new UsageFailure("--from requires JSONL output.");
-  if (invocation.notes.length > codes.length)
-    throw new UsageFailure("Each --note needs a corresponding --code.");
   if (command === "reclaim" && !invocation.confirm)
     throw new UsageFailure("reclaim requires --confirm after reviewing recovery facts.");
   return invocation;

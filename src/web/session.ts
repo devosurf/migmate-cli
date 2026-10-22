@@ -158,6 +158,8 @@ export class WebSession {
             "approver",
             "planDigest",
             "confirm",
+            "confirmMirror",
+            "confirmAccess",
             "freezeBy",
             "freezeAt",
             "freezeHow",
@@ -169,6 +171,11 @@ export class WebSession {
           return invalid(
             "Approval requires your identity, the exact reviewed plan digest, and an explicit approval action.",
           );
+        if (
+          (input.confirmMirror !== undefined && typeof input.confirmMirror !== "boolean") ||
+          (input.confirmAccess !== undefined && typeof input.confirmAccess !== "boolean")
+        )
+          return invalid("Changed authority confirmations must be explicit booleans.");
         if (
           input.freezeBy !== undefined ||
           input.freezeAt !== undefined ||
@@ -188,24 +195,18 @@ export class WebSession {
         break;
       case "accept":
         if (
-          !exact(input, ["approver", "verificationDigest", "codes"]) ||
+          !exact(input, ["approver", "verificationDigest", "codes", "rationale", "confirm"]) ||
           !text(input.approver) ||
           !text(input.verificationDigest) ||
+          !text(input.rationale) ||
+          input.confirm !== true ||
           !Array.isArray(input.codes) ||
           input.codes.length === 0 ||
-          input.codes.some((entry: unknown) => {
-            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
-            const item = entry as Record<string, unknown>;
-            return (
-              !exact(item, ["code", "note"]) ||
-              !text(item.code) ||
-              !isAcceptable(item.code) ||
-              (item.note !== undefined && !text(item.note))
-            );
-          })
+          input.codes.some((code: unknown) => !text(code) || !isAcceptable(code)) ||
+          new Set(input.codes).size !== input.codes.length
         )
           return invalid(
-            "Accept explicitly named registered exception codes against the exact verification digest; accept-all is not supported.",
+            "Acceptance requires explicitly selected registered exception groups, a common non-empty rationale, declared identity, captured verification digest, and confirmation; accept-all is not supported.",
           );
         break;
       case "cancel":
@@ -215,8 +216,16 @@ export class WebSession {
           );
         break;
       case "close":
-        if (!exact(input, ["confirm"]) || input.confirm !== true)
-          return invalid("Closing a job requires explicit confirmation.");
+        if (Object.keys(input).length === 0) break;
+        if (
+          !exact(input, ["approver", "evidenceDigest", "confirmGoLive"]) ||
+          !text(input.approver) ||
+          !text(input.evidenceDigest) ||
+          input.confirmGoLive !== true
+        )
+          return invalid(
+            "Initial go-live requires a declared identity, captured evidence, and explicit confirmation.",
+          );
         break;
       case "reclaim":
         if (
@@ -313,6 +322,10 @@ export class WebSession {
             approver: String(input.approver),
             planDigest: String(input.planDigest),
             mode: "interactive",
+            riskConfirmations: {
+              mirror: input.confirmMirror === true,
+              access: input.confirmAccess === true,
+            },
             ...(input.freezeBy !== undefined
               ? {
                   freeze: {
@@ -341,7 +354,9 @@ export class WebSession {
           const outcome = await writer.accept({
             approver: String(input.approver),
             verificationDigest: String(input.verificationDigest),
-            codes: input.codes as { code: string; note?: string }[],
+            codes: input.codes as string[],
+            rationale: String(input.rationale),
+            mode: "interactive",
           });
           if (outcome.ok) this.#verification = outcome.value;
           result = outcome;
@@ -351,7 +366,17 @@ export class WebSession {
           result = await writer.report();
           break;
         case "close":
-          result = await writer.close();
+          result = await writer.close(
+            Object.keys(input).length === 0
+              ? undefined
+              : {
+                  evidenceDigest: String(input.evidenceDigest),
+                  approver: String(input.approver),
+                  mode: "interactive",
+                  confirmGoLive: true,
+                  signal: this.abort.signal,
+                },
+          );
           break;
         case "cancel":
           result = await writer.cancel(String(input.reason));

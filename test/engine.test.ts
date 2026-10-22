@@ -196,11 +196,13 @@ describe("engine seam", () => {
       if (!verification.ok) throw new Error("unreachable");
 
       if (!verification.value.clean) {
-        const outstanding = verification.value.findings.map((f) => ({ code: f.code }));
+        const outstanding = verification.value.findings.map((f) => f.code);
         const accepted = await w.accept({
           verificationDigest: verification.value.verificationDigest,
           codes: outstanding,
           approver: "ci",
+          rationale: "Reviewed fixture findings",
+          mode: "unattended",
         });
         assert.equal(accepted.ok, true);
       }
@@ -211,7 +213,13 @@ describe("engine seam", () => {
       assert.ok(report.value.artifacts.some((a) => a.format === "jsonl"));
       assert.ok(report.value.artifacts.some((a) => a.format === "html"));
 
-      return w.close();
+      const status = await reader.status();
+      assert.ok(status.ok && status.value.closeReview);
+      return w.close({
+        evidenceDigest: status.value.closeReview.evidenceDigest,
+        approver: "ci",
+        mode: "unattended",
+      });
     });
     assert.equal(closed.ok, true);
     if (!closed.ok) throw new Error("unreachable");
