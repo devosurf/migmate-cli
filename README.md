@@ -897,8 +897,9 @@ Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL
 - `npm test` — behavioural suites, no network, followed by the fixed-heap 250,000-file
   report/close regression in a separate test-runner invocation. The scale test
   remains in the default CI gate but never competes with the main suite's
-  timing-sensitive tests. It writes roughly 1–1.5 GB of temporary artifacts and
-  removes them on completion.
+  timing-sensitive tests. The two fixture sizes share a ten-minute budget for the
+  required readiness and final report renders. Each large report set is roughly
+  1–1.5 GB; temporary artifacts are removed on completion.
 - `npm run check:vendor` — verifies the vendored binary hashes.
 - `npm run check:worker` — opt-in locally, required in CI's four platform cells. Spawns the vendored `rclone` worker and proves authentication, lifecycle, asynchronous copy, per-pass status/stats, cooperative stop and resumable copy, capped mirror deletions, and stored/downloaded hash listings against disposable local folders.
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.
