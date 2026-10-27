@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, it } from "node:test";
@@ -137,6 +137,31 @@ async function settled(session: WebSession): Promise<void> {
     await nextTurn();
   }
   assert.fail("The protocol action did not settle");
+}
+
+function renderedForm(document: HtmlNode, action: string): Element {
+  const form = elements(document, (element) => attr(element, "data-action") === action)[0];
+  assert.ok(form, `Expected a rendered ${action} form`);
+  return form;
+}
+
+function formField(form: Element, name: string): Element {
+  const field = elements(form, (element) => attr(element, "name") === name)[0];
+  assert.ok(field, `Expected rendered field ${name}`);
+  return field;
+}
+
+function capturedField(form: Element, name: string): string {
+  const field = formField(form, name);
+  assert.equal(attr(field, "type"), "hidden", `${name} must not require transcription`);
+  const value = attr(field, "value");
+  assert.ok(value);
+  return value;
+}
+
+function noDefaultConsent(form: Element): void {
+  for (const field of elements(form, (element) => attr(element, "type") === "checkbox"))
+    assert.equal(attr(field, "checked"), undefined);
 }
 
 describe("windowless native protocol", () => {
@@ -461,7 +486,9 @@ describe("windowless native protocol", () => {
         request("accept", {
           approver: "operator",
           verificationDigest: "digest",
-          codes: [{ code: "*" }],
+          codes: ["*"],
+          rationale: "Explicit but invalid selection",
+          confirm: true,
         }),
         409,
       ],
@@ -679,6 +706,415 @@ describe("windowless native protocol", () => {
       engine.close();
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it("captures approval evidence, refuses stale or cancelled review, and reuses only recorded interactive identity", async () => {
+    const home = mkdtempSync(join(tmpdir(), "migmate-web-handoff-"));
+    const provider = new FakeFileMigrationPort(
+      fileFixture([
+        { id: "notebook", parentId: "source-root", name: "Original notebook", kind: "package" },
+      ]),
+    );
+    const engine = openEngine({ home, provider, adapter: "web" });
+    let session: WebSession | undefined;
+    try {
+      const created = await engine.initJob({ type: "file_migration", config: fileConfig() });
+      assert.ok(created.ok);
+      session = new WebSession({ engine, job: created.value });
+      await session.open();
+      const handle = createProtocolHandler({ session });
+      const review = async () =>
+        renderedForm(
+          parse(await (await handle(new Request("migmate://localhost/view?stage=approve"))).text()),
+          "approve",
+        );
+      assert.equal((await handle(request("plan"))).status, 202);
+      await settled(session);
+      const first = await review();
+      noDefaultConsent(first);
+      assert.equal(
+        attr(formField(first, "approver"), "value"),
+        `${userInfo().username}@${hostname()}`,
+      );
+      assert.equal(attr(formField(first, "approver"), "readonly"), undefined);
+      const firstDigest = capturedField(first, "planDigest");
+      assert.equal(
+        (
+          await handle(
+            request("approve", {
+              approver: "cancelled identity",
+              planDigest: firstDigest,
+              confirm: false,
+            }),
+          )
+        ).status,
+        409,
+      );
+      let projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.equal(projected.value.currentApproval, null);
+      assert.equal(projected.value.lastInteractiveIdentity, null);
+
+      provider.mutateSourceItem("notebook", { name: "Changed notebook", etag: "changed" });
+      assert.equal((await handle(request("plan"))).status, 202);
+      await settled(session);
+      const next = await review();
+      const nextDigest = capturedField(next, "planDigest");
+      assert.notEqual(firstDigest, nextDigest);
+      assert.equal(
+        (
+          await handle(
+            request("approve", {
+              approver: "stale identity",
+              planDigest: firstDigest,
+              confirm: true,
+            }),
+          )
+        ).status,
+        202,
+      );
+      await settled(session);
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.equal(projected.value.currentApproval, null);
+      assert.equal(projected.value.lastInteractiveIdentity, null);
+      assert.equal((await session.snapshot({ stage: "approve", phase: "plan" })).readonly, true);
+      assert.equal((await handle(request("acquire"))).status, 202);
+      await settled(session);
+      assert.equal(
+        (
+          await handle(
+            request("approve", {
+              approver: "edited@identity",
+              planDigest: nextDigest,
+              confirm: true,
+            }),
+          )
+        ).status,
+        202,
+      );
+      await settled(session);
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.equal(projected.value.currentApproval?.planDigest, nextDigest);
+      assert.equal(projected.value.currentApproval?.approver, "edited@identity");
+      assert.equal(projected.value.currentApproval?.mode, "interactive");
+      assert.equal(projected.value.currentApproval?.identityAssurance, "declared_unverified");
+      assert.equal(attr(formField(await review(), "approver"), "value"), "edited@identity");
+      await session.close();
+      session = undefined;
+      const unattended = await engine.withWriterResult(created.value, async (writer) => {
+        const plan = await writer.plan();
+        assert.ok(plan.ok);
+        return writer.approve({
+          approver: "automation",
+          planDigest: plan.value.planDigest,
+          mode: "unattended",
+        });
+      });
+      assert.ok(unattended.ok);
+      session = new WebSession({ engine, job: created.value });
+      await session.open();
+      const reopened = createProtocolHandler({ session });
+      const form = renderedForm(
+        parse(await (await reopened(new Request("migmate://localhost/view?stage=approve"))).text()),
+        "approve",
+      );
+      assert.equal(attr(formField(form, "approver"), "value"), "edited@identity");
+    } finally {
+      await session?.close();
+      engine.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("reviews whole exception groups, requires a common rationale, and captures initial go-live authority", async () => {
+    const home = mkdtempSync(join(tmpdir(), "migmate-web-exceptions-"));
+    const provider = new FakeFileMigrationPort(
+      fileFixture([
+        { id: "package-1", parentId: "source-root", name: "Notebook one", kind: "package" },
+        { id: "package-2", parentId: "source-root", name: "Notebook two", kind: "package" },
+        { id: "excluded", parentId: "source-root", name: "Excluded notebook", kind: "package" },
+      ]),
+    );
+    const engine = openEngine({ home, provider, adapter: "web" });
+    let session: WebSession | undefined;
+    try {
+      const created = await engine.initJob({
+        type: "file_migration",
+        config: fileConfig([{ sourceItemId: "excluded", reason: "Outside the destination scope" }]),
+      });
+      assert.ok(created.ok);
+      session = new WebSession({ engine, job: created.value });
+      await session.open();
+      const handle = createProtocolHandler({ session });
+      const view = async (stage: string) =>
+        parse(
+          await (
+            await handle(new Request(`migmate://localhost/view?stage=${stage}&limit=25`))
+          ).text(),
+        );
+      const run = async (action: string, input: Record<string, unknown> = {}) => {
+        assert.equal((await handle(request(action, input))).status, 202);
+        await settled(session!);
+      };
+      await run("plan");
+      await run("approve", {
+        approver: "reviewer",
+        planDigest: capturedField(renderedForm(await view("approve"), "approve"), "planDigest"),
+        confirm: true,
+      });
+      await run("execute");
+      await run("verify");
+      const document = await view("verify");
+      const form = renderedForm(document, "accept");
+      noDefaultConsent(form);
+      assert.equal(attr(formField(form, "approver"), "value"), "reviewer");
+      assert.equal(attr(formField(form, "rationale"), "required"), "");
+      let projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      const group = projected.value.exceptionGroups?.find(
+        (entry) => entry.code === "source_package_omitted",
+      );
+      assert.ok(group);
+      assert.equal(group.count, 2);
+      assert.ok(group.examples.length > 0);
+      const groupElement = elements(
+        form,
+        (element) => attr(element, "data-exception-code") === group.code,
+      )[0]!;
+      assert.ok(text(groupElement).includes(group.consequence));
+      for (const example of group.examples) assert.ok(text(groupElement).includes(example));
+      assert.equal(attr(formField(groupElement, "codes"), "value"), group.code);
+      const input = {
+        approver: "exception reviewer",
+        verificationDigest: capturedField(form, "verificationDigest"),
+        codes: [group.code, "omitted_by_rule"],
+        rationale: "  Preserve the notebooks separately  ",
+        confirm: true,
+      };
+      for (const invalid of [
+        { ...input, rationale: " " },
+        { ...input, codes: [] },
+        { ...input, confirm: false },
+      ])
+        assert.equal((await handle(request("accept", invalid))).status, 409);
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.deepEqual(projected.value.acceptedExceptions, []);
+      await run("verify");
+      await run("accept", input);
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.deepEqual(projected.value.acceptedExceptions, []);
+      await run("acquire");
+      const currentForm = renderedForm(await view("verify"), "accept");
+      await run("accept", {
+        ...input,
+        verificationDigest: capturedField(currentForm, "verificationDigest"),
+      });
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.deepEqual(
+        projected.value.acceptedExceptions
+          ?.map((record) => ({
+            code: record.code,
+            note: record.note,
+            mode: record.mode,
+            identityAssurance: record.identityAssurance,
+          }))
+          .sort((a, b) => a.code.localeCompare(b.code)),
+        input.codes
+          .map((code) => ({
+            code,
+            note: input.rationale.trim(),
+            mode: "interactive",
+            identityAssurance: "declared_unverified",
+          }))
+          .sort((a, b) => a.code.localeCompare(b.code)),
+      );
+      const acceptedView = await view("verify");
+      assert.ok(text(acceptedView).includes(input.rationale.trim()));
+      assert.equal(
+        elements(
+          renderedForm(acceptedView, "accept"),
+          (element) => attr(element, "name") === "codes",
+        ).length,
+        0,
+      );
+      await run("report");
+      const closeForm = renderedForm(await view("close"), "close");
+      noDefaultConsent(closeForm);
+      assert.equal(attr(formField(closeForm, "approver"), "value"), "exception reviewer");
+      const closeInput = {
+        approver: "go-live reviewer",
+        evidenceDigest: capturedField(closeForm, "evidenceDigest"),
+        confirmGoLive: true,
+      };
+      assert.equal(
+        (await handle(request("close", { ...closeInput, confirmGoLive: false }))).status,
+        409,
+      );
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.equal(projected.value.closeAuthorization, null);
+      await run("verify");
+      await run("close", closeInput);
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.equal(projected.value.closeAuthorization, null);
+      assert.notEqual(projected.value.state, "closed");
+      await run("acquire");
+      await run("accept", {
+        ...input,
+        verificationDigest: capturedField(
+          renderedForm(await view("verify"), "accept"),
+          "verificationDigest",
+        ),
+      });
+      await run("report");
+      closeInput.evidenceDigest = capturedField(
+        renderedForm(await view("close"), "close"),
+        "evidenceDigest",
+      );
+      await run("close", closeInput);
+      projected = await engine.reader(created.value).status();
+      assert.ok(projected.ok);
+      assert.equal(projected.value.state, "closed");
+      assert.equal(projected.value.closeAuthorization?.evidenceDigest, closeInput.evidenceDigest);
+      assert.equal(projected.value.closeAuthorization?.approver, closeInput.approver);
+      assert.equal(projected.value.closeAuthorization?.mode, "interactive");
+      assert.equal(projected.value.closeAuthorization?.identityAssurance, "declared_unverified");
+    } finally {
+      await session?.close();
+      engine.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("confirms expanded authority once and resumes durably authorized go-live without another challenge", async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "migmate-web-authority-"));
+    const fixture = fileFixture([
+      { id: "file", parentId: "source-root", name: "a.txt", kind: "file", content: "proof" },
+    ]);
+    fixture.googleAbout = {
+      user: { emailAddress: "files@example.com" },
+      canCreateDrives: true,
+    };
+    const provider = new FakeFileMigrationPort(fixture);
+    const engine = openEngine({ home, provider, adapter: "web" });
+    const created = await engine.initJob({
+      type: "file_migration",
+      config: {
+        mappings: [],
+        options: { mirror: true, deleteLimit: 10, memberGrants: "after_verification" },
+      },
+    });
+    assert.ok(created.ok);
+    const session = new WebSession({ engine, job: created.value });
+    t.after(async () => {
+      await session.close();
+      engine.close();
+      rmSync(home, { recursive: true, force: true });
+    });
+    const loaded = await engine.withWriterResult(created.value, (writer) =>
+      writer.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "mapping",
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+              destination: { type: "google_shared_drive", create: "Reviewed destination" },
+              members: [
+                { email: "one@example.test", type: "user", role: "writer" },
+                { email: "two@example.test", type: "group", role: "reader" },
+              ],
+            },
+          ],
+        }),
+      }),
+    );
+    assert.ok(loaded.ok);
+    await session.open();
+    const handle = createProtocolHandler({ session });
+    const view = async (stage: string) =>
+      parse(await (await handle(new Request(`migmate://localhost/view?stage=${stage}`))).text());
+    const run = async (action: string, input: Record<string, unknown> = {}) => {
+      assert.equal((await handle(request(action, input))).status, 202);
+      await settled(session);
+    };
+    await run("plan");
+    let form = renderedForm(await view("approve"), "approve");
+    noDefaultConsent(form);
+    for (const name of ["confirmMirror", "confirmAccess"]) {
+      assert.equal(elements(form, (element) => attr(element, "name") === name).length, 1);
+      assert.equal(attr(formField(form, name), "required"), "");
+    }
+    for (const identity of ["one@example.test", "two@example.test"])
+      assert.ok(text(form).includes(identity));
+    const input = {
+      approver: "operator",
+      planDigest: capturedField(form, "planDigest"),
+      confirm: true,
+      confirmMirror: true,
+      confirmAccess: true,
+    };
+    await run("approve", { ...input, confirmAccess: false });
+    let projected = await engine.reader(created.value).status();
+    assert.ok(projected.ok);
+    assert.equal(projected.value.currentApproval, null);
+    await run("acquire");
+    await run("approve", input);
+    projected = await engine.reader(created.value).status();
+    assert.ok(projected.ok);
+    assert.equal(projected.value.state, "approved");
+    assert.equal(projected.value.currentApproval?.planDigest, input.planDigest);
+    await run("plan");
+    form = renderedForm(await view("approve"), "approve");
+    for (const name of ["confirmMirror", "confirmAccess"])
+      assert.equal(elements(form, (element) => attr(element, "name") === name).length, 0);
+    assert.equal(attr(formField(form, "confirm"), "required"), "");
+    await run("approve", {
+      approver: "operator",
+      planDigest: capturedField(form, "planDigest"),
+      confirm: true,
+    });
+    await run("execute");
+    const closeForm = renderedForm(await view("close"), "close");
+    noDefaultConsent(closeForm);
+    provider.scriptEffect({
+      method: "listFileHashes",
+      count: 1,
+      error: new TypeError("listing temporarily unavailable"),
+    });
+    await run("close", {
+      approver: "go-live reviewer",
+      evidenceDigest: capturedField(closeForm, "evidenceDigest"),
+      confirmGoLive: true,
+    });
+    projected = await engine.reader(created.value).status();
+    assert.ok(projected.ok);
+    assert.equal(projected.value.state, "verified");
+    assert.equal(projected.value.createdDrives[0]?.goLive?.check?.status, "failed");
+    const authorization = projected.value.closeAuthorization;
+    assert.equal(authorization?.approver, "go-live reviewer");
+    assert.equal(authorization?.mode, "interactive");
+    await run("acquire");
+    const recovery = renderedForm(await view("close"), "close");
+    assert.equal(attr(formField(recovery, "recovery"), "type"), "hidden");
+    for (const name of ["confirmGoLive", "approver"])
+      assert.equal(elements(recovery, (element) => attr(element, "name") === name).length, 0);
+    await run("close");
+    projected = await engine.reader(created.value).status();
+    assert.ok(projected.ok);
+    assert.equal(projected.value.state, "closed");
+    assert.equal(projected.value.createdDrives[0]?.goLive?.check?.status, "passed");
+    assert.deepEqual(projected.value.closeAuthorization, authorization);
+    const artifacts = await engine.reader(created.value).artifacts();
+    assert.ok(artifacts.ok);
+    assert.ok(artifacts.value.artifacts.some((artifact) => artifact.name === "report.json"));
   });
 
   it(

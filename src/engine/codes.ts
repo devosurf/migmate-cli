@@ -125,3 +125,57 @@ export function isAcceptable(code: string): boolean {
   const kind = CODE_BY_NAME[code]?.kind;
   return kind !== undefined && kind !== "policy_outcome";
 }
+
+const consequences: Record<string, string> = {
+  source_package_omitted: "Source packages, including notebooks, are absent from the destination.",
+  source_reference_omitted: "Referenced source content was not copied.",
+  source_content_unavailable: "Unavailable source content is absent from the migration.",
+  route_limit_omission: "Content outside this route's supported limits was omitted.",
+  version_history_omitted:
+    "Historical versions were not migrated; only the current version is covered.",
+  source_metadata_export_only:
+    "Source metadata is retained only in the export, not restored at the destination.",
+  destination_collision_omitted: "Content colliding at the destination was not copied.",
+  metadata_not_preserved: "Some source metadata was not preserved.",
+  content_verification_degraded:
+    "Content equality is not fully proven; verification used weaker evidence.",
+  omitted_by_rule: "Explicitly excluded source content remains absent from the destination.",
+  retained_history_not_requested: "Retained historical messages are outside this archive.",
+  transcript_unsupported_channel_meeting: "Unsupported channel-meeting transcripts are absent.",
+  attachment_metadata_only: "Attachment metadata is retained without attachment bytes.",
+  source_read_failed: "Source content could not be read and may be absent.",
+  destination_write_failed: "Destination writes failed; affected content is not proven complete.",
+  drive_membership_mismatch:
+    "Destination membership differs from the approved member declarations.",
+  destination_missing: "Verified source content is missing from the destination.",
+  destination_path_mismatch: "Destination content is stored at a different path.",
+  provenance_mismatch: "Destination provenance does not match the expected source.",
+  source_size_inconsistent:
+    "Source-listed size contradicts downloaded bytes; source parity is qualified.",
+  size_mismatch: "Source and destination sizes differ.",
+  content_mismatch: "Source and destination content differ.",
+  destination_rewrote_file: "The destination rewrote the source file.",
+  metadata_mismatch: "Destination metadata differs from the source.",
+  message_collection_incomplete: "The archive does not contain every requested message.",
+  hosted_content_unavailable_deleted_thread: "Hosted content from deleted threads is missing.",
+  hosted_content_unavailable_retained_message: "Hosted content from retained messages is missing.",
+  attachment_content_unavailable: "Some attachment bytes are unavailable.",
+  attachment_reference_unresolvable: "Some attachment references cannot be resolved.",
+  transcript_unavailable: "Some requested transcripts are unavailable.",
+  render_downgraded: "Some messages have reduced rendering fidelity.",
+  identity_unresolved: "Some participant identities could not be resolved.",
+  record_count_mismatch: "Archive record counts do not match the collected evidence.",
+  record_unrendered: "Some collected records are absent from rendered pages.",
+  record_duplicated: "Some records appear more than once in rendered pages.",
+  asset_missing: "Referenced archive assets are missing.",
+  asset_digest_mismatch: "Archive asset bytes do not match their recorded digests.",
+  page_parse_failed: "Some archive pages could not be parsed and verified.",
+  manifest_digest_mismatch: "Archive manifest evidence does not match the stored content.",
+};
+/** Acceptance records a limitation, never repairs it or proves successful verification. */
+export function exceptionConsequence(code: string): string {
+  return (
+    consequences[code] ??
+    `The ${code.replaceAll("_", " ")} finding remains unresolved; acceptance does not repair affected content or prove completeness.`
+  );
+}

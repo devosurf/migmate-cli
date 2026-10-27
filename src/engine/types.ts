@@ -299,6 +299,8 @@ export interface ApprovalRecord {
   planDigest: string;
   approver: string;
   mode: "interactive" | "unattended";
+  identityAssurance: "declared_unverified";
+  riskConfirmations?: { mirror?: boolean; access?: boolean };
   at: string;
   freeze?: { by: string; at: string; how: string };
   sourceInventoryAt?: string;
@@ -306,8 +308,39 @@ export interface ApprovalRecord {
 }
 
 export interface AcceptedException {
+  verificationDigest: string;
   code: string;
-  note?: string;
+  approver: string;
+  mode: "interactive" | "unattended" | "legacy_unknown";
+  identityAssurance: "declared_unverified";
+  note: string;
+  at: string;
+}
+
+export interface CloseAuthorization {
+  evidenceDigest: string;
+  approver: string;
+  mode: "interactive" | "unattended";
+  identityAssurance: "declared_unverified";
+  at: string;
+}
+
+export interface ApprovalAuthority {
+  mirrorChanges: {
+    mappingId: string;
+    source: string;
+    destination: string;
+    deleteLimit: number;
+    previousDeleteLimit: number | null;
+  }[];
+  accessChanges: {
+    mappingId: string;
+    email: string;
+    type: string;
+    role: string;
+    previousRole: string | null;
+    timing: string;
+  }[];
 }
 
 export interface VerificationRevision {
@@ -430,6 +463,20 @@ export interface JobStatus {
   planRevision: number | null;
   planDigest: string | null;
   currentPlan: PlanRevision | null;
+  lastInteractiveIdentity?: string | null;
+  currentApproval?: ApprovalRecord | null;
+  approvalAuthority?: ApprovalAuthority;
+  exceptionGroups?: {
+    code: string;
+    consequence: string;
+    count: number;
+    examples: string[];
+    acceptable: boolean;
+    accepted: boolean;
+  }[];
+  acceptedExceptions?: AcceptedException[];
+  closeReview?: { evidenceDigest: string; consequences: string[]; authorized: boolean } | null;
+  closeAuthorization?: CloseAuthorization | null;
   verificationDigest: string | null;
   progress: Progress | null;
   mappingPasses: MappingPass[];

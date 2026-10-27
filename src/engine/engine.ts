@@ -11,7 +11,6 @@
  */
 
 import type {
-  AcceptedException,
   ApprovalRecord,
   ArtifactSet,
   Closure,
@@ -81,16 +80,25 @@ export interface JobWriter {
     planDigest: string;
     mode: "interactive" | "unattended";
     freeze?: { by: string; at: string; how: string };
+    riskConfirmations?: { mirror?: boolean; access?: boolean };
   }): Promise<Outcome<ApprovalRecord>>;
   execute(opts?: ExecuteOptions): Promise<Outcome<ExecuteResult>>;
   verify(opts?: ExecuteOptions): Promise<Outcome<VerificationRevision>>;
   accept(x: {
     verificationDigest: string;
-    codes: AcceptedException[];
+    codes: string[];
+    rationale: string;
+    mode: "interactive" | "unattended";
     approver: string;
   }): Promise<Outcome<VerificationRevision>>;
   report(): Promise<Outcome<ArtifactSet>>;
-  close(): Promise<Outcome<Closure>>;
+  close(input?: {
+    evidenceDigest: string;
+    approver: string;
+    mode: "interactive" | "unattended";
+    confirmGoLive?: boolean;
+    signal?: AbortSignal;
+  }): Promise<Outcome<Closure>>;
   cancel(reason: string): Promise<Outcome<Closure>>;
 }
 

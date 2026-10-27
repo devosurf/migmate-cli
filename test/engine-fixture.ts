@@ -58,3 +58,15 @@ export async function approve(h: { engine: Engine; ref: JobRef }): Promise<strin
     }),
   );
 }
+
+/** Capture current reviewed evidence once; recovery deliberately supplies no new decision. */
+export async function closeDecision(h: { engine: Engine; ref: JobRef }) {
+  const review = value(await h.engine.reader(h.ref).status()).closeReview;
+  return review && !review.authorized
+    ? {
+        evidenceDigest: review.evidenceDigest,
+        approver: "engine-contract-test",
+        mode: "unattended" as const,
+      }
+    : undefined;
+}

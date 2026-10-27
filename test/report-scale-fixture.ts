@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { parse } from "csv-parse";
 import { openEngine } from "../src/engine/index.ts";
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
-import { fileFixture, value, approve } from "./engine-fixture.ts";
+import { fileFixture, value, approve, closeDecision } from "./engine-fixture.ts";
 
 const home = await mkdtemp(join(tmpdir(), "migmate-report-scale-"));
 const started = performance.now();
@@ -138,7 +138,9 @@ try {
     await engine.withWriterResult(ref, (w) =>
       w.accept({
         verificationDigest: verification,
-        codes: [{ code: "omitted_by_rule", note: "Scale fixture accepted exception" }],
+        codes: ["omitted_by_rule"],
+        rationale: "Scale fixture accepted exception",
+        mode: "unattended",
         approver: "scale-operator",
       }),
     ),
@@ -148,9 +150,10 @@ try {
     peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
   }, 10);
   sample.unref();
-  // Deferred close itself generates the complete report; do not serialize the
-  // same large inventory once here and then a second time inside close.
-  value(await engine.withWriterResult(ref, (w) => w.close()));
+  // Deferred close renders readiness and the final evidence without materializing the inventory.
+  value(
+    await engine.withWriterResult(ref, async (w) => w.close(await closeDecision({ engine, ref }))),
+  );
   assert.equal(value(await engine.reader(ref).status()).state, "closed");
   const report = value(await engine.reader(ref).artifacts());
   assert.equal(report.artifacts.length, 5);

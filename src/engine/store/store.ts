@@ -23,6 +23,8 @@ import {
   refuse,
   VERBS,
   type ApprovalRecord,
+  type AcceptedException,
+  type CloseAuthorization,
   type ArtifactSet,
   type CheckResult,
   type EventKind,
@@ -61,10 +63,12 @@ import type {
 import { canonicalJson, digestJson } from "./digest.ts";
 import type { StoredMappings } from "../manifest.ts";
 import { readReportJson } from "./report.ts";
+import { exceptionConsequence, isAcceptable } from "../codes.ts";
+import { approvalAuthority } from "../decisions.ts";
 import { ReportArray } from "../report.ts";
 import type { DriverContext } from "../drivers/types.ts";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 const BUSY_TIMEOUT_MS = 5_000;
 const schemaSql = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
 const extensionMarker = "-- Full file intents/results are retained";
@@ -123,12 +127,8 @@ export interface PlanRevisionRecord extends PlanRevision {
 export interface VerificationRevisionRecord extends VerificationRevision {
   planRev: number;
 }
-export interface AcceptanceRecord {
-  verificationDigest: string;
-  code: string;
-  approver: string;
+export interface AcceptanceRecord extends Omit<AcceptedException, "note"> {
   note: string | null;
-  at: string;
 }
 export interface FindingRecord {
   id?: number;
@@ -172,6 +172,11 @@ export interface Store {
   writePlanRevision(record: PlanRevisionRecord): void;
   readApproval(revision: number): ApprovalRecord | null;
   hasApprovedStagedPlan(): boolean;
+  latestApprovedPlan(): PlanRevisionRecord | null;
+  readCloseAuthorization(): CloseAuthorization | null;
+  writeCloseAuthorization(record: CloseAuthorization): void;
+  lastInteractiveIdentity(): string | null;
+  recordInteractiveIdentity(approver: string): void;
   writeApproval(record: ApprovalRecord): void;
   readVerificationRevision(revision: number): VerificationRevisionRecord | null;
   writeVerificationRevision(record: VerificationRevisionRecord): void;
@@ -447,6 +452,20 @@ function migrateVersion3(db: DatabaseSync): void {
 
 function migrateVersion4(db: DatabaseSync): void {
   db.exec(schemaSql.slice(schemaSql.indexOf("-- Shared Drive provisioning")));
+  db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
+}
+
+function migrateDecisions(db: DatabaseSync): void {
+  if (
+    !db
+      .prepare("PRAGMA table_info(acceptance)")
+      .all()
+      .some((row) => row.name === "mode")
+  )
+    db.exec(
+      "ALTER TABLE acceptance ADD COLUMN mode TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK (mode IN ('interactive','unattended','legacy_unknown'))",
+    );
+  db.exec(schemaSql.slice(schemaSql.indexOf("-- Local decision evidence")));
   db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
 }
 
@@ -918,17 +937,65 @@ class StoreImpl implements Store {
         .get() !== undefined
     );
   }
+  latestApprovedPlan(): PlanRevisionRecord | null {
+    const row = this.db
+      .prepare(
+        "SELECT p.rev FROM plan_revision p JOIN approval a ON a.rev=p.rev AND a.plan_digest=p.plan_digest ORDER BY a.id DESC LIMIT 1",
+      )
+      .get();
+    return row ? this.readPlanRevision(Number(row.rev)) : null;
+  }
+  readCloseAuthorization(): CloseAuthorization | null {
+    const row = this.db.prepare("SELECT payload FROM decision_evidence WHERE key='close'").get();
+    return row ? (JSON.parse(String(row.payload)) as CloseAuthorization) : null;
+  }
+  writeCloseAuthorization(record: CloseAuthorization): void {
+    this.db
+      .prepare(
+        "INSERT INTO decision_evidence (key,payload) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+      )
+      .run(`close:${record.evidenceDigest}`, canonicalJson(record));
+    this.db
+      .prepare(
+        "INSERT INTO decision_evidence (key,payload) VALUES ('close',?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+      )
+      .run(canonicalJson(record));
+    if (record.mode === "interactive") this.recordInteractiveIdentity(record.approver);
+  }
+  lastInteractiveIdentity(): string | null {
+    const row = this.db
+      .prepare("SELECT payload FROM decision_evidence WHERE key='interactive_identity'")
+      .get();
+    if (row) return JSON.parse(String(row.payload)) as string;
+    // Pre-v6 approvals recorded their mode, but acceptances did not.
+    const historical = this.db
+      .prepare("SELECT approver FROM approval WHERE mode='interactive' ORDER BY id DESC LIMIT 1")
+      .get();
+    return historical ? String(historical.approver) : null;
+  }
+  recordInteractiveIdentity(approver: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO decision_evidence (key,payload) VALUES ('interactive_identity',?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+      )
+      .run(canonicalJson(approver));
+  }
   readApproval(revision: number): ApprovalRecord | null {
     const row = this.db
       .prepare("SELECT * FROM approval WHERE rev=? ORDER BY id DESC LIMIT 1")
       .get(revision);
     if (row === undefined) return null;
-    if (typeof row.payload === "string") return JSON.parse(row.payload) as ApprovalRecord;
+    if (typeof row.payload === "string")
+      return {
+        ...(JSON.parse(row.payload) as ApprovalRecord),
+        identityAssurance: "declared_unverified",
+      };
     const approval = {
       revision: Number(row.rev),
       planDigest: String(row.plan_digest),
       approver: String(row.approver),
       mode: row.mode as ApprovalRecord["mode"],
+      identityAssurance: "declared_unverified" as const,
       at: String(row.at),
     };
     return { ...approval, approvalDigest: digestJson(approval) };
@@ -946,6 +1013,7 @@ class StoreImpl implements Store {
         record.at,
         canonicalJson(record),
       );
+    if (record.mode === "interactive") this.recordInteractiveIdentity(record.approver);
   }
   #snapshotVerification(planRev: number, run: number): void {
     const insert = this.db.prepare(
@@ -1061,6 +1129,8 @@ class StoreImpl implements Store {
         verificationDigest: String(row.verification_digest),
         code: String(row.code),
         approver: String(row.approver),
+        mode: String(row.mode) as AcceptanceRecord["mode"],
+        identityAssurance: "declared_unverified",
         note: nullableString(row.note),
         at: String(row.at),
       }));
@@ -1088,10 +1158,17 @@ class StoreImpl implements Store {
         }
       }
       const insert = this.db.prepare(
-        "INSERT INTO acceptance (verification_digest,code,approver,note,at) VALUES (?,?,?,?,?) ON CONFLICT(verification_digest,code) DO NOTHING",
+        "INSERT INTO acceptance (verification_digest,code,approver,note,at,mode) VALUES (?,?,?,?,?,?) ON CONFLICT(verification_digest,code) DO NOTHING",
       );
       for (const record of records)
-        insert.run(record.verificationDigest, record.code, record.approver, record.note, record.at);
+        insert.run(
+          record.verificationDigest,
+          record.code,
+          record.approver,
+          record.note,
+          record.at,
+          record.mode,
+        );
     });
   }
   readFindings(revision: number, phase?: RowPhase): FindingRecord[] {
@@ -2518,6 +2595,34 @@ class StoreImpl implements Store {
         planRevision: job.planRevision,
         planDigest: plan?.planDigest ?? null,
         currentPlan,
+        approvalAuthority: approvalAuthority(plan, this.latestApprovedPlan()),
+        exceptionGroups: findings.map((finding) => {
+          const phase = verification ? "verify" : this.currentPhase(job.planRevision ?? 0);
+          const selection = this.#currentFindingIds(job.planRevision ?? 0, phase);
+          const examples = this.db
+            .prepare(
+              `SELECT subject_id FROM finding WHERE id IN (${selection.sql}) AND code=? ORDER BY id LIMIT 3`,
+            )
+            .all(...selection.params, finding.code)
+            .map((row) => String(row.subject_id));
+          return {
+            code: finding.code,
+            consequence: exceptionConsequence(finding.code),
+            count: finding.count,
+            examples,
+            acceptable: isAcceptable(finding.code),
+            accepted: accepted.has(finding.code),
+          };
+        }),
+        currentApproval: plan ? this.readApproval(plan.revision) : null,
+        lastInteractiveIdentity: this.lastInteractiveIdentity(),
+        closeAuthorization: this.readCloseAuthorization(),
+        acceptedExceptions: verification
+          ? this.readAcceptances(verification.verificationDigest).map((record) => ({
+              ...record,
+              note: record.note ?? "",
+            }))
+          : [],
         verificationDigest: verification?.verificationDigest ?? null,
         progress,
         mappingPasses: this.readMappingPasses(job.planRevision ?? 0),
@@ -2708,8 +2813,9 @@ export function openStore(
         else if (version === 2) migrateVersion2(db);
         else if (version === 3) migrateVersion3(db);
         else if (version === 4) migrateVersion4(db);
-        else if (version !== null && version !== SCHEMA_VERSION)
+        else if (version !== null && version !== 5 && version !== SCHEMA_VERSION)
           throw new Error("Job schema changed while opening");
+        if (version !== null && version < 6) migrateDecisions(db);
       }
     });
     syncDirectory(root);

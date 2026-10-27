@@ -1,3 +1,4 @@
+import { hostname, userInfo } from "node:os";
 import { VERBS, type Row, type RowPage } from "../engine/index.ts";
 import { isAcceptable } from "../engine/codes.ts";
 import type { ViewQuery, WebSnapshot } from "./session.ts";
@@ -74,6 +75,35 @@ function planReview(snapshot: WebSnapshot): string {
     }</section>`;
 }
 
+function declaredIdentity(snapshot: WebSnapshot): string {
+  const identity =
+    snapshot.status?.lastInteractiveIdentity ?? `${userInfo().username}@${hostname()}`;
+  return `<p>This is a recorded local attestation, not authentication or proof that a human acted. Shell or browser automation can submit the same action.</p><label>Unverified declared identity<input name="approver" value="${escapeHtml(identity)}" required autocomplete="username"></label>`;
+}
+
+function authorityConfirmations(snapshot: WebSnapshot): string {
+  const authority = snapshot.status?.approvalAuthority;
+  const mirror = authority?.mirrorChanges ?? [];
+  const access = authority?.accessChanges ?? [];
+  return `${mirror.length ? `<section><h3>Changed mirror deletion authority</h3><ul>${mirror.map((change) => `<li>${escapeHtml(change.mappingId)}: ${escapeHtml(change.source)} → ${escapeHtml(change.destination)}; delete limit ${change.deleteLimit} (previous ${change.previousDeleteLimit ?? "none"})</li>`).join("")}</ul><p>These are authority limits, not predicted deletions. Actual deletions remain unknown until execution.</p><label class="confirmation"><input type="checkbox" name="confirmMirror" required>I confirm this changed set of mirror deletion authority and limits.</label></section>` : ""}
+    ${access.length ? `<section><h3>Changed access authority</h3><ul>${access.map((change) => `<li>${escapeHtml(change.mappingId)}: ${escapeHtml(change.email)} (${escapeHtml(change.type)}), ${escapeHtml(change.previousRole ?? "no approved role")} → ${escapeHtml(change.role)}; grant timing: ${escapeHtml(change.timing)}</li>`).join("")}</ul><p>These identities have no verified internal/external classification.</p><label class="confirmation"><input type="checkbox" name="confirmAccess" required>I confirm this changed set of member grants and roles.</label></section>` : ""}`;
+}
+
+function decisionRecords(snapshot: WebSnapshot): string {
+  const status = snapshot.status;
+  const records = [
+    { title: "Current plan approval", value: status?.currentApproval },
+    {
+      title: "Current verification exceptions",
+      value: status?.acceptedExceptions?.length ? status.acceptedExceptions : null,
+    },
+    { title: "Go-live authorization", value: status?.closeAuthorization },
+  ].filter((record) => record.value);
+  return records.length
+    ? `<section aria-label="Recorded local attestations"><h3>Recorded local attestations · identities unverified</h3>${records.map((record) => `<details open><summary>${record.title}</summary><pre>${escapeHtml(JSON.stringify(record.value, null, 2))}</pre></details>`).join("")}</section>`
+    : "";
+}
+
 function stagePanel(snapshot: WebSnapshot, query: ViewQuery): string {
   const disabled = snapshot.readonly || snapshot.busy !== null;
   const status = snapshot.status;
@@ -91,23 +121,44 @@ function stagePanel(snapshot: WebSnapshot, query: ViewQuery): string {
       return `<h2>plan · Review proposed outcomes</h2>${actionForm("plan", "Make plan", disabled)}${status?.jobType === "file_migration" ? actionForm("plan", "Make final cutover plan", disabled, '<input type="hidden" name="final" value="true"><p>For a staged job: final execution settles the approved source content before full verification. Freeze the source before approving.</p>') : ""}${planReview(snapshot)}<p>Collisions must be resolved outside Migmate, or excluded by stable item identity in configuration followed by a new plan. There are no destructive remediation controls.</p>${reviewTable(snapshot.rows, query)}`;
     case "approve":
       return `<h2>approve · Bind your decision</h2>${planReview(snapshot)}${reviewTable(snapshot.rows, query)}
-      ${actionForm("approve", "Approve this exact plan", disabled || !status?.planDigest || !snapshot.plan, `<label>Approver identity<input name="approver" required autocomplete="username"></label><label>Reviewed plan digest<input name="planDigest" value="${escapeHtml(status?.planDigest ?? "")}" readonly required></label>${snapshot.plan?.stage === "final" ? '<fieldset><legend>Source freeze attestation</legend><label>Who froze the source<input name="freezeBy" required></label><label>When (timestamp with timezone)<input name="freezeAt" placeholder="2026-10-04T12:00:00Z" required></label><label>How the source was frozen<textarea name="freezeHow" required></textarea></label><p>This is your attestation, not an automatic tenant lock or a claim of exact parity.</p></fieldset>' : ""}<label class="confirmation"><input type="checkbox" name="confirm" required>I have reviewed this exact digest, its expanded scope, rows, omissions, options, and standing disclosures.</label>`)}<p>Approval does not execute the job. Changing the plan invalidates the old approval; execution re-checks the digest before writing.</p>`;
+      ${actionForm("approve", "Approve this exact plan", disabled || !status?.planDigest || !snapshot.plan, `${declaredIdentity(snapshot)}<input type="hidden" name="planDigest" value="${escapeHtml(status?.planDigest ?? "")}">${authorityConfirmations(snapshot)}${snapshot.plan?.stage === "final" ? '<fieldset><legend>Source freeze attestation</legend><label>Who froze the source<input name="freezeBy" required></label><label>When (timestamp with timezone)<input name="freezeAt" placeholder="2026-10-04T12:00:00Z" required></label><label>How the source was frozen<textarea name="freezeHow" required></textarea></label><p>This is your attestation, not an automatic tenant lock or a claim of exact parity.</p></fieldset>' : ""}<label class="confirmation"><input type="checkbox" name="confirm" required>I approve the reviewed plan, scope, omissions, options and standing disclosures.</label>`)}<p>Approval does not execute the job. The displayed digest is captured automatically; changing the plan invalidates approval.</p>`;
     case "execute":
       return `<h2>execute · Foreground, checkpointed work</h2><p>Closing this window does not stop an active run. Quitting this process interrupts at the safest checkpoint; re-invoking execute resumes. Only cancel is a terminal stop, and it never rolls back destination writes.</p>${actionForm("execute", status?.resumable ? "Execute from last checkpoint" : "Execute approved plan", disabled)}${progress(snapshot)}${reviewTable(snapshot.rows, query)}`;
     case "status":
       return `<h2>status · Durable facts</h2><p>Status and row evidence remain readable while another process owns the job. Refreshes never acquire a lease.</p><button type="button" data-refresh>Refresh status</button>${progress(snapshot)}`;
     case "verify": {
-      const findings = snapshot.verification?.findings ?? status?.outstandingFindings ?? [];
-      const codes = findings.filter((finding) => isAcceptable(finding.code));
+      const groups = status?.exceptionGroups ?? [];
+      const selectable = groups.filter(
+        (group) => group.acceptable && !group.accepted && isAcceptable(group.code),
+      );
       return `<h2>verify · Proof and exceptions</h2><p>File content proof is separate from structural and metadata proof. <code>content_verification_degraded</code> is not clean byte-level verification. Archive verification proves the local package against itself; it does not re-query the tenant.</p>${actionForm("verify", "Run verification again", disabled)}<p>Verification digest <code>${escapeHtml(status?.verificationDigest ?? "not verified")}</code>. Every re-verification invalidates prior acceptances.</p>${reviewTable(snapshot.rows, query)}
-        <h3>Accept named exceptions</h3><p>Acceptance keeps the code, affected items, and consequence in evidence and reports. Nothing is relabelled as success.</p>
-        ${actionForm("accept", "Accept selected exceptions", disabled || !status?.verificationDigest || codes.length === 0, `<input type="hidden" name="verificationDigest" value="${escapeHtml(status?.verificationDigest ?? "")}"><label>Approver identity<input name="approver" required autocomplete="username"></label>${codes.map((finding) => `<label class="confirmation"><input type="checkbox" name="codes" value="${escapeHtml(finding.code)}">${escapeHtml(finding.code)} · ${finding.count} affected rows</label><label>Note for ${escapeHtml(finding.code)}<input name="note:${escapeHtml(finding.code)}"></label>`).join("")}<p>Select each named exception deliberately. There is no accept-all action.</p>`)}`;
+        <h3>Accept named exception groups</h3><p>Groups cover the entire verification, regardless of row filters. Counts are per group and may overlap; their sum is not a distinct-item count. Acceptance never relabels findings as success.</p>
+        ${actionForm("accept", "Accept selected groups", disabled || !status?.verificationDigest || selectable.length === 0, `<input type="hidden" name="verificationDigest" value="${escapeHtml(status?.verificationDigest ?? "")}">${declaredIdentity(snapshot)}${groups.map((group) => `<section data-exception-code="${escapeHtml(group.code)}"><h4><code>${escapeHtml(group.code)}</code> · ${group.count} affected items</h4><p>${escapeHtml(group.consequence)}</p><ul>${group.examples.map((example) => `<li>${escapeHtml(example)}</li>`).join("")}</ul>${group.accepted ? "<p>Accepted exception — still disclosed</p>" : group.acceptable && isAcceptable(group.code) ? `<label class="confirmation"><input type="checkbox" name="codes" value="${escapeHtml(group.code)}">Select this group</label>` : "<p>This finding cannot be accepted.</p>"}</section>`).join("")}<label>Common rationale for the selected groups<textarea name="rationale" required rows="3"></textarea></label><p>No groups are selected by default. Changing the selection clears its confirmation.</p><label class="confirmation"><input type="checkbox" name="confirm" required><span data-group-confirmation>I confirm acceptance of 0 selected groups with this rationale.</span></label>`)}`;
     }
     case "report":
       return `<h2>report · Digest-bound artifacts</h2>${actionForm("report", "Generate report artifacts", disabled)}<p>Report digest <code>${escapeHtml(snapshot.artifacts?.reportDigest ?? "not generated")}</code></p>
       <ul class="artifacts">${(snapshot.artifacts?.artifacts ?? []).map((artifact) => `<li><strong>${escapeHtml(artifact.name)}</strong> · ${escapeHtml(artifact.format)}<br><code>${escapeHtml(artifact.path)}</code><br>Digest <code>${escapeHtml(artifact.digest)}</code></li>`).join("")}</ul><p>Open these artifacts from their job folder. A Teams archive is its own self-contained, JavaScript-free package; this window is not the archive reader.</p>`;
-    case "close":
-      return `<h2>close · Complete the job</h2><p>Closure refuses while any verification gap remains unaccepted. Accepted exceptions survive into the completed report.</p>${actionForm("close", "Close job", disabled, '<label class="confirmation"><input type="checkbox" name="confirm" required>I am closing this job with its recorded verification and any explicitly accepted exceptions.</label>')}${progress(snapshot)}`;
+    case "close": {
+      const review = status?.closeReview;
+      const recovery =
+        review?.authorized === true &&
+        status?.closeAuthorization?.evidenceDigest === review.evidenceDigest;
+      return `<h2>close · Authorize go-live</h2><p>Plan approval and a completed copy are not go-live authorization. Closure refuses while required verification gaps remain unaccepted. Exceptions remain in the completed report.</p><p>Reviewed evidence <code>${escapeHtml(review?.evidenceDigest ?? "not ready")}</code></p><ul>${(review?.consequences ?? []).map((consequence) => `<li>${escapeHtml(consequence)}</li>`).join("")}</ul><p>Pre-close report <code>${escapeHtml(snapshot.artifacts?.reportDigest ?? "not generated yet; readiness is required before authorization")}</code></p><ul>${(snapshot.artifacts?.artifacts ?? []).map((artifact) => `<li>${escapeHtml(artifact.name)}: <code>${escapeHtml(artifact.path)}</code> · ${escapeHtml(artifact.digest)}</li>`).join("")}</ul>${
+        recovery
+          ? actionForm(
+              "close",
+              "Resume authorized close",
+              disabled || status?.state === "closed",
+              '<p>Matching durable authorization is recorded below. Resume unfinished close work without a new go-live decision; the engine rechecks its binding.</p><input type="hidden" name="recovery" value="true">',
+            )
+          : actionForm(
+              "close",
+              "Authorize go-live and close",
+              disabled || !review || status?.state === "closed",
+              `${declaredIdentity(snapshot)}<input type="hidden" name="evidenceDigest" value="${escapeHtml(review?.evidenceDigest ?? "")}"><label class="confirmation"><input type="checkbox" name="confirmGoLive" required>I have reviewed the pre-close report and exceptions and authorize the listed go-live access consequences.</label>`,
+            )
+      }${progress(snapshot)}`;
+    }
     case "cancel":
       return `<h2>cancel · Terminal stop</h2><p>Cancellation is irreversible for this job and never rolls back or deletes destination writes. To interrupt a run resumably, quit the owning process instead.</p>${actionForm("cancel", "Cancel job permanently", disabled, '<label>Reason<textarea name="reason" required rows="3"></textarea></label><label class="confirmation"><input type="checkbox" name="confirm" required>I understand this is a terminal cancellation, not an interruption or undo.</label>')}`;
   }
@@ -124,7 +175,7 @@ export function renderView(snapshot: WebSnapshot, query: ViewQuery): string {
   const refusal = snapshot.refusal;
   const recovery = refusal?.recovery;
   const holder = status?.ownership;
-  return `<div id="workspace" data-access="${readOnly ? "read-only" : "writer"}" data-busy="${escapeHtml(snapshot.busy ?? "")}" data-plan-digest="${escapeHtml(status?.planDigest ?? "")}" data-verification-digest="${escapeHtml(status?.verificationDigest ?? "")}">
+  return `<div id="workspace" data-access="${readOnly ? "read-only" : "writer"}" data-busy="${escapeHtml(snapshot.busy ?? "")}" data-plan-digest="${escapeHtml(status?.planDigest ?? "")}" data-verification-digest="${escapeHtml(status?.verificationDigest ?? "")}" data-close-digest="${escapeHtml(status?.closeReview?.evidenceDigest ?? "")}">
     <header><div><span class="eyebrow">MIGMATE · ${escapeHtml(status?.jobType ?? "job")}</span><h1>${escapeHtml(snapshot.job.id)}</h1></div><p data-ownership>${escapeHtml(ownership)}</p></header>
     <div class="layout"><nav aria-label="Job lifecycle"><ol>${VERBS.map((verb) => `<li><button type="button" data-stage="${verb}"${query.stage === verb ? ' aria-current="step"' : ""}><span>${verb}</span><small>${escapeHtml(status?.rail.find((entry) => entry.verb === verb)?.state ?? "pending")}</small></button></li>`).join("")}</ol></nav>
     <main id="stage" aria-live="polite">${
@@ -140,6 +191,7 @@ export function renderView(snapshot: WebSnapshot, query: ViewQuery): string {
     }
       ${snapshot.busy ? `<p class="running" role="status">${escapeHtml(snapshot.busy)} is running in the owning process. Reading remains available.</p>` : ""}
       ${stagePanel(view, query)}
+      ${decisionRecords(snapshot)}
       ${snapshot.result && snapshot.result.action === query.stage && !["plan", "status", "doctor", "report"].includes(query.stage) ? `<details><summary>Recorded ${escapeHtml(query.stage)} result</summary><pre>${escapeHtml(JSON.stringify(snapshot.result.value, null, 2))}</pre></details>` : ""}
     </main><aside aria-label="Ownership and trust facts"><h2>Process and evidence</h2><p data-ownership>${escapeHtml(ownership)}</p><dl><dt>Recorded lease holder</dt><dd>${holder?.held ? `${escapeHtml(holder.kind ?? "process")} PID ${escapeHtml(holder.pid)} · host ${escapeHtml(holder.hostId)}` : "No recorded writer"}</dd><dt>Heartbeat</dt><dd>${escapeHtml(holder?.heartbeatAt ?? "none")}</dd><dt>Run-scoped worker</dt><dd>${status?.worker?.active ? "Active" : "Inactive"}<br>Group ${escapeHtml(status?.worker?.group ?? "none")}</dd><dt>Plan digest</dt><dd><code>${escapeHtml(status?.planDigest ?? "not planned")}</code></dd><dt>Verification digest</dt><dd><code>${escapeHtml(status?.verificationDigest ?? "not verified")}</code></dd><dt>Checkpoint</dt><dd><code>${escapeHtml(status?.lastCheckpoint ?? "none")}</code></dd></dl>
       <h3>No listener</h3><p>Native custom protocol → same in-process engine. No TCP, loopback, unix listener, browser tab, or engine service.</p><p>Closing this window does not stop an active run. Quitting the process interrupts at a safe checkpoint.</p>

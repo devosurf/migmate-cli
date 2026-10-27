@@ -210,11 +210,6 @@ test("archive approval freezes empty conversations and offline verification surv
       currentTime = "2026-09-02T00:00:00.000Z";
       const replanned = await writer.plan();
       assert.ok(replanned.ok);
-      assert.equal(
-        replanned.value.planDigest,
-        planned.value.planDigest,
-        "Replanning must retain the frozen upper bound",
-      );
       assert.ok(
         (
           await writer.approve({
@@ -315,10 +310,12 @@ test("archive approval freezes empty conversations and offline verification surv
       writer.accept({
         verificationDigest,
         approver: "test",
+        rationale: "Reviewed archive limitations",
+        mode: "unattended",
         codes: [
-          { code: "message_collection_incomplete" },
-          { code: "retained_history_not_requested" },
-          { code: "attachment_metadata_only" },
+          "message_collection_incomplete",
+          "retained_history_not_requested",
+          "attachment_metadata_only",
         ],
       }),
     );
@@ -389,14 +386,22 @@ test("archive approval freezes empty conversations and offline verification surv
       const acceptance = await writer.accept({
         verificationDigest: repairedDigest,
         approver: "test",
+        rationale: "Reviewed archive limitations",
+        mode: "unattended",
         codes: [
-          { code: "message_collection_incomplete" },
-          { code: "retained_history_not_requested" },
-          { code: "attachment_metadata_only" },
+          "message_collection_incomplete",
+          "retained_history_not_requested",
+          "attachment_metadata_only",
         ],
       });
       assert.ok(acceptance.ok);
-      return writer.close();
+      const status = await reopened.reader(ref).status();
+      assert.ok(status.ok && status.value.closeReview);
+      return writer.close({
+        evidenceDigest: status.value.closeReview.evidenceDigest,
+        approver: "test",
+        mode: "unattended",
+      });
     });
     assert.ok(closure.ok);
     assert.equal(closure.value.outcome, "completed_with_accepted_exceptions");

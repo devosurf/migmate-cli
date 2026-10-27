@@ -355,6 +355,12 @@ export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIt
   for (const mapping of ctx.config.mappings) {
     if (!mapping.createDrive) continue;
     const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+    if (
+      drive.goLive?.revision === ctx.revision &&
+      drive.goLive.verificationAt === verificationAt &&
+      drive.goLive.check?.status === "passed"
+    )
+      continue;
     const expected = [...mapping.createDrive.members];
     if (
       !expected.some(
@@ -2532,14 +2538,19 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     }),
   };
   const goLiveDrives = (ctx.resume.createdDrives ?? []).filter((drive) => drive.goLive);
-  if (goLiveDrives.length)
+  if (timing === "after_verification" || goLiveDrives.length)
     yield {
       title: "Go-live",
       format: "text",
       body: JSON.stringify({
-        accessMayExist: true,
-        transfersFenced: true,
-        checksPassed: goLiveDrives.every((drive) => drive.goLive?.check?.status === "passed"),
+        accessMayExist: goLiveDrives.length > 0,
+        transfersFenced: goLiveDrives.length > 0,
+        checksPassed:
+          goLiveDrives.length > 0 &&
+          goLiveDrives.every((drive) => drive.goLive?.check?.status === "passed"),
+        ...(!goLiveDrives.length
+          ? { status: "Go-live has not started. Migmate has granted no member access." }
+          : {}),
         resolution:
           "If close fails or is interrupted, some access may already exist. Resolve membership or destination drift with an operator and retry close; do not run another copy or mirror pass.",
         drives: goLiveDrives.map((drive) => ({

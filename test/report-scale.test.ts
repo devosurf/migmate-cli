@@ -6,9 +6,9 @@ import { it } from "node:test";
 
 it(
   "reports 250,000 files across three mappings and staged passes within a fixed heap, then closes",
-  // The pair takes ~41 s on darwin-arm64; allow slow CI I/O without using
-  // more than five minutes of the 30-minute job.
-  { timeout: 300_000 },
+  // ADR-0015 requires readiness and final report renders. The previous single-render
+  // gate took ~211 s on hosted darwin-x64; budget both renders within the 30-minute job.
+  { timeout: 600_000 },
   async (t) => {
     const results: Array<{
       files: number;
@@ -26,7 +26,7 @@ it(
           new URL("./report-scale-fixture.ts", import.meta.url).pathname,
           String(files),
         ],
-        { timeout: 270_000, maxBuffer: 1024 * 1024, signal: t.signal },
+        { timeout: 540_000, maxBuffer: 1024 * 1024, signal: t.signal },
       );
       results.push(JSON.parse(stdout));
     }

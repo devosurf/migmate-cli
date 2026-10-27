@@ -65,6 +65,8 @@ async function invoke(
   options: {
     tty?: boolean[];
     answer?: string;
+    answers?: Array<string | null>;
+    onPrompt?: (index: number) => void | Promise<void>;
     write?: Io["stdout"]["write"];
     signal?: AbortSignal;
   } = {},
@@ -89,8 +91,9 @@ async function invoke(
     stdin: {
       isTTY: options.tty?.[0] ?? false,
       async readLine() {
-        prompts++;
-        return options.answer ?? null;
+        const index = prompts++;
+        await options.onPrompt?.(index);
+        return options.answers ? (options.answers[index] ?? null) : (options.answer ?? null);
       },
     },
     ...(options.signal ? { signal: options.signal } : {}),
@@ -175,6 +178,72 @@ async function planned(t: TestContext) {
   );
   assert.equal(plan.ok, true);
   return { ...h, id, plan: plan.value };
+}
+
+async function verifiedDecisionJob(t: TestContext, deferred = false) {
+  const fixture = cliFixture(deferred ? 1 : 0);
+  if (deferred)
+    fixture.googleAbout = {
+      user: { emailAddress: "files@example.com" },
+      canCreateDrives: true,
+    };
+  else
+    fixture.sourceItems.push(
+      { id: "notebook", parentId: "src-root", name: "Notebook", kind: "package" },
+      { id: "excluded", parentId: "src-root", name: "Excluded", kind: "package" },
+    );
+  const h = harness(t, fixture);
+  const engine = h.engine();
+  try {
+    const initialized = await engine.initJob({
+      type: "file_migration",
+      config: deferred
+        ? { mappings: [], options: { memberGrants: "after_verification" } }
+        : {
+            mappings: CLI_JOB_CONFIG.mappings.map((mapping) => ({
+              ...mapping,
+              exclusions: [{ sourceItemId: "excluded", reason: "Retained separately" }],
+            })),
+          },
+    });
+    assert.ok(initialized.ok);
+    const job = initialized.value;
+    const prepared = await engine.withWriter(job, async (writer) => {
+      if (deferred)
+        assert.ok(
+          (
+            await writer.loadManifest({
+              format: "json",
+              content: JSON.stringify({
+                version: 1,
+                mappings: [
+                  {
+                    id: "map-1",
+                    source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
+                    destination: { type: "google_shared_drive", create: "Reviewed destination" },
+                    members: [{ email: "reviewers@example.com", type: "group", role: "writer" }],
+                  },
+                ],
+              }),
+            })
+          ).ok,
+        );
+      const plan = await writer.plan();
+      assert.ok(plan.ok);
+      const approval = await writer.approve({
+        planDigest: plan.value.planDigest,
+        approver: "Alice",
+        mode: "interactive",
+        riskConfirmations: { access: true },
+      });
+      assert.ok(approval.ok);
+      assert.ok((await writer.execute()).ok);
+    });
+    assert.ok(prepared.ok);
+    return { ...h, id: job.id };
+  } finally {
+    engine.close();
+  }
 }
 
 it("refuses a plan without mappings with manifest-load guidance, not a credential error", async (t) => {
@@ -915,14 +984,14 @@ it("human approval prompts on stdin and stderr TTYs, honors explicit flags, and 
   for (const answer of ["", "y", "no", "yes please"]) {
     const result = await invoke(["approve", "--job", h.id], h.engine(), {
       tty: [true, false, true],
-      answer,
+      answers: ["", answer],
     });
     assert.equal(result.code, 4);
-    assert.equal(result.prompts, 1);
+    assert.equal(result.prompts, 2);
   }
   const accepted = await invoke(["approve", "--job", h.id], h.engine(), {
     tty: [true, false, true],
-    answer: " YES ",
+    answers: ["", " YES "],
   });
   assert.equal(accepted.code, 0);
   const approval: Document<ApprovalRecord> = JSON.parse(accepted.stdout);
@@ -934,10 +1003,10 @@ it("human approval prompts on stdin and stderr TTYs, honors explicit flags, and 
   const claimed = await invoke(
     ["approve", "--job", named.id, "--approver", "alice@example"],
     named.engine(),
-    { tty: [true, true, true], answer: "yes" },
+    { tty: [true, true, true], answers: ["", "yes"] },
   );
   assert.equal(claimed.code, 0);
-  assert.equal(claimed.prompts, 1);
+  assert.equal(claimed.prompts, 2);
   const claim: Document<ApprovalRecord> = JSON.parse(claimed.stdout);
   assert.equal(claim.value.approver, "alice@example");
 
@@ -958,6 +1027,414 @@ it("human approval prompts on stdin and stderr TTYs, honors explicit flags, and 
   assert.equal(flagged.code, 0);
   assert.equal(flagged.prompts, 0);
   assert.equal(document<ApprovalRecord>(flagged).value.mode, "unattended");
+});
+
+it("cancelled, EOF and aborted approval never enter the writer", async (t) => {
+  const h = await planned(t);
+  for (const answers of [[null], ["/cancel"], ["", null], ["", "no"]]) {
+    const engine = h.engine();
+    let writes = 0;
+    const original = engine.withWriterResult.bind(engine);
+    engine.withWriterResult = (...args) => {
+      writes++;
+      return original(...args);
+    };
+    const result = await invoke(["approve", "--job", h.id], engine, {
+      tty: [true, false, true],
+      answers,
+    });
+    assert.equal(result.code, 4);
+    assert.equal(writes, 0);
+  }
+  const controller = new AbortController();
+  const engine = h.engine();
+  let writes = 0;
+  const original = engine.withWriterResult.bind(engine);
+  engine.withWriterResult = (...args) => {
+    writes++;
+    return original(...args);
+  };
+  await invoke(["approve", "--job", h.id], engine, {
+    tty: [true, false, true],
+    answers: ["", "yes"],
+    signal: controller.signal,
+    onPrompt: () => controller.abort(),
+  });
+  assert.equal(writes, 0);
+});
+
+it("approval retains its reviewed digest when a new plan arrives during confirmation", async (t) => {
+  const h = await planned(t);
+  let newer: string | undefined;
+  const result = await invoke(["approve", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: ["Reviewer", "yes"],
+    async onPrompt(index) {
+      if (index !== 1) return;
+      const plan = document<PlanRevision>(
+        await invoke(["plan", "--job", h.id, "--output", "json"], h.engine()),
+      );
+      newer = plan.value.planDigest;
+    },
+  });
+  assert.notEqual(newer, h.plan.planDigest);
+  assert.equal(result.code, 4);
+  assert.match(result.stderr, /approval_digest_stale/u);
+});
+
+it("interactive identity is editable and unattended identity does not replace its suggestion", async (t) => {
+  const h = await planned(t);
+  const first = await invoke(["approve", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: ["Alice", "yes"],
+  });
+  assert.equal(first.code, 0);
+  const plan = document<PlanRevision>(
+    await invoke(["plan", "--job", h.id, "--output", "json"], h.engine()),
+  );
+  const automated = await invoke(
+    [
+      "approve",
+      "--job",
+      h.id,
+      "--plan-digest",
+      plan.value.planDigest,
+      "--approver",
+      "Automation",
+      "--output",
+      "json",
+    ],
+    h.engine(),
+  );
+  assert.equal(document<ApprovalRecord>(automated).value.mode, "unattended");
+  await invoke(["plan", "--job", h.id, "--output", "json"], h.engine());
+  const edited = await invoke(["approve", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: ["Bob", "yes"],
+  });
+  assert.equal(edited.code, 0);
+  assert.match(edited.stderr, /\[Alice\]/u);
+  assert.equal(JSON.parse(edited.stdout).value.approver, "Bob");
+});
+
+it("approval challenges expanded authority once per set, not once per member", async (t) => {
+  const h = await planned(t);
+  for (const changed of [true, false]) {
+    const engine = h.engine();
+    if (!changed) {
+      const replanned = await engine.withWriterResult({ id: h.id }, (writer) => writer.plan());
+      assert.ok(replanned.ok);
+    }
+    const reader = engine.reader({ id: h.id });
+    const status = await reader.status();
+    assert.ok(status.ok);
+    engine.reader = () => ({
+      ...reader,
+      status: async () => ({
+        ok: true,
+        value: {
+          ...status.value,
+          approvalAuthority: {
+            mirrorChanges: changed
+              ? [
+                  {
+                    mappingId: "map-1",
+                    source: "source",
+                    destination: "destination",
+                    deleteLimit: 10,
+                    previousDeleteLimit: null,
+                  },
+                  {
+                    mappingId: "map-2",
+                    source: "source2",
+                    destination: "destination2",
+                    deleteLimit: 20,
+                    previousDeleteLimit: 10,
+                  },
+                ]
+              : [],
+            accessChanges: changed
+              ? [
+                  {
+                    mappingId: "map-1",
+                    email: "a@example",
+                    type: "user",
+                    role: "writer",
+                    previousRole: null,
+                    timing: "go_live",
+                  },
+                  {
+                    mappingId: "map-1",
+                    email: "b@example",
+                    type: "group",
+                    role: "writer",
+                    previousRole: "reader",
+                    timing: "go_live",
+                  },
+                ]
+              : [],
+          },
+        },
+      }),
+    });
+    const result = await invoke(["approve", "--job", h.id], engine, {
+      tty: [true, false, true],
+      answers: changed ? ["Alice", "yes", "yes", "yes"] : ["", "yes"],
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.prompts, changed ? 4 : 2);
+    assert.equal(result.stderr.includes("Expanded mirror"), changed);
+    assert.equal(result.stderr.includes("Expanded access"), changed);
+    if (changed) {
+      assert.match(result.stderr, /deletion limits as Alice \(unverified\)/u);
+      assert.match(result.stderr, /grant timing as Alice \(unverified\)/u);
+    }
+  }
+});
+
+it("acceptance shows named groups and rejects missing selection, rationale or confirmation before writing", async (t) => {
+  const h = await verifiedDecisionJob(t);
+  for (const answers of [
+    [null],
+    [""],
+    ["all"],
+    ["missing"],
+    ["source_package_omitted", ""],
+    ["source_package_omitted", null],
+    ["source_package_omitted", "Reviewed exception", "/cancel"],
+    ["source_package_omitted", "Reviewed exception", "", "no"],
+  ]) {
+    const result = await invoke(["accept", "--job", h.id], h.engine(), {
+      tty: [true, false, true],
+      answers,
+    });
+    assert.equal(result.code, 4);
+    const after = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    assert.deepEqual(after.acceptedExceptions, []);
+    assert.equal(after.lastInteractiveIdentity, "Alice");
+    assert.match(result.stderr, /source_package_omitted/u);
+    assert.match(result.stderr, /notebook/u);
+  }
+  for (const command of ["accept", "close"]) {
+    for (const mode of ["json", "jsonl"]) {
+      const result = await invoke([command, "--job", h.id, "--output", mode], h.engine(), {
+        tty: [true, true, true],
+        answer: "yes",
+      });
+      assert.equal(result.code, 4);
+      assert.equal(result.prompts, 0);
+    }
+  }
+  assert.throws(() => parseInvocation(["accept", "--job", h.id, "--note", "one", "--note", "two"]));
+  assert.equal(
+    parseInvocation(["close", "--job", h.id, "--close-digest", "evidence", "--approver", "CI"])
+      .closeDigest,
+    "evidence",
+  );
+});
+
+it("accept records selected groups and one rationale with interactive or unattended attribution", async (t) => {
+  for (const interactive of [true, false]) {
+    const h = await verifiedDecisionJob(t);
+    const before = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    const flags = interactive
+      ? []
+      : [
+          "--verification-digest",
+          before.verificationDigest!,
+          "--approver",
+          "CI",
+          "--code",
+          "source_package_omitted",
+          "--code",
+          "omitted_by_rule",
+          "--note",
+          "Reviewed differences",
+          "--output",
+          "json",
+        ];
+    const result = await invoke(["accept", "--job", h.id, ...flags], h.engine(), {
+      tty: [true, false, true],
+      answers: ["source_package_omitted, omitted_by_rule", " Reviewed differences ", "", "yes"],
+    });
+    assert.equal(result.code, 0);
+    const after = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    assert.deepEqual(
+      after.acceptedExceptions
+        ?.map(({ code, note, verificationDigest, approver, mode }) => ({
+          code,
+          note,
+          verificationDigest,
+          approver,
+          mode,
+        }))
+        .sort((a, b) => a.code.localeCompare(b.code)),
+      ["omitted_by_rule", "source_package_omitted"].map((code) => ({
+        code,
+        note: "Reviewed differences",
+        verificationDigest: before.verificationDigest,
+        approver: interactive ? "Alice" : "CI",
+        mode: interactive ? "interactive" : "unattended",
+      })),
+    );
+    assert.equal(after.lastInteractiveIdentity, "Alice");
+    assert.equal(result.prompts, interactive ? 4 : 0);
+    if (interactive) assert.match(result.stderr, /Accept 2 selected groups/u);
+  }
+});
+
+it("accept refuses verification changed while the human confirmation is pending", async (t) => {
+  const h = await verifiedDecisionJob(t);
+  const before = document<JobStatus>(
+    await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+  ).value;
+  const result = await invoke(["accept", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: ["source_package_omitted", "Reviewed notebook", "Stale reviewer", "yes"],
+    async onPrompt(index) {
+      if (index !== 3) return;
+      const verification = await invoke(["verify", "--job", h.id, "--output", "json"], h.engine());
+      assert.equal(verification.code, 0);
+    },
+  });
+  assert.equal(result.code, 4);
+  const after = document<JobStatus>(
+    await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+  ).value;
+  assert.notEqual(after.verificationDigest, before.verificationDigest);
+  assert.deepEqual(after.acceptedExceptions, []);
+  assert.equal(after.lastInteractiveIdentity, "Alice");
+});
+
+it("initial close records only confirmed current evidence and authorized recovery needs no prompt", async (t) => {
+  for (const scenario of ["cancel", "interactive", "unattended", "stale", "recovery"]) {
+    const h = await verifiedDecisionJob(t, true);
+    const before = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    if (scenario === "recovery")
+      h.provider.scriptEffect({
+        method: "listFileHashes",
+        count: 1,
+        error: new TypeError("listing temporarily unavailable"),
+      });
+    const flags =
+      scenario === "unattended"
+        ? [
+            "--close-digest",
+            before.closeReview!.evidenceDigest,
+            "--approver",
+            "CI",
+            "--output",
+            "json",
+          ]
+        : [];
+    const result = await invoke(["close", "--job", h.id, ...flags], h.engine(), {
+      tty: [true, false, true],
+      answers: ["", scenario === "cancel" ? "no" : "yes"],
+      async onPrompt(index) {
+        if (scenario !== "stale" || index !== 1) return;
+        assert.equal(
+          (await invoke(["verify", "--job", h.id, "--output", "json"], h.engine())).code,
+          0,
+        );
+      },
+    });
+    let after = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    if (scenario === "cancel" || scenario === "stale") {
+      assert.equal(result.code, 4);
+      assert.equal(after.closeAuthorization, null);
+      assert.equal(after.state, "verified");
+      assert.deepEqual(after.memberGrants, []);
+      continue;
+    }
+    assert.equal(after.closeAuthorization?.evidenceDigest, before.closeReview!.evidenceDigest);
+    assert.equal(after.closeAuthorization?.approver, scenario === "unattended" ? "CI" : "Alice");
+    assert.equal(
+      after.closeAuthorization?.mode,
+      scenario === "unattended" ? "unattended" : "interactive",
+    );
+    if (scenario === "recovery") {
+      assert.equal(result.code, 4);
+      assert.equal(after.state, "verified");
+      assert.equal(after.createdDrives[0]?.goLive?.check?.status, "failed");
+      const authorization = after.closeAuthorization;
+      const resumed = await invoke(["close", "--job", h.id, "--output", "json"], h.engine(), {
+        tty: [true, true, true],
+      });
+      assert.equal(resumed.code, 0);
+      assert.equal(resumed.prompts, 0);
+      after = document<JobStatus>(
+        await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+      ).value;
+      assert.deepEqual(after.closeAuthorization, authorization);
+      assert.equal(after.createdDrives[0]?.goLive?.check?.status, "passed");
+    } else assert.equal(result.code, 0);
+    assert.equal(after.state, "closed");
+    const artifacts = document<ArtifactSet>(
+      await invoke(["report", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    assert.ok(
+      artifacts.artifacts.some(
+        (artifact) => artifact.name === "report.json" && existsSync(artifact.path),
+      ),
+    );
+  }
+});
+
+it("interruption during writer acquisition records no decision", async (t) => {
+  for (const command of ["approve", "accept", "close"]) {
+    const h =
+      command === "approve" ? await planned(t) : await verifiedDecisionJob(t, command === "close");
+    const before = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    const engine = h.engine();
+    const controller = new AbortController();
+    const original = engine.withWriterResult.bind(engine);
+    engine.withWriterResult = (job, operation) =>
+      original(job, async (writer) => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        controller.abort();
+        return operation(writer);
+      });
+    const flags =
+      command === "approve"
+        ? ["--plan-digest", before.planDigest!]
+        : command === "accept"
+          ? [
+              "--verification-digest",
+              before.verificationDigest!,
+              "--code",
+              "source_package_omitted",
+              "--note",
+              "Reviewed",
+            ]
+          : ["--close-digest", before.closeReview!.evidenceDigest];
+    const result = await invoke(
+      [command, "--job", h.id, "--approver", "CI", "--output", "json", ...flags],
+      engine,
+      { signal: controller.signal },
+    );
+    assert.equal(result.code, 4);
+    const after = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    assert.deepEqual(after.currentApproval, before.currentApproval);
+    assert.deepEqual(after.acceptedExceptions, before.acceptedExceptions);
+    assert.deepEqual(after.closeAuthorization, before.closeAuthorization);
+    assert.deepEqual(after.memberGrants, before.memberGrants);
+    assert.equal(after.lastInteractiveIdentity, before.lastInteractiveIdentity);
+    assert.equal(after.state, before.state);
+  }
 });
 
 it("maps stable refusal codes exactly and preserves unknown values fail-closed", async (t) => {
@@ -1257,6 +1734,8 @@ it("keeps acceptance bound to the verification digest and closes only after name
       "stale",
       "--code",
       "version_history_omitted",
+      "--note",
+      "Reviewing the previously captured verification",
       "--output",
       "json",
     ],
@@ -1275,7 +1754,9 @@ it("keeps acceptance bound to the verification digest and closes only after name
         "ci:review",
         "--verification-digest",
         verification.value.verificationDigest,
-        ...codes.flatMap((code) => ["--code", code, "--note", "Reviewed retained evidence"]),
+        ...codes.flatMap((code) => ["--code", code]),
+        "--note",
+        "Reviewed retained evidence",
         "--output",
         "json",
       ],
@@ -1286,7 +1767,24 @@ it("keeps acceptance bound to the verification digest and closes only after name
     assert.equal(value.verificationDigest, verification.value.verificationDigest);
     assert.deepEqual([...value.acceptedCodes].sort(), [...codes].sort());
   }
-  const closed = await invoke(["close", "--job", h.id, "--output", "json"], h.engine());
+  const ready = document<JobStatus>(
+    await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+  );
+  assert.ok(ready.value.closeReview);
+  const closed = await invoke(
+    [
+      "close",
+      "--job",
+      h.id,
+      "--close-digest",
+      ready.value.closeReview.evidenceDigest,
+      "--approver",
+      "ci:close",
+      "--output",
+      "json",
+    ],
+    h.engine(),
+  );
   assert.equal(closed.code, 0);
   assert.equal(document<{ state: string }>(closed).value.state, "closed");
   const again = await invoke(["execute", "--job", h.id, "--output", "json"], h.engine());

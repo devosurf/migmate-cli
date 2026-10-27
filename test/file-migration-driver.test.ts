@@ -18,7 +18,7 @@ import {
 } from "../src/engine/drivers/file-migration.ts";
 import type { DriverContext, CommitUnit } from "../src/engine/drivers/types.ts";
 import { ProviderFault } from "../src/engine/providers/credentials.ts";
-import { fileConfig, fileFixture, value, approve } from "./engine-fixture.ts";
+import { fileConfig, fileFixture, value, approve, closeDecision } from "./engine-fixture.ts";
 
 const now = "2026-09-01T00:00:00.000Z";
 const config = fileConfig();
@@ -109,7 +109,9 @@ describe("staged cutover lifecycle", () => {
     await approve(h);
     await execute(h);
     assert.equal(value(await h.engine.reader(h.ref).status()).currentPlan?.stage, "prestage");
-    const early = await h.engine.withWriterResult(h.ref, (writer) => writer.close());
+    const early = await h.engine.withWriterResult(h.ref, async (writer) =>
+      writer.close(await closeDecision(h)),
+    );
     assert.equal(early.ok, false);
     if (!early.ok) assert.equal(early.refusal.code, "cutover_incomplete");
     const final = value(
@@ -131,7 +133,9 @@ describe("staged cutover lifecycle", () => {
     await execute(h);
     const next = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     assert.equal(next.stage, "delta");
-    const stale = await h.engine.withWriterResult(h.ref, (writer) => writer.close());
+    const stale = await h.engine.withWriterResult(h.ref, async (writer) =>
+      writer.close(await closeDecision(h)),
+    );
     assert.equal(stale.ok, false);
     if (!stale.ok) assert.equal(stale.refusal.code, "cutover_incomplete");
   });
@@ -182,7 +186,8 @@ describe("rclone proof", () => {
       [],
     );
     assert.equal(
-      value(await h.engine.withWriterResult(h.ref, (w) => w.close())).outcome,
+      value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))))
+        .outcome,
       "completed",
     );
   });
@@ -209,7 +214,9 @@ describe("rclone proof", () => {
         ["report.docx", "size_mismatch"],
       ],
     );
-    const refused = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    const refused = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.equal(refused.refusal.code, "verification_unaccepted");
   });
@@ -275,7 +282,7 @@ describe("rclone proof", () => {
       await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
     ).sections.find((section: { title: string }) => section.title === "Settled confirmation");
     assert.equal(JSON.parse(settled.body)[0].outcome, "settled");
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     const closed = value(await h.engine.reader(h.ref).status());
     assert.equal(closed.state, "closed");
     assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
@@ -457,7 +464,9 @@ describe("destination folder verification", () => {
               }
             : { path: "nested/empty", itemType: "folder" },
         );
-        const closed = await h.engine.withWriterResult(h.ref, (writer) => writer.close());
+        const closed = await h.engine.withWriterResult(h.ref, async (writer) =>
+          writer.close(await closeDecision(h)),
+        );
         assert.equal(closed.ok, false);
         if (!closed.ok) assert.equal(closed.refusal.code, "verification_unaccepted");
       });
@@ -606,7 +615,9 @@ describe("Google Shared Drives to SharePoint", () => {
       verified.findings.map((entry) => entry.code),
       ["content_mismatch"],
     );
-    const closed = value(await h.engine.withWriter(h.ref, (writer) => writer.close()));
+    const closed = value(
+      await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
+    );
     assert.equal(closed.ok, false);
     if (closed.ok) throw new Error("Corruption must block close");
     assert.equal(closed.refusal.code, "verification_unaccepted");
@@ -926,7 +937,7 @@ describe("deferred member go-live", () => {
     const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
     assert.equal(verification.clean, true);
     assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     const closed = value(await h.engine.reader(h.ref).status());
     assert.equal(closed.state, "closed");
     assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
@@ -941,7 +952,9 @@ describe("deferred member go-live", () => {
     const prestaged = value(await h.engine.reader(h.ref).status());
     assert.equal(prestaged.currentPlan?.stage, "prestage");
     const driveId = prestaged.createdDrives[0]!.driveId!;
-    const early = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    const early = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
     assert.equal(early.ok, false);
     if (!early.ok) assert.equal(early.refusal.code, "cutover_incomplete");
     assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
@@ -962,7 +975,7 @@ describe("deferred member go-live", () => {
     );
     await execute(h);
     assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     const closed = value(await h.engine.reader(h.ref).status());
     assert.equal(closed.state, "closed");
     assert.equal(closed.memberGrants[0]?.member.email, "finance@example.com");
@@ -996,7 +1009,7 @@ describe("deferred member go-live", () => {
         error: new Error("grant crash"),
       });
       await assert.rejects(
-        h.engine.withWriterResult(h.ref, (w) => w.close()),
+        h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
         /grant crash/,
       );
       h.engine.close();
@@ -1005,7 +1018,7 @@ describe("deferred member go-live", () => {
       assert.equal(refused.ok, false);
       if (!refused.ok) assert.equal(refused.refusal.code, "go_live_started");
       const before = value(await h.engine.reader(h.ref).status()).mappingPasses;
-      value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+      value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
       const closed = value(await h.engine.reader(h.ref).status());
       assert.equal(closed.state, "closed");
       assert.equal(closed.memberGrants.length, 1);
@@ -1015,11 +1028,18 @@ describe("deferred member go-live", () => {
     const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
     await execute(h);
     const reviewed = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
-    t.mock.method(fileMigrationDriver, "reportSections", async function* () {
-      throw new Error("injected report serialization failure");
-    });
+    const originalSections = fileMigrationDriver.reportSections;
+    t.mock.method(
+      fileMigrationDriver,
+      "reportSections",
+      async function* (ctx: DriverContext<FileMigrationConfig>) {
+        if (ctx.resume.createdDrives?.some((drive) => drive.goLive?.check?.status === "passed"))
+          throw new Error("injected report serialization failure");
+        yield* originalSections(ctx);
+      },
+    );
     await assert.rejects(
-      h.engine.withWriterResult(h.ref, (w) => w.close()),
+      h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
       /injected report serialization failure/,
     );
     h.engine.close();
@@ -1039,12 +1059,33 @@ describe("deferred member go-live", () => {
     const refused = await h.engine.withWriterResult(h.ref, (w) => w.execute());
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.equal(refused.refusal.code, "go_live_started");
+    const cancelled = await h.engine.withWriterResult(h.ref, (w) => w.cancel("report failed"));
+    assert.equal(cancelled.ok, false);
+    if (!cancelled.ok) assert.equal(cancelled.refusal.code, "go_live_started");
     t.mock.restoreAll();
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    const driveId = status.createdDrives[0]!.driveId!;
+    await h.port.addDriveMember(driveId, {
+      email: "new-editor@example.com",
+      type: "user",
+      role: "writer",
+    });
+    const edited = (await h.port.listDestinationChildren(driveId)).find(
+      (item) => item.name === "report.docx",
+    )!;
+    h.port.mutateDestinationContent(edited.id, new Uint8Array([8, 8, 8, 8]));
+    t.mock.method(h.port, "startTransferWorker", async () => {
+      throw new Error("report-only recovery must not start a worker");
+    });
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     const closed = value(await h.engine.reader(h.ref).status());
     assert.equal(closed.state, "closed");
     assert.equal(closed.incompleteClose, undefined);
     assert.deepEqual(closed.mappingPasses, status.mappingPasses);
+    assert.deepEqual(
+      closed.createdDrives.map((drive) => drive.goLive?.check),
+      status.createdDrives.map((drive) => drive.goLive?.check),
+    );
+    assert.deepEqual(closed.closeAuthorization, status.closeAuthorization);
   });
   for (const drift of ["membership", "content"] as const)
     it(`blocks go-live on ${drift} drift and never reopens transfers`, async (t) => {
@@ -1064,7 +1105,9 @@ describe("deferred member go-live", () => {
         )!;
         h.port.mutateDestinationContent(file.id, new Uint8Array([9, 9, 9, 9]));
       }
-      const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+      const closing = await h.engine.withWriterResult(h.ref, async (w) =>
+        w.close(await closeDecision(h)),
+      );
       assert.equal(closing.ok, false);
       if (!closing.ok) {
         assert.equal(closing.refusal.code, "verification_unaccepted");
@@ -1080,14 +1123,16 @@ describe("deferred member go-live", () => {
       const executeResult = await h.engine.withWriterResult(h.ref, (w) => w.execute());
       assert.equal(executeResult.ok, false);
       if (!executeResult.ok) assert.equal(executeResult.refusal.code, "go_live_started");
-      const retry = await h.engine.withWriterResult(h.ref, (w) => w.close());
+      const retry = await h.engine.withWriterResult(h.ref, async (w) =>
+        w.close(await closeDecision(h)),
+      );
       assert.equal(retry.ok, false);
     });
   it("writes the final grant and check evidence before closing", async (t) => {
     const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
     await execute(h);
     value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     const artifacts = value(await h.engine.reader(h.ref).artifacts());
     assert.ok(artifacts);
     const report = JSON.parse(
@@ -1109,7 +1154,9 @@ describe("deferred member go-live", () => {
     await execute(h);
     const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
     assert.equal(verification.clean, false);
-    const refused = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    const refused = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.equal(refused.refusal.code, "verification_unaccepted");
     const before = value(await h.engine.reader(h.ref).status());
@@ -1123,11 +1170,13 @@ describe("deferred member go-live", () => {
         w.accept({
           verificationDigest: verification.verificationDigest,
           approver: "operator",
-          codes: [{ code: "content_verification_degraded" }],
+          codes: ["content_verification_degraded"],
+          rationale: "Listing proof is sufficient for this fixture",
+          mode: "unattended",
         }),
       ),
     );
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     assert.equal(
       value(await h.engine.reader(h.ref).status()).memberGrants[0]?.member.role,
       "writer",
@@ -1173,7 +1222,7 @@ describe("deferred member go-live", () => {
       error: new TypeError("ambiguous second grant"),
     });
     await assert.rejects(
-      h.engine.withWriterResult(h.ref, (w) => w.close()),
+      h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
       /ambiguous second grant/,
     );
     const partial = value(await h.engine.reader(h.ref).status());
@@ -1187,7 +1236,9 @@ describe("deferred member go-live", () => {
     });
     h.engine.close();
     h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
-    const mismatch = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    const mismatch = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
     assert.equal(mismatch.ok, false);
     if (!mismatch.ok) assert.equal(mismatch.refusal.detail?.check, "drive_membership_mismatch");
     assert.equal(
@@ -1201,7 +1252,7 @@ describe("deferred member go-live", () => {
       type: "group",
       role: "writer",
     });
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     const closed = value(await h.engine.reader(h.ref).status());
     assert.equal(closed.memberGrants.length, 2);
     assert.deepEqual(closed.mappingPasses, partial.mappingPasses);
@@ -1213,12 +1264,14 @@ describe("deferred member go-live", () => {
     const path = join(h.home, "jobs", h.ref.id, "job.toml");
     const original = await readFile(path, "utf8");
     await writeFile(path, original.replace("after_verification", "before_copy"));
-    const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    const closing = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
     assert.equal(closing.ok, false);
     if (!closing.ok) assert.equal(closing.refusal.code, "plan_revision_required");
     assert.deepEqual(value(await h.engine.reader(h.ref).status()).memberGrants, []);
     await writeFile(path, original);
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
   });
   it("discloses unavailable post-grant checks and resumes close without transfers", async (t) => {
     const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
@@ -1229,7 +1282,9 @@ describe("deferred member go-live", () => {
       count: 1,
       error: new TypeError("listing unavailable"),
     });
-    const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    const closing = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
     assert.equal(closing.ok, false);
     if (!closing.ok) {
       assert.equal(closing.refusal.code, "verification_unaccepted");
@@ -1239,7 +1294,7 @@ describe("deferred member go-live", () => {
     const partial = value(await h.engine.reader(h.ref).status());
     assert.equal(partial.memberGrants.length, 1);
     assert.equal(partial.createdDrives[0]!.goLive!.check!.status, "failed");
-    value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
     assert.deepEqual(
       value(await h.engine.reader(h.ref).status()).mappingPasses,
       partial.mappingPasses,
@@ -1563,7 +1618,9 @@ describe("file migration through the engine", () => {
     const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
     assert.equal(verification.clean, false);
     assert.ok(verification.findings.some((f) => f.code === "drive_membership_mismatch"));
-    const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    const closing = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
     assert.equal(closing.ok, false);
     assert.equal(
       (await h.port.listDriveMembers(driveId)).find((m) => m.email === "finance@example.com")?.role,
@@ -1822,7 +1879,7 @@ describe("file migration through the engine", () => {
     await approve(h);
     await execute(h);
     value(value(await h.engine.withWriter(h.ref, (w) => w.verify())));
-    value(value(await h.engine.withWriter(h.ref, (w) => w.close())));
+    value(value(await h.engine.withWriter(h.ref, async (w) => w.close(await closeDecision(h)))));
     const report = value(value(await h.engine.withWriter(h.ref, (w) => w.report())));
     const json = report.artifacts.find((a) => a.name === "report.json")!;
     const contents = await readFile(json.path, "utf8");
@@ -1876,7 +1933,7 @@ describe("file migration through the engine", () => {
     await approve(h);
     await execute(h);
     value(value(await h.engine.withWriter(h.ref, (w) => w.verify())));
-    value(value(await h.engine.withWriter(h.ref, (w) => w.close())));
+    value(value(await h.engine.withWriter(h.ref, async (w) => w.close(await closeDecision(h)))));
     t.mock.method(h.port, "googleAbout", async () => {
       throw new Error("Reports must retain the identity observed for the approved plan");
     });
@@ -2747,7 +2804,11 @@ describe("file migration through the engine", () => {
       retained.map((item) => item.jobType === "file_migration" && item.relativePath).sort(),
       ["keep.txt", "report.docx"],
     );
-    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+    value(
+      value(
+        await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
+      ),
+    );
     const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
     const json = report.artifacts.find((artifact) => artifact.name === "report.json")!;
     const findings = JSON.parse(await readFile(json.path, "utf8")).findings;
@@ -2839,7 +2900,9 @@ describe("file migration through the engine", () => {
         value(
           await writer.accept({
             verificationDigest: verified.verificationDigest,
-            codes: verified.findings.map((entry) => ({ code: entry.code })),
+            codes: verified.findings.map((entry) => entry.code),
+            rationale: "Reviewed fixture findings",
+            mode: "unattended",
             approver: "file-contract-test",
           }),
         );
@@ -2921,7 +2984,11 @@ describe("file migration through the engine", () => {
     const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
     assert.equal(verified.clean, true);
     assert.deepEqual(verified.findings, []);
-    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+    value(
+      value(
+        await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
+      ),
+    );
   });
 
   it("retains observed destination ids for matching and destination-only files", async (t) => {
@@ -3012,7 +3079,9 @@ describe("file migration through the engine", () => {
       verified.findings.map((entry) => entry.code),
       ["content_verification_degraded"],
     );
-    const closed = value(await h.engine.withWriter(h.ref, (writer) => writer.close()));
+    const closed = value(
+      await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
+    );
     assert.equal(closed.ok, false);
     if (closed.ok) throw new Error("Size-only verification closed without acceptance");
     assert.equal(closed.refusal.code, "verification_unaccepted");
@@ -3022,12 +3091,18 @@ describe("file migration through the engine", () => {
           writer.accept({
             verificationDigest: verified.verificationDigest,
             approver: "operator",
-            codes: [{ code: "content_verification_degraded" }],
+            codes: ["content_verification_degraded"],
+            rationale: "Listing proof is sufficient for this fixture",
+            mode: "unattended",
           }),
         ),
       ),
     );
-    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+    value(
+      value(
+        await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
+      ),
+    );
   });
 
   it("names an unreadable source without losing verification of readable files", async (t) => {
@@ -3149,7 +3224,9 @@ describe("file migration through the engine", () => {
         cause: "source_size_inconsistent",
       });
     }
-    const closed = value(await h.engine.withWriter(h.ref, (writer) => writer.close()));
+    const closed = value(
+      await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
+    );
     assert.equal(closed.ok, false);
     if (closed.ok) throw new Error("Source changes must block close");
     assert.equal(closed.refusal.code, "verification_unaccepted");
@@ -3191,7 +3268,9 @@ describe("file migration through the engine", () => {
             writer.accept({
               verificationDigest,
               approver: "operator",
-              codes: [{ code: "source_size_inconsistent" }],
+              codes: ["source_size_inconsistent"],
+              rationale: "Source-served bytes retained",
+              mode: "unattended",
             }),
           ),
         ),
@@ -3210,7 +3289,11 @@ describe("file migration through the engine", () => {
       value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())))
         .verificationDigest,
     );
-    value(value(await h.engine.withWriter(h.ref, (writer) => writer.close())));
+    value(
+      value(
+        await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
+      ),
+    );
     const report = value(value(await h.engine.withWriter(h.ref, (writer) => writer.report())));
     const json = report.artifacts.find((artifact) => artifact.name === "report.json");
     assert.ok(json);
@@ -3581,4 +3664,323 @@ describe("settled and partial file-driver proof", () => {
     assert.equal(after.passes, 1);
     assert.equal(after.outcome, "exhausted");
   });
+});
+
+describe("human decision authority", () => {
+  it("preserves approved access when source scope changes but still requires mirror confirmation", async (t) => {
+    const h = await provisioningHarness(t, fixture(), {
+      mirror: true,
+      deleteLimit: 3,
+      memberGrants: "after_verification",
+    });
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "finance",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "nested" },
+                destination: { type: "google_shared_drive", create: "Finance" },
+                members: [{ email: "finance@example.com", type: "group", role: "writer" }],
+              },
+            ],
+          }),
+        }),
+      ),
+    );
+    const plan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).approvalAuthority, {
+      mirrorChanges: [
+        {
+          mappingId: "finance",
+          source: "source-drive/nested",
+          destination: "Finance",
+          deleteLimit: 3,
+          previousDeleteLimit: null,
+        },
+      ],
+      accessChanges: [],
+    });
+    const missingMirror = await h.engine.withWriterResult(h.ref, (w) =>
+      w.approve({
+        planDigest: plan.planDigest,
+        approver: "human@host",
+        mode: "interactive",
+      }),
+    );
+    assert.equal(missingMirror.ok, false);
+    if (!missingMirror.ok) assert.equal(missingMirror.refusal.code, "approval_required");
+    assert.equal(value(await h.engine.reader(h.ref).status()).currentApproval, null);
+    const approved = value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          planDigest: plan.planDigest,
+          approver: "human@host",
+          mode: "interactive",
+          riskConfirmations: { mirror: true },
+        }),
+      ),
+    );
+    assert.deepEqual(approved.riskConfirmations, { mirror: true });
+  });
+
+  for (const change of [
+    {
+      name: "a new creation identity with the same drive name",
+      id: "finance-new",
+      destination: "Finance",
+      email: "finance@example.com",
+      role: "writer",
+      previousRole: null,
+    },
+    {
+      name: "a different destination name",
+      id: "finance",
+      destination: "New Finance",
+      email: "finance@example.com",
+      role: "writer",
+      previousRole: null,
+    },
+    {
+      name: "a new member grant",
+      id: "finance",
+      destination: "Finance",
+      email: "new-member@example.com",
+      role: "writer",
+      previousRole: null,
+    },
+    {
+      name: "a member role escalation",
+      id: "finance",
+      destination: "Finance",
+      email: "finance@example.com",
+      role: "organizer",
+      previousRole: "writer",
+    },
+  ])
+    it(`requires access confirmation for ${change.name} even when source scope changes`, async (t) => {
+      const h = await provisioningHarness(t, fixture(), {
+        mirror: true,
+        deleteLimit: 3,
+        memberGrants: "after_verification",
+      });
+      value(
+        await h.engine.withWriterResult(h.ref, (w) =>
+          w.loadManifest({
+            format: "json",
+            content: JSON.stringify({
+              version: 1,
+              mappings: [
+                {
+                  id: change.id,
+                  source: { type: "sharepoint", driveId: "source-drive", folderPath: "nested" },
+                  destination: { type: "google_shared_drive", create: change.destination },
+                  members: [{ email: change.email, type: "group", role: change.role }],
+                },
+              ],
+            }),
+          }),
+        ),
+      );
+      const plan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+      const authority = value(await h.engine.reader(h.ref).status()).approvalAuthority!;
+      assert.equal(authority.mirrorChanges.length, 1);
+      assert.equal(authority.mirrorChanges[0]!.mappingId, change.id);
+      assert.deepEqual(authority.accessChanges, [
+        {
+          mappingId: change.id,
+          email: change.email,
+          type: "group",
+          role: change.role,
+          previousRole: change.previousRole,
+          timing: "after_verification",
+        },
+      ]);
+      const missingAccess = await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          planDigest: plan.planDigest,
+          approver: "human@host",
+          mode: "interactive",
+          riskConfirmations: { mirror: true },
+        }),
+      );
+      assert.equal(missingAccess.ok, false);
+      if (!missingAccess.ok) assert.equal(missingAccess.refusal.code, "approval_required");
+      assert.equal(value(await h.engine.reader(h.ref).status()).currentApproval, null);
+      const approved = value(
+        await h.engine.withWriterResult(h.ref, (w) =>
+          w.approve({
+            planDigest: plan.planDigest,
+            approver: "human@host",
+            mode: "interactive",
+            riskConfirmations: { mirror: true, access: true },
+          }),
+        ),
+      );
+      assert.deepEqual(approved.riskConfirmations, { mirror: true, access: true });
+    });
+
+  it("compares mirror limits and role escalation with the latest approved plan, not declined revisions", async (t) => {
+    const h = await provisioningHarness(t, fixture(), {
+      mirror: true,
+      deleteLimit: 3,
+      memberGrants: "after_verification",
+    });
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const original = await readFile(path, "utf8");
+    await writeFile(path, original.replace("deleteLimit = 3", "deleteLimit = 8"));
+    const declined = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).approvalAuthority?.mirrorChanges[0]
+        ?.previousDeleteLimit,
+      3,
+    );
+    const missingChallenge = await h.engine.withWriterResult(h.ref, (w) =>
+      w.approve({
+        planDigest: declined.planDigest,
+        approver: "human@host",
+        mode: "interactive",
+      }),
+    );
+    assert.equal(missingChallenge.ok, false);
+    assert.equal(value(await h.engine.reader(h.ref).status()).currentApproval, null);
+    await writeFile(path, original.replace("deleteLimit = 3", "deleteLimit = 5"));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "finance",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+                destination: { type: "google_shared_drive", create: "Finance" },
+                members: [{ email: "finance@example.com", type: "group", role: "organizer" }],
+              },
+            ],
+          }),
+        }),
+      ),
+    );
+    const proposed = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    const review = value(await h.engine.reader(h.ref).status());
+    assert.equal(review.approvalAuthority?.mirrorChanges[0]?.deleteLimit, 5);
+    assert.equal(review.approvalAuthority?.mirrorChanges[0]?.previousDeleteLimit, 3);
+    assert.equal(review.approvalAuthority?.accessChanges[0]?.previousRole, "writer");
+    const stale = await h.engine.withWriterResult(h.ref, (w) =>
+      w.approve({
+        planDigest: declined.planDigest,
+        approver: "stale@host",
+        mode: "interactive",
+        riskConfirmations: { mirror: true, access: true },
+      }),
+    );
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.refusal.code, "approval_digest_stale");
+    const approved = value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          planDigest: proposed.planDigest,
+          approver: "human@host",
+          mode: "interactive",
+          riskConfirmations: { mirror: true, access: true },
+        }),
+      ),
+    );
+    assert.equal(approved.identityAssurance, "declared_unverified");
+    assert.deepEqual(approved.riskConfirmations, { mirror: true, access: true });
+    const unchanged = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).approvalAuthority, {
+      mirrorChanges: [],
+      accessChanges: [],
+    });
+    const automated = value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          planDigest: unchanged.planDigest,
+          approver: "automation",
+          mode: "unattended",
+          riskConfirmations: { mirror: true, access: true },
+        }),
+      ),
+    );
+    assert.equal(automated.riskConfirmations, undefined);
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).lastInteractiveIdentity,
+      "human@host",
+    );
+  });
+
+  it("refuses stale close review and failed risk confirmation without new authority", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    const reviewed = value(await h.engine.reader(h.ref).status()).closeReview!;
+    assert.ok(
+      reviewed.consequences.some(
+        (line) => line.includes("finance@example.com") && line.includes("writer"),
+      ),
+    );
+    const declined = await h.engine.withWriterResult(h.ref, (w) =>
+      w.close({
+        evidenceDigest: reviewed.evidenceDigest,
+        approver: "human@host",
+        mode: "interactive",
+      }),
+    );
+    assert.equal(declined.ok, false);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    const stale = await h.engine.withWriterResult(h.ref, (w) =>
+      w.close({
+        evidenceDigest: reviewed.evidenceDigest,
+        approver: "human@host",
+        mode: "interactive",
+        confirmGoLive: true,
+      }),
+    );
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.refusal.code, "approval_digest_stale");
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.closeAuthorization, null);
+    assert.deepEqual(status.memberGrants, []);
+    assert.ok(status.createdDrives.every((drive) => !drive.goLive));
+  });
+
+  for (const failure of ["render", "abort"] as const)
+    it(`records no authority, fence or grant when readiness ${failure}s`, async (t) => {
+      const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+      await execute(h);
+      const decision = (await closeDecision(h))!;
+      const controller = new AbortController();
+      const originalSections = fileMigrationDriver.reportSections;
+      t.mock.method(
+        fileMigrationDriver,
+        "reportSections",
+        async function* (ctx: DriverContext<FileMigrationConfig>) {
+          if (failure === "render") throw new Error("readiness unavailable");
+          yield* originalSections(ctx);
+          controller.abort(new Error("decision interrupted"));
+        },
+      );
+      await assert.rejects(
+        h.engine.withWriterResult(h.ref, (w) =>
+          w.close({
+            ...decision,
+            signal: controller.signal,
+          }),
+        ),
+        failure === "render" ? /readiness unavailable/ : /decision interrupted/,
+      );
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.equal(status.state, "verified");
+      assert.equal(status.closeAuthorization, null);
+      assert.deepEqual(status.memberGrants, []);
+      assert.ok(status.createdDrives.every((drive) => !drive.goLive));
+      const recovery = await h.engine.withWriterResult(h.ref, (w) => w.close());
+      assert.equal(recovery.ok, false);
+      if (!recovery.ok) assert.equal(recovery.refusal.code, "approval_required");
+    });
 });

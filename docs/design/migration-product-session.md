@@ -349,6 +349,8 @@ Approval assurance in 1.0 is a recorded local attestation:
 
 This proves digest binding, not cryptographic human identity. The schema remains extensible for later signed/external approvals.
 
+[ADR-0016](../adr/0016-human-handoff-without-digest-transcription.md) retains this local-attestation boundary while replacing guided digest/identity transcription with human terminal/web handoff. Declared identities remain unverified; interactive versus unattended records describe the interaction, not authenticated human identity. The accepted scope explicitly excludes an agent-proof channel and identity-provider integration. See the ADR for changed-authority confirmations and named exception acceptance; it records a decision, not shipped behavior.
+
 Amendments:
 
 - Approved plan files are never changed in place.
