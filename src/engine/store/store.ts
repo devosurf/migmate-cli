@@ -60,7 +60,7 @@ import type {
   ArchiveRecord,
   ArchiveResumeState,
 } from "../providers/archive.ts";
-import { canonicalJson, digestJson } from "./digest.ts";
+import { canonicalJson, digestJson, digestVerificationEvidence } from "./digest.ts";
 import type { StoredMappings } from "../manifest.ts";
 import { readReportJson } from "./report.ts";
 import { exceptionConsequence, isAcceptable } from "../codes.ts";
@@ -186,7 +186,7 @@ export interface Store {
   writeAcceptances(records: AcceptanceRecord[]): void;
   readFindings(revision: number, phase?: RowPhase): FindingRecord[];
   currentPhase(revision: number): RowPhase;
-  readCurrentFindings(revision: number, phase: RowPhase): FindingRecord[];
+  readVerificationEvidenceDigest(revision: number): string;
   currentFindingCounts(revision: number, phase: RowPhase): FacetCount[];
   writeFinding(record: FindingRecord): void;
   readCheckResults(verb?: Verb): CheckResultRecord[];
@@ -1246,12 +1246,31 @@ class StoreImpl implements Store {
       .get(sourceDriveId, subjectId, revision, phase, mappingId);
     return row ? String(row.relative_path) : undefined;
   }
-  readCurrentFindings(revision: number, phase: RowPhase): FindingRecord[] {
-    const selection = this.#currentFindingIds(revision, phase);
-    return this.db
-      .prepare(`SELECT * FROM finding WHERE id IN (${selection.sql}) ORDER BY id`)
-      .all(...selection.params)
-      .map(rowToFinding);
+  readVerificationEvidenceDigest(revision: number): string {
+    return this.#snapshot(() => {
+      const db = this.db;
+      const selection = this.#currentFindingIds(revision, "verify");
+      const manifest = db
+        .prepare("SELECT manifest_digest FROM archive_plan WHERE rev=?")
+        .get(revision);
+      return digestVerificationEvidence({
+        archive: nullableString(manifest?.manifest_digest),
+        rows: (function* () {
+          for (const table of ["item", "conversation"] as const) {
+            for (const row of db
+              .prepare(`SELECT * FROM ${table} WHERE rev=? AND phase='verify' ORDER BY phase,id`)
+              .iterate(revision))
+              yield rowToCommit(table, row);
+          }
+        })(),
+        findings: (function* () {
+          for (const row of db
+            .prepare(`SELECT * FROM finding WHERE id IN (${selection.sql}) ORDER BY id`)
+            .iterate(...selection.params))
+            yield rowToFinding(row);
+        })(),
+      });
+    });
   }
   currentFindingCounts(revision: number, phase: RowPhase): FacetCount[] {
     const selection = this.#currentFindingIds(revision, phase);

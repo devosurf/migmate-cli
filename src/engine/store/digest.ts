@@ -65,3 +65,31 @@ export function canonicalJson(value: unknown): string {
 export function digestJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
+
+/** Preserve the evidence object's canonical bytes without retaining its collections. */
+export function digestVerificationEvidence(evidence: {
+  rows: Iterable<unknown>;
+  findings: Iterable<unknown>;
+  archive: string | null;
+}): string {
+  const hash = createHash("sha256");
+  const seen = new WeakSet<object>();
+  function array(values: Iterable<unknown>): void {
+    hash.update("[");
+    let first = true;
+    for (const value of values) {
+      if (!first) hash.update(",");
+      hash.update(canonicalize(value, seen) ?? "null");
+      first = false;
+    }
+    hash.update("]");
+  }
+  // canonicalJson sorts the three evidence keys in this order.
+  hash.update('{"archive":');
+  hash.update(canonicalJson(evidence.archive));
+  hash.update(',"findings":');
+  array(evidence.findings);
+  hash.update(',"rows":');
+  array(evidence.rows);
+  return hash.update("}").digest("hex");
+}
