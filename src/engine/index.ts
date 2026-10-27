@@ -1906,11 +1906,7 @@ function makeWriter(
       return refuse("retry_budget_exhausted", "Verification stopped at its retry budget.", {
         detail: budget.summary(),
       });
-    const evidenceDigest = digestJson({
-      rows: store.readAllRows(revision, "verify"),
-      findings: store.readCurrentFindings(revision, "verify"),
-      archive: store.readResume(revision).archiveManifestDigest ?? null,
-    });
+    const evidenceDigest = store.readVerificationEvidenceDigest(revision);
     const verificationDigest = digestJson({
       planDigest: store.readPlanRevision(revision)?.planDigest,
       revision: run,

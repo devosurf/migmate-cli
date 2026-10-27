@@ -211,6 +211,14 @@ request deadline. rclone retries each Graph and Drive request up to 10 times, ho
 256 MiB, roughly 900,000 files at the ~260 bytes per file observed on SharePoint. Split
 a larger library into folder mappings.
 
+Verification finalization hashes canonical evidence one SQLite row or finding at
+a time and reads the archive manifest digest directly. It no longer builds a
+whole-evidence string or reloads execution resume state merely to compute that
+digest. Existing evidence digests remain byte-identical; jobs need no migration.
+The synthetic digest regression exceeds V8's single-string limit. This is not a
+whole-job memory guarantee: individual records, driver resume state and verification
+snapshots elsewhere still have their existing memory costs.
+
 Report generation does not build whole-job row/finding arrays, execution resume
 state, settled-inventory section strings or complete artifact strings. It reads
 evidence incrementally, writes and hashes bounded output buffers, and atomically
