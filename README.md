@@ -894,10 +894,11 @@ Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL
 
 `package.json` holds the scripts; the ones with non-obvious cost:
 
-- `npm test` — behavioural suites, no network, followed by the fixed-heap 250,000-file
-  report/close regression in a separate test-runner invocation. The scale test
-  remains in the default CI gate but never competes with the main suite's
-  timing-sensitive tests. The two fixture sizes share a ten-minute budget for the
+- `npm test` — behavioural suites, no network, followed by two isolated test-runner
+  invocations: the 1,000-mapping load/plan/paging regression (15 seconds, 256 MiB
+  additional RSS), then the fixed-heap 250,000-file report/close regression. Both
+  remain in the default CI gate without competing with other suites for CPU or
+  disk. The report test's two fixture sizes share a ten-minute budget for the
   required readiness and final report renders. Each large report set is roughly
   1–1.5 GB; temporary artifacts are removed on completion.
 - `npm run check:vendor` — verifies the vendored binary hashes.
