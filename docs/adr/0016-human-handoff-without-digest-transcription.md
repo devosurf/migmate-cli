@@ -5,6 +5,7 @@
 - Accepted: Morgan, in the decision session for [#83](https://github.com/devosurf/migmate-cli/issues/83), including the explicit narrowing from an agent-proof channel to a cooperative-agent workflow.
 - Amends: [ADR-0012](0012-staged-migrations-and-access-timing.md), for guided approval, exception acceptance and initial go-live authorization.
 - Preserves: [ADR-0014](0014-map-approval-and-listing-verification.md), for map-only file plans, and [ADR-0015](0015-close-report-readiness-and-resume.md), for close ordering and recovery.
+- Amended by: [ADR-0017](0017-pre-grant-drift-and-acknowledged-go-live-checks.md), for a separate, evidence-bound acknowledgment of a failed or unavailable post-grant check. Ordinary recovery still cannot skip an unacknowledged failure; the human-handoff, identity and unattended-automation model remain unchanged.
 
 Humans review the proposed authority or verification exceptions and act in their own terminal or web view, without transcribing a digest or reading back an identity. The guided agent presents the evidence, hands over the decision and observes the durable result. We choose this lower-friction workflow for a cooperative agent, not an enforceable boundary against an agent that can bypass it. This records an accepted decision, not shipped behavior; CLI, web, engine and installed-skill changes belong to implementation of #83.
 

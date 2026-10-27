@@ -4,6 +4,7 @@
 - Date: 2026-10-14
 - Accepted: Morgan, 2026-10-14, in the decision session for [#90](https://github.com/devosurf/migmate-cli/issues/90).
 - Amends: [ADR-0012](0012-staged-migrations-and-access-timing.md) A6 (deferred grants at close): what close checks before the first fence, what a retry repeats, and how a job ends once go-live starts.
+- Amended by: [ADR-0017](0017-pre-grant-drift-and-acknowledged-go-live-checks.md), for destination-drift checks before the first fence or grant and recovery that preserves explicitly acknowledged post-grant failures as well as passed checks.
 
 A `close` with deferred grants now renders and publishes the report before it fences or grants anything, so a report that cannot be produced stops close while nobody has access. A retry keeps every go-live check that already passed and resumes at the first unfinished step. Once go-live starts, only `close` with its final report ends the job. The order grants → checks → final report → closed is unchanged: the final report still carries the actual grant and check evidence.
 
@@ -48,9 +49,9 @@ Once any created drive has a go-live fence, the job ends only through `close` wi
 - **Close with the missing report recorded as an exception and regenerated later (#81's open question):** rejected by D3. It would need its own authorization, evidence and terminal-state meaning.
 - **`cancel` as a sanctioned abandonment after go-live,** for example a `cancelled_after_go_live` outcome: rejected by D3 for the same reasons.
 
-## Not decided here
+## Subsequent decision
 
-Recovery from a go-live check that fails after the grants, and whether the destination drift check should run before the first grant: [#95](https://github.com/devosurf/migmate-cli/issues/95).
+Recovery from a go-live check that fails after the grants, and moving destination drift before the first fence or grant, are decided in [ADR-0017](0017-pre-grant-drift-and-acknowledged-go-live-checks.md) for [#95](https://github.com/devosurf/migmate-cli/issues/95). That accepted policy preserves the final-report requirement and the prohibition on cancellation after go-live; its implementation is separate.
 
 ## Consequences
 
