@@ -18,7 +18,7 @@ import type {
   TransferWorkerProbe,
 } from "./port.ts";
 import { withSocketPath } from "./socket-path.ts";
-import { DiskListing } from "./listing.ts";
+import { DiskListing, ListingScratch } from "./listing.ts";
 import { parseListingJson } from "./listing-json.ts";
 import { compareListings, type ListedFile, type ListedHash } from "./listing-comparison.ts";
 
@@ -427,6 +427,7 @@ export function createTransferSupervisor(options: {
   const starting = new Set<Promise<TransferWorkerHandle>>();
   const listings = new Set<Disposable>();
   const closing = new AbortController();
+  const scratch = new ListingScratch(join(options.jobDirectory, "listing-scratch-standalone"));
 
   function track<T extends Disposable>(listing: T): T {
     if (closed) {
@@ -960,7 +961,7 @@ export function createTransferSupervisor(options: {
     }
   }
 
-  return {
+  const supervisor: TransferSupervisor = {
     proveBinary,
     async compareFileListings(input) {
       const worker = owned(input.socketPath);
@@ -1165,7 +1166,7 @@ export function createTransferSupervisor(options: {
             (line) => {
               if (typeof line !== "string")
                 throw fail("provider_failed", "worker_response_invalid");
-              const match = /^ *(\\S*) {2}([\\s\\S]*)$/.exec(line);
+              const match = /^ *(\S*) {2}([\s\S]*)$/.exec(line);
               if (!match) throw fail("provider_failed", "worker_response_invalid");
               hashes.add({
                 path: match[2]!,
@@ -1318,6 +1319,7 @@ export function createTransferSupervisor(options: {
       closed = true;
       closing.abort(fail("provider_failed", "supervisor_closed"));
       for (const listing of listings) listing[Symbol.dispose]();
+      scratch[Symbol.dispose]();
       await Promise.allSettled(starting);
       const results = await Promise.allSettled(
         [...workers.values()].map((worker) => shutdown(worker, true)),
@@ -1325,5 +1327,11 @@ export function createTransferSupervisor(options: {
       if (results.some((result) => result.status === "rejected"))
         throw fail("recovery_required", "worker_cleanup_failed");
     },
+  };
+  return {
+    ...supervisor,
+    compareFileListings: (input) => scratch.inherit(() => supervisor.compareFileListings(input)),
+    listFolders: (input) => scratch.inherit(() => supervisor.listFolders(input)),
+    listFileHashes: (input) => scratch.inherit(() => supervisor.listFileHashes(input)),
   };
 }

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
@@ -1060,10 +1060,11 @@ async function* copyMapping(
         pending.size === 0 ? "settled" : state.passes >= state.maxPasses ? "exhausted" : "pending";
       let changedPaths: string[] = [];
       let changedPathPages = 0;
+      const changedPathGeneration = randomUUID();
       for (const path of pending.sorted((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
         changedPaths.push(path);
         if (pending.size > 1000 && changedPaths.length === 1000) {
-          const unitKey = `file-settle-paths:${mapping.id}:${state.observations.length}:${changedPathPages++}`;
+          const unitKey = `file-settle-paths:${mapping.id}:${changedPathGeneration}:${changedPathPages++}`;
           yield {
             rev: ctx.revision,
             phase: "execute",
@@ -1077,7 +1078,7 @@ async function* copyMapping(
         }
       }
       if (changedPathPages && changedPaths.length) {
-        const unitKey = `file-settle-paths:${mapping.id}:${state.observations.length}:${changedPathPages++}`;
+        const unitKey = `file-settle-paths:${mapping.id}:${changedPathGeneration}:${changedPathPages++}`;
         yield {
           rev: ctx.revision,
           phase: "execute",
@@ -1092,7 +1093,7 @@ async function* copyMapping(
       state.observations.push({
         at: ctx.now().toISOString(),
         changedPaths,
-        ...(changedPathPages ? { changedPathPages } : {}),
+        ...(changedPathPages ? { changedPathPages, changedPathGeneration } : {}),
         outcome: state.outcome === "pending" ? "changed" : state.outcome,
       });
     } finally {

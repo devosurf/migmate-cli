@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { it, type TestContext } from "node:test";
-import { fileMigrationDriver } from "../src/engine/drivers/file-migration.ts";
+import {
+  fileMigrationDriver,
+  type FileMigrationConfig,
+} from "../src/engine/drivers/file-migration.ts";
+import type { DriverContext } from "../src/engine/drivers/types.ts";
 import { openEngine } from "../src/engine/index.ts";
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import type { CommitUnit, FileCommitRow } from "../src/engine/commit.ts";
@@ -74,6 +78,66 @@ function commitRow(
   };
   store.commit({ rev: 1, phase, unitKey: id, checkpoint: id, rows: [row], findings: [] });
 }
+
+it("recovery publishes one fresh settle generation after interruption between path pages", async (t) => {
+  const store = await fixture(t);
+  const port = new FakeFileMigrationPort(fileFixture());
+  const worker = await port.startTransferWorker({ runDirectory: "/tmp/settle-generation-test" });
+  t.after(() => port.stopTransferWorker(worker));
+  let observation = 0;
+  const freshPaths = Array.from(
+    { length: 1501 },
+    (_, index) => `new-${String(index).padStart(4, "0")}`,
+  );
+  t.mock.method(port, "compareFileListings", async () => {
+    const paths =
+      observation++ === 0
+        ? Array.from({ length: 2001 }, (_, index) => `old-${String(index).padStart(4, "0")}`)
+        : observation === 2
+          ? freshPaths
+          : [];
+    return {
+      new: paths.map((path) => ({ path, size: 1 })),
+      changed: [],
+      unchanged: [],
+      deleted: [],
+      retained: [],
+      timestampOnly: [],
+      modifyWindowNs: "1000000000",
+    };
+  });
+  const ctx: DriverContext<FileMigrationConfig> = {
+    jobDirectory: "/tmp/settle-generation-test",
+    config: {
+      ...fileConfig(),
+      options: { staged: true, consistencyIntervalMs: 0, settleMaxPasses: 1 },
+    },
+    revision: 1,
+    stage: "final",
+    provider: port,
+    now: () => new Date(NOW),
+    resume: { checkpoint: null, ...store.readResume(1) },
+  };
+  for await (const unit of fileMigrationDriver.collect(ctx)) store.commit(unit);
+  ctx.resume = { checkpoint: null, ...store.readResume(1) };
+  const interrupted = fileMigrationDriver.execute(ctx)[Symbol.asyncIterator]();
+  for (;;) {
+    const next = await interrupted.next();
+    assert.equal(next.done, false);
+    if (next.done) throw new Error("Expected a pending path page");
+    store.commit(next.value);
+    if (next.value.watermark?.unitKey.startsWith("file-settle-paths:")) break;
+  }
+  await interrupted.return?.();
+  const partial = JSON.parse([...reportJson(store.reportEvidence(1).settled("mapping"))].join(""));
+  assert.deepEqual(partial.observations, [], "an unfinished generation is not published");
+  ctx.resume = { checkpoint: null, ...store.readResume(1) };
+  for await (const unit of fileMigrationDriver.execute(ctx)) store.commit(unit);
+  const final = JSON.parse([...reportJson(store.reportEvidence(1).settled("mapping"))].join(""));
+  assert.equal(final.outcome, "settled");
+  assert.deepEqual(final.observations[0].changedPaths, freshPaths);
+  assert.deepEqual(final.observations[1].changedPaths, []);
+});
 
 it("resumes file jobs from mapping metadata, not item rows, coverage pages or committed keys", async (t) => {
   const store = await fixture(t);

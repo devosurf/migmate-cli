@@ -79,7 +79,7 @@ export function readReportSettlement(
           `SELECT json_extract(document,?) AS document FROM (${query})`,
           [`$.observations[${index}]`, ...params],
         ) as Record<string, unknown>;
-        const { changedPathPages, ...evidence } = observation;
+        const { changedPathPages, changedPathGeneration, ...evidence } = observation;
         if (typeof changedPathPages === "number") {
           evidence.changedPaths = new ReportArray(function* () {
             for (let page = 0; page < changedPathPages; page++) {
@@ -87,7 +87,10 @@ export function readReportSettlement(
                 .prepare(
                   "SELECT j.value FROM watermark w,json_each(w.value) j WHERE w.rev=? AND w.unit_key=? ORDER BY j.key",
                 )
-                .iterate(revision, `file-settle-paths:${mappingId}:${index}:${page}`))
+                .iterate(
+                  revision,
+                  `file-settle-paths:${mappingId}:${changedPathGeneration ?? index}:${page}`,
+                ))
                 yield String(path.value);
             }
           });

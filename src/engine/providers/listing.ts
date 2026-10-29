@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -6,6 +7,68 @@ import { deserialize, serialize } from "node:v8";
 
 const PAGE_SIZE = 256;
 const SORT_RUN_SIZE = 1024;
+
+const scratchOwner = new AsyncLocalStorage<ListingScratch>();
+
+/** Owns disposable indexes across asynchronous helpers. Only a leased writer
+ * may reclaim the shared job scratch root; independent owners never sweep it. */
+export class ListingScratch implements Disposable {
+  readonly #parent: string;
+  readonly #listings = new Set<Disposable>();
+  #directory: string | undefined;
+  #closed = false;
+
+  constructor(parent: string) {
+    this.#parent = parent;
+  }
+
+  run<T>(callback: () => T): T {
+    if (this.#closed) throw new Error("Listing scratch is disposed");
+    return scratchOwner.run(this, callback);
+  }
+
+  /** Supervisors used outside the engine own their scratch until close. Inside
+   * a writer, all nested inventories instead share that writer's lease lifetime. */
+  inherit<T>(callback: () => T): T {
+    if (this.#closed) throw new Error("Listing scratch is disposed");
+    return (scratchOwner.getStore() ?? this).run(callback);
+  }
+
+  createDirectory(): string {
+    if (this.#closed) throw new Error("Listing scratch is disposed");
+    if (this.#directory === undefined) {
+      mkdirSync(this.#parent, { recursive: true, mode: 0o700 });
+      this.#directory = mkdtempSync(join(this.#parent, "owner-"));
+    }
+    return mkdtempSync(join(this.#directory, "listing-"));
+  }
+
+  track(listing: Disposable): void {
+    this.#listings.add(listing);
+  }
+
+  forget(listing: Disposable): void {
+    this.#listings.delete(listing);
+  }
+
+  [Symbol.dispose](): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    try {
+      for (const listing of this.#listings) listing[Symbol.dispose]();
+    } finally {
+      if (this.#directory !== undefined) rmSync(this.#directory, { recursive: true, force: true });
+    }
+  }
+}
+
+/** Call only after acquiring the job writer lease (including worker liveness
+ * adjudication). No reader or independent supervisor may reclaim this root. */
+export function reclaimListingScratch(jobDirectory: string): ListingScratch {
+  const root = join(jobDirectory, "listing-scratch");
+  rmSync(root, { recursive: true, force: true });
+  return new ListingScratch(root);
+}
 
 function database(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
@@ -29,6 +92,7 @@ export class DiskListing<T> implements Iterable<T>, Disposable {
   readonly #page: StatementSync;
   readonly #key: (value: T) => string;
   readonly #onDispose: (() => void) | undefined;
+  readonly #owner: ListingScratch | undefined;
   #pending = 0;
   #size = 0;
   #closed = false;
@@ -47,7 +111,11 @@ export class DiskListing<T> implements Iterable<T>, Disposable {
     },
     onDispose?: () => void,
   ) {
-    this.#directory = mkdtempSync(join(tmpdir(), "migmate-listing-"));
+    this.#owner = scratchOwner.getStore();
+    // Independent module callers retain caller-owned temporary inventories.
+    // Engine writers and real supervisors always install an identifiable owner.
+    this.#directory =
+      this.#owner?.createDirectory() ?? mkdtempSync(join(tmpdir(), "migmate-listing-"));
     this.#key = key;
     this.#onDispose = onDispose;
     let opened: DatabaseSync | undefined;
@@ -63,6 +131,7 @@ export class DiskListing<T> implements Iterable<T>, Disposable {
       this.#contains = this.#db.prepare("SELECT 1 FROM entries WHERE path=? LIMIT 1");
       this.#remove = this.#db.prepare("DELETE FROM entries WHERE path=?");
       this.#page = this.#db.prepare("SELECT id,value FROM entries WHERE id>? ORDER BY id LIMIT ?");
+      this.#owner?.track(this);
     } catch (error) {
       opened?.close();
       rmSync(this.#directory, { recursive: true, force: true });
@@ -219,6 +288,7 @@ export class DiskListing<T> implements Iterable<T>, Disposable {
       this.#db.close();
     } finally {
       rmSync(this.#directory, { recursive: true, force: true });
+      this.#owner?.forget(this);
       this.#onDispose?.();
     }
   }

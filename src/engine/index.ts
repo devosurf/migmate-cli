@@ -107,6 +107,7 @@ import {
 import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
 import { ProviderFault } from "./providers/fault.ts";
+import { reclaimListingScratch, type ListingScratch } from "./providers/listing.ts";
 import {
   fileMigrationDriver,
   goLive,
@@ -1081,6 +1082,7 @@ async function withWriter<T>(
     });
     if (!acquired.ok) return acquired;
     let active = true;
+    let scratch: ListingScratch | undefined;
     const session = makeWriter(
       deps,
       store,
@@ -1095,6 +1097,7 @@ async function withWriter<T>(
     let failed = false;
     let controlled: Refusal | null = null;
     try {
+      scratch = reclaimListingScratch(paths.dir);
       await reconcileWriterOpen(store.db, reconcileOnWriterOpen, {
         now: deps.now,
         hostId,
@@ -1127,8 +1130,9 @@ async function withWriter<T>(
             if (prefixes.some((prefix) => name.startsWith(prefix)))
               rmSync(join(staging, name), { recursive: true, force: true });
       }
+
       try {
-        value = await fn(session.writer);
+        value = await scratch.run(() => fn(session.writer));
       } catch (error) {
         operationError = error;
         failed = true;
@@ -1139,7 +1143,11 @@ async function withWriter<T>(
           controlled = await session.finishControl();
         } finally {
           try {
-            await session.dispose();
+            try {
+              await session.dispose();
+            } finally {
+              scratch?.[Symbol.dispose]();
+            }
           } finally {
             // Close the request inbox and release ownership under one write lock.
             // A racing requester reaches this owner or observes no holder.

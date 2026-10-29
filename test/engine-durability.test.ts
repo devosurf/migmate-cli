@@ -1117,6 +1117,40 @@ describe("engine durability seam", () => {
     assert.equal(status.state, "new");
   });
 
+  it("upgrades schema 6 to fence paged evidence readers without rewriting historical evidence", async (t) => {
+    const h = await harness(t);
+    const planDigest = await approve(h);
+    await execute(h);
+    const verified = await verify(h);
+    const path = join(h.home, "jobs", h.ref.id, "state.db");
+    const database = new DatabaseSync(path);
+    const historical = database.prepare("SELECT payload FROM item ORDER BY rev,phase,id").all();
+    const plans = database.prepare("SELECT * FROM plan_revision ORDER BY rev").all();
+    const approvals = database.prepare("SELECT * FROM approval ORDER BY id").all();
+    database.exec("UPDATE job SET schema_version=6");
+    database.close();
+    reopen(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(
+      status.schemaVersion,
+      7,
+      "released schema-6 readers must refuse paged-evidence stores",
+    );
+    assert.equal(status.planDigest, planDigest);
+    assert.equal(status.verificationDigest, verified.verificationDigest);
+    const migrated = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.deepEqual(
+        migrated.prepare("SELECT payload FROM item ORDER BY rev,phase,id").all(),
+        historical,
+      );
+      assert.deepEqual(migrated.prepare("SELECT * FROM plan_revision ORDER BY rev").all(), plans);
+      assert.deepEqual(migrated.prepare("SELECT * FROM approval ORDER BY id").all(), approvals);
+    } finally {
+      migrated.close();
+    }
+  });
+
   it("opens an approved schema version 2 job and executes mapping passes without losing its approval", async (t) => {
     const h = await harness(t);
     const digest = await approve(h);

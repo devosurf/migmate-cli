@@ -325,9 +325,18 @@ File-job resume loads mapping metadata rather than every verified item.
 Reverification snapshots iterate stored rows, coverage and changed-path observations
 are stored in pages, and reports reconstruct the complete historical array shapes
 without assembling them in memory. Verification commits retain their individual
-idempotence keys within bounded transactions. No job-store schema migration is
-needed. Historical stores and reports remain readable, and destination digest
-compatibility covers Unicode locale ties, duplicate paths, escaping and missing IDs.
+idempotence keys within bounded transactions. Schema **7** fences older readers
+that cannot interpret paged evidence: opening an existing job upgrades its version
+without rewriting historical rows, approvals, frozen plans or digests. Older builds
+then refuse that store with `state_version_unsupported`; keep a backup if rollback
+is needed. Destination digest compatibility covers Unicode locale ties, duplicate
+paths, escaping and missing IDs. Settle pages belong to a unique observation
+generation, published only after every page commits, so interruption and changed
+source paths cannot combine evidence from different observations.
+Listing indexes live in job-local `listing-scratch`, owned by the writer session.
+Normal completion and callback failures dispose them before releasing the lease.
+After a process crash, the next writer reclaims abandoned scratch only after
+acquiring that job's lease; readers and refused competing writers never sweep it.
 A single JSON value or token is bounded at 16 Mi characters; the complete listing
 has no size cap.
 
@@ -350,9 +359,9 @@ synthetic single-host qualification, not live-provider throughput, rclone-proces
 memory, or a guarantee that one destination container accepts five million items.
 Provider container limits still apply.
 
-The recorded darwin-arm64 / Node 26.4.0 run passed in **99.4 minutes**, with
-**93,651,744 bytes sampled peak JS heap** (89.3 MiB), 646,643,712 bytes sampled
-peak RSS, and **259.9 seconds listing time** across 35 million parsed records.
+The recorded darwin-arm64 / Node 26.4.0 run passed in **180.5 minutes**, with
+**93,728,544 bytes sampled peak JS heap** (89.4 MiB), 612,040,704 bytes sampled
+peak RSS, and **267.0 seconds listing time** across 35 million parsed records.
 The final five-artifact set was 19,453,922,524 bytes (19.45 GB), in addition to
 the job store, readiness artifacts and temporary indexes. Reserve disk for all
 of them; this gate is intentionally separate from the ordinary test suite.

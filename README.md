@@ -1001,7 +1001,7 @@ Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL
   under a 192 MiB Node heap. It streams synthetic rclone JSON through comparison,
   final settling, verification, status, go-live checks and readiness/final reports;
   output includes listing time, wall time and sampled heap/RSS peaks. The recorded
-  run took about 100 minutes; its final artifact set alone was 19.45 GB, with
+  run took about 181 minutes; its final artifact set alone was 19.45 GB, with
   additional space needed for the job store, readiness reports and temporary
   indexes. A 6,003-file version remains in `npm test`. See
   [scale qualification](docs/release-limits.md#listing-execution-and-historical-evidence)

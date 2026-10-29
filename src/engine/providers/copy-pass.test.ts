@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,6 +18,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createTransferSupervisor, type TransferSupervisor } from "./transfer-worker.ts";
 import type { CopyPassReference, FileListingComparison } from "./port.ts";
 import { FakeFileMigrationPort } from "./fake.ts";
+import { disposeListing } from "./listing.ts";
 
 function comparisonArrays(comparison: FileListingComparison) {
   return {
@@ -67,7 +78,7 @@ it("compares Google source downloaded hashes with SharePoint fixture hashes", as
       destination: { fs: "destination", kind: "sharepoint", ignoreSizeAndChecksum: true },
       mode: "copy",
     });
-    assert.deepEqual(comparison.unchanged, [{ path: "file.txt", size: 5 }]);
+    assert.deepEqual(comparisonArrays(comparison).unchanged, [{ path: "file.txt", size: 5 }]);
   } finally {
     await provider.stopTransferWorker({ socketPath: worker.socketPath });
   }
@@ -96,6 +107,63 @@ function suppliedBinary() {
   assert.ok(path && sha256 && provenance);
   return { path: resolve(path), sha256, provenance };
 }
+
+it(
+  "parses real worker hashsum lines with hexadecimal hashes and whitespace paths",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-hash-lines-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      await mkdir(source);
+      await writeFile(join(source, "hello  world.txt"), "hello");
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      for (const download of [false, true]) {
+        const listing = await supervisor.listFileHashes({
+          socketPath: worker.socketPath,
+          root: { fs: source, kind: "local" },
+          hashType: "sha256",
+          download,
+        });
+        assert.deepEqual(
+          [...listing],
+          [
+            {
+              path: "hello  world.txt",
+              size: 5,
+              hash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            },
+          ],
+        );
+        const scratch = join(directory, "listing-scratch-standalone");
+        assert.equal(
+          (await readdir(scratch, { recursive: true })).filter((path) =>
+            path.endsWith("/listing.sqlite"),
+          ).length,
+          1,
+        );
+        if (!download) {
+          disposeListing(listing);
+          assert.ok(
+            !(await readdir(scratch, { recursive: true })).some((path) =>
+              path.endsWith("/listing.sqlite"),
+            ),
+          );
+        }
+      }
+      await supervisor.close();
+      assert.deepEqual(await readdir(join(directory, "listing-scratch-standalone")), []);
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 it(
   "copies asynchronously with a durable handle, isolated stats and retained completion",
@@ -632,10 +700,12 @@ it(
         mode: "copy" as const,
         transfers: 1,
       };
-      const comparison = await supervisor.compareFileListings({
-        ...input,
-        destination: { fs: destination, kind: "sharepoint", ignoreSizeAndChecksum: true },
-      });
+      const comparison = comparisonArrays(
+        await supervisor.compareFileListings({
+          ...input,
+          destination: { fs: destination, kind: "sharepoint", ignoreSizeAndChecksum: true },
+        }),
+      );
       assert.deepEqual(comparison.unchanged, [{ path: "report.docx", size: 12 }]);
       assert.deepEqual(comparison.changed, []);
       assert.deepEqual(comparison.timestampOnly, []);
@@ -684,10 +754,12 @@ it(
       await writeFile(join(root, "a", "f.txt"), "file");
       const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
       assert.deepEqual(
-        await supervisor.listFolders({
-          socketPath: worker.socketPath,
-          root: { fs: root, kind: "local" },
-        }),
+        [
+          ...(await supervisor.listFolders({
+            socketPath: worker.socketPath,
+            root: { fs: root, kind: "local" },
+          })),
+        ],
         ["a", "a/b", "e"],
       );
     } finally {
@@ -745,7 +817,7 @@ it(
         download: true,
       };
       assert.deepEqual(
-        await supervisor.listFileHashes({ ...input, paths: ["nested/literal[1].txt"] }),
+        [...(await supervisor.listFileHashes({ ...input, paths: ["nested/literal[1].txt"] }))],
         [
           {
             path: "nested/literal[1].txt",
@@ -755,7 +827,7 @@ it(
         ],
       );
       assert.deepEqual(downloaded, ["/nested/literal[1].txt"]);
-      assert.deepEqual(await supervisor.listFileHashes({ ...input, paths: [] }), []);
+      assert.deepEqual([...(await supervisor.listFileHashes({ ...input, paths: [] }))], []);
       assert.deepEqual(downloaded, ["/nested/literal[1].txt"]);
     } finally {
       await supervisor.close();
@@ -800,10 +872,12 @@ it(
       const local = join(directory, "local");
       await mkdir(join(local, "still-served"), { recursive: true });
       assert.deepEqual(
-        await supervisor.listFolders({
-          socketPath: worker.socketPath,
-          root: { fs: local, kind: "local" },
-        }),
+        [
+          ...(await supervisor.listFolders({
+            socketPath: worker.socketPath,
+            root: { fs: local, kind: "local" },
+          })),
+        ],
         ["still-served"],
       );
     } finally {
@@ -853,7 +927,7 @@ it(
         destination: { fs: destination, kind: "local" as const },
         mode: "copy" as const,
       };
-      const comparison = await supervisor.compareFileListings(input);
+      const comparison = comparisonArrays(await supervisor.compareFileListings(input));
       assert.equal(comparison.modifyWindowNs, "1000000000");
       assert.deepEqual(comparison.unchanged, [{ path: "file.txt", size: 4 }]);
       assert.deepEqual(comparison.changed, []);
@@ -866,7 +940,7 @@ it(
       assert.equal(await readFile(join(destination, "file.txt"), "utf8"), "AAAA");
       assert.equal(downloads, 0);
       await utimes(join(destination, "file.txt"), 1_700_000_001, 1_700_000_001);
-      const boundary = await supervisor.compareFileListings(input);
+      const boundary = comparisonArrays(await supervisor.compareFileListings(input));
       assert.deepEqual(boundary.changed, [{ path: "file.txt", size: 4 }]);
       const copied = await supervisor.startCopyPass({ ...input, transfers: 1 });
       assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass: copied }), {
@@ -904,15 +978,18 @@ it(
         root: { fs: source, kind: "local" as const },
         hashType: "sha256" as const,
       };
-      assert.deepEqual(await supervisor.listFileHashes({ ...input, download: true }), [
-        {
-          path: "nested/hello world.txt",
-          size: 5,
-          hash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-        },
-      ]);
       assert.deepEqual(
-        await supervisor.listFileHashes({ ...input, hashType: "md5", download: false }),
+        [...(await supervisor.listFileHashes({ ...input, download: true }))],
+        [
+          {
+            path: "nested/hello world.txt",
+            size: 5,
+            hash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          },
+        ],
+      );
+      assert.deepEqual(
+        [...(await supervisor.listFileHashes({ ...input, hashType: "md5", download: false }))],
         [
           {
             path: "nested/hello world.txt",
@@ -942,11 +1019,11 @@ it(
         error: null,
       });
       assert.deepEqual(
-        await supervisor.listFileHashes({ ...input, root: encrypted, download: false }),
+        [...(await supervisor.listFileHashes({ ...input, root: encrypted, download: false }))],
         [{ path: "nested/hello world.txt", size: 5, hash: null }],
       );
       assert.deepEqual(
-        await supervisor.listFileHashes({ ...input, root: encrypted, download: true }),
+        [...(await supervisor.listFileHashes({ ...input, root: encrypted, download: true }))],
         [
           {
             path: "nested/hello world.txt",
