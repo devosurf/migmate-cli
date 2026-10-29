@@ -1038,7 +1038,7 @@ function nestedSource(pathFromRoot: string, boundId: string) {
 
 test("source bytes are read by the drive-root path that is bound to the item", async () => {
   const nested = nestedSource("reports/Q4 2026/summary.txt", "stable-source");
-  const requested: Array<{ driveId: string; path: string }> = [];
+  const requested: Array<{ fs: string; path: string }> = [];
   const effects = new FileEffects({
     config: {
       sourceProvider: "sharepoint",
@@ -1049,7 +1049,7 @@ test("source bytes are read by the drive-root path that is bound to the item", a
     graph: nested.transport,
     worker: {
       async *read(input) {
-        requested.push({ driveId: input.driveId, path: input.path });
+        requested.push(input);
         yield Buffer.from("bytes");
       },
     },
@@ -1060,7 +1060,9 @@ test("source bytes are read by the drive-root path that is bound to the item", a
     .catch(() => undefined);
   await effects.readSourceItem(stable);
   assert.equal((await bytes(effects.openSourceContent(stable))).toString(), "bytes");
-  assert.deepEqual(requested, [{ driveId: "source-drive", path: "reports/Q4 2026/summary.txt" }]);
+  assert.deepEqual(requested, [
+    { fs: "source,drive_id='source-drive',encoding=Slash:", path: "reports/Q4 2026/summary.txt" },
+  ]);
 });
 
 test("a source path that resolves to another item refuses instead of serving its bytes", async () => {

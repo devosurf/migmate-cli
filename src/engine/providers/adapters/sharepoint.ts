@@ -428,7 +428,12 @@ export class SharePointAdapter implements FileAdapter {
         "The source does not expose stable downloadable ordinary file content.",
       );
     const path = await this.#sourcePath({ driveId, item: before });
-    yield* this.#worker.read({ remote: this.#session.sourceRemote, driveId, path }) ??
+    // OneDrive resolves streamed objects from the drive root, not root_folder_id.
+    // Keep the exact library identity while the path remains bound to the item above.
+    if (!driveId || /[\[\]\u0000-\u001f\u007f/\\]/u.test(driveId))
+      throw new ProviderFault("preflight_failed", "The source identity is invalid.");
+    const fs = `${this.#session.sourceRemote},drive_id='${driveId.replaceAll("'", "''")}',encoding=Slash:`;
+    yield* this.#worker.read({ fs, path }) ??
       this.#graph.stream(
         `/v1.0/drives/${encodeURIComponent(driveId)}/root:/${path
           .split("/")

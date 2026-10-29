@@ -17,8 +17,8 @@ export interface Mapping {
 }
 
 export interface SourceWorker {
-  /** Path from the drive root, bound to the exact item ID by the adapter; null means no live worker. */
-  read(input: { remote: string; driveId: string; path: string }): AsyncIterable<Uint8Array> | null;
+  /** Adapter-constructed remote and item-bound path; null means no live worker. */
+  read(input: { fs: string; path: string }): AsyncIterable<Uint8Array> | null;
 }
 
 export interface AdapterInput {

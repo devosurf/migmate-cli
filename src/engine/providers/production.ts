@@ -91,7 +91,7 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
               graph,
               worker: {
                 read(item) {
-                  return current ? worker.openSource(current.socketPath, item) : null;
+                  return current ? worker.openRoot(current.socketPath, item) : null;
                 },
               },
             });
