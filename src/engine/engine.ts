@@ -42,6 +42,23 @@ export interface EngineOptions {
 export interface ExecuteOptions {
   /** Interrupt, never cancellation: aborting stops at the next commit boundary. */
   signal?: AbortSignal;
+  /** Detached attempt evidence, relative to the job folder; persisted before admission. */
+  detached?: { logPath: string };
+  /** Called only after admission has durably entered executing, before worker startup. */
+  onAdmitted?: (owner: { ownerUuid: string }) => void | Promise<void>;
+}
+
+export interface ControlOptions {
+  kind: "stop" | "cancel";
+  reason?: string;
+  commandId: string;
+  /** Cancels waiting, never withdraws a delivered request. */
+  signal?: AbortSignal;
+}
+
+export interface ControlResult {
+  stopped?: boolean;
+  cancelled?: boolean;
 }
 
 export interface ReclaimDecision {
@@ -62,6 +79,7 @@ export interface Engine {
    * which is how a caller ends up reporting exit 0 for a job that refused.
    */
   withWriterResult<T>(ref: JobRef, fn: (w: JobWriter) => Promise<Outcome<T>>): Promise<Outcome<T>>;
+  requestControl(ref: JobRef, options: ControlOptions): Promise<Outcome<ControlResult>>;
   reclaim(ref: JobRef, decision: ReclaimDecision): Promise<Outcome<RecoveryReport>>;
   close(): void;
 }

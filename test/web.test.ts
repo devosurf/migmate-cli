@@ -57,6 +57,8 @@ function status(): JobStatus {
       pid: 900,
       heartbeatAt: "2026-09-01T00:00:00Z",
       kind: "cli",
+      detached: false,
+      logPath: null,
     },
     planRevision: 1,
     planDigest: "reviewed-plan-digest",
@@ -117,6 +119,9 @@ function readerEngine(
       return writer ? await callback(writer) : refused;
     },
     async reclaim() {
+      return refused;
+    },
+    async requestControl() {
       return refused;
     },
     close() {},

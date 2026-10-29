@@ -13,6 +13,7 @@ export type CommandName =
   | "acknowledge"
   | "reclaim"
   | "web"
+  | "stop"
   | "version";
 export interface Invocation {
   command: CommandName;
@@ -26,6 +27,7 @@ export interface Invocation {
   approver?: string;
   planDigest?: string;
   final?: boolean;
+  detach?: boolean;
   freeze?: { by: string; at: string; how: string };
   verificationDigest?: string;
   closeDigest?: string;
@@ -150,9 +152,16 @@ export function parseInvocation(argv: string[]): Invocation {
       continue;
     }
     if (
-      ["--help", "-h", "--version", "--review", "--confirm", "--stop-worker", "--final"].includes(
-        token,
-      )
+      [
+        "--help",
+        "-h",
+        "--version",
+        "--review",
+        "--confirm",
+        "--stop-worker",
+        "--final",
+        "--detach",
+      ].includes(token)
     ) {
       if (switches.has(token)) throw new UsageFailure("A switch was supplied more than once.");
       switches.add(token);
@@ -183,6 +192,7 @@ export function parseInvocation(argv: string[]): Invocation {
       "accept",
       "acknowledge",
       "reclaim",
+      "stop",
       "web",
     ].includes(command) &&
     !((help || version) && words.length === 0)
@@ -260,6 +270,7 @@ export function parseInvocation(argv: string[]): Invocation {
     query,
     help,
   };
+  if (switches.has("--detach")) invocation.detach = true;
   if (jobId !== undefined) invocation.jobId = jobId;
   if (type !== undefined) invocation.type = type as JobType;
   const strings = {
@@ -292,6 +303,10 @@ export function parseInvocation(argv: string[]): Invocation {
     if ((values.has(flag) || switches.has(flag)) && !allowed.includes(command))
       throw new UsageFailure("Option is not valid for this command.");
   };
+  if (invocation.detach && (command !== "execute" || output === "jsonl"))
+    throw new UsageFailure(
+      "--detach is only available for execute with text or JSON output; tail the attempt log and use status to follow progress.",
+    );
   for (const flag of ["--type", "--label"]) only(flag, ["init"]);
   only("--config", ["init", "creds init"]);
   only("--file", ["manifest load", "discover"]);

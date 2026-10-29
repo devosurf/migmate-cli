@@ -1,17 +1,25 @@
 import { openEngine } from "../src/engine/index.ts";
-import { run } from "../src/cli/main.ts";
+import { run, initializeDetachedChild } from "../src/cli/main.ts";
 import { errorCode, processIo } from "../src/cli/io.ts";
 import { PersistentCliPort } from "./cli-fixture.ts";
+import { writeFileSync } from "node:fs";
 
 const home = process.env.CLI_TEST_HOME;
 const destination = process.env.CLI_TEST_DESTINATION;
 const now = process.env.CLI_TEST_NOW;
 if (!home || !destination || !now || !Number.isFinite(Date.parse(now)))
   throw new Error("CLI subprocess fixture needs isolated test paths and a valid clock");
+process.env.MIGMATE_HOME = home;
+const detachedChild = await initializeDetachedChild();
 const provider = new PersistentCliPort(
   destination,
   process.env.CLI_TEST_HOLD === "1"
-    ? { verb: process.argv[2]!, ready: () => process.send?.("checkpoint") }
+    ? {
+        verb: process.argv[2]!,
+        ready: () => {
+          if (process.connected) process.send?.("checkpoint");
+        },
+      }
     : undefined,
 );
 const engine = openEngine({ home, provider, adapter: "cli", now: () => new Date(now) });
@@ -30,13 +38,22 @@ const release = async (message: unknown) => {
 };
 const disconnected = () => process.kill(process.pid, "SIGTERM");
 process.on("message", release);
-process.once("disconnect", disconnected);
+if (!detachedChild) process.once("disconnect", disconnected);
 if (process.env.CLI_TEST_BLOCK_ON_ABORT) {
   const write = transport.io.stdout.write;
   transport.io.stdout.write = (chunk) =>
     write(transport.io.signal?.aborted ? `${" ".repeat(8 * 1024 * 1024)}${chunk}` : chunk);
 }
 try {
+  if (detachedChild && process.env.CLI_TEST_ADMISSION_MARKER) {
+    process.once("disconnect", disconnected);
+    writeFileSync(process.env.CLI_TEST_ADMISSION_MARKER, String(process.pid));
+    await new Promise<void>((resolve) => {
+      if (transport.io.signal?.aborted) resolve();
+      else transport.io.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+    process.off("disconnect", disconnected);
+  }
   process.exitCode = await run(process.argv.slice(2), transport.io, engine);
 } finally {
   provider.release();

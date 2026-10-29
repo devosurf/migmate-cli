@@ -1,5 +1,5 @@
 -- Migmate per-job durable state. One database per job folder, WAL mode.
--- Schema version 2. Forward-only migrations; a newer database refuses to open
+-- Schema version 7. Forward-only migrations; a newer database refuses to open
 -- under an older Migmate with `state_version_unsupported`.
 
 -- The job itself. Exactly one row.
@@ -30,6 +30,8 @@ CREATE TABLE lease (
   process_start_time INTEGER NOT NULL,
   heartbeat_at       TEXT NOT NULL,
   kind               TEXT NOT NULL CHECK (kind IN ('cli', 'web')),
+  detached           INTEGER NOT NULL DEFAULT 0 CHECK (detached IN (0, 1)),
+  log_path           TEXT,
   socket_path        TEXT,
   worker_group       TEXT,
   worker_pid         INTEGER,
@@ -400,3 +402,20 @@ CREATE TABLE IF NOT EXISTS decision_evidence (
   key TEXT PRIMARY KEY,
   payload TEXT NOT NULL
 ) STRICT;
+
+-- Requests bind to an ownership lifetime, never to a reusable process ID.
+CREATE TABLE IF NOT EXISTS control_request (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK (kind IN ('stop', 'cancel')),
+  owner_uuid TEXT NOT NULL,
+  reason TEXT,
+  host_id TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  command_id TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  answered_at TEXT,
+  outcome TEXT,
+  CHECK ((answered_at IS NULL) = (outcome IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS control_request_pending_owner
+  ON control_request(owner_uuid) WHERE answered_at IS NULL;

@@ -45,13 +45,29 @@ const enums: Record<string, readonly unknown[]> = {
   resumable: [true, false],
   workerStatus: WORKER_STATUSES,
   jobType: JOB_TYPES,
-  phase: VERBS,
+  phase: [...VERBS, "stop"],
   stage: ["prestage", "delta", "final"],
   verb: VERBS,
-  kind: ["policy_outcome", "planned_omission", "finding", ...EVENT_KINDS, "cli", "web", null],
+  kind: [
+    "policy_outcome",
+    "planned_omission",
+    "finding",
+    ...EVENT_KINDS,
+    "cli",
+    "web",
+    "stop",
+    "cancel",
+    null,
+  ],
   state: [...JOB_STATES, ...EXECUTION_TERMINAL_STATES, ...VERB_STATES],
   terminalState: [...EXECUTION_TERMINAL_STATES, null],
-  outcome: [...EXECUTION_TERMINAL_STATES, ...CLOSURE_OUTCOMES],
+  outcome: [
+    ...EXECUTION_TERMINAL_STATES,
+    ...CLOSURE_OUTCOMES,
+    "stopped",
+    "cancelled",
+    ...Object.keys(EXIT_CODE_BY_REFUSAL_CODE),
+  ],
   closureOutcome: CLOSURE_OUTCOMES,
   mode: ["interactive", "unattended", "legacy_unknown", "copy", "mirror"],
   identityAssurance: ["declared_unverified"],
@@ -140,8 +156,22 @@ export function knownContract(value: unknown): boolean {
 
 export function outcomeExit(command: string, outcome: AdapterOutcome): number {
   if (!knownContract(outcome)) return 1;
-  if (!outcome.ok) return exitCodeForRefusalCode(outcome.refusal.code);
+  if (!outcome.ok) {
+    if (
+      outcome.refusal.code === "retry_budget_exhausted" &&
+      outcome.refusal.detail?.interrupted === true
+    )
+      return 130;
+    return exitCodeForRefusalCode(outcome.refusal.code);
+  }
   if (command === "execute") {
+    if (
+      outcome.value &&
+      typeof outcome.value === "object" &&
+      "detached" in outcome.value &&
+      outcome.value.detached === true
+    )
+      return 0;
     const result = outcome.value as ExecuteResult;
     switch (result.outcome) {
       case "completed":

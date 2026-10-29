@@ -17,6 +17,8 @@ Match the exit status first, then the code.
 
 Exit 5 also covers a _successful_ `execute` whose outcome is `blocked`, so a checkpoint report is the finishing move either way. Statuses `130` (SIGINT), `141` (broken stdout) and `143` (SIGTERM) are process outcomes; inspect any accompanying result. An interrupted `plan` returns `retry_budget_exhausted` with `detail.interrupted: true`, releases its lease, and needs a fresh `plan`, not `reclaim` or `execute`. An interrupted `execute` remains resumable from its durable checkpoint.
 
+A detached launch's exit 0 acknowledges execute admission, not completion; follow its private log and status. Stop/cancel requester success means acknowledgement and lease release. The foreground owner instead exits 130 after stop or 7 after admitted cancellation. A requester interrupted with Ctrl-C leaves its delivered request pending. A stale heartbeat while waiting returns the recovery refusal (3), not a claim that stopping finished. See [ROUTES.md](ROUTES.md) for detached host-lifetime limits and resumable stop.
+
 Codes worth recognising:
 
 - **`plan_revision_required`** — plan and approve again when approved inputs change. For file migrations, a missing or changed destination root and new members in an excluded source subtree still require replanning; unrelated destination additions or removals do not. Same-path file content is governed by rclone copy comparison, not an ownership collision gate.
