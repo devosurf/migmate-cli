@@ -17,8 +17,24 @@ A job that preserves Microsoft Teams conversations and assets as human-readable 
 _Avoid_: Teams migration, chat backup
 
 **Supported route**:
-A source-and-destination combination this build implements and verifies item by item in every job. Anything outside it refuses as unsupported rather than degrading.
-_Avoid_: Qualified route, universal remote support, all-remotes support
+A source-and-destination combination this build implements and verifies item by item in every job. For file migration it is an ordered pair of providers, such as Dropbox to Google Drive. Anything outside it refuses as unsupported rather than degrading.
+_Avoid_: Qualified route, named route, universal remote support, all-remotes support
+
+**Provider**:
+A content service a file migration job reads from or writes to: Dropbox, Google Drive or SharePoint.
+_Avoid_: Backend, remote, cloud
+
+**Container**:
+The shared storage unit a provider grants access to as a whole, with its own membership and item limit: a Google Shared Drive, a Dropbox team folder or a SharePoint document library.
+_Avoid_: Drive (outside Google), space, bucket
+
+**Access boundary**:
+Source content that shares one membership, such as a Dropbox team folder or shared folder, a Shared Drive, or a SharePoint library or folder with unique permissions. A boundary stays in one container unless capacity forces a split.
+_Avoid_: Permission group, share
+
+**Capacity target**:
+The number of items planned into one destination container: by default a fixed share of the provider's hard item limit, overridable per destination.
+_Avoid_: Quota, limit
 
 **Capability sample**:
 Real source content whose observation the optional live test rests on, such as an item kind a driver must omit or a message carrying inline bytes. A sample that cannot exist is recorded with a named reason, never assumed away.
@@ -77,12 +93,28 @@ A known gap in a job's verified result or go-live evidence, explicitly acknowled
 _Avoid_: Error, warning, caveat
 
 **File mapping**:
-An approved relation from one stable source root to one stable destination root, such as a SharePoint document library and a Google Shared Drive, in either direction. A job's supported route fixes one direction for all its mappings. Items keep their relative hierarchy inside the mapping, and mappings within a job never overlap.
+An approved relation from one stable source root to one stable destination root, such as a Dropbox team folder and a folder in a Google Shared Drive. A job's supported route fixes one direction for all its mappings. Items keep their relative hierarchy inside the mapping, and mappings within a job never overlap.
 _Avoid_: Route, mount, sync pair
 
+**Files-only mapping**:
+A file mapping that covers only the files directly inside its source root, not its subfolders. It carries the files of a folder whose subfolders are split across containers.
+_Avoid_: Shallow mapping, non-recursive mapping
+
 **Mapping manifest**:
-The batch list of a job's file mappings, each naming its destination (an existing root, or a Shared Drive the job creates) and that destination's members. It is loaded into the job and frozen into the plan; after that the job, not the file, is the authority.
+The batch list of a job's file mappings, each naming its destination (an existing root, or a container the job creates) and that destination's members. It is loaded into the job and frozen into the plan; after that the job, not the file, is the authority.
 _Avoid_: Inventory, spreadsheet
+
+**Acting account**:
+The identity a pass writes to the destination as: an impersonated Workspace user on Google Drive, a selected team member on Dropbox. It is never the person who approves.
+_Avoid_: Service account, approver
+
+**Acting-account pool**:
+The approved set of acting accounts a job's passes may write as; each pass writes as exactly one. Adding an account expands authority; removing one does not.
+_Avoid_: Account rotation, user pool
+
+**Uploader membership**:
+Temporary write membership an acting account holds on a container the job created, removed at close before the membership check. It is not an end-user grant.
+_Avoid_: Service member, temporary grant
 
 **Mirror**:
 An opt-in mode in which a repeat pass makes a destination the job created match its source, including deletions. Without it a pass only copies and never deletes.
