@@ -128,7 +128,7 @@ Both existing file routes, SharePoint → Shared Drive and Shared Drive → Shar
 
 Version history, list-item fields, retention labels and permissions are not copied. The plan and report disclose these route-wide omissions once, not as per-file findings or accepted exceptions. OneNote notebooks copy as their section files, not as working Google notebooks. Mapping roots are the only scope selection.
 
-Removed configuration fields (`proof`, mapping exclusions, `acceptedOmissions`, `oneNoteNotebooks`, `deltaVerification`, and `verificationMode = "size_only"`) refuse rather than acquiring new meanings. Old inventory-planned jobs refuse mutation; their historical status, evidence and reports remain readable. Start a new map-only job to continue migration under this behavior. Teams archive jobs are unchanged.
+Removed configuration fields (`proof`, mapping exclusions, `acceptedOmissions`, `oneNoteNotebooks`, `deltaVerification`, and `verificationMode = "size_only"`) refuse rather than acquiring new meanings. Old inventory-planned jobs refuse mutation; their historical status, evidence and reports remain readable. Historical CSV reports retain omissions accepted by the frozen plan's approval, including reports generated before verification; editing the current job config cannot change that decision. Start a new map-only job to continue migration under this behavior. Teams archive jobs are unchanged.
 
 ### Staged cutover: keep one job open
 

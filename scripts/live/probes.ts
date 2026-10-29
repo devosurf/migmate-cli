@@ -84,11 +84,48 @@ export function probeFailures(input: {
         fail("capability proofs missing");
         continue;
       }
+      const census = observations.sourceKindCensus;
+      const roots = record(census) && strings(census.roots) ? census.roots : undefined;
+      const kinds = record(census) && record(census.kinds) ? census.kinds : undefined;
+      const validCensus =
+        record(census) &&
+        census.scope === "capability_source_root_children" &&
+        roots !== undefined &&
+        roots.length > 0 &&
+        roots.every((root) => hashPattern.test(root)) &&
+        new Set(roots).size === roots.length &&
+        kinds !== undefined &&
+        count(census.itemsScanned) &&
+        census.itemsScanned > 0;
+      if (!validCensus) fail("capability source census missing or malformed");
       for (const kind of sourceCapabilityKinds) {
         const proof = proofs[kind];
+        const observedCount = kinds?.[kind];
         if (proof === "live_source_entry") {
-          // A real item of that kind existed and the driver omitted it.
-          if (!asserted(`${kind}_omission`, true)) fail(`${kind} omission not asserted`);
+          for (const id of ["source_entry", "map_only_plan", "listing_verification_clean"]) {
+            if (!asserted(`${kind}_${id}`, true)) fail(`${kind} ${id} not asserted`);
+          }
+          if (!asserted(`${kind}_copy_completed`, "completed"))
+            fail(`${kind} copy completion not asserted`);
+          const samples = observations.capabilitySamples;
+          const sample = record(samples) ? samples[kind] : undefined;
+          if (
+            !record(sample) ||
+            typeof sample.sourceRoot !== "string" ||
+            !hashPattern.test(sample.sourceRoot) ||
+            typeof sample.sourceItem !== "string" ||
+            !hashPattern.test(sample.sourceItem) ||
+            sample.sourceRoot === sample.sourceItem ||
+            !count(sample.verifiedFiles) ||
+            sample.verifiedFiles <= 0 ||
+            !validCensus ||
+            !roots?.includes(sample.sourceRoot) ||
+            !count(observedCount) ||
+            observedCount <= 0
+          )
+            fail(`${kind} copied sample evidence missing`);
+          if (kind === "package" && !asserted("package_sections_copied", true))
+            fail("package section copy not asserted");
           continue;
         }
         // Each kind rests on at most one weaker proof, and only with its evidence.
@@ -98,19 +135,14 @@ export function probeFailures(input: {
           continue;
         }
         if (weaker === "source_refuses_creation") {
+          if (!validCensus || observedCount !== 0)
+            fail(`${kind} creation refusal cannot replace an available sample`);
           // Only the reference create is attempted live, so its status is the proof.
           if (observations.sourceRefusedReferenceStatus !== 400)
             fail(`${kind} creation refusal not observed`);
         } else {
           // Absence is only a proof when something was actually scanned.
-          const census = observations.sourceKindCensus;
-          if (
-            !record(census) ||
-            !record(census.kinds) ||
-            !count(census.itemsScanned) ||
-            census.itemsScanned <= 0 ||
-            census.kinds[kind] !== 0
-          )
+          if (!validCensus || observedCount !== 0)
             fail(`${kind} absence not proven by a scanned source`);
         }
       }

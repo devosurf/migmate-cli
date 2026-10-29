@@ -16,7 +16,14 @@ interface CsvEvidence {
 }
 
 function* exceptions(evidence: CsvEvidence) {
-  const { store, config, accepted } = evidence;
+  const { store, config, accepted, approval, revision } = evidence;
+  const plan = approval?.revision === revision ? store.readPlanRevision(revision) : null;
+  // Read-only projection of the old decision, never the mutable job configuration.
+  // This does not restore acceptedOmissions to the current public options.
+  const frozen: { options?: { acceptedOmissions?: string[] } } | undefined =
+    plan && approval?.planDigest === plan.planDigest && plan.inputs.configuration
+      ? JSON.parse(plan.inputs.configuration)
+      : undefined;
   for (const finding of evidence.findings()) {
     if (finding.kind === "policy_outcome") continue;
     const details =
@@ -24,7 +31,16 @@ function* exceptions(evidence: CsvEvidence) {
         ? (finding.evidence as Record<string, unknown>)
         : {};
     const acceptance = accepted.find((entry) => entry.code === finding.code);
-    const status = acceptance ? "accepted" : "outstanding";
+    const acceptedInAdvance =
+      finding.phase === "plan" &&
+      finding.kind === "planned_omission" &&
+      frozen?.options?.acceptedOmissions?.includes(finding.code);
+    const status = acceptance
+      ? "accepted"
+      : acceptedInAdvance
+        ? "accepted in advance"
+        : "outstanding";
+    const approver = acceptance?.approver ?? (acceptedInAdvance ? approval?.approver : undefined);
     let located = false;
     for (const mapping of config?.mappings ?? []) {
       const path = store.reportItemPath(
@@ -47,6 +63,7 @@ function* exceptions(evidence: CsvEvidence) {
         finding,
         status,
         acceptance,
+        approver,
         reason: details.reason,
       };
     }
@@ -57,6 +74,7 @@ function* exceptions(evidence: CsvEvidence) {
         finding,
         status,
         acceptance,
+        approver,
         reason: details.reason,
       };
   }
@@ -70,7 +88,7 @@ export function* exceptionsCsv(evidence: CsvEvidence): Generator<string> {
       item.path,
       item.finding.code,
       item.status,
-      item.acceptance?.approver,
+      item.approver,
       item.acceptance?.note,
       item.reason,
     ]);

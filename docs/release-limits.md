@@ -85,7 +85,9 @@ OneNote notebooks copy as section files. Mapping roots alone select scope.
 Removed options (`proof`, exclusions, `acceptedOmissions`, `oneNoteNotebooks`,
 `deltaVerification`, and `verificationMode = "size_only"`) refuse. Old
 inventory-planned jobs refuse mutation, while historical status, evidence and
-reports remain readable; use a new map-only job for further migration.
+reports remain readable; use a new map-only job for further migration. Historical
+CSV reports retain advance omission acceptance from the frozen configuration and
+matching approval even before verification, without enabling that option for new jobs.
 Teams archive jobs are unaffected.
 
 Final settling compares source and destination file/folder listings after the
@@ -472,6 +474,51 @@ npm run test:live -- --config "$PROBE_CONFIG"
 ```
 
 It prints `PASS` or `FAIL` per probe, exits 0 when every probe passed, and otherwise exits 4 with the refusal code `live_test_failed` and the blocking gate in `refusal.detail.gate`. Nothing it observes is written into the repository.
+
+**SharePoint capability samples after ADR-0014.** The source-capability probe maps
+ordinary isolated folders, never exclusions or individual package/reference item
+IDs. Configure each supplied kind under `fixtures.capabilityRoots`:
+
+```json
+{
+  "capabilityRoots": {
+    "package": {
+      "sourceItemId": "ordinary-folder-containing-only-the-notebook",
+      "sampleItemId": "notebook-item-id"
+    }
+  }
+}
+```
+
+Each `sourceItemId` must be an ordinary folder directly beneath the acknowledged
+disposable source root, containing exactly its `sampleItemId` as a direct child.
+Use distinct folders and sample IDs for `package`, `reference`, and
+`undownloadable`. The folders and samples remain read-only and are not deleted;
+only the newly created destination copy roots and their outputs are cleaned up.
+The prerequisite wizard now asks for both identities. Existing `specialSources`
+configs refuse `file_special_sources_removed_use_capability_roots`; do not rename
+an old item ID into a folder-root field. Prepare the isolated folders and rewrite
+the configuration explicitly.
+
+The probe requires a real package sample with at least one copied `.one` section
+beneath the notebook path. It approves a map-only plan, executes the entire isolated
+root, and runs **default listing verification**, alongside the existing separate
+hash/copy/resume probes. A supplied sample needs completed copying, clean listing
+verification and actual verified sample content; an empty notebook or an unavailable
+content stream is not a passing sample. Failed copy/listing observations remain
+failed evidence, not omission assertions or a weaker-proof fallback. Old
+omission-only captures no longer pass the verdict.
+
+ADR-0006's real-sample/refusal/absence distinction remains: a package has no weaker
+proof; a missing reference requires a real HTTP 400 creation refusal in this run;
+only an undownloadable item may rest on absence. The census covers direct children
+of the acknowledged source root **and each configured isolated sample root**,
+recording hashed root identities and kind counts. It does not claim absence from
+the whole library or unscanned descendants. A kind present in this census requires
+its supplied sample rather than weaker evidence. This replaces ADR-0006's historical
+per-file omission observation, not its requirement for genuine sample coverage.
+No credentialed tenant run of this updated probe is claimed; offline regressions
+cover configuration and capture validation, not real notebook transfer behavior.
 
 **Where you see it.** The `unsupported_route` refusal; option-specific tenant and permission probes; verification findings and `verification_unaccepted`.
 

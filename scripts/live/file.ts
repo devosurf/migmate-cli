@@ -5,6 +5,8 @@ import { openEngine, type Outcome, type JobRef } from "../../src/engine/index.ts
 import { createCredentialSession } from "../../src/engine/providers/credentials.ts";
 import { createProductionProvider } from "../../src/engine/providers/production.ts";
 import type { FileMappingConfig } from "../../src/engine/drivers/file-migration.ts";
+import { digestJson } from "../../src/engine/store/digest.ts";
+import type { SourceEntry } from "../../src/engine/providers/port.ts";
 import {
   fileProbeIds,
   sourceCapabilityKinds,
@@ -73,11 +75,18 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
       codes: [],
     });
   }
-  async function approved(mappings: FileMappingConfig[]): Promise<JobRef> {
+  async function approved(
+    mappings: FileMappingConfig[],
+    verificationMode: "hash" | "listing" = "hash",
+  ): Promise<JobRef> {
     const ref = value(
       await engine.initJob({
         type: "file_migration",
-        config: { ...jobConfig, mappings, options: { verificationMode: "hash" } },
+        config: {
+          ...jobConfig,
+          mappings,
+          options: verificationMode === "hash" ? { verificationMode: "hash" } : {},
+        },
       }),
     );
     value(
@@ -261,10 +270,20 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
     capture("mapping_interrupt_and_resume", resumeStartedAt, resumeAssertions);
 
     const routeStartedAt = new Date().toISOString();
-    const children = await readback.listSourceChildren({
-      driveId: root.sourceDriveId,
-      itemId: root.sourceItemId,
-    });
+    const scopes = new Map<string, SourceEntry[]>();
+    for (const itemId of [
+      root.sourceItemId,
+      ...Object.values(configured.capabilityRoots).map((sample) => sample.sourceItemId),
+    ]) {
+      scopes.set(
+        itemId,
+        await readback.listSourceChildren({
+          driveId: root.sourceDriveId,
+          itemId,
+        }),
+      );
+    }
+    const children = [...scopes.values()].flat();
     const kinds: Record<string, number> = {
       file: 0,
       folder: 0,
@@ -276,48 +295,104 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
       const kind = child.kind === "file" && !child.downloadable ? "undownloadable" : child.kind;
       kinds[kind] = (kinds[kind] ?? 0) + 1;
     }
-    const specialIds = configured.specialSources;
-    const selected = Object.values(specialIds);
-    const specialDestination = await fixtures.destinationObject(destinationRoot, "source-limits");
-    const specialRef = value(
-      await engine.initJob({
-        type: "file_migration",
-        config: {
-          ...jobConfig,
-          mappings: [
-            {
-              ...root,
-              destFolderId: specialDestination,
-              exclusions: children
-                .filter((c) => !selected.includes(c.id))
-                .map((c) => ({ sourceItemId: c.id, reason: "Outside capability sample" })),
-            },
-          ],
-        },
-      }),
-    );
-    value(await engine.withWriterResult(specialRef, (writer) => writer.plan()));
-    const rows = value(await engine.reader(specialRef).rows({ phase: "plan", limit: 1000 })).rows;
     const routeAssertions: ProbeCapture["assertions"] = [];
     const proofs: Record<string, string> = {};
-    const refusedReference = specialIds.referenceId
+    const samples: Record<
+      string,
+      { sourceRoot: string; sourceItem: string; verifiedFiles: number }
+    > = {};
+    const refusedReference = configured.capabilityRoots.reference
       ? null
       : await fixtures.rejectedReferenceItem(sourceRoot);
-    const omissionCodes = {
-      package: "source_package_omitted",
-      reference: "source_reference_omitted",
-      undownloadable: "source_content_unavailable",
-    };
     for (const kind of sourceCapabilityKinds) {
-      const id = specialIds[`${kind}Id`];
-      if (id) {
-        const omitted = rows.some(
-          (row) =>
-            row.jobType === "file_migration" &&
-            row.sourceItemId === id &&
-            row.code === omissionCodes[kind],
+      const fixture = configured.capabilityRoots[kind];
+      if (fixture) {
+        const sampleChildren = scopes.get(fixture.sourceItemId)!;
+        const sample = sampleChildren.find((child) => child.id === fixture.sampleItemId);
+        const observedKind =
+          sample?.kind === "file" && !sample.downloadable ? "undownloadable" : sample?.kind;
+        if (!sample || observedKind !== kind || sampleChildren.length !== 1)
+          throw new LiveTestBlocked(`file_live_${kind}_fixture_unproven`);
+        routeAssertions.push(liveAssertion("file_probe_", `${kind}_source_entry`, true, true));
+        const destination = await fixtures.destinationObject(destinationRoot, `source-${kind}`);
+        copyRoots.push(destination);
+        const mapping = {
+          ...root,
+          id: `live-source-${kind}`,
+          sourceItemId: fixture.sourceItemId,
+          destFolderId: destination,
+        };
+        // Ordinary isolated roots are the entire scope; no per-item filters or inventory.
+        // An empty options object deliberately exercises default listing verification.
+        const sampleRef = await approved([mapping], "listing");
+        const plan = value(await engine.reader(sampleRef).rows({ phase: "plan", limit: 2 }));
+        routeAssertions.push(
+          liveAssertion(
+            "file_probe_",
+            `${kind}_map_only_plan`,
+            true,
+            plan.totalRows === 1 &&
+              plan.rows.length === 1 &&
+              plan.nextCursor === null &&
+              plan.rows.every(
+                (row) =>
+                  row.jobType === "file_migration" &&
+                  row.sourceItemId === fixture.sourceItemId &&
+                  row.relativePath === ".",
+              ),
+          ),
         );
-        routeAssertions.push(liveAssertion("file_probe_", `${kind}_omission`, true, omitted));
+        const copied = value(
+          await engine.withWriterResult(sampleRef, (writer) =>
+            writer.execute({ signal: input.signal }),
+          ),
+        );
+        const verified = value(
+          await engine.withWriterResult(sampleRef, (writer) => writer.verify()),
+        );
+        let verifiedFiles = 0;
+        let cursor: string | undefined;
+        do {
+          const page = value(
+            await engine.reader(sampleRef).rows({
+              phase: "verify",
+              limit: 1000,
+              ...(cursor ? { cursor } : {}),
+            }),
+          );
+          for (const row of page.rows) {
+            if (
+              row.jobType !== "file_migration" ||
+              row.provenanceState !== "verified" ||
+              row.code !== "unchanged" ||
+              row.size === null ||
+              !row.destinationFileId
+            )
+              continue;
+            if (
+              kind === "package"
+                ? row.relativePath.startsWith(`${sample.name}/`) && /\.one$/i.test(row.relativePath)
+                : row.sourceItemId === sample.id || row.relativePath === sample.name
+            )
+              verifiedFiles++;
+          }
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor);
+        samples[kind] = {
+          sourceRoot: digestJson(fixture.sourceItemId),
+          sourceItem: digestJson(sample.id),
+          verifiedFiles,
+        };
+        // Preserve failures as evidence for the verdict; unavailable content is not a clean proof.
+        routeAssertions.push(
+          { id: `${kind}_copy_completed`, expected: "completed", observed: copied.outcome },
+          { id: `${kind}_listing_verification_clean`, expected: true, observed: verified.clean },
+          {
+            id: kind === "package" ? "package_sections_copied" : `${kind}_content_copied`,
+            expected: true,
+            observed: verifiedFiles > 0,
+          },
+        );
         proofs[kind] = "live_source_entry";
       } else if (
         kinds[kind] === 0 &&
@@ -344,9 +419,11 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
     routeAssertions.push(...worker.assertions);
     capture("route_limits_and_version_gate", routeStartedAt, routeAssertions, {
       capabilityProofs: proofs,
+      capabilitySamples: samples,
       sourceRefusedReferenceStatus: refusedReference,
       sourceKindCensus: {
-        scope: "mapping_source_root_children",
+        scope: "capability_source_root_children",
+        roots: [...scopes.keys()].map((id) => digestJson(id)).sort(),
         itemsScanned: children.length,
         kinds,
       },

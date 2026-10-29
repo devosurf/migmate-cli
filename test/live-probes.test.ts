@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { digestJson } from "../src/engine/store/digest.ts";
 import { probeFailures, type ProbeCapture } from "../scripts/live/probes.ts";
+import { fixtureConfig } from "../scripts/live/file-fixtures.ts";
+import { LiveTestBlocked } from "../scripts/live/common.ts";
 
 const census = {
-  scope: "mapping_source_root_children",
-  itemsScanned: 4,
-  kinds: { file: 2, folder: 2, package: 0, reference: 0, undownloadable: 0 },
+  scope: "capability_source_root_children",
+  roots: [digestJson("package-root"), digestJson("source-root")].sort(),
+  itemsScanned: 5,
+  kinds: { file: 2, folder: 2, package: 1, reference: 0, undownloadable: 0 },
 };
 const noRetained = { channel: false, chat: false };
 
@@ -26,7 +29,11 @@ function capture(probeId: string, overrides: Partial<ProbeCapture> = {}): ProbeC
 function routeCapture(
   observations: Record<string, unknown> = {},
   assertions: ProbeCapture["assertions"] = [
-    { id: "package_omission", expected: true, observed: true },
+    { id: "package_source_entry", expected: true, observed: true },
+    { id: "package_map_only_plan", expected: true, observed: true },
+    { id: "package_copy_completed", expected: "completed", observed: "completed" },
+    { id: "package_listing_verification_clean", expected: true, observed: true },
+    { id: "package_sections_copied", expected: true, observed: true },
   ],
 ): ProbeCapture {
   return capture("route_limits_and_version_gate", {
@@ -38,6 +45,13 @@ function routeCapture(
         undownloadable: "absent_from_source_scope",
       },
       sourceKindCensus: census,
+      capabilitySamples: {
+        package: {
+          sourceRoot: digestJson("package-root"),
+          sourceItem: digestJson("package-item"),
+          verifiedFiles: 1,
+        },
+      },
       sourceRefusedReferenceStatus: 400,
       ...observations,
     },
@@ -56,11 +70,52 @@ describe("live file probe verdict", () => {
     assert.deepEqual(routeFailures(routeCapture()), []);
   });
 
-  it("fails an assertion whose observed value differs", () => {
-    const failures = routeFailures(
-      routeCapture({}, [{ id: "package_omission", expected: true, observed: false }]),
+  it("rejects an old omission-only capture even when every old assertion passes", () => {
+    assert.ok(
+      routeFailures(routeCapture({}, [{ id: "package_omission", expected: true, observed: true }]))
+        .length > 0,
     );
-    assert.ok(failures.length > 0);
+  });
+
+  for (const id of [
+    "package_source_entry",
+    "package_map_only_plan",
+    "package_copy_completed",
+    "package_listing_verification_clean",
+    "package_sections_copied",
+  ]) {
+    it(`requires live map/copy/listing evidence: ${id}`, () => {
+      const route = routeCapture();
+      route.assertions = route.assertions.filter((assertion) => assertion.id !== id);
+      assert.ok(routeFailures(route).length > 0);
+    });
+  }
+
+  it("does not call an empty notebook listing a copied package sample", () => {
+    assert.ok(
+      routeFailures(
+        routeCapture({
+          capabilitySamples: {
+            package: {
+              sourceRoot: digestJson("package-root"),
+              sourceItem: digestJson("package-item"),
+              verifiedFiles: 0,
+            },
+          },
+        }),
+      ).length > 0,
+    );
+  });
+
+  it("fails an assertion whose observed value differs", () => {
+    const route = routeCapture();
+    const assertion = route.assertions.find((item) => item.id === "package_source_entry")!;
+    assertion.observed = false;
+    assert.ok(
+      routeFailures(route).includes(
+        "route_limits_and_version_gate: assertion package_source_entry observed a different value",
+      ),
+    );
   });
 
   it("fails a required probe that never ran", () => {
@@ -103,7 +158,7 @@ describe("live file probe verdict", () => {
         capabilityProofs: { package: "live_source_entry", reference: "source_refuses_creation" },
       }),
     ],
-    ["a live-source-entry claim without the observed omission", routeCapture({}, [])],
+    ["a live-source-entry claim without observed sample evidence", routeCapture({}, [])],
     [
       "an absence claim from a kind the source can hold on demand",
       routeCapture({
@@ -131,6 +186,53 @@ describe("live file probe verdict", () => {
       assert.ok(failures.every((failure) => failure.startsWith("route_limits_and_version_gate: ")));
     });
   }
+});
+
+describe("live capability fixture configuration", () => {
+  const mapping = {
+    id: "live",
+    sourceDriveId: "source-drive",
+    sourceItemId: "source-root",
+    destDriveId: "destination-drive",
+    destFolderId: "destination-root",
+  };
+  const fixtures = {
+    disposableRoots: { ...mapping, acknowledged: true },
+    graphMutation: {
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      clientId: "22222222-2222-2222-2222-222222222222",
+      clientSecret: { resolver: "file", path: "/private/mutator-secret" },
+    },
+  };
+
+  it("refuses old direct-child sample IDs instead of treating them as folder roots", () => {
+    assert.throws(
+      () => fixtureConfig({ ...fixtures, specialSources: { packageId: "notebook" } }, mapping),
+      (error: unknown) =>
+        error instanceof LiveTestBlocked &&
+        error.gate === "file_special_sources_removed_use_capability_roots",
+    );
+  });
+
+  it("retains explicit isolated folder roots and their real sample identities", () => {
+    const capabilityRoots = {
+      package: { sourceItemId: "package-root", sampleItemId: "notebook" },
+    };
+    assert.deepEqual(fixtureConfig({ ...fixtures, capabilityRoots }, mapping), {
+      disposableRoots: {
+        sourceDriveId: "source-drive",
+        sourceItemId: "source-root",
+        destDriveId: "destination-drive",
+        destFolderId: "destination-root",
+        acknowledged: true,
+      },
+      graphMutation: {
+        ...fixtures.graphMutation,
+        clientSecret: { ...fixtures.graphMutation.clientSecret, mode: "0600" },
+      },
+      capabilityRoots,
+    });
+  });
 });
 
 const privateSubject = digestJson("private-conversation");

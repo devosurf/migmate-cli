@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { it, type TestContext } from "node:test";
 import { parse } from "csv-parse/sync";
+import { stringify as stringifyToml } from "smol-toml";
 import type { FileMigrationConfig } from "../src/engine/drivers/file-migration.ts";
 import { openEngine } from "../src/engine/index.ts";
 import { fileMigrationDriver } from "../src/engine/drivers/file-migration.ts";
@@ -205,6 +207,118 @@ it("exports mapping totals and accepted findings without inventing missing metad
   assert.deepEqual(value(await h.engine.reader(h.ref).artifacts()), report);
   assert.deepEqual(value(await h.engine.withWriterResult(h.ref, (w) => w.report())), report);
 });
+
+for (const decision of ["approved", "absent", "unapproved", "mismatched"] as const)
+  it(`preserves ${decision} historical omission acceptance in report CSV before verification`, async (t) => {
+    const legacy: {
+      plan: Record<string, string | number>;
+      inputs: Array<{ key: string; value: string }>;
+      approval: Record<string, string | number>;
+    } = JSON.parse(
+      await readFile(new URL("./fixtures/pre-manifest-approved.json", import.meta.url), "utf8"),
+    );
+    const h = await fixture(t);
+    value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
+    const directory = join(h.home, "jobs", h.ref.id);
+    const database = new DatabaseSync(join(directory, "state.db"));
+    try {
+      database.exec("UPDATE item SET payload=json_remove(payload,'$.fileScope')");
+      database.exec("DELETE FROM plan_input; DELETE FROM plan_revision");
+      for (const [table, row] of [
+        ["plan_revision", legacy.plan],
+        ...(decision === "unapproved" ? [] : [["approval", legacy.approval] as const]),
+      ] as const) {
+        const keys = Object.keys(row);
+        database
+          .prepare(
+            `INSERT INTO ${table} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`,
+          )
+          .run(...Object.values(row));
+      }
+      for (const input of legacy.inputs) {
+        const frozen = input.key === "configuration" ? JSON.parse(input.value) : undefined;
+        if (frozen && decision !== "absent")
+          frozen.options.acceptedOmissions = ["version_history_omitted"];
+        database
+          .prepare("INSERT INTO plan_input (rev,key,value) VALUES (1,?,?)")
+          .run(input.key, frozen ? JSON.stringify(frozen) : input.value);
+      }
+      if (decision === "mismatched")
+        database.exec(
+          "UPDATE approval SET plan_digest='different-plan', payload=json_set(payload,'$.planDigest','different-plan')",
+        );
+      database
+        .prepare("UPDATE job SET state=?")
+        .run(decision === "unapproved" ? "planned" : "approved");
+      const finding = database.prepare(
+        "INSERT INTO finding (rev,phase,code,kind,subject_kind,subject_id,evidence,at) VALUES (1,'plan',?,?,'mapping','mapping','{}',?)",
+      );
+      for (const [code, kind] of [
+        ["version_history_omitted", "planned_omission"],
+        ["permissions_not_migrated", "planned_omission"],
+      ] as const)
+        finding.run(code, kind, "2026-09-01T00:00:00.000Z");
+      // An interrupted verification has findings but no successful verification revision.
+      database.exec(
+        `INSERT INTO finding (rev,phase,code,kind,subject_kind,subject_id,evidence,at)
+         VALUES (1,'verify','version_history_omitted','planned_omission','file','unverified',
+           '{"mappingId":"mapping","path":"unverified.txt"}','2026-09-01T00:00:00.000Z');
+         UPDATE projection_verb_state SET state='done' WHERE state='current';
+         INSERT INTO projection_verb_state (verb,state,updated_at)
+         VALUES ('verify','current','2026-09-01T00:00:00.000Z')
+         ON CONFLICT(verb) DO UPDATE SET state='current'`,
+      );
+    } finally {
+      database.close();
+    }
+    // Live config deliberately disagrees with the frozen decision in both directions.
+    await writeFile(
+      join(directory, "job.toml"),
+      stringifyToml({
+        ...fileConfig(),
+        options: {
+          acceptedOmissions: decision === "approved" ? [] : ["version_history_omitted"],
+        },
+      }),
+    );
+    for (const mutate of [
+      () => h.engine.withWriterResult(h.ref, (writer) => writer.plan()),
+      () => h.engine.withWriterResult(h.ref, (writer) => writer.execute()),
+      () => h.engine.withWriterResult(h.ref, (writer) => writer.cancel("retire")),
+    ]) {
+      const result = await mutate();
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.refusal.code, "state_version_unsupported");
+    }
+    const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+    const csv = async (name: string): Promise<Record<string, string>[]> =>
+      parse(
+        await readFile(report.artifacts.find((artifact) => artifact.name === name)!.path, "utf8"),
+        {
+          columns: true,
+        },
+      );
+    const exceptions = await csv("exceptions.csv");
+    assert.equal(exceptions.length, 3);
+    const omission = exceptions.find(
+      (row) => row.code === "version_history_omitted" && row.path !== "unverified.txt",
+    )!;
+    const unverified = exceptions.find((row) => row.path === "unverified.txt")!;
+    assert.equal(unverified.status, "outstanding");
+    assert.equal(unverified.approver, "");
+    const accepted = decision === "approved";
+    assert.equal(omission.status, accepted ? "accepted in advance" : "outstanding");
+    assert.equal(omission.approver, accepted ? "engine-contract-test" : "");
+    assert.equal(
+      exceptions.find((row) => row.code === "permissions_not_migrated")!.status,
+      "outstanding",
+    );
+    const mappings = await csv("mappings.csv");
+    assert.equal(mappings.length, 1);
+    assert.equal(mappings[0]!.accepted_exceptions, accepted ? "1" : "0");
+    assert.equal(mappings[0]!.outstanding_exceptions, accepted ? "2" : "3");
+    assert.equal(mappings[0]!.verification_outcome, "");
+  });
 
 it("discloses map-only scope once without per-file omission exceptions", async (t) => {
   const h = await fixture(t, fileFixture(), fileConfig());

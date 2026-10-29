@@ -654,25 +654,36 @@ else
   unset MIGMATE_PROBE_MUTATOR_SECRET
 fi
 chmod 600 "$MIGMATE_PROBE_MUTATOR_SECRET_FILE"
-say "Capability samples are optional, read-only, and must be direct children of the disposable source root. Leave one empty when the tenant has no such item; the gate then records it as unavailable rather than claiming the observation."
-ask MIGMATE_PROBE_PACKAGE_ID "Paste a package item id, e.g. a OneNote notebook (Enter to skip):"
-ask MIGMATE_PROBE_REFERENCE_ID "Paste a reference (remoteItem) id (Enter to skip):"
-ask MIGMATE_PROBE_UNDOWNLOADABLE_ID "Paste an undownloadable item id (Enter to skip):"
-special_sources=""
-for pair in "packageId:$MIGMATE_PROBE_PACKAGE_ID" \
-  "referenceId:$MIGMATE_PROBE_REFERENCE_ID" \
-  "undownloadableId:$MIGMATE_PROBE_UNDOWNLOADABLE_ID"; do
-  key=${pair%%:*}
-  value=${pair#*:}
-  [[ -z "$value" ]] && continue
-  special_sources+="$(printf '\n      "%s": "%s",' "$key" "$value")"
+say "Capability samples stay read-only. For each supplied sample, create an ordinary folder directly beneath the disposable source root and place only that sample inside it. The folder is the whole mapping scope; exclusions are not supported."
+say "A package sample is required: use a OneNote notebook with a real .one section. The probe must copy and listing-verify its sections. Reference and undownloadable samples may be absent only with the live refusal/census evidence from ADR-0006."
+ask MIGMATE_PROBE_PACKAGE_ROOT_ID "Paste the isolated ordinary folder id containing the package sample:"
+ask MIGMATE_PROBE_PACKAGE_ID "Paste the package sample item id inside that folder (not the folder id):"
+ask MIGMATE_PROBE_REFERENCE_ROOT_ID "Paste the isolated folder id containing a reference sample (Enter if unavailable):"
+ask MIGMATE_PROBE_REFERENCE_ID "Paste the reference sample item id (Enter if unavailable):"
+ask MIGMATE_PROBE_UNDOWNLOADABLE_ROOT_ID "Paste the isolated folder id containing an undownloadable sample (Enter if unavailable):"
+ask MIGMATE_PROBE_UNDOWNLOADABLE_ID "Paste the undownloadable sample item id (Enter if unavailable):"
+capability_roots=""
+for pair in "package:$MIGMATE_PROBE_PACKAGE_ROOT_ID:$MIGMATE_PROBE_PACKAGE_ID" \
+  "reference:$MIGMATE_PROBE_REFERENCE_ROOT_ID:$MIGMATE_PROBE_REFERENCE_ID" \
+  "undownloadable:$MIGMATE_PROBE_UNDOWNLOADABLE_ROOT_ID:$MIGMATE_PROBE_UNDOWNLOADABLE_ID"; do
+  kind=${pair%%:*}
+  ids=${pair#*:}
+  root_id=${ids%%:*}
+  sample_id=${ids#*:}
+  if [[ -z "$root_id" && -z "$sample_id" && "$kind" != "package" ]]; then continue; fi
+  if [[ -z "$root_id" || -z "$sample_id" || "$root_id" == "$sample_id" ]]; then
+    warn "$kind needs distinct ordinary folder and sample item ids; old sample ids are not mapping roots."
+    exit 1
+  fi
+  capability_roots+="$(printf '\n      "%s": { "sourceItemId": "%s", "sampleItemId": "%s" },' "$kind" "$root_id" "$sample_id")"
 done
-if [[ -n "$special_sources" ]]; then
-  # Trailing comma removed: this is emitted into strict JSON.
-  special_sources="$(printf ',\n    "specialSources": {%s\n    }' "${special_sources%,}")"
-fi
+# Trailing comma removed: this is emitted into strict JSON.
+capability_roots="$(printf ',\n    "capabilityRoots": {%s\n    }' "${capability_roots%,}")"
+write_env MIGMATE_PROBE_PACKAGE_ROOT_ID "$MIGMATE_PROBE_PACKAGE_ROOT_ID"
 write_env MIGMATE_PROBE_PACKAGE_ID "$MIGMATE_PROBE_PACKAGE_ID"
+write_env MIGMATE_PROBE_REFERENCE_ROOT_ID "$MIGMATE_PROBE_REFERENCE_ROOT_ID"
 write_env MIGMATE_PROBE_REFERENCE_ID "$MIGMATE_PROBE_REFERENCE_ID"
+write_env MIGMATE_PROBE_UNDOWNLOADABLE_ROOT_ID "$MIGMATE_PROBE_UNDOWNLOADABLE_ROOT_ID"
 write_env MIGMATE_PROBE_UNDOWNLOADABLE_ID "$MIGMATE_PROBE_UNDOWNLOADABLE_ID"
 ask MIGMATE_PROBE_CONFIG "Choose the probe config path outside the repo (probe-config.json):"
 case "$MIGMATE_PROBE_CONFIG" in
@@ -717,7 +728,7 @@ cat > "$MIGMATE_PROBE_CONFIG" <<EOF
       "tenantId": "$MIGMATE_TENANT_ID",
       "clientId": "$MIGMATE_PROBE_MUTATOR_CLIENT_ID",
       "clientSecret": { "resolver": "file", "path": "$MIGMATE_PROBE_MUTATOR_SECRET_FILE", "mode": "0600" }
-    }$special_sources
+    }$capability_roots
   }
 }
 EOF

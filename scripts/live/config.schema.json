@@ -204,6 +204,7 @@
     "fixtures": {
       "type": "object",
       "description": "File route: explicit disposable roots. A SharePoint-source run also needs a separate scoped source-write application; normal route credentials stay read-only on SharePoint. A reverse run writes its disposable Google source as the acting account and its SharePoint copy root with the destination app. Only tool-created IDs are mutated or deleted. Archive uses actual in-scope samples, not supplied captured outputs.",
+      "not": { "required": ["specialSources"] },
       "properties": {
         "disposableRoots": {
           "type": "object",
@@ -251,28 +252,37 @@
             }
           }
         },
-        "specialSources": {
+        "capabilityRoots": {
           "type": "object",
-          "description": "Optional real direct-child SharePoint fixture identities for package/reference/undownloadable observations. A supplied sample must produce its omission live; a missing one is a gate unless the source refuses to create that kind or the scanned scope's kind census shows none, per ADR-0006. Never fabricated source entries.",
+          "description": "Read-only isolated ordinary SharePoint folders, each a direct child of disposableRoots.sourceItemId and containing exactly its named sample as a direct child. The whole folder is mapped without exclusions. A package sample is required and must yield copied .one sections with clean default listing verification. Missing reference requires a live creation refusal; missing undownloadable requires a scoped absence census (ADR-0006). Old specialSources item IDs are refused, never reinterpreted as folder roots.",
           "properties": {
-            "packageId": {
-              "type": "string",
-              "minLength": 1
-            },
-            "referenceId": {
-              "type": "string",
-              "minLength": 1
-            },
-            "undownloadableId": {
-              "type": "string",
-              "minLength": 1
-            }
-          }
+            "package": { "$ref": "#/$defs/capabilityRoot" },
+            "reference": { "$ref": "#/$defs/capabilityRoot" },
+            "undownloadable": { "$ref": "#/$defs/capabilityRoot" }
+          },
+          "additionalProperties": false
         }
       }
     }
   },
   "$defs": {
+    "capabilityRoot": {
+      "type": "object",
+      "required": ["sourceItemId", "sampleItemId"],
+      "properties": {
+        "sourceItemId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Ordinary isolated folder root, not the package/reference/undownloadable item."
+        },
+        "sampleItemId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Real sample identity, the only direct child of sourceItemId."
+        }
+      },
+      "additionalProperties": false
+    },
     "fileReference": {
       "type": "object",
       "required": ["resolver", "path"],
