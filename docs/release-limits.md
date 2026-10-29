@@ -107,6 +107,12 @@ terminal counters, unresolved crashes, decreases and sampling intervals over
 while relevant. Unresolved active attempts never age into complete coverage.
 Only complete local coverage yields the clamped estimate against decimal
 750,000,000,000 bytes. It is neither a safe budget nor an authoritative quota.
+Counter-reset uncertainty covers subsequent observations through termination.
+A clock earlier than durable ledger timing evidence withholds the estimate
+without re-dating or including future bytes. Both interruption and iterator-exit
+cleanup reconcile worker counters, finalizing only after a terminal pass status;
+unconfirmed termination keeps an open gap. Expected execute-time identity-probe
+failures refuse `preflight_failed`; only an observed mismatch requires replanning.
 
 Measurements retain their observation timestamps for 48 hours. Writer-side
 maintenance prunes measurements and expired resolved gaps, retaining lifetime

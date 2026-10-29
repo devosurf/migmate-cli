@@ -1015,6 +1015,58 @@ async function* copyPass(
   let reference: CopyPassReference | undefined;
   let upload: UploadAttempt | undefined;
   let lastObservation: { bytes: number; at: Date } | undefined;
+  async function stopAndReconcile(): Promise<void> {
+    const stopping = reference;
+    if (!stopping) return;
+    reference = undefined;
+    let stopped = false;
+    let stopError: unknown;
+    try {
+      await ctx.provider.stopCopyPass(stopping);
+      stopped = true;
+    } catch (error) {
+      stopError = error;
+    }
+    if (upload) {
+      let terminal = false;
+      let finalStats;
+      try {
+        terminal = (await ctx.provider.copyPassStatus(stopping)).state !== "running";
+      } catch {
+        // A stop acknowledgment is not proof that the transfer function ended.
+      }
+      try {
+        finalStats = await ctx.provider.copyPassStats(stopping);
+      } catch {
+        // Worker teardown may have already discarded its counter.
+      }
+      if (finalStats) {
+        const transferring = finalStats.transferring.slice(0, 5);
+        const transferringTotal = finalStats.transferringTotal ?? finalStats.transferring.length;
+        pass = {
+          ...pass,
+          lastStats: {
+            ...finalStats,
+            transferring,
+            transferringTotal,
+            transferringTruncated: transferringTotal > transferring.length,
+          },
+        };
+        upload.observe(finalStats.bytes, ctx.now(), terminal);
+      } else if (lastObservation) {
+        upload.observe(lastObservation.bytes, lastObservation.at);
+      }
+      if (!terminal || !finalStats)
+        upload.missing(
+          ctx.now(),
+          terminal
+            ? "terminal_counter_unavailable_after_stop"
+            : "copy_pass_termination_unconfirmed",
+          terminal,
+        );
+    }
+    if (!stopped) throw stopError;
+  }
   try {
     ctx.signal?.throwIfAborted();
     if (ctx.config.options?.mirror) {
@@ -1101,35 +1153,7 @@ async function* copyPass(
   } catch (error) {
     const interrupted =
       ctx.signal?.aborted || (error instanceof Error && error.name === "AbortError");
-    if (reference) {
-      await ctx.provider.stopCopyPass(reference);
-      if (upload) {
-        let finalStats;
-        try {
-          finalStats = await ctx.provider.copyPassStats(reference);
-        } catch {
-          // A stopped worker may already have discarded its counter.
-        }
-        if (finalStats) {
-          const transferring = finalStats.transferring.slice(0, 5);
-          const transferringTotal = finalStats.transferringTotal ?? finalStats.transferring.length;
-          pass = {
-            ...pass,
-            lastStats: {
-              ...finalStats,
-              transferring,
-              transferringTotal,
-              transferringTruncated: transferringTotal > transferring.length,
-            },
-          };
-          upload.observe(finalStats.bytes, ctx.now(), true);
-        } else {
-          if (lastObservation) upload.observe(lastObservation.bytes, lastObservation.at);
-          upload.missing(ctx.now(), "terminal_counter_unavailable_after_stop");
-        }
-      }
-      reference = undefined;
-    }
+    await stopAndReconcile();
     if (error instanceof UploadLedgerError) throw error;
     const message = interrupted ? null : error instanceof Error ? error.message : String(error);
     const uploadQuota = fileProviderPair(ctx.config).destination.quotaStop?.(ctx, message);
@@ -1154,11 +1178,7 @@ async function* copyPass(
     yield unit();
     if (interrupted) return;
   } finally {
-    if (reference && pass.status === "running") {
-      await ctx.provider.stopCopyPass(reference);
-      if (lastObservation) upload?.observe(lastObservation.bytes, lastObservation.at);
-      upload?.missing(ctx.now(), "upload_observation_interrupted");
-    }
+    if (reference && pass.status === "running") await stopAndReconcile();
   }
 }
 

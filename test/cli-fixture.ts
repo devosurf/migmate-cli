@@ -142,6 +142,9 @@ export class PersistentCliPort extends FakeFileMigrationPort {
   private sourceRootReads = 0;
   constructor(destinationPath: string, control?: { verb: string; ready: () => void }) {
     const fixture = cliFixture();
+    // These effects live in the CLI process. An arbitrary fake PID can collide
+    // with an unrelated live process and correctly prevent stale-lease recovery.
+    fixture.worker = { ...fixture.worker, pid: process.pid };
     fixture.archive = cliArchiveFixture();
     if (control) fixture.copyPasses = [{ pause: true, afterFiles: 1 }];
     if (existsSync(destinationPath))

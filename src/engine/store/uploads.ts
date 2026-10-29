@@ -51,7 +51,8 @@ export interface UploadActivity {
 }
 export interface UploadAttempt {
   observe(bytes: number, at: Date, terminal?: boolean, worker?: string): void;
-  missing(at: Date, reason: string): void;
+  /** Unconfirmed termination leaves the attempt open until worker recovery proves it ended. */
+  missing(at: Date, reason: string, terminal?: boolean): void;
 }
 interface AttemptRow {
   id: string;
@@ -129,7 +130,10 @@ function access<T>(home: string, write: boolean, fn: (db: DatabaseSync) => T): T
 function maintain(db: DatabaseSync, now: number): void {
   db.prepare("INSERT OR IGNORE INTO metadata VALUES (1, ?)").run(now);
   db.prepare("DELETE FROM measurements WHERE at < ?").run(now - 2 * DAY);
-  db.prepare("DELETE FROM gaps WHERE end < ?").run(now - 2 * DAY);
+  db.prepare(
+    `DELETE FROM gaps WHERE end < ? AND attempt_id IN
+    (SELECT id FROM attempts WHERE ended IS NOT NULL)`,
+  ).run(now - 2 * DAY);
 }
 export function initializeUploadLedger(home: string, now: Date): void {
   access(home, true, (db) => maintain(db, now.getTime()));
@@ -144,6 +148,10 @@ export function endAbandonedUploads(home: string, jobId: string, now: Date): voi
       `INSERT OR IGNORE INTO gaps
       SELECT id, 'recovered_attempt_terminal_counter_unavailable', observed, MAX(observed, ?)
       FROM attempts WHERE job_id = ? AND ended IS NULL`,
+    ).run(end, jobId);
+    db.prepare(
+      `UPDATE gaps SET end = MAX(end, ?) WHERE reason = 'counter_decreased_without_new_attempt'
+      AND attempt_id IN (SELECT id FROM attempts WHERE job_id = ? AND ended IS NULL)`,
     ).run(end, jobId);
     db.prepare(
       "UPDATE attempts SET ended = MAX(observed, ?) WHERE job_id = ? AND ended IS NULL",
@@ -201,7 +209,21 @@ export function beginUploadAttempt(
           db
             .prepare("INSERT OR IGNORE INTO gaps VALUES (?, ?, ?, ?)")
             .run(id, reason, row.observed, time);
-        if (bytes < row.high_water) gap("counter_decreased_without_new_attempt");
+        if (
+          bytes < row.high_water &&
+          !db
+            .prepare(
+              "SELECT 1 FROM gaps WHERE attempt_id = ? AND reason = 'counter_decreased_without_new_attempt'",
+            )
+            .get(id)
+        )
+          gap("counter_decreased_without_new_attempt");
+        // A retained high-water mark cannot explain a decreased counter's later
+        // increments. Keep that uncertainty through the whole affected attempt.
+        db.prepare(
+          `UPDATE gaps SET end = ? WHERE attempt_id = ?
+          AND reason = 'counter_decreased_without_new_attempt'`,
+        ).run(time, id);
         if (time - row.observed > SAMPLING_GAP_MS) gap("sampling_interval_exceeded_30_seconds");
         const delta = Math.max(0, bytes - row.high_water);
         if (delta)
@@ -215,7 +237,7 @@ export function beginUploadAttempt(
         maintain(db, time);
       });
     },
-    missing(at, reason) {
+    missing(at, reason, terminal = true) {
       access(home, true, (db) => {
         const row = db
           .prepare("SELECT * FROM attempts WHERE id = ?")
@@ -228,7 +250,11 @@ export function beginUploadAttempt(
           row.observed,
           end,
         );
-        db.prepare("UPDATE attempts SET ended = ? WHERE id = ?").run(end, id);
+        db.prepare(
+          `UPDATE gaps SET end = ? WHERE attempt_id = ?
+          AND reason = 'counter_decreased_without_new_attempt'`,
+        ).run(end, id);
+        if (terminal) db.prepare("UPDATE attempts SET ended = ? WHERE id = ?").run(end, id);
         maintain(db, end);
       });
     },
@@ -289,6 +315,23 @@ export function readUploadActivity(
       if (!metadata) throw new Error("Upload ledger coverage metadata is missing");
       const coverage = Number(metadata.coverage_start);
       result.coverageStart = iso(coverage);
+      const latest = Number(
+        db
+          .prepare(
+            `SELECT MAX(at) AS latest FROM (
+        SELECT coverage_start AS at FROM metadata
+        UNION ALL SELECT MAX(started, observed, COALESCE(ended, observed)) FROM attempts
+        UNION ALL SELECT end FROM gaps
+      )`,
+          )
+          .get()!.latest,
+      );
+      if (end < latest)
+        result.gaps.push({
+          reason: "clock_precedes_durable_observation",
+          from: iso(end),
+          to: iso(latest),
+        });
       if (coverage > start)
         result.gaps.push({
           reason: "new_ledger_or_uninstrumented_older_activity",

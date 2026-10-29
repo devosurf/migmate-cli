@@ -134,6 +134,12 @@ counter decreases and sampling gaps preserve partial totals without complete
 coverage. File observations are normally ten seconds apart; archive observations
 follow acknowledged chunks, and intervals over 30 seconds disclose timing
 uncertainty. Unresolved attempts do not become complete through expiry.
+Counter-reset gaps cover the remaining attempt, not only the decreasing sample.
+For clock-skew gaps, keep the estimate unavailable until time catches up with
+durable evidence; do not re-date observations. A stop acknowledgment is not proof
+of a final counter, so unconfirmed termination remains incomplete. An unavailable
+execute-time account probe refuses `preflight_failed` with safe evidence; reserve
+`plan_revision_required` for an observed identity mismatch.
 Even a complete local window only estimates `max(0, 750,000,000,000 - bytes)`;
 provider retries and excluded activity make this different from Google's charge.
 

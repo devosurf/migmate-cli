@@ -269,7 +269,7 @@ describe("durable mapping progress", () => {
       if (terminal === "interrupted")
         assert.ok(
           status.uploadActivity?.accounts[0]?.gaps.some(
-            (gap) => gap.reason === "terminal_counter_unavailable_after_stop",
+            (gap) => gap.reason === "copy_pass_termination_unconfirmed",
           ),
         );
       assert.equal(status.mappingPasses[0]?.lastStats?.transferringTotal, 0);

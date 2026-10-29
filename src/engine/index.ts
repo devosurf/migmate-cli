@@ -3027,15 +3027,39 @@ function makeWriter(
               "The approved inputs or authenticated route identity have changed.",
             );
           const approvedAccount = object(plan.evidence, "plan.evidence").actingGoogleAccount;
-          if (
-            typeof approvedAccount === "string" &&
-            normalizeUploadAccount((await p.googleAbout(signal)).user.emailAddress) !==
-              normalizeUploadAccount(approvedAccount)
-          )
-            return refuse(
-              "plan_revision_required",
-              "The approved acting Google account has changed.",
-            );
+          if (typeof approvedAccount === "string") {
+            let observedAccount: string | null;
+            try {
+              signal.throwIfAborted();
+              observedAccount = normalizeUploadAccount(
+                (await p.googleAbout(signal)).user.emailAddress,
+              );
+              signal.throwIfAborted();
+            } catch (error) {
+              if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+                if (opts?.onAdmitted) throw error;
+                transition("execute", "execute");
+                return terminalResult("interrupted", 0, new RetryBudget(Math.max(1, plan.rowCount)));
+              }
+              if (
+                !(error instanceof ProviderFault) &&
+                !errorCode(error) &&
+                !(error instanceof TypeError)
+              )
+                throw error;
+              return refuse("preflight_failed", "The acting Google account could not be verified.", {
+                detail: {
+                  prerequisiteEstablished: false,
+                  ...(error instanceof ProviderFault ? { provider: error.evidence } : {}),
+                },
+              });
+            }
+            if (observedAccount !== normalizeUploadAccount(approvedAccount))
+              return refuse(
+                "plan_revision_required",
+                "The approved acting Google account has changed.",
+              );
+          }
           const bound = readBoundEvidence(plan.evidence);
           if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
           if ("mappings" in config)

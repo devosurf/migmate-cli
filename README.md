@@ -217,8 +217,13 @@ crashes, missing final counters, counter decreases and sampling gaps keep
 `estimatedRemainingBytes` unavailable (`null`). File samples normally arrive
 about every ten seconds; archive samples follow bounded acknowledged chunks.
 Intervals longer than 30 seconds disclose uncertain timing rather than pretending
-all accumulated bytes were uploaded at the end. An unresolved crashed attempt
-remains incomplete until reconciled evidence exists; expiry alone does not repair it.
+all accumulated bytes were uploaded at the end. Counter-reset uncertainty extends
+through the affected attempt's termination. Clock rollback behind durable ledger
+timestamps excludes future bytes and withholds an allowance estimate until the
+clock catches up. A stop acknowledgment alone does not establish a final counter:
+interruption and consumer-exit cleanup reconcile available worker stats, but
+unconfirmed termination remains an open gap until writer recovery proves the
+worker ended. Expiry alone does not repair an unresolved attempt.
 
 Only complete local coverage produces `max(0, 750,000,000,000 - observedBytes)`.
 **750 GB is decimal; this is an estimate, not Google's remaining quota, a safe
@@ -233,6 +238,9 @@ Measurements are retained for 48 hours with writer-side pruning; compact attempt
 checkpoints survive for the ledger's lifetime. Status does not repair or prune the
 ledger. Keep it with the engine home; deleting it loses observation history, not
 Google's quota usage. Accounting failures are surfaced instead of an empty total.
+If execute cannot verify the approved acting Google account, it refuses
+`preflight_failed` with safe provider evidence; an observed identity change still
+requires a new plan. Cancellation remains cancellation, not an identity mismatch.
 The estimate never gates execution or changes concurrency. Provider-observed
 quota stops and manual `execute` resume remain unchanged, with no automatic wait
 or guaranteed reset time.

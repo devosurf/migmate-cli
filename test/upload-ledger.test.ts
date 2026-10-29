@@ -24,6 +24,12 @@ import {
 import { openEngine } from "../src/engine/index.ts";
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { approve, fileConfig, fileFixture, value } from "./engine-fixture.ts";
+import {
+  fileMigrationDriver,
+  type FileMigrationConfig,
+} from "../src/engine/drivers/file-migration.ts";
+import type { DriverContext } from "../src/engine/drivers/types.ts";
+import { HttpProviderFault } from "../src/engine/providers/http.ts";
 
 const DAY = 86_400_000;
 const BASE = Date.parse("2026-10-25T00:30:00.000Z");
@@ -110,6 +116,52 @@ test("duplicate, older and expired observations cannot replay; resets disclose g
   assert.equal(expired.estimatedRemainingBytes, 750_000_000_000);
 });
 
+test("counter-reset uncertainty lasts through the affected terminal sample, not just the decrease", async (t) => {
+  const directory = await home(t);
+  initializeUploadLedger(directory, new Date(BASE - DAY));
+  const attempt = beginUploadAttempt(
+    directory,
+    { jobId: "reset", revision: 1, source: "file", identity: "pass", account },
+    new Date(BASE),
+  );
+  attempt.observe(100, new Date(BASE + 10));
+  attempt.observe(20, new Date(BASE + 20));
+  attempt.observe(150, new Date(BASE + 30), true);
+  const affected = readUploadActivity(directory, new Date(BASE + 20 + DAY)).accounts[0]!;
+  assert.equal(affected.observedBytesInWindow, 50);
+  assert.equal(affected.estimatedRemainingBytes, null);
+  assert.equal(affected.complete, false);
+  assert.ok(affected.gaps.some((gap) => gap.reason === "counter_decreased_without_new_attempt"));
+  const expired = readUploadActivity(directory, new Date(BASE + 30 + DAY)).accounts[0]!;
+  assert.equal(expired.observedBytesInWindow, 0);
+  assert.equal(expired.complete, true);
+});
+
+test("clock rollback excludes future bytes but withholds allowance until durable timing catches up", async (t) => {
+  const directory = await home(t);
+  initializeUploadLedger(directory, new Date(BASE - DAY));
+  const earlier = beginUploadAttempt(
+    directory,
+    { jobId: "earlier", revision: 1, source: "file", identity: "pass", account },
+    new Date(BASE),
+  );
+  earlier.observe(10, new Date(BASE), true);
+  const future = beginUploadAttempt(
+    directory,
+    { jobId: "future", revision: 1, source: "file", identity: "pass", account },
+    new Date(BASE + 100),
+  );
+  future.observe(20, new Date(BASE + 110), true);
+  const rolledBack = readUploadActivity(directory, new Date(BASE + 50)).accounts[0]!;
+  assert.equal(rolledBack.observedBytesInWindow, 10);
+  assert.equal(rolledBack.estimatedRemainingBytes, null);
+  assert.equal(rolledBack.complete, false);
+  assert.ok(rolledBack.gaps.some((gap) => gap.reason === "clock_precedes_durable_observation"));
+  const caughtUp = readUploadActivity(directory, new Date(BASE + 110)).accounts[0]!;
+  assert.equal(caughtUp.observedBytesInWindow, 30);
+  assert.equal(caughtUp.estimatedRemainingBytes, 750_000_000_000 - 30);
+});
+
 test("rolling UTC window excludes the exact lower bound and future observations independent of midnight or DST", async (t) => {
   const directory = await home(t);
   initializeUploadLedger(directory, new Date(BASE - DAY));
@@ -129,7 +181,7 @@ test("rolling UTC window excludes the exact lower bound and future observations 
   }
   const snapshot = readUploadActivity(directory, new Date(BASE + DAY)).accounts[0]!;
   assert.equal(snapshot.observedBytesInWindow, 50);
-  assert.equal(snapshot.estimatedRemainingBytes, 750_000_000_000 - 50);
+  assert.equal(snapshot.estimatedRemainingBytes, null, "a future observation discloses clock skew");
   assert.equal(
     readUploadActivity(directory, new Date(BASE + DAY + 1)).accounts[0]!.observedBytesInWindow,
     70,
@@ -475,3 +527,167 @@ test("reverse-route and local-only archive execution add no Google content obser
   await assert.rejects(stat(join(directory, "uploads.sqlite")), { code: "ENOENT" });
   assert.deepEqual(readUploadActivity(directory, new Date(BASE)).accounts, []);
 });
+
+test("a stop acknowledgment with a still-running copy pass cannot finalize upload accounting", async (t) => {
+  const directory = await home(t);
+  initializeUploadLedger(directory, new Date(BASE - DAY));
+  const provider = new FakeFileMigrationPort(
+    fileFixture([
+      {
+        id: "file",
+        parentId: "source-root",
+        name: "file.txt",
+        kind: "file",
+        content: "hello",
+        size: 5,
+      },
+    ]),
+  );
+  const engine = openEngine({ home: directory, now: () => new Date(BASE), provider });
+  t.after(() => engine.close());
+  const ref = value(await engine.initJob({ type: "file_migration", config: fileConfig() }));
+  await approve({ engine, ref });
+  const controller = new AbortController();
+  let stopRequested = false;
+  t.mock.method(provider, "copyPassStatus", async () => ({ state: "running", error: null }));
+  t.mock.method(provider, "copyPassStats", async () => {
+    if (!stopRequested) controller.abort();
+    return { bytes: stopRequested ? 7 : 3, files: 0, errors: 0, speed: 0, transferring: [] };
+  });
+  t.mock.method(provider, "stopCopyPass", async () => {
+    stopRequested = true;
+  });
+  assert.equal(
+    value(
+      await engine.withWriterResult(ref, (writer) => writer.execute({ signal: controller.signal })),
+    ).outcome,
+    "interrupted",
+  );
+  const observed = value(await engine.reader(ref).status()).uploadActivity!.accounts[0]!;
+  assert.equal(observed.observedBytesInWindow, 7);
+  assert.equal(observed.estimatedRemainingBytes, null);
+  assert.ok(
+    observed.gaps.some(
+      (gap) => gap.reason.includes("terminal_counter") || gap.reason.includes("termination"),
+    ),
+  );
+});
+
+test("consumer exit reconciles available terminal upload counters before tearing down the driver iterator", async (t) => {
+  const directory = await home(t);
+  initializeUploadLedger(directory, new Date(BASE - DAY));
+  const provider = new FakeFileMigrationPort(
+    fileFixture([
+      {
+        id: "file",
+        parentId: "source-root",
+        name: "file.txt",
+        kind: "file",
+        content: "hello",
+        size: 5,
+      },
+    ]),
+  );
+  const worker = await provider.startTransferWorker({ runDirectory: join(directory, "run") });
+  t.after(() => provider.stopTransferWorker(worker));
+  const ctx: DriverContext<FileMigrationConfig> = {
+    jobDirectory: directory,
+    config: fileConfig(),
+    revision: 1,
+    actingGoogleAccount: account,
+    resume: { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] },
+    provider,
+    now: () => new Date(BASE),
+    beginUpload: (source, identity, account) =>
+      beginUploadAttempt(
+        directory,
+        { jobId: "consumer-exit", revision: 1, source, identity, ...(account ? { account } : {}) },
+        new Date(BASE),
+      ),
+  };
+  for await (const unit of fileMigrationDriver.collect(ctx)) ctx.resume.rows!.push(...unit.rows);
+  let stopped = false;
+  t.mock.method(provider, "stopCopyPass", async () => {
+    stopped = true;
+  });
+  t.mock.method(provider, "copyPassStatus", async () => ({
+    state: stopped ? "failed" : "running",
+    error: stopped ? "stopped" : null,
+  }));
+  t.mock.method(provider, "copyPassStats", async () => ({
+    bytes: stopped ? 7 : 3,
+    files: 0,
+    errors: 0,
+    speed: 0,
+    transferring: [],
+  }));
+  for await (const unit of fileMigrationDriver.execute(ctx)) {
+    if (unit.mappingPass?.lastStats?.bytes === 3) break;
+  }
+  const observed = readUploadActivity(directory, new Date(BASE)).accounts[0]!;
+  assert.equal(observed.observedBytesInWindow, 7);
+  assert.equal(observed.complete, true);
+  assert.equal(observed.estimatedRemainingBytes, 750_000_000_000 - 7);
+});
+
+for (const type of ["file_migration", "teams_archive"] satisfies Array<
+  "file_migration" | "teams_archive"
+>) {
+  test(`${type} refuses an unavailable execute-time acting-account probe without changing approval`, async (t) => {
+    const directory = await home(t);
+    const provider = new FakeFileMigrationPort({ ...fileFixture(), archive: cliArchiveFixture() });
+    const engine = openEngine({ home: directory, now: () => new Date(BASE), provider });
+    t.after(() => engine.close());
+    const config =
+      type === "file_migration"
+        ? fileConfig()
+        : {
+            ...CLI_ARCHIVE_CONFIG,
+            destination: { destDriveId: "destination-drive", destFolderId: "destination-root" },
+          };
+    const ref = value(await engine.initJob({ type, config }));
+    const digest = await approve({ engine, ref });
+    const before = value(await engine.reader(ref).status());
+    for (const status of [0, 503]) {
+      const probe = t.mock.method(provider, "googleAbout", async () => {
+        throw new HttpProviderFault(status, null, "serviceNotAvailable", "www.googleapis.com");
+      });
+      const result = await engine.withWriterResult(ref, (writer) => writer.execute());
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.refusal.code, "preflight_failed");
+        assert.deepEqual(result.refusal.detail?.provider, {
+          status,
+          providerCode: "serviceNotAvailable",
+          host: "www.googleapis.com",
+        });
+      }
+      probe.mock.restore();
+    }
+    const networkFailure = t.mock.method(provider, "googleAbout", async () => {
+      throw new TypeError("secret-bearing transport diagnostics must not reach the refusal");
+    });
+    const refused = await engine.withWriterResult(ref, (writer) => writer.execute());
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.refusal.code, "preflight_failed");
+    assert.ok(!JSON.stringify(refused).includes("secret-bearing"));
+    networkFailure.mock.restore();
+    const controller = new AbortController();
+    t.mock.method(provider, "googleAbout", async (signal?: AbortSignal) => {
+      controller.abort();
+      signal?.throwIfAborted();
+      throw new Error("The acting-account probe must receive the execution signal");
+    });
+    const interrupted = value(
+      await engine.withWriterResult(ref, (writer) => writer.execute({ signal: controller.signal })),
+    );
+    assert.equal(interrupted.outcome, "interrupted");
+    assert.equal(interrupted.resumable, true);
+    const after = value(await engine.reader(ref).status());
+    assert.equal(after.state, "interrupted");
+    assert.equal(after.planDigest, digest);
+    assert.equal(after.currentApproval?.planDigest, digest);
+    assert.deepEqual(after.mappingPasses, before.mappingPasses);
+    assert.equal(after.uploadActivity?.accounts[0]?.observedBytesInWindow, 0);
+  });
+}
