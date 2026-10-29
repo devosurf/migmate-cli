@@ -90,7 +90,6 @@ import { createProductionProvider } from "./providers/production.ts";
 import { ProviderFault } from "./providers/credentials.ts";
 import {
   fileMigrationDriver,
-  assertSourceInventoryFresh,
   goLive,
   GoLiveCheckError,
   memberGrantTiming,
@@ -316,17 +315,10 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     const parsedMappings = mappings
       .map((raw, index): Mapping => {
         const m = object(raw, "mappings");
+        if (Object.hasOwn(m, "exclusions")) configError(`mappings[${index}].exclusions`);
         keys(
           m,
-          [
-            "id",
-            "sourceDriveId",
-            "sourceItemId",
-            "destDriveId",
-            "destFolderId",
-            "sourceSiteId",
-            "exclusions",
-          ],
+          ["id", "sourceDriveId", "sourceItemId", "destDriveId", "destFolderId", "sourceSiteId"],
           "mappings",
         );
         const mapping: Mapping = {
@@ -338,54 +330,32 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         };
         if (m.sourceSiteId !== undefined)
           mapping.sourceSiteId = text(m.sourceSiteId, "sourceSiteId");
-        if (m.exclusions !== undefined) {
-          if (!Array.isArray(m.exclusions)) configError("exclusions");
-          mapping.exclusions = m.exclusions
-            .map((raw) => {
-              const e = object(raw, "exclusions");
-              keys(e, ["sourceItemId", "reason"], "exclusions");
-              return {
-                sourceItemId: text(e.sourceItemId, "exclusions.sourceItemId"),
-                reason: text(e.reason, "exclusions.reason"),
-              };
-            })
-            .sort((a, b) => compareText(a.sourceItemId, b.sourceItemId));
-          if (
-            new Set(mapping.exclusions.map((e) => e.sourceItemId)).size !==
-            mapping.exclusions.length
-          )
-            configError("exclusions");
-        }
         return mapping;
       })
       .sort((a, b) => compareText(a.id, b.id));
     if (new Set(parsedMappings.map((m) => m.id)).size !== parsedMappings.length)
       configError("mappings");
     const options = input.options === undefined ? {} : object(input.options, "options");
+    for (const removed of ["proof", "acceptedOmissions", "oneNoteNotebooks", "deltaVerification"])
+      if (Object.hasOwn(options, removed)) configError(`options.${removed}`);
+    if (options.verificationMode === "size_only")
+      configError('options.verificationMode = "size_only"');
     keys(
       options,
       [
         "verificationMode",
-        "oneNoteNotebooks",
         "mappingsInFlight",
         "transfersPerMapping",
         "mirror",
         "deleteLimit",
         "staged",
         "memberGrants",
-        "deltaVerification",
         "consistencyIntervalMs",
         "settleMaxPasses",
-        "acceptedOmissions",
-        "proof",
       ],
       "options",
     );
-    if (
-      options.verificationMode !== undefined &&
-      options.verificationMode !== "hash" &&
-      options.verificationMode !== "size_only"
-    )
+    if (options.verificationMode !== undefined && options.verificationMode !== "hash")
       configError("options.verificationMode");
     const config: FileConfig = {
       ...common,
@@ -395,16 +365,6 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           ? {}
           : { verificationMode: options.verificationMode },
     };
-    if (options.oneNoteNotebooks !== undefined) {
-      if (options.oneNoteNotebooks !== "omit" && options.oneNoteNotebooks !== "copy")
-        configError("options.oneNoteNotebooks");
-      if (
-        options.oneNoteNotebooks === "copy" &&
-        common.route === "shared_drive_to_sharepoint_library"
-      )
-        configError("options.oneNoteNotebooks");
-      config.options.oneNoteNotebooks = options.oneNoteNotebooks;
-    }
     if (options.mirror !== undefined) {
       if (typeof options.mirror !== "boolean") configError("options.mirror");
       config.options.mirror = options.mirror;
@@ -429,47 +389,12 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         configError("options.memberGrants");
       config.options.memberGrants = options.memberGrants;
     }
-    if (options.deltaVerification !== undefined) {
-      if (options.deltaVerification !== "full" && options.deltaVerification !== "changed")
-        configError("options.deltaVerification");
-      config.options.deltaVerification = options.deltaVerification;
-    }
-    if (options.acceptedOmissions !== undefined) {
-      const codes = options.acceptedOmissions;
-      // Only omissions a plan can disclose before approval; verification gaps such as
-      // degraded proof still need acceptance of the verification that found them.
-      if (
-        !Array.isArray(codes) ||
-        new Set(codes).size !== codes.length ||
-        codes.some((code) => {
-          const registered = typeof code === "string" ? CODE_BY_NAME[code] : undefined;
-          return (
-            registered?.kind !== "planned_omission" ||
-            registered.phase !== "plan" ||
-            registered.jobType !== "file_migration"
-          );
-        })
-      )
-        configError("options.acceptedOmissions");
-      config.options.acceptedOmissions = [...codes].sort(compareText);
-    }
     for (const key of ["consistencyIntervalMs", "settleMaxPasses"] as const) {
       if (options[key] !== undefined) {
         if (!Number.isSafeInteger(options[key]) || Number(options[key]) < 0)
           configError(`options.${key}`);
         config.options[key] = Number(options[key]);
       }
-    }
-    if (options.proof !== undefined) {
-      if (options.proof !== "full" && options.proof !== "rclone") configError("options.proof");
-      config.options.proof = options.proof;
-    }
-    // rclone proof has no per-file inventory: options that need one cannot apply.
-    if (config.options.proof === "rclone") {
-      if (common.route !== "sharepoint_library_to_shared_drive") configError("options.proof");
-      if (options.verificationMode !== undefined) configError("options.verificationMode");
-      if (options.deltaVerification === "changed") configError("options.deltaVerification");
-      if (options.oneNoteNotebooks === "omit") configError("options.oneNoteNotebooks");
     }
     if (input.impersonate !== undefined) {
       if (typeof input.impersonate !== "boolean") configError("impersonate");
@@ -700,11 +625,24 @@ function readConfig(paths: JobPaths, type: JobType, store?: Store): JobConfig {
   const config = parseConfig(persisted(parsed), type, paths);
   const loaded = store?.readMappings();
   if ("mappings" in config && loaded) {
+    for (const [index, mapping] of loaded.mappings.entries())
+      if (Object.hasOwn(mapping, "exclusions")) configError(`mappings[${index}].exclusions`);
     validateMirrorDestinations(loaded.mappings, config.options.mirror);
     validateMappingDirections(loaded.mappings, config.route);
     return { ...config, mappings: loaded.mappings, manifestDigest: loaded.digest };
   }
   return config;
+}
+function historicalConfig(store: Store): FileConfig | undefined {
+  if (store.readJob()?.type !== "file_migration") return undefined;
+  const revision = store.readJob()?.planRevision;
+  if (revision == null) return undefined;
+  const configuration = store.readPlanRevision(revision)?.inputs.configuration;
+  if (!configuration) return undefined;
+  const config = JSON.parse(configuration) as FileConfig;
+  return store.inventoryPlanRevision() !== null || Object.hasOwn(config.options ?? {}, "proof")
+    ? config
+    : undefined;
 }
 
 function requireFileMappings(config: JobConfig): void {
@@ -936,7 +874,7 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
         if (!status.currentPlan || !status.verificationDigest)
           return { ...status, closeReview: null, goLiveReview: null };
         try {
-          const config = readConfig(pathsFor(deps, ref), status.jobType, s);
+          const config = historicalConfig(s) ?? readConfig(pathsFor(deps, ref), status.jobType, s);
           const review = closeReview(s, config);
           const acknowledgments = status.goLiveAcknowledgments ?? [];
           const authority = review?.authorized ? review.evidenceDigest : undefined;
@@ -1059,8 +997,13 @@ async function withWriter<T>(
         hostId,
         ownerUuid: acquired.value.row.ownerUuid,
       });
-      migrateConfig(paths, job.type);
-      if (job.type === "file_migration" && existsSync(paths.configPath)) {
+      if (store.inventoryPlanRevision() === null) migrateConfig(paths, job.type);
+      if (
+        job.type === "file_migration" &&
+        store.inventoryPlanRevision() === null &&
+        !store.readMappings() &&
+        existsSync(paths.configPath)
+      ) {
         const config = readConfig(paths, job.type);
         if ("mappings" in config && config.mappings.length) {
           // Store wins if a crash happened after its commit but before config replacement.
@@ -1232,16 +1175,7 @@ function semantic(value: unknown): unknown {
     Object.entries(value)
       .filter(
         ([key]) =>
-          ![
-            "rev",
-            "revision",
-            "at",
-            "sourceInventoryAt",
-            "cursor",
-            "nextLink",
-            "watermark",
-            "accepted",
-          ].includes(key),
+          !["rev", "revision", "at", "cursor", "nextLink", "watermark", "accepted"].includes(key),
       )
       .map(([key, item]) => [key, ["raw", "listItemFields"].includes(key) ? item : semantic(item)]),
   );
@@ -1524,11 +1458,19 @@ function makeWriter(
     if (!record) throw new Error("Missing durable job record");
     return record;
   }
+  const inventoryRevision = store.inventoryPlanRevision();
   function guard(verb: Verb): void {
     if (!active() || deps.closed || store.readLease()?.ownerUuid !== ownerUuid)
       throw new EngineRefusalError({
         code: "lease_held",
         message: "The writer is outside its lease lifetime.",
+      });
+    if (verb !== "report" && inventoryRevision !== null)
+      throw new EngineRefusalError({
+        code: "state_version_unsupported",
+        message:
+          "This file job uses an inventory-planned revision. Its status and reports remain readable; create a new map-only job to continue.",
+        detail: { planRevision: inventoryRevision },
       });
     const terminal = refusalForClosedJob(job().state);
     if (terminal && verb !== "report")
@@ -1636,27 +1578,6 @@ function makeWriter(
     signal?: AbortSignal,
     reporting = false,
   ): DriverContext<never> {
-    let verificationBaseline: DriverContext<never>["verificationBaseline"];
-    if (!reporting && "mappings" in config && config.options?.deltaVerification === "changed") {
-      const considered = new Set<number>();
-      for (let run = store.nextVerificationRun() - 1; run > 0; run--) {
-        const verified = store.readVerificationRevision(run);
-        if (!verified || considered.has(verified.planRev)) continue;
-        considered.add(verified.planRev);
-        if (verified && verified.planRev < revision && verified.clean) {
-          verificationBaseline = {
-            revision: verified.planRev,
-            rows: store.readAllRows(verified.planRev),
-            findings: store.readFindings(verified.planRev).map((finding) => ({
-              ...finding,
-              evidence: object(finding.evidence, "verification.evidence"),
-            })),
-            acceptedCodes: verified.acceptedCodes,
-          };
-          break;
-        }
-      }
-    }
     const plan = reporting ? store.readReportPlan(revision) : store.readPlanRevision(revision);
     const stage = plan?.stage ?? pendingStage;
     const actingGoogleAccount = plan
@@ -1668,7 +1589,6 @@ function makeWriter(
       revision,
       ...(stage === "prestage" || stage === "delta" || stage === "final" ? { stage } : {}),
       ...(typeof actingGoogleAccount === "string" ? { actingGoogleAccount } : {}),
-      ...(verificationBaseline ? { verificationBaseline } : {}),
       jobDirectory: paths.dir,
       resume: {
         ...(reporting ? store.readReportResume(revision) : store.readResume(revision)),
@@ -1977,41 +1897,20 @@ function makeWriter(
       evidenceDigest,
     });
     const findings = findingFacets(store, revision),
-      at = deps.now().toISOString(),
-      plan = store.readPlanRevision(revision)!,
-      approval = store.readApproval(revision)!;
-    // Consent given by approving the exact plan that disclosed these omissions.
-    const approved = approvedOptions(plan)?.acceptedOmissions ?? [];
-    const disclosed = new Set(store.readFindings(revision, "plan").map((f) => f.code));
-    const preaccepted = findings
-      .map((f) => f.code)
-      .filter((code) => approved.includes(code) && disclosed.has(code))
-      .sort(compareText);
+      at = deps.now().toISOString();
     const result = {
       revision: run,
       planRev: revision,
       verificationDigest,
       evidenceDigest,
-      clean: findings.every((f) => preaccepted.includes(f.code)),
+      clean: findings.length === 0,
       findings,
-      acceptedCodes: preaccepted,
+      acceptedCodes: [],
       at,
     };
     store.atomic(() => {
       store.writeVerificationRevision(result);
       store.writeJob({ ...job(), verificationRevision: run });
-      if (preaccepted.length)
-        store.writeAcceptances(
-          preaccepted.map((code) => ({
-            verificationDigest,
-            code,
-            approver: approval.approver,
-            mode: approval.mode,
-            identityAssurance: "declared_unverified" as const,
-            note: `Accepted in advance by approving plan ${plan.planDigest} with [options] acceptedOmissions.`,
-            at: approval.at,
-          })),
-        );
     });
     return ok(result);
   }
@@ -2116,9 +2015,14 @@ function makeWriter(
   async function createReport(closureOutcome?: ClosureOutcome): Promise<Outcome<ArtifactSet>> {
     const revision = job().planRevision ?? 0,
       verification = currentVerification(store);
-    const config = revision > 0 ? readConfig(paths, job().type, store) : undefined;
-    const reportSections: ReportSection[] = [];
-    if (config)
+    const historical = historicalConfig(store);
+    const config = revision > 0 ? (historical ?? readConfig(paths, job().type, store)) : undefined;
+    const reportSections: ReportSection[] = historical
+      ? (store
+          .readPlanRevision(revision)
+          ?.sections.map(({ title, body }) => ({ title, body, format: "text" as const })) ?? [])
+      : [];
+    if (config && !historical)
       for await (const section of driverFor(job().type).reportSections(
         context(provider(config), config, revision, undefined, true),
       ))
@@ -2461,16 +2365,6 @@ function makeWriter(
                 detail: { field: "options.staged" },
               },
             );
-          if (
-            "mappings" in config &&
-            config.options?.proof === "rclone" &&
-            config.mappings.some((mapping) => mapping.exclusions?.length)
-          )
-            return refuse(
-              "configuration_invalid",
-              "rclone proof copies whole mapping roots; exclusions need the full per-file inventory.",
-              { detail: { field: "exclusions" } },
-            );
           if (input?.final !== undefined && typeof input.final !== "boolean")
             return refuse("configuration_invalid", "Final intent must be a boolean.");
           if (input?.final && (!("mappings" in config) || !config.options?.staged))
@@ -2498,7 +2392,6 @@ function makeWriter(
                   : ("prestage" as const)
               : undefined;
           pendingStage = stage;
-          const sourceInventoryAt = deps.now().toISOString();
           store.appendEvent({
             verb: "plan",
             phase: "plan",
@@ -2510,13 +2403,6 @@ function makeWriter(
           try {
             if (needsTransferWorker(config)) planWorker = await startWorker(p);
             drained = await drain(p, config, revision, "plan", new RetryBudget(200), input?.signal);
-            if (
-              "mappings" in config &&
-              !drained.blocked &&
-              !drained.interrupted &&
-              !store.readFindings(revision, "plan").some((finding) => finding.kind === "finding")
-            )
-              await assertSourceInventoryFresh(context(p, config, revision, input?.signal));
           } finally {
             if (planWorker) await stopWorker(p, planWorker, input?.signal?.aborted);
           }
@@ -2563,7 +2449,6 @@ function makeWriter(
             planDigest,
             inputsDigest,
             createdAt,
-            sourceInventoryAt,
             rowCount: rows.length,
             inputs,
             evidence: {
@@ -2666,11 +2551,6 @@ function makeWriter(
             : {}),
           at: deps.now().toISOString(),
           ...(a.freeze ? { freeze: a.freeze } : {}),
-          sourceInventoryAt: plan.sourceInventoryAt,
-          sourceInventoryAgeMs: Math.max(
-            0,
-            deps.now().getTime() - Date.parse(plan.sourceInventoryAt),
-          ),
         };
         const record: ApprovalRecord = { ...approval, approvalDigest: digestJson(approval) };
         store.atomic(() => {
@@ -2759,8 +2639,6 @@ function makeWriter(
         if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
         if ("mappings" in config)
           await checkApprovedMappingScope(p, config, store.readAllRows(plan.revision, "plan"));
-        if ("mappings" in config)
-          await assertSourceInventoryFresh(context(p, config, plan.revision), true);
         transition("execute", "execute");
         store.appendEvent({
           verb: "execute",
@@ -2832,12 +2710,13 @@ function makeWriter(
         // Verification proves what was approved: an options edit cannot weaken it.
         if (
           "mappings" in config &&
-          (approvedOptions(plan)?.proof ?? "full") !== (config.options?.proof ?? "full")
+          (approvedOptions(plan)?.verificationMode ?? "listing") !==
+            (config.options?.verificationMode ?? "listing")
         )
           return refuse(
             "plan_revision_required",
-            "The proof level differs from the approved plan; plan and approve again.",
-            { detail: { field: "options.proof" } },
+            "The verification mode differs from the approved plan; plan and approve again.",
+            { detail: { field: "options.verificationMode" } },
           );
         let worker: TransferWorkerHandle | undefined;
         try {
@@ -3345,43 +3224,17 @@ async function checkApprovedMappingScope(
         code: "plan_revision_required",
         message: "An approved destination root changed identity or type.",
       });
-    if (mapping.exclusions?.length) {
-      const excluded = new Set(frozen.fileScope.exclusions.map((e) => e.sourceItemId));
-      const sourceRoot = await p.resolveSourceRoot(mapping);
-      if (
-        !sourceRoot ||
-        sourceRoot.driveId !== mapping.sourceDriveId ||
-        sourceRoot.kind !== "folder"
-      )
-        throw new EngineRefusalError({
-          code: "plan_revision_required",
-          message: "An approved source root no longer resolves.",
-        });
-      const requested = new Set(mapping.exclusions.map((e) => e.sourceItemId));
-      const sourceStack = [{ id: sourceRoot.id, excluded: requested.has(sourceRoot.id) }],
-        sourceSeen = new Set<string>();
-      while (sourceStack.length) {
-        const parent = sourceStack.pop()!;
-        if (sourceSeen.has(parent.id))
-          throw new EngineRefusalError({
-            code: "plan_revision_required",
-            message: "The source hierarchy is no longer a tree.",
-          });
-        sourceSeen.add(parent.id);
-        for (const child of await p.listSourceChildren({
-          driveId: mapping.sourceDriveId,
-          itemId: parent.id,
-        })) {
-          const inExclusion = parent.excluded || requested.has(child.id);
-          if (inExclusion !== excluded.has(child.id))
-            throw new EngineRefusalError({
-              code: "plan_revision_required",
-              message: "The excluded subtree no longer matches its approved stable-ID set.",
-            });
-          if (child.kind === "folder") sourceStack.push({ id: child.id, excluded: inExclusion });
-        }
-      }
-    }
+    const sourceRoot = await p.resolveSourceRoot(mapping);
+    if (
+      !sourceRoot ||
+      sourceRoot.id !== mapping.sourceItemId ||
+      sourceRoot.driveId !== mapping.sourceDriveId ||
+      sourceRoot.kind !== "folder"
+    )
+      throw new EngineRefusalError({
+        code: "plan_revision_required",
+        message: "An approved source root no longer resolves.",
+      });
   }
 }
 function escapeHtml(value: unknown): string {

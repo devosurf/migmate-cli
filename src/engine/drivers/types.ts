@@ -41,18 +41,10 @@ export interface DriverContext<Cfg> {
   stage?: "prestage" | "delta" | "final";
   /** Observed in preflight and retained in the plan, never refreshed while reporting. */
   actingGoogleAccount?: string;
-  verificationBaseline?: {
-    revision: number;
-    rows: CommitRow[];
-    findings: CommitFinding[];
-    acceptedCodes: string[];
-  };
   resume: DriverResumeState;
   reportEvidence?: {
     settled(mappingId: string): unknown;
-    preview(mappingId: string): { value: unknown; byteTotals: unknown } | undefined;
     coverage: ReportArray;
-    sourceMetadata: ReportArray;
   };
   provider: ProviderPort;
   now: () => Date;

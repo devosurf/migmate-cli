@@ -12,7 +12,7 @@ import type {
   CopyPassHandle,
   CopyPassReference,
   FilePassProvider,
-  FilePassPreview,
+  FileListingComparison,
   ProviderPort,
   TransferWorkerHandle,
   TransferWorkerProbe,
@@ -411,19 +411,6 @@ function literalFilterPath(path: string): string {
     .replace(/\s/g, (character) => `{{\\x{${character.codePointAt(0)!.toString(16)}}}}`);
 }
 
-function passFilter(excludePaths?: string[]): Record<string, unknown> {
-  return excludePaths?.length
-    ? {
-        _filter: {
-          ExcludeRule: excludePaths.flatMap((path) => {
-            const literal = literalFilterPath(path);
-            return [`/${literal}`, `/${literal}/**`];
-          }),
-        },
-      }
-    : {};
-}
-
 function modTimeNs(value: unknown): bigint {
   if (typeof value !== "string") throw fail("provider_failed", "worker_response_invalid");
   const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)$/.exec(value);
@@ -439,7 +426,7 @@ function durationNs(value: unknown): bigint {
   return BigInt(value);
 }
 
-interface PreviewFile {
+interface ListedFile {
   path: string;
   size: number;
   modified: bigint;
@@ -941,13 +928,11 @@ export function createTransferSupervisor(options: {
 
   return {
     proveBinary,
-    async previewCopyPass(input) {
+    async compareFileListings(input) {
       const worker = owned(input.socketPath);
       const [sourceInfo, destinationInfo, options] = await Promise.all([
         authenticated(worker, "operations/fsinfo", { fs: input.source.fs }),
-        input.destination
-          ? authenticated(worker, "operations/fsinfo", { fs: input.destination.fs })
-          : Promise.resolve({ Precision: 0, Hashes: [] }),
+        authenticated(worker, "operations/fsinfo", { fs: input.destination.fs }),
         authenticated(worker, "options/get", {}),
       ]);
       if (
@@ -975,7 +960,7 @@ export function createTransferSupervisor(options: {
         durationNs(destinationInfo.Precision),
         durationNs(main.ModifyWindow),
       ].reduce((largest, value) => (value > largest ? value : largest));
-      const list = async (fs: string): Promise<PreviewFile[]> => {
+      const list = async (fs: string): Promise<ListedFile[]> => {
         const result = await longCall(
           worker,
           "operations/list",
@@ -983,7 +968,6 @@ export function createTransferSupervisor(options: {
             fs,
             remote: "",
             opt: { recurse: true, filesOnly: true, noMimeType: true },
-            ...passFilter(input.excludePaths),
           },
           input.signal,
         );
@@ -997,14 +981,14 @@ export function createTransferSupervisor(options: {
       };
       const [source, destination] = await Promise.all([
         list(input.source.fs),
-        input.destination ? list(input.destination.fs) : Promise.resolve([]),
+        list(input.destination.fs),
       ]);
       const key = (path: string) => {
         const normalized = main.NoUnicodeNormalization === true ? path : path.normalize("NFC");
         return main.IgnoreCaseSync === true ? normalized.toLowerCase() : normalized;
       };
       const remaining = new Map(destination.map((file) => [key(file.path), file]));
-      const preview: FilePassPreview = {
+      const comparison: FileListingComparison = {
         new: [],
         changed: [],
         unchanged: [],
@@ -1013,27 +997,27 @@ export function createTransferSupervisor(options: {
         timestampOnly: [],
         modifyWindowNs: window.toString(),
       };
-      const hashCandidates: { source: PreviewFile; destination: PreviewFile }[] = [];
+      const hashCandidates: { source: ListedFile; destination: ListedFile }[] = [];
       for (const file of source) {
         const entry = { path: file.path, size: file.size };
         const previous = remaining.get(key(file.path));
         remaining.delete(key(file.path));
         if (!previous) {
-          preview.new.push(entry);
+          comparison.new.push(entry);
           continue;
         }
         const difference = file.modified - previous.modified;
         const sizeDiffers =
-          input.destination?.kind !== "sharepoint" &&
+          input.destination.kind !== "sharepoint" &&
           file.size >= 0 &&
           previous.size >= 0 &&
           file.size !== previous.size;
-        if (sizeDiffers) preview.changed.push(entry);
-        else if (difference < window && difference > -window) preview.unchanged.push(entry);
+        if (sizeDiffers) comparison.changed.push(entry);
+        else if (difference < window && difference > -window) comparison.unchanged.push(entry);
         else if (commonHash) hashCandidates.push({ source: file, destination: previous });
-        else preview.changed.push(entry);
+        else comparison.changed.push(entry);
       }
-      if (commonHash && input.destination && hashCandidates.length > 0) {
+      if (commonHash && hashCandidates.length > 0) {
         const hashes = async (fs: string, paths: string[]) => {
           const result = await longCall(
             worker,
@@ -1080,28 +1064,28 @@ export function createTransferSupervisor(options: {
           // branch. SharePoint still uses that branch if a common hash exists.
           const timestampOnly =
             hash !== undefined && hash === destinationHashes.get(pair.destination.path);
-          preview[timestampOnly ? "timestampOnly" : "changed"].push({
+          comparison[timestampOnly ? "timestampOnly" : "changed"].push({
             path: pair.source.path,
             size: pair.source.size,
           });
         }
       }
       for (const file of remaining.values()) {
-        preview[input.mode === "mirror" ? "deleted" : "retained"].push({
+        comparison[input.mode === "mirror" ? "deleted" : "retained"].push({
           path: file.path,
           size: file.size,
         });
       }
       for (const entries of [
-        preview.new,
-        preview.changed,
-        preview.unchanged,
-        preview.deleted,
-        preview.retained,
-        preview.timestampOnly,
+        comparison.new,
+        comparison.changed,
+        comparison.unchanged,
+        comparison.deleted,
+        comparison.retained,
+        comparison.timestampOnly,
       ])
         entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-      return preview;
+      return comparison;
     },
     async listFolders({ socketPath, root, signal }) {
       const listing = await longCall(
@@ -1191,7 +1175,6 @@ export function createTransferSupervisor(options: {
           createEmptySrcDirs: true,
           _async: true,
           _group: group,
-          ...passFilter(input.excludePaths),
           _config: {
             Transfers: input.transfers,
             Metadata: true,

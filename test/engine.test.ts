@@ -11,7 +11,6 @@ import {
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
 import { fileConfig as jobConfig, fileFixture } from "./engine-fixture.ts";
-import type { ProviderPort } from "../src/engine/providers/port.ts";
 import { value } from "./engine-fixture.ts";
 
 const FIXED_NOW = new Date("2026-09-01T00:00:00.000Z");
@@ -69,9 +68,9 @@ async function initialised(h: Harness): Promise<JobRef> {
 }
 
 describe("engine seam", () => {
-  for (const stage of ["preflight", "source", "destination", "freshness"] as const) {
+  for (const stage of ["preflight"] as const) {
     it(
-      `aborted full-inventory plan stops during ${stage} and can be planned again`,
+      `aborted map-only plan stops during ${stage} and can be planned again`,
       { timeout: 5000 },
       async (t) => {
         const h = harness();
@@ -91,24 +90,7 @@ describe("engine seam", () => {
             signal?.removeEventListener("abort", abort);
           }
         };
-        const source = h.port.listSourceChildren.bind(h.port);
-        const destination = h.port.listDestinationChildren.bind(h.port);
         const preflight = h.port.preflight.bind(h.port);
-        let inventories = 0;
-        h.port.listSourceChildren = async (
-          input: Parameters<ProviderPort["listSourceChildren"]>[0],
-        ) => {
-          if (input.itemId === "source-root") {
-            inventories++;
-            if (stage === "source" || (stage === "freshness" && inventories === 2))
-              await waitForAbort(input.signal);
-          }
-          return source(input);
-        };
-        h.port.listDestinationChildren = async (id: string, signal?: AbortSignal) => {
-          if (stage === "destination") await waitForAbort(signal);
-          return destination(id);
-        };
         h.port.preflight = async function* (input) {
           if (stage === "preflight") await waitForAbort(input.signal);
           yield* preflight(input);
@@ -132,8 +114,6 @@ describe("engine seam", () => {
         assert.equal(status.ownership.held, false);
         assert.equal(status.planDigest, null);
         assert.equal(status.worker.active, false);
-        h.port.listSourceChildren = source;
-        h.port.listDestinationChildren = destination;
         h.port.preflight = preflight;
         const planned = value(value(await h.engine.withWriter(ref, (writer) => writer.plan())));
         assert.ok(planned.planDigest);

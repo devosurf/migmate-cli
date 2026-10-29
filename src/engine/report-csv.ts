@@ -16,25 +16,15 @@ interface CsvEvidence {
 }
 
 function* exceptions(evidence: CsvEvidence) {
-  const { store, config, approval, accepted } = evidence;
-  const acceptedOmissions = store.readPlanAcceptedOmissions(evidence.revision);
+  const { store, config, accepted } = evidence;
   for (const finding of evidence.findings()) {
     if (finding.kind === "policy_outcome") continue;
     const details =
       finding.evidence !== null && typeof finding.evidence === "object"
         ? (finding.evidence as Record<string, unknown>)
         : {};
-    const recorded = accepted.find((entry) => entry.code === finding.code);
-    const plannedAcceptance =
-      finding.phase === "plan" && approval && acceptedOmissions.includes(finding.code);
-    const inAdvance =
-      plannedAcceptance ||
-      recorded?.note ===
-        `Accepted in advance by approving plan ${approval?.planDigest} with [options] acceptedOmissions.`;
-    const acceptance =
-      recorded ??
-      (plannedAcceptance ? { approver: approval.approver, note: undefined } : undefined);
-    const status = acceptance ? (inAdvance ? "accepted in advance" : "accepted") : "outstanding";
+    const acceptance = accepted.find((entry) => entry.code === finding.code);
+    const status = acceptance ? "accepted" : "outstanding";
     let located = false;
     for (const mapping of config?.mappings ?? []) {
       const path = store.reportItemPath(
@@ -73,10 +63,6 @@ function* exceptions(evidence: CsvEvidence) {
 }
 
 export function* exceptionsCsv(evidence: CsvEvidence): Generator<string> {
-  if (evidence.config?.options?.proof === "rclone")
-    yield* csvRow([
-      "rclone proof: per-file omission findings are not collected at this proof level.",
-    ]);
   yield* csvRow(exceptionColumns);
   for (const item of exceptions(evidence))
     yield* csvRow([

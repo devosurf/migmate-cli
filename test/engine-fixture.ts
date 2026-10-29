@@ -26,9 +26,7 @@ export function fileFixture(
   };
 }
 
-export function fileConfig(
-  exclusions: Array<{ sourceItemId: string; reason: string }> = [],
-): FileMigrationConfig {
+export function fileConfig(): FileMigrationConfig {
   return {
     mappings: [
       {
@@ -37,7 +35,6 @@ export function fileConfig(
         sourceItemId: "source-root",
         destDriveId: "destination-drive",
         destFolderId: "destination-root",
-        exclusions,
       },
     ],
   };

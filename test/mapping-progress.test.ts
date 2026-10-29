@@ -361,7 +361,7 @@ describe("durable mapping progress", () => {
       observations,
       {
         ...fileConfig(),
-        options: { staged: true, proof: "rclone", consistencyIntervalMs: 0 },
+        options: { staged: true, consistencyIntervalMs: 0 },
       },
       undefined,
       async () => {

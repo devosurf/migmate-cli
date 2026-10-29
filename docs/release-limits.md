@@ -50,11 +50,10 @@ same in-process engine. No external approval service, login, token storage or
 transfer-permission change is introduced. See
 [ADR-0016](adr/0016-human-handoff-without-digest-transcription.md).
 
-The all-file-plan map-only cutover in ADR-0014/#70 and informational account-activity
-snapshots in #78 remain separate work. This handoff adds no planning scan,
-file/deletion prediction, upload total, quota threshold or inventory-age gate.
-The current build still distinguishes default full inventory from opt-in rclone
-proof below.
+Both existing file directions now use ADR-0014 map-only approval. Approval binds
+mapping roots, drives to create, members and options, not a file inventory.
+There is no file/deletion preview or inventory-age/freshness gate.
+Informational account-activity snapshots in #78 remain separate work.
 
 Local verification covers fake-provider stale submissions, cancelled confirmations,
 identity reuse, unattended labels, authority expansion, required rationale and
@@ -70,9 +69,28 @@ File migration uses rclone copy rather than Migmate's per-item destination write
 
 Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. A job's route fixes one direction for every mapping: a row in the other direction, including any row of a mixed manifest, refuses at load with its row and `source.type`.
 
-`[options] acceptedOmissions` lists plan-phase planned omissions, such as `version_history_omitted` and `source_metadata_export_only`, that are accepted by approving the plan that discloses them. It is bound to the plan digest. Each verification records as accepted exceptions only the listed codes that the approved plan contained, attributed to its approver and approval time; everything else, including `content_verification_degraded`, still requires `accept` for that verification digest. Accepted codes keep their per-file evidence in the report.
+Verification defaults to rclone listing comparison by relative path and size,
+including folders and empty folders. Every verification covers whole mappings.
+It does not establish byte equality and raises no degraded-content finding.
+Opt-in `[options] verificationMode = "hash"` downloads source content to compute
+the destination's hash type and compares stored destination hashes without a
+per-file Graph inventory. Shared Drive → SharePoint size differences on PDF,
+Office and HTML files raise `destination_rewrote_file`; other types raise
+`size_mismatch`. SharePoint → Shared Drive served-size rewrites can still cause
+copy failures and `size_mismatch`.
 
-Several document libraries of one SharePoint site can be mapped in one job. Graph gives every library root in a site the same item ID, so Migmate tracks source items by drive and item ID together.
+Version history, list-item fields, retention labels and permissions are not
+copied; plan and report disclose these omissions once, not as per-file findings.
+OneNote notebooks copy as section files. Mapping roots alone select scope.
+Removed options (`proof`, exclusions, `acceptedOmissions`, `oneNoteNotebooks`,
+`deltaVerification`, and `verificationMode = "size_only"`) refuse. Old
+inventory-planned jobs refuse mutation, while historical status, evidence and
+reports remain readable; use a new map-only job for further migration.
+Teams archive jobs are unaffected.
+
+Final settling compares source and destination file/folder listings after the
+consistency interval, bounded by `settleMaxPasses`; it settles only when nothing
+remains to copy or delete. It is observed quiescence, not a snapshot or freeze.
 
 Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back. Ordinary retries have a fresh cap; final settle catch-up passes retain the original cumulative deletion authorization. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
 
@@ -85,7 +103,7 @@ legacy schema-5 records; it never infers ownership solely from the manifest's
 `create` label. These optional evidence fields live in the existing JSON payload;
 no schema migration fabricates proof for legacy drives.
 
-Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. An excluded source subtree gaining a new member still requires replanning.
+Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. Mirror lists files and folders on both sides immediately before every pass, records execute-phase `to_be_deleted` evidence and enforces `deleteLimit` at execution rather than approval. The limit counts files; folder removals are recorded separately.
 
 **Acting account.** File jobs may set top-level `impersonate = true` and `subject`.
 Preflight proves a token can be issued and `about.user.emailAddress` equals that
@@ -180,10 +198,9 @@ and member grants.
 
 The deferred go-live fence does not apply to legacy `before_copy` timing.
 Close uses the immutable plan's approved timing, not the current operator file.
-Already-verified legacy/before-copy plans still require the new initial close
-decision, including plans whose input digests contain retired qualification
-fields. They retain their existing transfer/access behavior; deferred grants
-continue to require the approved close-time input re-check.
+Old inventory-planned file jobs refuse mutation, including close; their historical
+reports remain readable. Current map-only jobs require the approved close-time
+input re-check for deferred grants.
 In either mode, plan/report warn that mirror can overwrite or delete existing
 writers' files. Deferred grants do not exclude external access, administrators,
 existing drive members or members of pre-populated groups. The acting account
@@ -209,32 +226,25 @@ an unnecessary write remote refuses `credential_config_invalid`. Reverse jobs ne
 no SharePoint source remote. Destinations are paths under a library
 pinned by `drive_id`, never `root_folder_id`, and passes into SharePoint run with
 `--ignore-size --ignore-checksum` because SharePoint may rewrite PDF, Office and HTML
-bytes. Verification computes quickXorHash by downloading the source and compares it
-with SharePoint's stored quickXorHash. A differing PDF, Office or HTML file raises
-`destination_rewrote_file`; any other differing file raises `content_mismatch`. Both
-carry `sourceHash`, `destinationHash`, `sourceSize` and `destinationSize` and block
-`close` until accepted. Mirror and drive provisioning remain Google-destination only.
+bytes. Default verification compares listing paths and sizes. Opt-in hash
+verification downloads the source to compute SharePoint's quickXorHash.
+PDF, Office or HTML differences raise `destination_rewrote_file`; other types
+raise `size_mismatch` for size differences or `content_mismatch` for hash
+differences. Findings carry available sizes/hashes and block `close` until
+accepted. Mirror and drive provisioning remain Google-destination only.
 Engine, HTTP-transport and local-folder rclone tests cover this direction. The optional
 live suite runs a reverse probe for a reverse job config (copy, quickXorHash verification,
 and a replaced Office file and plain file); no credentialed run of it is claimed.
 
-### rclone proof
+### Listing execution and historical evidence
 
-`[options] proof = "rclone"` (SharePoint → Shared Drive only) replaces the per-file
-Graph inventory with rclone's own listings. Approval binds mapping roots, drives,
-members and options, not a file list. No preview, freshness comparison or per-file
-omission finding precedes copying. rclone checks each upload's size; SharePoint and
-Drive share no hash type, so neither rclone nor this mode compares content. Verification
-compares rclone listings by path and size, folders included, and flags a mapping whose
-last pass did not complete. Final passes settle on an empty rclone listing comparison.
-Mirror passes record each destination-only file as `to_be_deleted` from an rclone
-listing taken just before the pass, and delete at most that many, within
-`deleteLimit`. Exclusions, `verificationMode`, `deltaVerification = "changed"` and
-`oneNoteNotebooks = "omit"` refuse; notebooks are copied as their section files. A
-test-tenant run covered two small libraries through prestage, a mirror delta, a final
-pass and go-live, plus a copy-only run; no run at large-library scale is claimed.
+Both file routes use the map-only planning and listing-default verification
+described above. A historical test-tenant run of the former opt-in map-only
+implementation covered two small SharePoint libraries through prestage, a mirror
+delta, a final pass and go-live, plus a copy-only run. That observation does not
+qualify the new all-route cutover or establish large-library scale.
 
-rclone listings and hash sums, in both proof levels, run as polled rclone jobs with no
+rclone listings and hash sums run as polled rclone jobs with no
 request deadline. rclone retries each Graph and Drive request up to 10 times, honoring
 `Retry-After`, and its own I/O timeouts still apply. One listing response is capped at
 256 MiB, roughly 900,000 files at the ~260 bytes per file observed on SharePoint. Split
@@ -282,23 +292,10 @@ is not authority for a later revision.
 An approved staged revision permanently establishes that intent for the job,
 including after manifest reloads clear the current plan pointer.
 
-Plans expose listing-derived new, changed, unchanged and mirror deletion paths
-and byte totals. Every proposed deletion is reviewable against its mapping's
-limit; an over-limit preview cannot be approved as executable. Copy-only
-destination extras are retained. Preview predicts rclone's comparison, not
-content equality: same-size changes within its effective modify window can be
-skipped. The timestamp boundary, backend precision, common-hash behavior and
-reverse-route `IgnoreSize`/`IgnoreChecksum` settings matter; full verification
-remains separate.
-
-Planning and approval display `sourceInventoryAt` and its current age.
-Execute-start freshness uses a **complete read-only inventory comparison**,
-refusing `plan_revision_required` if the source changed or freshness cannot be
-established. Graph delta acquisition and unchanged replay were observed with
-read-only source credentials, but nested-change coverage and latency remain
-unqualified. A cursor, root tag or root modification timestamp is not a qualified
-shortcut around that comparison. The freshness fence does not close the race
-between checking and copying.
+Plans expose the mapping roots and authority, not predicted file changes,
+deletions or byte totals. Mirror lists and guards deletions when execution runs;
+copy-only destination extras are retained. There is no source inventory age or
+execute-start inventory-freshness comparison.
 
 Final approval records `--freeze-by`, `--freeze-at` (timestamp with timezone) and
 `--freeze-how`; the web approval fields capture the same attestation. Migmate
@@ -310,22 +307,11 @@ destination-only paths continue to qualify the result.
 After final copying, `consistencyIntervalMs` defaults to **30000** and
 `settleMaxPasses` defaults to **3** additional catch-up passes. The interval is a
 configurable wait, not a measured guarantee of SharePoint convergence. Each
-confirmation inventories completely; a complete confirmation with no unprocessed
-change is required before full verification. Catch-up stays within approval:
-new paths or unapproved deletions require a new revision, and original deletion
-authority is cumulative across settle passes. Exhaustion leaves cutover
-incomplete. Changes during verification still block completion.
-
-`deltaVerification = "full"` is the default. Opt-in `"changed"` gives intermediate
-deltas **partial proof**, recording the last verified baseline and covered paths,
-including creations, changes and deletions, while preserving earlier exceptions.
-Baseline evidence is bound to source/destination roots, expanded exclusions,
-OneNote policy and verification mode; a changed or missing binding forces full
-verification for that mapping instead of reusing another destination's proof.
-Failed or unverified revisions do not advance the baseline. Prestage, missing
-baselines and final revisions use full verification; this option is independent
-of `verificationMode = "size_only"`. Partial proof does not recheck independent
-damage to previously unchanged destination content.
+confirmation compares source and destination listings, including folders; nothing
+remaining to copy or delete is required before final verification. Catch-up stays
+within approved mappings and cumulative deletion authority. Exhaustion leaves
+cutover incomplete. Every verification covers whole mappings; partial verification
+is unavailable.
 
 No live tenant writes were used to qualify the staged lifecycle here. Read-only
 Graph probes and disposable local rclone probes in
@@ -345,7 +331,7 @@ Job `[options]` settings `mappingsInFlight` (default **2**) and `transfersPerMap
 
 On writer-open recovery, all unfinished passes whose worker is gone become interrupted, including every pass active at a crash. The next `execute` retries failed/interrupted mappings and skips completed passes for the approved revision. rclone compares files and skips identical ones on retry; this is not replay of a durable rclone job. Ctrl-C stops all active passes cooperatively and exits 130, leaving the job resumable.
 
-Planning is interruptible during preflight, full file inventory and Teams archive collection, including provider paging and per-file metadata requests. SIGINT exits 130 and SIGTERM exits 143 after worker cleanup and lease release. Re-run `plan` directly: interrupted collection publishes no new approvable revision and needs no `reclaim`. The existing `retry_budget_exhausted` refusal carries `detail.interrupted: true`; it is not a tenant prerequisite failure. Disposable preflight probes receive up to five seconds of cleanup after interruption; an unavailable destination can still leave privately marked `.migmate-probe-*` objects for operator cleanup. There is no process-kill deadline that bypasses durable cleanup.
+Planning is interruptible during preflight, mapping-root resolution and Teams archive collection, including provider paging. SIGINT exits 130 and SIGTERM exits 143 after worker cleanup and lease release. Re-run `plan` directly: interrupted collection publishes no new approvable revision and needs no `reclaim`. The existing `retry_budget_exhausted` refusal carries `detail.interrupted: true`; it is not a tenant prerequisite failure. Disposable preflight probes receive up to five seconds of cleanup after interruption; an unavailable destination can still leave privately marked `.migmate-probe-*` objects for operator cleanup. There is no process-kill deadline that bypasses durable cleanup.
 
 Foreground SIGHUP uses the same cooperative interruption as SIGTERM and exits **129**, including when output is full or disconnected. Successful cleanup stops the worker and releases the writer lease; repeat `execute` to resume, `plan` to collect a complete revision, or `verify` to obtain fresh verification. Interrupted verification does not publish success. This is not detached execution or cross-process cancellation. SIGKILL, host loss or failed worker cleanup may still require explicit recovery: inspect `status` and worker ownership rather than assuming `reclaim` is unnecessary.
 
@@ -422,26 +408,24 @@ and libraries added after discovery.
 
 `migmate web`'s native window has been inspected by an operator on `darwin-arm64` only; the other three platforms still need a person at a logged-in desktop ([#32](https://github.com/devosurf/migmate-cli/issues/32)). The CLI itself installs and passes its package smoke on all four in CI.
 
-**What every job proves about itself.** File verification compares each mapping by relative file path using rclone hash listings. It reads Google Drive's stored SHA-256 without downloading the destination, falling back per file to stored MD5 when SHA-256 is absent, and re-downloads the source to compute the same hash type. Findings name missing files (`destination_missing`), size differences (`size_mismatch`), differing bytes (`content_mismatch`), and unreadable source files (`source_read_failed`), with `path`, `sourceSize`, `destinationSize`, `sourceHash`, `destinationHash`, and `hashType` evidence (unavailable values are `null`). Verification rows retain the destination object's observed id alongside its hash, including destination-only files; that id comes from the current listing, not a prior reserved identity. Destination-only files are reported as `destination_only_retained`, never deleted and never blocking close. Verification does not read per-item markers or reserved ids, and works with destinations written by the current execute.
+**What every job proves about itself.** File verification defaults to relative path-and-size listing comparison across whole mappings. Opt-in hash verification re-downloads source bytes to compute the destination's stored hash type. Findings identify missing paths (`destination_missing`), size differences (`size_mismatch`), and, in hash mode, differing bytes (`content_mismatch`) or unreadable source bytes (`source_read_failed`), with available size/hash evidence. Reverse-route PDF, Office and HTML rewrite differences use `destination_rewrote_file`. Verification rows retain observed destination IDs, not reserved identities. Destination-only files are reported as `destination_only_retained` without blocking close; verification never deletes them.
 
-**OneNote notebooks.** `[options] oneNoteNotebooks = "omit"` is the default:
-`source_package_omitted` findings retain the source URL, section count, reason and
-manual export guidance in plan and verification; paged review shows them. Export
-from OneNote for Windows (File → Export → Notebook `.onepkg` or PDF), then upload
-the export manually. Opt-in `"copy"` instead records `source_package_copied_as_files`
-and copies every notebook descendant as ordinary files, including `.one` sections
-and `Open Notebook.onetoc2`. Per-file hashes, unchanged delta skips and mirror
-deletions apply normally. Other package types remain omitted, and `"copy"` refuses
-on the reverse route (`configuration_invalid`, `options.oneNoteNotebooks`).
-Plan and report disclose a read-only reference copy, not a working Google notebook:
-download the folder to open `Open Notebook.onetoc2` in OneNote for Windows, not Mac
-or Drive. Editing through Drive for desktop is unsafe. This does not enforce
-read-only Drive permissions. Fake-provider lifecycle and paged Graph enumeration
-are covered; a disposable live Google upload still requires operator approval.
+**OneNote notebooks.** Notebooks copy as ordinary section files, including `.one`
+sections and `Open Notebook.onetoc2`. This is a reference copy, not a working Google
+notebook: download the folder and open it in OneNote for Windows, not Mac or Drive.
+Editing through Drive for desktop is unsafe. Migmate does not enforce read-only
+Drive permissions.
 
-**Size-only is an explicit trade-off.** Set `[options] verificationMode = "size_only"` in the job TOML to compare listed sizes without downloading source bytes. The default is `"hash"`; the immutable plan and report state the mode. Size-only verification raises `content_verification_degraded` even when all sizes match or the mapping is empty. A missing destination hash after MD5 fallback raises that same finding. `close` refuses `verification_unaccepted` until an operator accepts every blocking finding by code. Both modes verify folder existence, including empty folders, on both file routes; neither verifies file or folder metadata. A missing expected folder raises blocking `destination_missing` with `path` and `itemType: "folder"`. A file at an expected folder path raises blocking `destination_type_conflict`, not `destination_only_retained`. Excluded and omitted folders and their descendants are outside this check. Teams archive verification is unchanged: it self-verifies the local package, then byte-verifies every uploaded object and its provenance.
+**Verification limits.** Default listing verification establishes path-and-size
+agreement, not byte equality, without raising a degraded-content finding.
+Opt-in hash verification changes the content check, not mapping scope. Both modes
+check folders, including empty folders; neither verifies file or folder metadata.
+A missing folder raises `destination_missing` with `itemType: "folder"`; a file at
+that path raises `destination_type_conflict`. Teams archive verification is
+unchanged: it self-verifies the local package, then byte-verifies every uploaded
+object and its provenance.
 
-**What the source serves is what gets copied.** SharePoint can rewrite PDF, Office and HTML files and list sizes that contradict downloaded bytes ([provider byte-integrity research](research/provider-byte-integrity.md)). rclone owns execution and its backend checks; Migmate no longer stages files or requires its old two-read agreement before uploading. Hash verification raises `source_size_inconsistent` when listed size contradicts served bytes, with `listedSize`, `servedSize` and hash evidence. When hashes differ, verification measures an additional source read and checks it against downloaded SHA-256 before attributing the discrepancy. A destination length differing from served length also raises `size_mismatch`. Size-only cannot make that distinction; blocking findings require acceptance.
+**What the source serves is what gets copied.** SharePoint can rewrite PDF, Office and HTML files and list sizes that contradict downloaded bytes ([provider byte-integrity research](research/provider-byte-integrity.md)). rclone owns execution and its backend checks; Migmate no longer stages files or requires its old two-read agreement before uploading. Hash verification raises `source_size_inconsistent` when listed size contradicts served bytes, with `listedSize`, `servedSize` and hash evidence. When hashes differ, verification measures an additional source read and checks it against downloaded SHA-256 before attributing the discrepancy. A destination length differing from served length also raises `size_mismatch`. Listing verification cannot make that distinction; blocking findings require acceptance.
 
 Per-file findings report the compared size in `sourceSize`; if it differs from the listing, `listedSize` preserves that listing. When `source_size_inconsistent` accompanies `size_mismatch` or `content_mismatch` for the same path, those dependent findings carry `cause: "source_size_inconsistent"`. A source change between copy and verify can produce all three. They remain separate blocking findings requiring explicit acceptance.
 

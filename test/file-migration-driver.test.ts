@@ -89,16 +89,14 @@ function hash(content: string | Uint8Array): string {
 }
 
 describe("staged cutover lifecycle", () => {
-  it("refuses a complete stale inventory before any transfer", async (t) => {
+  it("copies current source content without an inventory freshness gate", async (t) => {
     const h = await harness(t, fixture(), { ...config, options: { staged: true } });
     await approve(h);
     h.port.mutateSourceItem("binary", { content: "a newer version" });
-    const result = await h.engine.withWriterResult(h.ref, (writer) => writer.execute());
-    assert.equal(result.ok, false);
-    if (!result.ok) assert.equal(result.refusal.code, "plan_revision_required");
-    assert.deepEqual(
-      h.port.snapshotDestination().map((item) => item.path),
-      ["."],
+    await execute(h);
+    assert.equal(
+      h.port.snapshotDestination().find((item) => item.path === "report.docx")?.checksum,
+      hash("a newer version"),
     );
   });
   it("keeps prestage open and binds final intent and freeze to the latest approval", async (t) => {
@@ -160,8 +158,8 @@ describe("staged cutover lifecycle", () => {
   });
 });
 
-describe("rclone proof", () => {
-  const rclone = { proof: "rclone" as const, consistencyIntervalMs: 0 };
+describe("map-only listing migration", () => {
+  const rclone = { consistencyIntervalMs: 0 };
 
   it("copies, verifies and closes from a map-only plan without a per-file source inventory", async (t) => {
     const h = await harness(t, fixture(), { ...config, options: rclone });
@@ -240,8 +238,11 @@ describe("rclone proof", () => {
     const names = async () =>
       (await h.port.listDestinationChildren(driveId)).map((item) => item.name).sort();
     assert.deepEqual(await names(), ["a.txt", "b.txt", "c.txt"]);
-    h.port.deleteSourceItem("a");
     await approve(h);
+    h.port.deleteSourceItem("a");
+    const planned = value(await h.engine.reader(h.ref).rows({ phase: "plan" })).rows;
+    assert.equal(planned.length, 1);
+    assert.ok(planned[0]?.jobType === "file_migration");
     await execute(h);
     const deletions = value(await h.engine.reader(h.ref).rows({ phase: "execute", limit: 100 }));
     assert.deepEqual(
@@ -328,47 +329,173 @@ describe("rclone proof", () => {
     assert.ok((await h.port.listDestinationChildren(driveId)).some((item) => item.name === "late"));
   });
 
-  it("verifies only at the proof level the plan approved", async (t) => {
-    const h = await harness(t, fixture(), config);
-    await approve(h);
-    await execute(h);
-    value(await h.engine.withWriterResult(h.ref, (w) => w.onboard({ ...config, options: rclone })));
-    const refused = await h.engine.withWriterResult(h.ref, (w) => w.verify());
-    assert.equal(refused.ok, false);
-    if (!refused.ok)
-      assert.deepEqual(
-        [refused.refusal.code, refused.refusal.detail?.field],
-        ["plan_revision_required", "options.proof"],
-      );
-  });
-
-  it("refuses options that need the per-file inventory", async (t) => {
-    for (const [options, field] of [
-      [{ verificationMode: "size_only" }, "options.verificationMode"],
-      [{ deltaVerification: "changed" }, "options.deltaVerification"],
-      [{ oneNoteNotebooks: "omit" }, "options.oneNoteNotebooks"],
-    ] as const) {
-      const home = await mkdtemp(join(tmpdir(), "migmate-rclone-proof-"));
-      t.after(() => rm(home, { recursive: true, force: true }));
-      const engine = openEngine({ home, provider: new FakeFileMigrationPort(fixture()) });
-      const init = await engine.initJob({
-        type: "file_migration",
-        config: { ...config, options: { ...options, proof: "rclone" } },
+  for (const reverse of [false, true]) {
+    async function routeHarness(
+      t: TestContext,
+      input = fixture(),
+      options?: FileMigrationConfig["options"],
+    ) {
+      const h = await harness(t, input, {
+        ...(reverse ? { route: "shared_drive_to_sharepoint_library", mappings: [] } : config),
+        ...(options ? { options } : {}),
       });
-      assert.equal(init.ok, false);
-      if (!init.ok) assert.equal(init.refusal.detail?.field, field);
+      if (reverse) {
+        value(
+          await h.engine.withWriterResult(h.ref, (w) =>
+            w.loadManifest({
+              format: "json",
+              content: JSON.stringify({
+                version: 1,
+                mappings: [
+                  {
+                    id: "mapping",
+                    source: {
+                      type: "google_shared_drive",
+                      driveId: "source-drive",
+                      folderId: "source-root",
+                    },
+                    destination: {
+                      type: "sharepoint",
+                      driveId: "destination-drive",
+                      folderPath: "",
+                    },
+                  },
+                ],
+              }),
+            }),
+          ),
+        );
+      }
+      return h;
     }
-    const h = await harness(t, fixture(), {
-      mappings: config.mappings.map((mapping) => ({
-        ...mapping,
-        exclusions: [{ sourceItemId: "binary", reason: "Not migrated" }],
-      })),
-      options: rclone,
+
+    it(`approves only roots and verifies whole listings without downloads (${reverse ? "reverse" : "forward"})`, async (t) => {
+      const h = await routeHarness(t);
+      const inventory = t.mock.method(h.port, "listSourceChildren", async () => {
+        throw new Error("Map-only migration must not inventory source children");
+      });
+      const hashes = t.mock.method(h.port, "listFileHashes");
+      await approve(h);
+      assert.equal(hashes.mock.callCount(), 0);
+      const planned = value(await h.engine.reader(h.ref).rows({ phase: "plan" })).rows;
+      assert.equal(planned.length, 1);
+      assert.ok(planned[0]?.jobType === "file_migration");
+      h.port.mutateSourceItem("binary", { name: "plain.bin" });
+      await execute(h);
+      const copied = h.port.snapshotDestination().find((item) => item.path === "plain.bin")!;
+      // Same-size corruption is deliberately outside listing verification.
+      h.port.mutateDestinationContent(copied.id, new Uint8Array([1, 1, 1, 1]));
+      const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.equal(verified.clean, true);
+      assert.deepEqual(verified.findings, []);
+      assert.equal(inventory.mock.callCount(), 0);
+      assert.ok(hashes.mock.calls.every((call) => !call.arguments[0].download));
     });
-    const plan = await h.engine.withWriterResult(h.ref, (w) => w.plan());
-    assert.equal(plan.ok, false);
-    if (!plan.ok) assert.equal(plan.refusal.detail?.field, "exclusions");
-  });
+
+    it(`finds listing size differences and missing files and folders (${reverse ? "reverse" : "forward"})`, async (t) => {
+      const h = await routeHarness(t);
+      await approve(h);
+      await execute(h);
+      const copied = new Map(h.port.snapshotDestination().map((item) => [item.path, item.id]));
+      h.port.mutateDestinationContent(copied.get("report.docx")!, "longer Office content");
+      h.port.removeDestinationItem(copied.get("nested/empty")!);
+      h.port.removeDestinationItem(copied.get("nested/zero.bin")!);
+      const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.deepEqual(
+        verified.findings.map(({ code, count }) => ({ code, count })),
+        [
+          { code: "destination_missing", count: 2 },
+          { code: reverse ? "destination_rewrote_file" : "size_mismatch", count: 1 },
+        ],
+      );
+    });
+
+    it(`keeps hash corruption and unavailable stored hashes blocking (${reverse ? "reverse" : "forward"})`, async (t) => {
+      const input = fixture();
+      input.sourceItems.find((item) => item.id === "binary")!.name = "plain.bin";
+      const h = await routeHarness(t, input, { verificationMode: "hash" });
+      await approve(h);
+      await execute(h);
+      const copied = h.port.snapshotDestination().find((item) => item.path === "plain.bin")!;
+      h.port.mutateDestinationContent(copied.id, new Uint8Array([1, 1, 1, 1]));
+      let verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.deepEqual(
+        verified.findings.map((finding) => finding.code),
+        ["content_mismatch"],
+      );
+      const list = h.port.listFileHashes.bind(h.port);
+      t.mock.method(
+        h.port,
+        "listFileHashes",
+        async (input: Parameters<FakeFileMigrationPort["listFileHashes"]>[0]) => {
+          const entries = await list(input);
+          return input.root.fs === "destination-root"
+            ? entries.map((entry) =>
+                entry.path === "plain.bin" ? { ...entry, hash: null } : entry,
+              )
+            : entries;
+        },
+      );
+      verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.deepEqual(
+        verified.findings.map((finding) => finding.code),
+        ["destination_read_failed"],
+      );
+    });
+
+    it(`settles newly visible folders by listing without changing approval (${reverse ? "reverse" : "forward"})`, async (t) => {
+      const input = fixture();
+      input.sourceItems.push({ id: "late", parentId: "source-root", name: "late", kind: "folder" });
+      const h = await routeHarness(t, input, { staged: true, consistencyIntervalMs: 0 });
+      const visible = ["folder", "binary", "late"];
+      h.port.overrideSourceChildren("source-root", ["folder", "binary"]);
+      await approve(h);
+      await execute(h);
+      const final = value(await h.engine.withWriterResult(h.ref, (w) => w.plan({ final: true })));
+      value(
+        await h.engine.withWriterResult(h.ref, (w) =>
+          w.approve({
+            approver: "operator",
+            mode: "unattended",
+            planDigest: final.planDigest,
+            freeze: { by: "operator", at: now, how: "writers stopped" },
+          }),
+        ),
+      );
+      h.engine.close();
+      h.engine = openEngine({
+        home: h.home,
+        now: () => new Date(now),
+        provider: h.port,
+        waitForConsistency: async () => h.port.overrideSourceChildren("source-root", visible),
+      });
+      await execute(h);
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.equal(status.state, "verified");
+      assert.equal(status.planDigest, final.planDigest);
+      assert.ok(h.port.snapshotDestination().some((item) => item.path === "late"));
+      assert.deepEqual(status.outstandingFindings, []);
+    });
+
+    it(`verifies unchanged paths again on every delta (${reverse ? "reverse" : "forward"})`, async (t) => {
+      const h = await routeHarness(t, fixture(), { staged: true, consistencyIntervalMs: 0 });
+      await approve(h);
+      await execute(h);
+      h.port.mutateSourceItem("binary", { content: "new delta bytes" });
+      await approve(h);
+      await execute(h);
+      const unchanged = h.port
+        .snapshotDestination()
+        .find((item) => item.path === "nested/zero.bin")!;
+      h.port.mutateDestinationContent(unchanged.id, "independent damage");
+      const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.deepEqual(
+        verified.findings.map((finding) => finding.code),
+        ["size_mismatch"],
+      );
+      assert.equal((await codes(h, "verify")).get("zero"), "size_mismatch");
+    });
+  }
 });
 
 describe("destination folder verification", () => {
@@ -514,7 +641,7 @@ describe("Google Shared Drives to SharePoint", () => {
   ];
 
   it("copies into SharePoint, verifies quickXorHash and names rewritten Office files", async (t) => {
-    const h = await harness(t, fixture(), reverse);
+    const h = await harness(t, fixture(), { ...reverse, options: { verificationMode: "hash" } });
     value(await load(h, [both[0]]));
     const plan = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     assert.ok(
@@ -603,7 +730,7 @@ describe("Google Shared Drives to SharePoint", () => {
       kind: "file",
       content: "original",
     });
-    const h = await harness(t, input, reverse);
+    const h = await harness(t, input, { ...reverse, options: { verificationMode: "hash" } });
     value(await load(h, [both[0]]));
     await approve(h);
     await execute(h);
@@ -791,55 +918,17 @@ function notebookFixture(): FakeFileMigrationFixture {
       kind: "file",
       content: "table of contents",
     },
-    { id: "other-package", parentId: "source-root", name: "Other", kind: "package" },
   ]);
 }
 
-describe("OneNote notebook policy", () => {
-  it("makes default omissions actionable in plan, verification and report", async (t) => {
-    const h = await harness(t, notebookFixture());
-    await approve(h);
-    assert.equal((await codes(h, "plan")).get("notebook"), "source_package_omitted");
-    assert.equal((await codes(h, "plan")).has("section"), false);
-    for (const phase of ["plan", "verify"]) {
-      if (phase === "verify") {
-        await execute(h);
-        value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
-      }
-      const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
-      const json = JSON.parse(
-        await readFile(report.artifacts.find((a) => a.name === "report.json")!.path, "utf8"),
-      );
-      const evidence = json.findings.find(
-        (f: { phase: string; subjectId: string; code: string }) =>
-          f.phase === phase && f.subjectId === "notebook" && f.code === "source_package_omitted",
-      ).evidence;
-      assert.equal(evidence.webUrl, "https://example.sharepoint.com/Notes");
-      assert.equal(evidence.sectionCount, 1);
-      assert.equal(typeof evidence.reason, "string");
-      assert.equal(typeof evidence.nextStep, "string");
-      const other = json.findings.find(
-        (f: { phase: string; subjectId: string }) =>
-          f.phase === phase && f.subjectId === "other-package",
-      );
-      assert.equal(other.evidence.nextStep, null);
-    }
-    assert.deepEqual(
-      h.port.snapshotDestination().filter((entry) => entry.kind === "file"),
-      [],
-    );
-  });
+describe("OneNote section files", () => {
   it("copies notebook files, verifies their bytes, skips unchanged deltas and mirrors deleted sections", async (t) => {
     const h = await provisioningHarness(t, notebookFixture(), {
-      oneNoteNotebooks: "copy",
+      verificationMode: "hash",
       mirror: true,
       deleteLimit: 1,
     });
-    assert.equal((await codes(h, "plan")).get("notebook"), "source_package_copied_as_files");
-    assert.equal((await codes(h, "plan")).get("other-package"), "source_package_omitted");
-    assert.equal((await codes(h, "plan")).get("section"), "created");
-    const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
-    assert.ok(plan.sections.some((section) => section.title === "OneNote notebooks"));
+    assert.deepEqual([...(await codes(h, "plan")).keys()], ["source-root"]);
     await execute(h);
     const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
     const notebook = (await h.port.listDestinationChildren(driveId)).find(
@@ -855,7 +944,6 @@ describe("OneNote notebook policy", () => {
     );
     value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
     assert.equal((await codes(h, "verify")).get("section"), "unchanged");
-    assert.notEqual((await codes(h, "verify")).get("notebook"), "source_package_omitted");
     const section = (await h.port.listDestinationChildren(notebook.id)).find(
       (e) => e.name === "Section.one",
     )!;
@@ -877,18 +965,10 @@ describe("OneNote notebook policy", () => {
       (await h.port.listDestinationChildren(notebook.id)).map((e) => e.name),
       ["Open Notebook.onetoc2"],
     );
-    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
-    const json = JSON.parse(
-      await readFile(report.artifacts.find((a) => a.name === "report.json")!.path, "utf8"),
-    );
-    for (const sections of [plan.sections, json.sections]) {
-      const disclosure = sections.find((s: { title: string }) => s.title === "OneNote notebooks");
-      assert.ok(disclosure);
-    }
   });
 
   it("reports a file where a copied notebook's folder belongs", async (t) => {
-    const h = await provisioningHarness(t, notebookFixture(), { oneNoteNotebooks: "copy" });
+    const h = await provisioningHarness(t, notebookFixture());
     await execute(h);
     const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
     const notebook = (await h.port.listDestinationChildren(driveId)).find(
@@ -913,24 +993,6 @@ describe("OneNote notebook policy", () => {
       conflicts.map((row) => ("relativePath" in row ? row.relativePath : null)),
       ["Notes"],
     );
-  });
-
-  it("strictly validates notebook policy and refuses copy on the reverse route", async (t) => {
-    const h = await harness(t);
-    for (const oneNoteNotebooks of ["zip", true, null, "COPY", 1, "copy"]) {
-      const result = await h.engine.initJob({
-        type: "file_migration",
-        config: {
-          mappings: [],
-          route: "shared_drive_to_sharepoint_library",
-          options: { oneNoteNotebooks },
-        },
-      });
-      assert.equal(result.ok, false);
-      if (result.ok) throw new Error("Invalid notebook policy must refuse");
-      assert.equal(result.refusal.code, "configuration_invalid");
-      assert.deepEqual(result.refusal.detail, { field: "options.oneNoteNotebooks" });
-    }
   });
 });
 
@@ -1173,9 +1235,13 @@ describe("deferred member go-live", () => {
   it("withholds access for blocking findings and grants only after explicit acceptance", async (t) => {
     const h = await provisioningHarness(t, fixture(), {
       memberGrants: "after_verification",
-      verificationMode: "size_only",
     });
     await execute(h);
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    const damaged = (await h.port.listDestinationChildren(driveId)).find(
+      (item) => item.name === "report.docx",
+    )!;
+    h.port.mutateDestinationContent(damaged.id, "explicitly accepted damaged file");
     const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
     assert.equal(verification.clean, false);
     const refused = await h.engine.withWriterResult(h.ref, async (w) =>
@@ -1194,8 +1260,8 @@ describe("deferred member go-live", () => {
         w.accept({
           verificationDigest: verification.verificationDigest,
           approver: "operator",
-          codes: ["content_verification_degraded"],
-          rationale: "Listing proof is sufficient for this fixture",
+          codes: ["size_mismatch"],
+          rationale: "Reviewed the damaged fixture file",
           mode: "unattended",
         }),
       ),
@@ -1974,58 +2040,6 @@ describe("file migration through the engine", () => {
       ["outside.txt"],
     );
   });
-  it("refuses an over-limit mirror plan before any mapping can execute", async (t) => {
-    const input = multiMapping().input;
-    input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
-    const h = await harness(t, input, { mappings: [], options: { mirror: true, deleteLimit: 0 } });
-    value(
-      await h.engine.withWriterResult(h.ref, (w) =>
-        w.loadManifest({
-          format: "json",
-          content: JSON.stringify({
-            version: 1,
-            mappings: ["a", "b"].map((id) => ({
-              id,
-              source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
-              destination: { type: "google_shared_drive", create: id },
-            })),
-          }),
-        }),
-      ),
-    );
-    await approve(h);
-    await execute(h);
-    h.port.deleteSourceItem("a-file");
-    h.port.mutateSourceItem("b-file", { content: "changed" });
-    const plan = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
-    const approval = await h.engine.withWriterResult(h.ref, (writer) =>
-      writer.approve({
-        approver: "operator",
-        mode: "unattended",
-        planDigest: plan.planDigest,
-      }),
-    );
-    assert.equal(approval.ok, false);
-    if (!approval.ok) assert.equal(approval.refusal.code, "delete_limit_exceeded");
-    const status = value(await h.engine.reader(h.ref).status());
-    assert.ok(status.mappingPasses.every((pass) => pass.status === "pending"));
-    const driveId = status.createdDrives.find((d) => d.mappingId === "a")!.driveId!;
-    assert.deepEqual(
-      (await h.port.listDestinationChildren(driveId)).map((f) => f.name),
-      ["one.txt"],
-    );
-    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
-    const json = await readFile(
-      report.artifacts.find((a) => a.name === "report.json")!.path,
-      "utf8",
-    );
-    assert.equal(
-      JSON.parse(json).findings.some(
-        (finding: { code: string }) => finding.code === "delete_limit_exceeded",
-      ),
-      true,
-    );
-  });
   it("repeat copy passes retain deleted and renamed source files", async (t) => {
     const h = await provisioningHarness(t);
     await execute(h);
@@ -2059,14 +2073,37 @@ describe("file migration through the engine", () => {
     }
     const result = await h.engine.initJob({
       type: "file_migration",
-      config: {
-        ...config,
-        options: { mirror: true, deleteLimit: 1 },
-      },
+      config: { ...config, options: { mirror: true, deleteLimit: 1 } },
     });
     assert.equal(result.ok, false);
-    if (result.ok) throw new Error("Legacy existing destination accepted");
+    if (result.ok) throw new Error("Existing destination accepted for mirror");
     assert.deepEqual(result.refusal.detail, { row: 1, field: "destination" });
+    const reverse = await harness(t, fixture(), {
+      route: "shared_drive_to_sharepoint_library",
+      mappings: [],
+      options: { mirror: true, deleteLimit: 1 },
+    });
+    const loaded = await reverse.engine.withWriterResult(reverse.ref, (w) =>
+      w.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "mapping",
+              source: {
+                type: "google_shared_drive",
+                driveId: "source-drive",
+                folderId: "source-root",
+              },
+              destination: { type: "sharepoint", driveId: "destination-drive", folderPath: "" },
+            },
+          ],
+        }),
+      }),
+    );
+    assert.equal(loaded.ok, false);
+    if (!loaded.ok) assert.deepEqual(loaded.refusal.detail, { row: 1, field: "destination" });
   });
   it("discloses mirror and the per-mapping delete limit in plan and report", async (t) => {
     for (const options of [undefined, { mirror: true, deleteLimit: 3 }]) {
@@ -3367,7 +3404,7 @@ describe("file migration through the engine", () => {
       kind: "file",
       content: "external",
     });
-    const h = await harness(t, input);
+    const h = await harness(t, input, { ...config, options: { verificationMode: "hash" } });
     await approve(h);
     await execute(h);
     const copied = h.port.snapshotDestination().find((item) => item.path === "report.docx")!;
@@ -3419,7 +3456,7 @@ describe("file migration through the engine", () => {
   });
 
   it("reports corrupt destination bytes rather than a degraded comparison", async (t) => {
-    const h = await harness(t);
+    const h = await harness(t, fixture(), { ...config, options: { verificationMode: "hash" } });
     await approve(h);
     await execute(h);
     const item = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
@@ -3430,105 +3467,12 @@ describe("file migration through the engine", () => {
     assert.equal(verification.clean, false);
     assert.ok(verification.findings.some((entry) => entry.code === "content_mismatch"));
     assert.equal(
-      verification.findings.some((entry) => entry.code === "content_verification_degraded"),
-      false,
-    );
-    assert.equal(
       h.port.snapshotDestination().find((entry) => entry.id === item.id)?.checksum,
       hash(new Uint8Array([1, 1, 1, 1])),
     );
   });
 
-  it("expands subtree exclusions to exact source identities and never creates their descendants", async (t) => {
-    const selected: FileMigrationConfig = {
-      mappings: [
-        {
-          ...config.mappings[0]!,
-          exclusions: [{ sourceItemId: "folder", reason: "Outside approved migration scope" }],
-        },
-      ],
-    };
-    const h = await harness(t, fixture(), selected);
-    await approve(h);
-    const planned = await codes(h, "plan");
-    assert.equal(planned.get("folder"), "omitted_by_rule");
-    assert.equal(planned.get("empty"), "omitted_by_rule");
-    assert.equal(planned.get("zero"), "omitted_by_rule");
-    await execute(h);
-    assert.deepEqual(
-      h.port
-        .snapshotDestination()
-        .map((entry) => entry.path)
-        .sort(),
-      [".", "report.docx"],
-    );
-    assert.equal((await codes(h, "verify")).get("zero"), "omitted_by_rule");
-  });
-
-  it("requires a new plan when an excluded subtree gains a new stable member", async (t) => {
-    const input = fixture();
-    input.sourceItems.push({
-      id: "later",
-      parentId: "folder",
-      name: "later.bin",
-      kind: "file",
-      content: "later",
-    });
-    const selected: FileMigrationConfig = {
-      mappings: [
-        {
-          ...config.mappings[0]!,
-          exclusions: [{ sourceItemId: "folder", reason: "Explicitly excluded" }],
-        },
-      ],
-    };
-    const h = await harness(t, input, selected);
-    h.port.overrideSourceChildren("folder", ["empty", "zero"]);
-    await approve(h);
-    await execute(h);
-    value(
-      await h.engine.withWriter(h.ref, async (writer) => {
-        const verified = value(await writer.verify());
-        value(
-          await writer.accept({
-            verificationDigest: verified.verificationDigest,
-            codes: verified.findings.map((entry) => entry.code),
-            rationale: "Reviewed fixture findings",
-            mode: "unattended",
-            approver: "file-contract-test",
-          }),
-        );
-      }),
-    );
-    h.port.overrideSourceChildren("folder", ["empty", "zero", "later"]);
-    const refused = value(await h.engine.withWriter(h.ref, (writer) => writer.execute()));
-    assert.equal(refused.ok, false);
-    if (refused.ok) throw new Error("Expanded exclusions were silently admitted");
-    assert.equal(refused.refusal.code, "plan_revision_required");
-    assert.equal(
-      h.port.snapshotDestination().some((entry) => entry.path.includes("later")),
-      false,
-    );
-  });
-
-  it("requires a new plan before an approved excluded file moved outside its subtree can be copied", async (t) => {
-    const h = await harness(
-      t,
-      fixture(),
-      fileConfig([{ sourceItemId: "folder", reason: "Outside approved migration scope" }]),
-    );
-    await approve(h);
-    const before = h.port.snapshotDestination();
-    h.port.mutateSourceItem("zero", { parentId: "source-root" });
-    const result = value(await h.engine.withWriter(h.ref, (writer) => writer.execute()));
-    assert.equal(result.ok, false);
-    if (result.ok) throw new Error("A previously excluded file was admitted without approval");
-    assert.equal(result.refusal.code, "plan_revision_required");
-    assert.deepEqual(h.port.snapshotDestination(), before);
-    assert.equal(value(await h.engine.reader(h.ref).status()).mappingPasses[0]?.status, "pending");
-  });
-
-  it("blocks nested mappings and unrepresentable ancestor paths before descendant writes", async (t) => {
+  it("blocks nested mappings", async (t) => {
     const input = fixture();
     input.destinationItems.push({
       id: "other-root",
@@ -3548,22 +3492,13 @@ describe("file migration through the engine", () => {
       ],
     };
     const h = await harness(t, input, selected);
-    await h.engine.withWriter(h.ref, (writer) => writer.plan());
-    const overlap = value(
-      await h.engine.reader(h.ref).rows({ phase: "plan", codes: ["mapping_overlap"] }),
-    );
-    assert.equal(overlap.totalRows, 2);
-    const other = await harness(t);
-    other.port.renameSourceItem("folder", "bad/name");
-    await other.engine.withWriter(other.ref, (writer) => writer.plan());
-    const planned = await codes(other, "plan");
-    assert.equal(planned.get("folder"), "path_unrepresentable");
-    assert.equal(planned.get("zero"), "path_unrepresentable");
-    assert.equal(planned.get("empty"), "path_unrepresentable");
+    const overlap = await h.engine.withWriterResult(h.ref, (writer) => writer.plan());
+    assert.equal(overlap.ok, false);
+    if (!overlap.ok) assert.equal(overlap.refusal.code, "configuration_invalid");
   });
 
   it("verifies matching paths and hashes without per-item provenance markers", async (t) => {
-    const h = await harness(t);
+    const h = await harness(t, fixture(), { ...config, options: { verificationMode: "hash" } });
     await approve(h);
     const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
     assert.ok(
@@ -3621,7 +3556,7 @@ describe("file migration through the engine", () => {
   });
 
   it("falls back per file to stored MD5 without downloading the destination", async (t) => {
-    const h = await harness(t);
+    const h = await harness(t, fixture(), { ...config, options: { verificationMode: "hash" } });
     await approve(h);
     await execute(h);
     const item = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
@@ -3650,55 +3585,8 @@ describe("file migration through the engine", () => {
     });
   });
 
-  it("requires acceptance of size-only verification and states the mode in the plan", async (t) => {
-    const h = await harness(t, fixture(), {
-      ...config,
-      options: { verificationMode: "size_only" },
-    });
-    await approve(h);
-    const plan = value(await h.engine.reader(h.ref).status()).currentPlan!;
-    assert.ok(
-      plan.sections
-        .filter((section) => section.body.startsWith("{"))
-        .some((section) => JSON.parse(section.body).verificationMode === "size_only"),
-    );
-    await execute(h);
-    const item = h.port.snapshotDestination().find((entry) => entry.path === "report.docx")!;
-    h.port.mutateDestinationContent(item.id, new Uint8Array([1, 1, 1, 1]));
-    h.port.mutateSourceItem("binary", { downloadable: false });
-    const verified = value(value(await h.engine.withWriter(h.ref, (writer) => writer.verify())));
-    assert.deepEqual(
-      verified.findings.map((entry) => entry.code),
-      ["content_verification_degraded"],
-    );
-    const closed = value(
-      await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
-    );
-    assert.equal(closed.ok, false);
-    if (closed.ok) throw new Error("Size-only verification closed without acceptance");
-    assert.equal(closed.refusal.code, "verification_unaccepted");
-    value(
-      value(
-        await h.engine.withWriter(h.ref, (writer) =>
-          writer.accept({
-            verificationDigest: verified.verificationDigest,
-            approver: "operator",
-            codes: ["content_verification_degraded"],
-            rationale: "Listing proof is sufficient for this fixture",
-            mode: "unattended",
-          }),
-        ),
-      ),
-    );
-    value(
-      value(
-        await h.engine.withWriter(h.ref, async (writer) => writer.close(await closeDecision(h))),
-      ),
-    );
-  });
-
   it("names an unreadable source without losing verification of readable files", async (t) => {
-    const h = await harness(t);
+    const h = await harness(t, fixture(), { ...config, options: { verificationMode: "hash" } });
     await approve(h);
     await execute(h);
     h.port.mutateSourceItem("binary", { downloadable: false });
@@ -3723,7 +3611,7 @@ describe("file migration through the engine", () => {
   });
 
   it("reports deleted and size-differing destination files with path and both sides' evidence", async (t) => {
-    const h = await harness(t);
+    const h = await harness(t, fixture(), { ...config, options: { verificationMode: "hash" } });
     await approve(h);
     await execute(h);
     const items = h.port.snapshotDestination();
@@ -3777,6 +3665,7 @@ describe("file migration through the engine", () => {
           mimeType: "image/heic",
         },
       ]),
+      { ...config, options: { verificationMode: "hash" } },
     );
     await approve(h);
     await execute(h);
@@ -3838,7 +3727,7 @@ describe("file migration through the engine", () => {
         mimeType: "image/heic",
       },
     ]);
-    const h = await harness(t, input);
+    const h = await harness(t, input, { ...config, options: { verificationMode: "hash" } });
     await approve(h);
     await execute(h);
     const copied = h.port.snapshotDestination().find((entry) => entry.path === "photo.heic");
@@ -3904,7 +3793,7 @@ describe("file migration through the engine", () => {
   });
 });
 
-describe("settled and partial file-driver proof", () => {
+describe("listing-settled final passes", () => {
   it("catches an approved file changing after copy before final verification", async () => {
     class MutatingPort extends FakeFileMigrationPort {
       changed = false;
@@ -3933,6 +3822,10 @@ describe("settled and partial file-driver proof", () => {
     try {
       for await (const unit of fileMigrationDriver.collect(ctx))
         ctx.resume.rows!.push(...unit.rows);
+      assert.equal(ctx.resume.rows!.length, 1);
+      const planned = ctx.resume.rows![0]!;
+      assert.ok(planned.jobType === "file_migration");
+      assert.deepEqual(planned.fileScope, { mapOnly: true });
       const completed = new Set<number>();
       for await (const unit of fileMigrationDriver.execute(ctx)) {
         if (unit.watermark) ctx.resume.watermarks[unit.watermark.unitKey] = unit.watermark.value;
@@ -3992,7 +3885,7 @@ describe("settled and partial file-driver proof", () => {
     let observations = 0;
     ctx.waitForConsistency = async (milliseconds) => {
       assert.equal(milliseconds, 17);
-      port.mutateSourceItem("binary", { content: `changed-${++observations}` });
+      port.mutateSourceItem("binary", { content: "changed".repeat(++observations) });
     };
     await consume(ctx, fileMigrationDriver.collect(ctx));
     await assert.rejects(consume(ctx, fileMigrationDriver.execute(ctx)), {
@@ -4009,130 +3902,17 @@ describe("settled and partial file-driver proof", () => {
     });
   });
 
-  it("requires new approval rather than catching up a new source path", async (t) => {
+  it("catches up new source paths within the approved mapping", async (t) => {
     const { ctx, port } = await stagedContext(t);
     ctx.waitForConsistency = async () => {
       port.mutateSourceItem("binary", { name: "unapproved.docx" });
     };
     await consume(ctx, fileMigrationDriver.collect(ctx));
-    await assert.rejects(consume(ctx, fileMigrationDriver.execute(ctx)), {
-      code: "plan_revision_required",
-    });
+    await consume(ctx, fileMigrationDriver.execute(ctx));
     assert.equal(
       port.snapshotDestination().some((item) => item.path === "unapproved.docx"),
-      false,
+      true,
     );
-  });
-
-  it("labels partial proof against the verified baseline and checks renamed/deleted paths, while final stays full", async (t) => {
-    const { ctx, port } = await stagedContext(t, { deltaVerification: "changed" });
-    ctx.stage = "prestage";
-    await consume(ctx, fileMigrationDriver.collect(ctx));
-    await consume(ctx, fileMigrationDriver.execute(ctx));
-    const initial = await consume(ctx, fileMigrationDriver.verify(ctx));
-    const baseline = {
-      revision: 1,
-      rows: [...ctx.resume.rows!],
-      findings: initial.flatMap((unit) => unit.findings),
-      acceptedCodes: [],
-    };
-    port.mutateSourceItem("binary", { name: "renamed.docx", content: "delta content" });
-    ctx.revision = 2;
-    ctx.stage = "delta";
-    ctx.verificationBaseline = baseline;
-    ctx.resume = { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] };
-    await consume(ctx, fileMigrationDriver.collect(ctx));
-    await consume(ctx, fileMigrationDriver.execute(ctx));
-    const unchanged = port.snapshotDestination().find((item) => item.path === "nested/zero.bin")!;
-    port.mutateDestinationContent(unchanged.id, "independent destination damage");
-    const partial = await consume(ctx, fileMigrationDriver.verify(ctx));
-    const evidence = partial
-      .flatMap((unit) => unit.rows)
-      .find((item) => item.jobType === "file_migration" && item.fileScope?.verification);
-    assert.ok(evidence?.jobType === "file_migration");
-    assert.equal(evidence.fileScope!.verification!.scope, "partial");
-    assert.equal(evidence.fileScope!.verification!.baselineRevision, 1);
-    assert.deepEqual(evidence.fileScope!.verification!.coveredPaths, [
-      "renamed.docx",
-      "report.docx",
-    ]);
-    assert.deepEqual(evidence.fileScope!.verification!.deletedPaths, ["report.docx"]);
-    assert.equal(
-      partial.flatMap((unit) => unit.findings).some((item) => item.subjectId === "zero"),
-      false,
-    );
-    assert.ok(
-      partial
-        .flatMap((unit) => unit.findings)
-        .some((item) => item.code === "destination_only_retained"),
-    );
-
-    ctx.stage = "final";
-    await consume(ctx, fileMigrationDriver.execute(ctx));
-    // Copy may repair independent damage; damage it again after settled confirmation.
-    port.mutateDestinationContent(unchanged.id, "still damaged at final verification");
-    const full = await consume(ctx, fileMigrationDriver.verify(ctx));
-    assert.ok(
-      full
-        .flatMap((unit) => unit.findings)
-        .some((item) => item.subjectId === "zero" && item.code === "content_mismatch"),
-    );
-    const finalEvidence = full
-      .flatMap((unit) => unit.rows)
-      .find((item) => item.jobType === "file_migration" && item.fileScope?.verification);
-    assert.ok(finalEvidence?.jobType === "file_migration");
-    assert.equal(finalEvidence.fileScope!.verification!.scope, "full");
-  });
-
-  it("previews the rehearsal's five copies and four deletions before approving its cumulative limit", async (t) => {
-    for (const deleteLimit of [4, 3]) {
-      const input = fileFixture(
-        Array.from({ length: 9 }, (_, index) => ({
-          id: `item-${index}`,
-          parentId: "source-root",
-          name: `file-${index}.bin`,
-          kind: "file",
-          content: "old",
-        })),
-      );
-      const h = await provisioningHarness(t, input, { mirror: true, deleteLimit });
-      await execute(h);
-      await approve(h);
-      await execute(h);
-      for (let index = 0; index < 5; index++)
-        h.port.mutateSourceItem(`item-${index}`, { content: "fresh" });
-      for (let index = 5; index < 9; index++) h.port.deleteSourceItem(`item-${index}`);
-      const plan = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
-      const rows = value(await h.engine.reader(h.ref).rows({ phase: "plan", limit: 100 })).rows;
-      assert.equal(rows.filter((item) => item.code === "updated").length, 5);
-      assert.deepEqual(
-        rows
-          .filter((item) => item.jobType === "file_migration" && item.code === "to_be_deleted")
-          .map((item) => (item.jobType === "file_migration" ? item.relativePath : ""))
-          .sort(),
-        ["file-5.bin", "file-6.bin", "file-7.bin", "file-8.bin"],
-      );
-      const section = JSON.parse(
-        plan.sections.find((item) => item.title === "Mapping finance")!.body,
-      );
-      assert.equal(section.byteTotals.changed, 25);
-      assert.equal(section.byteTotals.deleted, 12);
-      const approval = await h.engine.withWriterResult(h.ref, (writer) =>
-        writer.approve({
-          approver: "operator",
-          mode: "unattended",
-          planDigest: plan.planDigest,
-        }),
-      );
-      assert.equal(approval.ok, deleteLimit === 4);
-      if (!approval.ok) assert.equal(approval.refusal.code, "delete_limit_exceeded");
-      const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
-      assert.equal(
-        (await h.port.listDestinationChildren(driveId)).filter((item) => item.kind === "file")
-          .length,
-        9,
-      );
-    }
   });
 
   it("keeps a final mirror deletion budget cumulative across catch-up passes", async (t) => {
@@ -4185,54 +3965,6 @@ describe("settled and partial file-driver proof", () => {
       retained,
       "an already-consumed deletion authorization must not delete recreated content",
     );
-  });
-
-  it("blocks a source deletion discovered during full final verification", async (t) => {
-    const { ctx, port } = await stagedContext(t);
-    await consume(ctx, fileMigrationDriver.collect(ctx));
-    await consume(ctx, fileMigrationDriver.execute(ctx));
-    const verification = fileMigrationDriver.verify(ctx)[Symbol.asyncIterator]();
-    await verification.next();
-    port.deleteSourceItem("binary");
-    await assert.rejects(
-      async () => {
-        while (!(await verification.next()).done) {}
-      },
-      { code: "plan_revision_required" },
-    );
-  });
-
-  it("uses full proof without a baseline and retains earlier exceptions in partial proof", async (t) => {
-    const { ctx, port } = await stagedContext(t, { deltaVerification: "changed" });
-    ctx.stage = "delta";
-    await consume(ctx, fileMigrationDriver.collect(ctx));
-    await consume(ctx, fileMigrationDriver.execute(ctx));
-    port.mutateDestinationContent(
-      port.snapshotDestination().find((item) => item.path === "report.docx")!.id,
-      "damage",
-    );
-    const first = await consume(ctx, fileMigrationDriver.verify(ctx));
-    const findings = first.flatMap((unit) => unit.findings);
-    assert.ok(findings.some((item) => item.code === "content_mismatch"));
-    ctx.verificationBaseline = {
-      revision: 1,
-      rows: [...ctx.resume.rows!],
-      findings,
-      acceptedCodes: ["content_mismatch", "size_mismatch"],
-    };
-    ctx.revision = 2;
-    ctx.resume = { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] };
-    await consume(ctx, fileMigrationDriver.collect(ctx));
-    const partial = await consume(ctx, fileMigrationDriver.verify(ctx));
-    const inherited = partial
-      .flatMap((unit) => unit.findings)
-      .find((item) => item.code === "content_mismatch");
-    assert.equal(inherited?.evidence.inheritedFromRevision, 1);
-    const coverage = partial
-      .flatMap((unit) => unit.rows)
-      .find((item) => item.jobType === "file_migration" && item.fileScope?.verification);
-    assert.ok(coverage?.jobType === "file_migration");
-    assert.deepEqual(coverage.fileScope!.verification!.coveredPaths, []);
   });
 
   it("charges an interrupted durable copy attempt to the original catch-up bound", async (t) => {

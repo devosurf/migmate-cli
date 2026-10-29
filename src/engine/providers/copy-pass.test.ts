@@ -7,6 +7,59 @@ import { it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createTransferSupervisor, type TransferSupervisor } from "./transfer-worker.ts";
 import type { CopyPassReference } from "./port.ts";
+import { FakeFileMigrationPort } from "./fake.ts";
+
+it("compares Google source downloaded hashes with SharePoint fixture hashes", async () => {
+  const provider = new FakeFileMigrationPort({
+    sourceDriveId: "google",
+    sourceRootId: "source",
+    destinationDriveId: "sharepoint",
+    destinationRootId: "destination",
+    sourceItems: [
+      { id: "source", parentId: null, name: "source", kind: "folder" },
+      { id: "source-file", parentId: "source", name: "file.txt", kind: "file", content: "hello" },
+    ],
+    destinationItems: [
+      { id: "destination", parentId: null, name: "destination", kind: "folder" },
+      {
+        id: "destination-file",
+        parentId: "destination",
+        name: "file.txt",
+        kind: "file",
+        content: "hello",
+      },
+    ],
+  });
+  const worker = await provider.startTransferWorker({ runDirectory: "run" });
+  try {
+    const source = await provider.listFileHashes({
+      socketPath: worker.socketPath,
+      root: { fs: "source", kind: "google_drive" },
+      hashType: "quickxor",
+      download: true,
+    });
+    const destination = await provider.listFileHashes({
+      socketPath: worker.socketPath,
+      root: { fs: "destination", kind: "sharepoint" },
+      hashType: "quickxor",
+      download: false,
+    });
+    assert.equal(source.length, 1);
+    assert.equal(destination.length, 1);
+    assert.ok(source[0]!.hash);
+    assert.equal(source[0]!.hash, destination[0]!.hash);
+    assert.equal(source[0]!.size, destination[0]!.size);
+    const comparison = await provider.compareFileListings({
+      socketPath: worker.socketPath,
+      source: { fs: "source", kind: "google_drive" },
+      destination: { fs: "destination", kind: "sharepoint" },
+      mode: "copy",
+    });
+    assert.deepEqual(comparison.unchanged, [{ path: "file.txt", size: 5 }]);
+  } finally {
+    await provider.stopTransferWorker({ socketPath: worker.socketPath });
+  }
+});
 
 async function finish(supervisor: TransferSupervisor, reference: CopyPassReference) {
   const deadline = Date.now() + 15_000;
@@ -124,7 +177,7 @@ it(
         destination: { fs: destination, kind: "google_drive" as const },
         mode: "copy" as const,
       };
-      assert.deepEqual((await supervisor.previewCopyPass(input)).new, [
+      assert.deepEqual((await supervisor.compareFileListings(input)).new, [
         { path: "file.txt", size: 5 },
       ]);
       const pass = await supervisor.startCopyPass({ ...input, transfers: 1 });
@@ -167,10 +220,10 @@ it(
 );
 
 it(
-  "previews disjoint-hash copies and mirror deletions at the exact modify-window boundary",
+  "compares disjoint-hash copies and mirror deletions at the exact modify-window boundary",
   { skip: !enabled },
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "mm-preview-"));
+    const directory = await mkdtemp(join(tmpdir(), "mm-comparison-"));
     const supervisor = createTransferSupervisor({
       configPath: null,
       jobDirectory: directory,
@@ -192,7 +245,6 @@ it(
         // either timestamp to milliseconds incorrectly predicts a transfer.
         { path: "within-window.txt", source: "BBBB", destination: "AAAA", delta: 1 },
         { path: "deleted.txt", source: null, destination: "gone", delta: 0 },
-        { path: "excluded[1].txt", source: null, destination: "keep", delta: 0 },
       ];
       for (const fixture of fixtures) {
         for (const [root, content, time] of [
@@ -214,10 +266,9 @@ it(
         socketPath: worker.socketPath,
         source: { fs: `:local,hashes=quickxor:${source}`, kind: "local" as const },
         destination: { fs: `:local,hashes=md5:${destination}`, kind: "local" as const },
-        excludePaths: ["excluded[1].txt"],
       };
-      const preview = await supervisor.previewCopyPass({ ...input, mode: "mirror" });
-      assert.deepEqual(preview, {
+      const comparison = await supervisor.compareFileListings({ ...input, mode: "mirror" });
+      assert.deepEqual(comparison, {
         new: [{ path: "new.txt", size: 3 }],
         changed: [
           { path: "boundary.txt", size: 4 },
@@ -233,31 +284,10 @@ it(
         timestampOnly: [],
         modifyWindowNs: "1000000000",
       });
-      const copyPreview = await supervisor.previewCopyPass({ ...input, mode: "copy" });
-      assert.deepEqual(copyPreview.deleted, []);
-      assert.deepEqual(copyPreview.retained, [{ path: "deleted.txt", size: 4 }]);
-      const emptyPreview = await supervisor.previewCopyPass({
-        socketPath: worker.socketPath,
-        source: input.source,
-        excludePaths: ["same.txt"],
-        mode: "copy",
-      });
-      assert.deepEqual(emptyPreview, {
-        new: [
-          { path: "boundary.txt", size: 4 },
-          { path: "new.txt", size: 3 },
-          { path: "same-size.txt", size: 4 },
-          { path: "size.txt", size: 6 },
-          { path: "within-window.txt", size: 4 },
-        ],
-        changed: [],
-        unchanged: [],
-        deleted: [],
-        retained: [],
-        timestampOnly: [],
-        modifyWindowNs: "1000000000",
-      });
-      // Preview has no write effects, including timestamp changes.
+      const copyComparison = await supervisor.compareFileListings({ ...input, mode: "copy" });
+      assert.deepEqual(copyComparison.deleted, []);
+      assert.deepEqual(copyComparison.retained, [{ path: "deleted.txt", size: 4 }]);
+      // Comparison has no write effects, including timestamp changes.
       assert.equal(await readFile(join(destination, "same-size.txt"), "utf8"), "AAAA");
       assert.equal(await readFile(join(destination, "deleted.txt"), "utf8"), "gone");
       const pass = await supervisor.startCopyPass({
@@ -273,7 +303,7 @@ it(
       const stats = await supervisor.copyPassStats({ socketPath: worker.socketPath, pass });
       assert.equal(stats.files, 4);
       assert.equal(stats.bytes, 17);
-      for (const file of [...preview.new, ...preview.changed]) {
+      for (const file of [...comparison.new, ...comparison.changed]) {
         assert.equal(
           await readFile(join(destination, file.path), "utf8"),
           await readFile(join(source, file.path), "utf8"),
@@ -281,7 +311,6 @@ it(
       }
       assert.equal(await readFile(join(destination, "within-window.txt"), "utf8"), "AAAA");
       await assert.rejects(stat(join(destination, "deleted.txt")), { code: "ENOENT" });
-      assert.equal(await readFile(join(destination, "excluded[1].txt"), "utf8"), "keep");
       // One nanosecond beyond the exact boundary must skip, without rounding
       // the configured window down to whole milliseconds or seconds.
       await writeFile(join(destination, "boundary.txt"), "AAAA");
@@ -289,7 +318,7 @@ it(
       await supervisor.call(worker.socketPath, "options/set", {
         main: { ModifyWindow: "1000000001ns" },
       });
-      const precise = await supervisor.previewCopyPass({ ...input, mode: "copy" });
+      const precise = await supervisor.compareFileListings({ ...input, mode: "copy" });
       assert.equal(precise.modifyWindowNs, "1000000001");
       assert.deepEqual(precise.changed, []);
       assert.deepEqual(precise.timestampOnly, []);
@@ -311,10 +340,10 @@ it(
 );
 
 it(
-  "previews common-hash timestamp-only work without counting it as copied bytes",
+  "compares common-hash timestamp-only work without counting it as copied bytes",
   { skip: !enabled },
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "mm-preview-hash-"));
+    const directory = await mkdtemp(join(tmpdir(), "mm-comparison-hash-"));
     const supervisor = createTransferSupervisor({
       configPath: null,
       jobDirectory: directory,
@@ -339,8 +368,8 @@ it(
         destination: { fs: destination, kind: "local" as const },
         mode: "copy" as const,
       };
-      const preview = await supervisor.previewCopyPass(input);
-      assert.deepEqual(preview, {
+      const comparison = await supervisor.compareFileListings(input);
+      assert.deepEqual(comparison, {
         new: [],
         changed: [{ path: "different.txt", size: 4 }],
         unchanged: [{ path: "skipped.txt", size: 4 }],
@@ -506,7 +535,7 @@ it(
 );
 
 it(
-  "excludes literal mapping paths and subtrees without filtering similarly named files",
+  "copies all mapping paths including literal pattern characters and subtrees",
   { skip: !enabled },
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "mm-filter-"));
@@ -521,15 +550,15 @@ it(
       await mkdir(join(source, "folder[1]"), { recursive: true });
       await mkdir(join(source, "nested"), { recursive: true });
       await mkdir(destination);
-      const excludedFiles = [
+      const literalFiles = [
         "brace{a,b}.txt",
         ...(process.platform === "win32"
           ? []
           : ["secret*.txt", "question?.txt", "slash\\name.txt", "trailing "]),
       ];
-      const excluded = [...excludedFiles, "folder[1]"];
       const retained = ["secret-other.txt", "questionX.txt", "bracea.txt", "nested/brace{a,b}.txt"];
-      for (const path of [...excludedFiles, ...retained, "folder[1]/hidden.txt"]) {
+      const paths = [...literalFiles, ...retained, "folder[1]/hidden.txt"];
+      for (const path of paths) {
         await writeFile(join(source, path), path);
       }
       const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
@@ -540,29 +569,14 @@ it(
         mode: "copy" as const,
         transfers: 2,
       };
-      const pass = await supervisor.startCopyPass({ ...input, excludePaths: excluded });
+      const pass = await supervisor.startCopyPass(input);
       assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass }), {
         state: "completed",
         error: null,
       });
-      for (const path of excluded)
-        await assert.rejects(
-          stat(join(destination, path)),
-          { code: "ENOENT" },
-          JSON.stringify(path),
-        );
-      for (const path of retained) {
+      for (const path of paths) {
         assert.equal(await readFile(join(destination, path), "utf8"), path);
       }
-      const unfiltered = await supervisor.startCopyPass(input);
-      assert.deepEqual(
-        await finish(supervisor, { socketPath: worker.socketPath, pass: unfiltered }),
-        { state: "completed", error: null },
-      );
-      assert.equal(
-        await readFile(join(destination, "folder[1]/hidden.txt"), "utf8"),
-        "folder[1]/hidden.txt",
-      );
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });
@@ -599,13 +613,13 @@ it(
         mode: "copy" as const,
         transfers: 1,
       };
-      const preview = await supervisor.previewCopyPass({
+      const comparison = await supervisor.compareFileListings({
         ...input,
         destination: { fs: destination, kind: "sharepoint" },
       });
-      assert.deepEqual(preview.unchanged, [{ path: "report.docx", size: 12 }]);
-      assert.deepEqual(preview.changed, []);
-      assert.deepEqual(preview.timestampOnly, []);
+      assert.deepEqual(comparison.unchanged, [{ path: "report.docx", size: 12 }]);
+      assert.deepEqual(comparison.changed, []);
+      assert.deepEqual(comparison.timestampOnly, []);
       const intoSharePoint = await supervisor.startCopyPass({
         ...input,
         destination: { fs: destination, kind: "sharepoint" },
@@ -820,10 +834,10 @@ it(
         destination: { fs: destination, kind: "local" as const },
         mode: "copy" as const,
       };
-      const preview = await supervisor.previewCopyPass(input);
-      assert.equal(preview.modifyWindowNs, "1000000000");
-      assert.deepEqual(preview.unchanged, [{ path: "file.txt", size: 4 }]);
-      assert.deepEqual(preview.changed, []);
+      const comparison = await supervisor.compareFileListings(input);
+      assert.equal(comparison.modifyWindowNs, "1000000000");
+      assert.deepEqual(comparison.unchanged, [{ path: "file.txt", size: 4 }]);
+      assert.deepEqual(comparison.changed, []);
       assert.equal(downloads, 0);
       const skipped = await supervisor.startCopyPass({ ...input, transfers: 1 });
       assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass: skipped }), {
@@ -833,7 +847,7 @@ it(
       assert.equal(await readFile(join(destination, "file.txt"), "utf8"), "AAAA");
       assert.equal(downloads, 0);
       await utimes(join(destination, "file.txt"), 1_700_000_001, 1_700_000_001);
-      const boundary = await supervisor.previewCopyPass(input);
+      const boundary = await supervisor.compareFileListings(input);
       assert.deepEqual(boundary.changed, [{ path: "file.txt", size: 4 }]);
       const copied = await supervisor.startCopyPass({ ...input, transfers: 1 });
       assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass: copied }), {

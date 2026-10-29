@@ -35,7 +35,8 @@ it(
     assert.equal(large!.files, 250_000);
     assert.ok(large!.bytes > constants.MAX_STRING_LENGTH);
     assert.ok(large!.bytes < 1_500_000_000, "keep the default gate's I/O under 1.5 GB");
-    assert.ok(large!.headerBytes > small!.headerBytes * 8);
+    // Map-only plans and listing settle evidence must not embed a per-file inventory in the header.
+    assert.ok(large!.headerBytes < small!.headerBytes * 2);
     assert.ok(large!.bytes > small!.bytes * 8);
     assert.ok(large!.peakHeap < small!.peakHeap * 4, JSON.stringify(results));
   },

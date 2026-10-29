@@ -17,7 +17,7 @@ import type {
   DestinationEntry,
   DestinationItemKind,
   FileHashEntry,
-  FilePassPreview,
+  FileListingComparison,
   GoogleAbout,
   DriveMember,
   DriveMembership,
@@ -943,17 +943,14 @@ export class FakeFileMigrationPort implements ProviderPort {
     return result;
   }
 
-  async previewCopyPass(
-    input: Parameters<ProviderPort["previewCopyPass"]>[0],
-  ): Promise<FilePassPreview> {
+  async compareFileListings(
+    input: Parameters<ProviderPort["compareFileListings"]>[0],
+  ): Promise<FileListingComparison> {
     this.assertPassWorker(input.socketPath);
-    this.throwRetryAfter("previewCopyPass", input.source.fs);
+    this.throwRetryAfter("compareFileListings", input.source.fs);
     const source = this.tree(input.source.fs);
-    const destination = input.destination ? this.tree(input.destination.fs) : new Map();
-    const excluded = (path: string) =>
-      input.excludePaths?.some((exclude) => path === exclude || path.startsWith(`${exclude}/`)) ??
-      false;
-    const preview: FilePassPreview = {
+    const destination = this.tree(input.destination.fs);
+    const comparison: FileListingComparison = {
       new: [],
       changed: [],
       unchanged: [],
@@ -963,37 +960,37 @@ export class FakeFileMigrationPort implements ProviderPort {
       modifyWindowNs: "1000000000",
     };
     for (const [path, entry] of source) {
-      if (sourceDirectory(entry) || excluded(path)) continue;
+      if (sourceDirectory(entry)) continue;
       const previous = destination.get(path);
       const item = { path, size: entry.size ?? -1 };
       // Match this fake's content-based executeCopyPass predicate, not an
       // invented timestamp clock for fixture content mutations.
-      if (!previous) preview.new.push(item);
+      if (!previous) comparison.new.push(item);
       else if (
         previous.kind === "file" &&
         previous.content !== null &&
         entry.content !== null &&
         hashBytes(previous.content) === hashBytes(entry.content)
       )
-        preview.unchanged.push(item);
-      else preview.changed.push(item);
+        comparison.unchanged.push(item);
+      else comparison.changed.push(item);
     }
     for (const [path, entry] of destination) {
-      if (source.has(path) || sourceDirectory(entry) || excluded(path)) continue;
-      preview[input.mode === "mirror" ? "deleted" : "retained"].push({
+      if (source.has(path) || sourceDirectory(entry)) continue;
+      comparison[input.mode === "mirror" ? "deleted" : "retained"].push({
         path,
         size: entry.size ?? -1,
       });
     }
     for (const entries of [
-      preview.new,
-      preview.changed,
-      preview.unchanged,
-      preview.deleted,
-      preview.retained,
+      comparison.new,
+      comparison.changed,
+      comparison.unchanged,
+      comparison.deleted,
+      comparison.retained,
     ])
       entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    return preview;
+    return comparison;
   }
 
   async startCopyPass(
@@ -1064,11 +1061,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       const source = this.tree(input.source.fs);
       const destination = this.tree(input.destination.fs);
       const parents = new Map<string, string>([["", input.destination.fs]]);
-      const excluded = (path: string) =>
-        input.excludePaths?.some((exclude) => path === exclude || path.startsWith(`${exclude}/`)) ??
-        false;
       for (const [path, entry] of source) {
-        if (excluded(path)) continue;
         active();
         const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
         const parentId = parents.get(parentPath)!;
@@ -1126,7 +1119,7 @@ export class FakeFileMigrationPort implements ProviderPort {
         await checkpoint();
       }
       if (input.mode === "mirror") {
-        const extras = [...destination].filter(([path]) => !excluded(path) && !source.has(path));
+        const extras = [...destination].filter(([path]) => !source.has(path));
         const files = extras.filter(([, entry]) => entry.kind !== "folder");
         for (const [, entry] of files.slice(0, input.deleteLimit))
           this.removeDestinationItem(entry.id);
@@ -1159,20 +1152,6 @@ export class FakeFileMigrationPort implements ProviderPort {
     pass.stopped = true;
     pass.release?.();
     await pass.done;
-  }
-
-  async resolveFilePassSource(input: Parameters<ProviderPort["resolveFilePassSource"]>[0]) {
-    if (!this.workerState?.alive) throw destinationFault("worker_exited", 500);
-    return {
-      socketPath: this.workerState.socketPath,
-      source: {
-        fs: input.sourceItemId,
-        kind:
-          input.sourceType === "google_shared_drive"
-            ? ("google_drive" as const)
-            : ("sharepoint" as const),
-      },
-    };
   }
 
   async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
