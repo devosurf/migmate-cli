@@ -17,7 +17,7 @@ import {
   type FileMigrationConfig,
 } from "../src/engine/drivers/file-migration.ts";
 import type { DriverContext, CommitUnit } from "../src/engine/drivers/types.ts";
-import { ProviderFault } from "../src/engine/providers/credentials.ts";
+import { ProviderFault } from "../src/engine/providers/fault.ts";
 import { fileConfig, fileFixture, value, approve, closeDecision } from "./engine-fixture.ts";
 
 const now = "2026-09-01T00:00:00.000Z";
@@ -336,7 +336,13 @@ describe("map-only listing migration", () => {
       options?: FileMigrationConfig["options"],
     ) {
       const h = await harness(t, input, {
-        ...(reverse ? { route: "shared_drive_to_sharepoint_library", mappings: [] } : config),
+        ...(reverse
+          ? {
+              sourceProvider: "google_shared_drive",
+              destinationProvider: "sharepoint",
+              mappings: [],
+            }
+          : config),
         ...(options ? { options } : {}),
       });
       if (reverse) {
@@ -507,7 +513,8 @@ describe("destination folder verification", () => {
           fixture(),
           reverse
             ? {
-                route: "shared_drive_to_sharepoint_library",
+                sourceProvider: "google_shared_drive",
+                destinationProvider: "sharepoint",
                 mappings: [],
               }
             : config,
@@ -602,7 +609,11 @@ describe("destination folder verification", () => {
 });
 
 describe("Google Shared Drives to SharePoint", () => {
-  const reverse = { mappings: [], route: "shared_drive_to_sharepoint_library" };
+  const reverse = {
+    mappings: [],
+    sourceProvider: "google_shared_drive",
+    destinationProvider: "sharepoint",
+  };
   function reverseMapping(id: string, sourceDrive: string, sourceRoot: string, library: string) {
     return {
       id,
@@ -2079,7 +2090,8 @@ describe("file migration through the engine", () => {
     if (result.ok) throw new Error("Existing destination accepted for mirror");
     assert.deepEqual(result.refusal.detail, { row: 1, field: "destination" });
     const reverse = await harness(t, fixture(), {
-      route: "shared_drive_to_sharepoint_library",
+      sourceProvider: "google_shared_drive",
+      destinationProvider: "sharepoint",
       mappings: [],
       options: { mirror: true, deleteLimit: 1 },
     });

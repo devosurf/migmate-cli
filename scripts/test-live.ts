@@ -154,7 +154,8 @@ if (args.length === 1 && args[0] === "--help") {
       config.jobType === "teams_archive" && jobConfig.retainedHistory === true;
     const requiredProbes =
       config.jobType === "file_migration"
-        ? jobConfig.route === "shared_drive_to_sharepoint_library"
+        ? jobConfig.sourceProvider === "google_shared_drive" &&
+          jobConfig.destinationProvider === "sharepoint"
           ? [...reverseFileProbeIds]
           : [...fileProbeIds]
         : [

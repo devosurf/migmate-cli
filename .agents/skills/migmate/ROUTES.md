@@ -15,6 +15,31 @@
 
 `status` is safe at any point. `cancel` is terminal and exits 0 on success.
 
+## File provider pairs
+
+Set the provider pair at the top level of the operator TOML, before any table:
+
+```toml
+sourceProvider = "sharepoint"
+destinationProvider = "google_shared_drive"
+```
+
+For Google → SharePoint, swap the two values. Only these cross-provider directions
+are supported; Dropbox, same-provider copies and all other pairs refuse
+`unsupported_route`. Empty config defaults to the forward pair; saved file configs
+name both providers. Explicit `route` in a new file config refuses
+`configuration_invalid`: replace `route` with `sourceProvider` and
+`destinationProvider` using this example or its reverse. Historical persisted
+`job.toml` route values are decoded read-only and preserved; historical status and
+reports remain readable. Teams retains `route = "teams_global_archive"`.
+
+Members remain limited to job-created destinations. Shared roles `reader`, `writer`,
+and `manager` map to Google `reader`, `writer`, and `organizer`; Google-native
+`organizer`, `fileOrganizer`, and `commenter` are also valid. The SharePoint role map
+is `reader` → `read`, `writer` → `write`, `manager` → `owner`, but SharePoint
+container creation and membership are unshipped. Use existing SharePoint roots
+without `create` or `members`; the role map does not enable those operations.
+
 ## Mapping manifests
 
 For file migration batches, initialize with credential config; `[[mappings]]` may
@@ -44,8 +69,9 @@ In mapping view, read each row's `mapping` and `mappingPass`, not top-level
 
 ## Reverse route
 
-For Google Shared Drives into SharePoint, set top-level `route = "shared_drive_to_sharepoint_library"`
-in the job TOML before loading; one job copies in one direction, so a row in the other
+For Google Shared Drives into SharePoint, set top-level
+`sourceProvider = "google_shared_drive"` and `destinationProvider = "sharepoint"`
+in the operator TOML before loading; one job copies in one direction, so a row in the other
 direction (or a mixed manifest) refuses `configuration_invalid` with `field: "source.type"`.
 A mapping uses
 `source: { type: "google_shared_drive", driveId, folderId }` and
@@ -53,9 +79,9 @@ A mapping uses
 already exist, so `create`, `members` and mirror refuse. CSV uses README's eleven-column
 layout. The job's `[rclone]` needs `sharepointDestinationRemote`, a separate SharePoint
 app holding exactly `Sites.ReadWrite.All` (anything else returns `preflight_failed`
-with `detail.check: credential_permissions_invalid`). Before mappings exist, the explicit reverse
-route already requires this write remote and needs no `sourceRemote`; the default
-SharePoint-source route requires `sourceRemote` and refuses the write remote.
+with `detail.check: credential_permissions_invalid`). Before mappings exist, the reverse
+provider pair already requires this write remote and needs no `sourceRemote`; the
+SharePoint-source pair requires `sourceRemote` and refuses the write remote.
 Sources are read as the acting account. On `preflight_failed` with
 `unreadableSourceDrives` (from `manifest load` or `doctor`/`plan`), surface those drive IDs: a human must add the acting
 account as a member; Migmate never does. Verification defaults to path-and-size

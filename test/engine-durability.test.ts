@@ -221,16 +221,17 @@ describe("engine durability seam", () => {
 
   it("accepts listing and opt-in hash configuration on both file routes", async (t) => {
     const h = await harness(t);
-    for (const route of [
-      "sharepoint_library_to_shared_drive",
-      "shared_drive_to_sharepoint_library",
+    for (const [sourceProvider, destinationProvider] of [
+      ["sharepoint", "google_shared_drive"],
+      ["google_shared_drive", "sharepoint"],
     ])
       for (const verificationMode of [undefined, "hash"]) {
         const initialized = await h.engine.initJob({
           type: "file_migration",
           config: {
             ...config(),
-            route,
+            sourceProvider,
+            destinationProvider,
             options: verificationMode === undefined ? {} : { verificationMode },
           },
         });

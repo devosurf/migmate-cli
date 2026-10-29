@@ -32,7 +32,7 @@ reaches granted sites; a leaked tenant-read key reaches every site, including si
 outside the job. Surface that tradeoff before asking an administrator to replace
 the grant; Migmate never widens it automatically.
 
-For a SharePoint-source file job with no mappings, onboard the route/options and
+For a SharePoint-source file job with no mappings, onboard the provider pair/options and
 `[rclone]` config with `creds init --job ID --config job.toml --output json`, then run
 `discover --job ID --file draft.json --output json`. Read `value.sites` and
 `value.manifest`; the optional new private file contains only the manifest and

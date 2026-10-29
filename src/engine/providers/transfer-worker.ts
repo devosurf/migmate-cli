@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { TESTED_TRANSFER_VERSIONS, TRANSFER_VERSION } from "../../versions.ts";
-import { ProviderFault } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import type {
   CopyPassHandle,
   CopyPassReference,
@@ -1008,7 +1008,7 @@ export function createTransferSupervisor(options: {
         }
         const difference = file.modified - previous.modified;
         const sizeDiffers =
-          input.destination.kind !== "sharepoint" &&
+          !input.destination.ignoreSizeAndChecksum &&
           file.size >= 0 &&
           previous.size >= 0 &&
           file.size !== previous.size;
@@ -1179,7 +1179,7 @@ export function createTransferSupervisor(options: {
             Transfers: input.transfers,
             Metadata: true,
             ...(input.mode === "mirror" ? { MaxDelete: input.deleteLimit } : {}),
-            ...(input.destination.kind === "sharepoint"
+            ...(input.destination.ignoreSizeAndChecksum
               ? { IgnoreSize: true, IgnoreChecksum: true }
               : {}),
           },

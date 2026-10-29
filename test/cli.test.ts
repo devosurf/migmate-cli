@@ -375,7 +375,8 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
     { mode: 0o600 },
   );
   const config = {
-    route: "sharepoint_library_to_shared_drive",
+    sourceProvider: "sharepoint",
+    destinationProvider: "google_shared_drive",
     options: { verificationMode: "hash" },
     rclone: {
       config: { resolver: "file", path: rclonePath, mode: "0600" },
@@ -731,7 +732,10 @@ it("loads JSON and CSV mapping manifests into the job and names invalid rows and
 it("loads reverse JSON and eleven-column CSV manifests with row-specific path errors", async (t) => {
   const h = harness(t);
   const route = join(h.home, "reverse.toml");
-  writeFileSync(route, stringifyToml({ route: "shared_drive_to_sharepoint_library" }));
+  writeFileSync(
+    route,
+    stringifyToml({ sourceProvider: "google_shared_drive", destinationProvider: "sharepoint" }),
+  );
   const init = document<{ id: string }>(
     await invoke(
       ["init", "--type", "file_migration", "--config", route, "--output", "json"],

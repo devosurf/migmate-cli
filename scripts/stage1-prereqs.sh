@@ -522,7 +522,8 @@ fi
 mkdir -p "$(dirname "$MIGMATE_JOB_CONFIG")"
 cat > "$MIGMATE_JOB_CONFIG" <<EOF
 # Migmate file migration job. References only; no secret values live here.
-route = "sharepoint_library_to_shared_drive"
+sourceProvider = "sharepoint"
+destinationProvider = "google_shared_drive"
 
 [[mappings]]
 id = "$MIGMATE_MAPPING_ID"
@@ -603,7 +604,8 @@ EOF
 # Migmate Google Shared Drive -> SharePoint job. References only; no secret values live here.
 # Add top-level impersonate = true and subject = "files@example.com" here to act as that account.
 # Mappings come from a manifest: migmate manifest load --job ID --file mappings.json
-route = "shared_drive_to_sharepoint_library"
+sourceProvider = "google_shared_drive"
+destinationProvider = "sharepoint"
 
 [options]
 

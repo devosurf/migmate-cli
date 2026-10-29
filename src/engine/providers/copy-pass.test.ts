@@ -52,7 +52,7 @@ it("compares Google source downloaded hashes with SharePoint fixture hashes", as
     const comparison = await provider.compareFileListings({
       socketPath: worker.socketPath,
       source: { fs: "source", kind: "google_drive" },
-      destination: { fs: "destination", kind: "sharepoint" },
+      destination: { fs: "destination", kind: "sharepoint", ignoreSizeAndChecksum: true },
       mode: "copy",
     });
     assert.deepEqual(comparison.unchanged, [{ path: "file.txt", size: 5 }]);
@@ -615,14 +615,14 @@ it(
       };
       const comparison = await supervisor.compareFileListings({
         ...input,
-        destination: { fs: destination, kind: "sharepoint" },
+        destination: { fs: destination, kind: "sharepoint", ignoreSizeAndChecksum: true },
       });
       assert.deepEqual(comparison.unchanged, [{ path: "report.docx", size: 12 }]);
       assert.deepEqual(comparison.changed, []);
       assert.deepEqual(comparison.timestampOnly, []);
       const intoSharePoint = await supervisor.startCopyPass({
         ...input,
-        destination: { fs: destination, kind: "sharepoint" },
+        destination: { fs: destination, kind: "sharepoint", ignoreSizeAndChecksum: true },
       });
       assert.deepEqual(
         await finish(supervisor, { socketPath: worker.socketPath, pass: intoSharePoint }),

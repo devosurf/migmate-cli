@@ -2,6 +2,22 @@
 
 This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders to existing SharePoint document libraries or folders. Teams archives remain local packages with optional Shared Drive cold storage.
 
+File configuration selects top-level `sourceProvider = "sharepoint"` and
+`destinationProvider = "google_shared_drive"`, or the reversed pair. Only those
+two cross-provider combinations are shipped; Dropbox, same-provider copies and
+all other pairs refuse `unsupported_route`. Empty config defaults to the forward
+pair; saved file configs name both providers. An explicit `route` in a new file
+config refuses `configuration_invalid`: replace it with the two provider fields
+above (swap the values for reverse jobs). Historical persisted file routes are
+decoded read-only and preserved, so historical status and reports remain readable.
+Teams archives keep `route = "teams_global_archive"`.
+
+Shared member roles are `reader`, `writer`, and `manager`. Google keeps the first
+two and maps `manager` to `organizer`; native `organizer`, `fileOrganizer`, and
+`commenter` remain valid. SharePoint maps shared roles to `read`, `write`, and
+`owner`, but container creation and membership are unshipped. Members are still
+allowed only on creates, currently Google Shared Drives, not existing destinations.
+
 The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclone-executes-file-transfers.md)). Earlier measurements of Migmate's per-item file writer do not prove this implementation. Archive uploads retain their own reserved IDs, private markers, revision checks and create-only behavior.
 
 ## Unreleased changes — ADR-0017
@@ -67,7 +83,7 @@ identity-provider calls were needed.
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
 
-Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. A job's route fixes one direction for every mapping: a row in the other direction, including any row of a mixed manifest, refuses at load with its row and `source.type`.
+Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. A job's provider pair fixes one direction for every mapping: a row in the other direction, including any row of a mixed manifest, refuses at load with its row and `source.type`.
 
 Verification defaults to rclone listing comparison by relative path and size,
 including folders and empty folders. Every verification covers whole mappings.
@@ -210,9 +226,10 @@ requires organizer access; operators must restrict all other access to claim sta
 isolation. Offline engine and HTTP contracts cover provisioning and crash recovery;
 no live tenant provisioning measurement is claimed.
 
-**Google Shared Drives to SharePoint.** A job with `route = "shared_drive_to_sharepoint_library"`
+**Google Shared Drives to SharePoint.** A job with
+`sourceProvider = "google_shared_drive"` and `destinationProvider = "sharepoint"`
 reads Google Shared Drive folders (drive id and folder id) into existing SharePoint
-document libraries or folders (drive id and library-relative path); the route is frozen
+document libraries or folders (drive id and library-relative path); the provider pair is frozen
 into the plan and report. Migmate creates no SharePoint sites,
 libraries or folders, and never adds the acting account to a source drive: it must
 already be a member. Manifest load and preflight check every source drive as the acting
@@ -221,8 +238,8 @@ SharePoint is written only by a separate destination app, the optional third rcl
 remote `rclone.sharepointDestinationRemote`. Its token's roles must be exactly
 `Sites.ReadWrite.All`; anything else refuses `credential_permissions_invalid`, as does
 reusing the source app's client id. The source app never gains a write role. Before
-manifest load, only the explicit reverse route may name the write remote (and requires
-it); the default SharePoint-source route requires `rclone.sourceRemote` instead.
+manifest load, only the reverse provider pair may name the write remote (and requires
+it); the SharePoint-source pair requires `rclone.sourceRemote` instead.
 With mappings loaded, only Google-source mappings may hold the write remote;
 an unnecessary write remote refuses `credential_config_invalid`. Reverse jobs need
 no SharePoint source remote. Destinations are paths under a library

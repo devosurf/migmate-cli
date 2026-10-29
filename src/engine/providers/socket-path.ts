@@ -1,6 +1,6 @@
 import { chmod, lstat, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { ProviderFault } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 
 /**
  * sockaddr_un limits the spelling passed to connect, not the target inode's path.

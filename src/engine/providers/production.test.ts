@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createProductionProvider } from "./production.ts";
-import { ProviderFault } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import type { ProvenanceRecord } from "./port.ts";
 
 test("archive destination uses real Drive effects without SharePoint mappings or access", async (t) => {

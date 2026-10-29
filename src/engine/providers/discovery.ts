@@ -1,5 +1,5 @@
 import type { ManifestMapping } from "../manifest.ts";
-import { ProviderFault } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import { cursorPages, graphUrl, HttpProviderFault, type GraphTransport } from "./http.ts";
 
 export interface SharePointDiscovery {

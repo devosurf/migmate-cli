@@ -18,9 +18,12 @@
       "type": "object",
       "description": "The same parsed operator configuration accepted by production. Credentials remain typed file references, never raw secrets.",
       "properties": {
-        "route": {
-          "enum": ["sharepoint_library_to_shared_drive", "shared_drive_to_sharepoint_library"],
-          "description": "shared_drive_to_sharepoint_library runs the reverse probe instead of the SharePoint-source suite."
+        "sourceProvider": {
+          "enum": ["sharepoint", "google_shared_drive"]
+        },
+        "destinationProvider": {
+          "enum": ["sharepoint", "google_shared_drive"],
+          "description": "Google Shared Drive source with SharePoint destination runs the reverse probe."
         },
         "rclone": {
           "type": "object",
@@ -323,8 +326,11 @@
         "if": {
           "properties": {
             "jobConfig": {
-              "required": ["route"],
-              "properties": { "route": { "const": "shared_drive_to_sharepoint_library" } }
+              "required": ["sourceProvider", "destinationProvider"],
+              "properties": {
+                "sourceProvider": { "const": "google_shared_drive" },
+                "destinationProvider": { "const": "sharepoint" }
+              }
             }
           }
         },

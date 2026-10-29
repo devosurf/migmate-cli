@@ -74,6 +74,8 @@ export interface TransferWorkerProbe {
 export interface FilePassRoot {
   fs: string;
   kind: "local" | "sharepoint" | "google_drive";
+  /** Backend compares timestamps because upload can rewrite size/checksum. */
+  ignoreSizeAndChecksum?: boolean;
 }
 
 export interface CopyPassHandle {
@@ -187,7 +189,8 @@ export interface GoogleAbout {
 export interface DriveMember {
   email: string;
   type: "user" | "group";
-  role: "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader";
+  role:
+    "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader" | "read" | "write" | "owner";
 }
 export interface SharedDrive {
   id: string;

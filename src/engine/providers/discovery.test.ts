@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ProviderFault } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import { discoverSharePoint } from "./discovery.ts";
 import { HttpProviderFault, type GraphTransport } from "./http.ts";
 

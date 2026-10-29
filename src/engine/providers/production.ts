@@ -1,6 +1,7 @@
 import type { CheckResult, JobType } from "../types.ts";
 import type { ProviderPort, TransferWorkerHandle } from "./port.ts";
-import { createCredentialSession, ProviderFault, type CredentialSession } from "./credentials.ts";
+import { createCredentialSession, type CredentialSession } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import { createGraphTransport, type GraphTransport } from "./http.ts";
 import { FileEffects, failedCheck } from "./file-effects.ts";
 import {
@@ -11,7 +12,7 @@ import {
 import { createArchiveProvider } from "./archive-graph.ts";
 import type { ArchiveProvider } from "./archive.ts";
 import { parseArchiveConfig } from "../archive/config.ts";
-import { discoverSharePoint } from "./discovery.ts";
+import { fileProviderPair } from "./adapters/capabilities.ts";
 
 export interface ProductionProviderInput {
   jobType: JobType;
@@ -64,7 +65,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
       configPath,
       jobDirectory: input.jobDirectory,
       stopOnUploadLimit:
-        input.jobType === "file_migration" && config.route !== "shared_drive_to_sharepoint_library",
+        input.jobType === "file_migration" &&
+        fileProviderPair(input.config).destination.uploadQuota,
       ...(binary ? { binary } : {}),
     });
   }
@@ -88,15 +90,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
               session,
               graph,
               worker: {
-                async *read(item) {
-                  if (current) yield* worker.openSource(current.socketPath, item);
-                  else
-                    yield* graph.stream(
-                      `/v1.0/drives/${encodeURIComponent(item.driveId)}/root:/${item.path
-                        .split("/")
-                        .map((segment) => encodeURIComponent(segment))
-                        .join("/")}:/content`,
-                    );
+                read(item) {
+                  return current ? worker.openSource(current.socketPath, item) : null;
                 },
               },
             });
@@ -152,11 +147,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
       : {}),
     async discoverSharePoint() {
       if (input.jobType !== "file_migration")
-        throw new ProviderFault(
-          "unsupported_route",
-          "Discovery requires a SharePoint source file job.",
-        );
-      return discoverSharePoint((await state()).graph);
+        throw new ProviderFault("unsupported_route", "Discovery requires a source file job.");
+      return (await files()).discoverSharePoint();
     },
     async *preflight({ signal }): AsyncIterable<CheckResult> {
       let loaded: ProviderState | undefined;
