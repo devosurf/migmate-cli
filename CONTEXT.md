@@ -61,7 +61,7 @@ The deliberate opening of the verified destination to its intended users. It is 
 _Avoid_: Final delta, copy complete
 
 **Final report**:
-The report produced at close after go-live, carrying the timestamped grant and go-live check evidence; it is the closure evidence handed over. A report produced before go-live is a pre-close report: it can show that a job is ready to close, never that go-live happened.
+The report produced at close after go-live, carrying the timestamped grant and go-live check evidence, including any acknowledged failures or missing proof; it is the closure evidence handed over. A report produced before go-live is a pre-close report: it can show that a job is ready to close, never that go-live happened.
 _Avoid_: Close report, handover report
 
 **Preflight**:
@@ -73,7 +73,7 @@ A condition of a source tenant that no credential satisfies and no retry survive
 _Avoid_: Setting, environment config, dependency
 
 **Exception**:
-A known gap between what a job planned and what is verifiably present, explicitly acknowledged by an operator accepting a verification finding. An exception is a recorded outcome, not a failure, and it never disappears from a report.
+A known gap in a job's verified result or go-live evidence, explicitly acknowledged by an operator. Acceptance records the gap without changing the underlying result, and the exception never disappears from a report.
 _Avoid_: Error, warning, caveat
 
 **File mapping**:
