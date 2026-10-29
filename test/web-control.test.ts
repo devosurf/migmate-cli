@@ -19,6 +19,55 @@ async function settled(session: WebSession): Promise<void> {
   assert.fail("The web action did not settle");
 }
 
+for (const kind of ["stop", "cancel"] as const) {
+  for (const action of ["doctor", "approve", "report", "close"] as const) {
+    it(
+      `queued ${kind} before web ${action} leaves a readable released window`,
+      { timeout: 5000 },
+      async (t) => {
+        const home = mkdtempSync(join(tmpdir(), "migmate-web-queued-control-"));
+        const provider = new FakeFileMigrationPort(fileFixture());
+        const engine = openEngine({ home, provider, adapter: "web" });
+        const controller = openEngine({ home, provider, adapter: "cli" });
+        const ref = value(await engine.initJob({ type: "file_migration", config: fileConfig() }));
+        const session = new WebSession({ engine, job: ref });
+        t.after(async () => {
+          try {
+            await session.close(true);
+          } finally {
+            controller.close();
+            engine.close();
+            rmSync(home, { recursive: true, force: true });
+          }
+        });
+        const planDigest = await approve({ engine, ref });
+        await session.open();
+        // Enqueue synchronously before starting a command, not at the later heartbeat.
+        const controlled = controller.requestControl(ref, {
+          kind,
+          commandId: `queued-${kind}-${action}`,
+          signal: AbortSignal.timeout(2000),
+        });
+        assert.ok(
+          session.command({
+            action,
+            input: action === "approve" ? { planDigest, approver: "fixture", confirm: true } : {},
+          }).ok,
+        );
+        assert.deepEqual(await controlled, {
+          ok: true,
+          value: kind === "stop" ? { stopped: true } : { cancelled: true },
+        });
+        const snapshot = await session.snapshot({ stage: "status", phase: "plan" });
+        assert.equal(snapshot.readonly, true);
+        assert.equal(snapshot.busy, null);
+        assert.equal(snapshot.status?.ownership.held, false);
+        assert.equal(snapshot.status?.state, kind === "cancel" ? "cancelled" : "approved");
+      },
+    );
+  }
+}
+
 describe("persistent web owner control", () => {
   for (const kind of ["stop", "cancel"] as const) {
     for (const active of [false, true]) {

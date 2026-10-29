@@ -1185,6 +1185,7 @@ it(
     await owner.checkpoint((event) => event.kind === "unit_committed");
     const db = new DatabaseSync(join(h.home, "jobs", id, "state.db"));
     try {
+      db.exec("PRAGMA busy_timeout=5000");
       db.prepare("INSERT INTO created_drive (mapping_id,payload) VALUES (?,?)").run(
         "fenced",
         JSON.stringify({

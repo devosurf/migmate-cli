@@ -1711,7 +1711,13 @@ function makeWriter(
       }
       const notify = !stopping;
       stopping = true;
-      executionInterrupt?.abort(new Error(`${request.kind} requested`));
+      executionInterrupt?.abort(
+        new EngineRefusalError({
+          code: "retry_budget_exhausted",
+          message: `${request.kind} requested; the command was interrupted.`,
+          detail: { interrupted: true },
+        }),
+      );
       return notify;
     });
     if (admitted) onControl?.();
