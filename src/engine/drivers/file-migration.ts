@@ -11,7 +11,7 @@ import type {
   MappingPass,
   UploadQuotaStop,
 } from "../types.ts";
-import { goLiveCheckSettled } from "../go-live.ts";
+import { checkedBeforeGrant, goLiveCheckSettled, unsettledGoLiveCheck } from "../go-live.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
 import type {
   CopyPassReference,
@@ -466,63 +466,79 @@ export async function* goLive(
   });
   for (const mapping of affected) {
     const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
-    if (
-      drive.goLive?.revision === ctx.revision &&
-      drive.goLive.verificationAt === verificationAt &&
-      goLiveCheckSettled(drive, recovery.authorityDigest, recovery.acknowledgments)
-    )
-      continue;
-    const expected = [...mapping.createDrive!.members];
-    if (
-      !expected.some(
-        (member) =>
-          member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
-      )
-    )
-      expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
-    const preGrant = drive.preGrantCheck;
-    const checkedBeforeGrant =
-      preGrant?.revision === drive.goLive!.revision &&
-      preGrant.verificationAt === drive.goLive!.verificationAt &&
-      preGrant.check.status === "passed" &&
-      preGrant.check.check === "destination";
+    const unsettled =
+      drive.goLive?.revision === ctx.revision && drive.goLive.verificationAt === verificationAt
+        ? unsettledGoLiveCheck(drive, recovery.authorityDigest, recovery.acknowledgments)
+        : "check";
+    if (!unsettled) continue;
     let check: GoLiveCheck;
-    try {
-      const actual = await ctx.provider.listDriveMembers(drive.driveId!);
-      if (
-        JSON.stringify(membershipIdentities(expected)) !==
-        JSON.stringify(membershipIdentities(actual))
-      ) {
-        check = {
-          at: ctx.now().toISOString(),
-          status: "failed",
-          check: "drive_membership_mismatch",
-          evidence: { expected, actual },
-        };
-      } else if (checkedBeforeGrant) {
-        check = {
-          at: ctx.now().toISOString(),
-          status: "passed",
-          check: "membership",
-          evidence: { expected, actual },
-        };
-      } else {
-        // Already-live jobs retain their original content baseline, not invented pregrant proof.
-        const destination = await destinationCheck(ctx, mapping, drive);
-        check = {
-          ...destination,
-          check: destination.status === "passed" ? "membership_and_destination" : destination.check,
-          evidence: { expected, actual, ...destination.evidence },
-        };
+    if (unsettled === "destinationCheck") {
+      // Keep the settled membership evidence; finish only the content proof it never reached.
+      try {
+        check = await destinationCheck(ctx, mapping, drive);
+      } catch (error) {
+        check = unavailableGoLiveCheck(ctx, error, { scope: "destination" });
       }
-    } catch (error) {
-      check = unavailableGoLiveCheck(ctx, error, {
-        expected,
-        scope: checkedBeforeGrant ? "membership" : "membership_and_destination",
-      });
+      drive.goLive = { ...drive.goLive!, destinationCheck: check };
+    } else {
+      const expected = [...mapping.createDrive!.members];
+      if (
+        !expected.some(
+          (member) =>
+            member.type === "user" &&
+            member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
+        )
+      )
+        expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
+      const membershipOnly = checkedBeforeGrant(drive);
+      try {
+        const actual = await ctx.provider.listDriveMembers(drive.driveId!);
+        if (
+          JSON.stringify(membershipIdentities(expected)) !==
+          JSON.stringify(membershipIdentities(actual))
+        ) {
+          check = {
+            at: ctx.now().toISOString(),
+            status: "failed",
+            check: "drive_membership_mismatch",
+            evidence: { expected, actual },
+          };
+        } else if (membershipOnly) {
+          check = {
+            at: ctx.now().toISOString(),
+            status: "passed",
+            check: "membership",
+            evidence: { expected, actual },
+          };
+        } else {
+          // Already-live jobs retain their original content baseline, not invented pregrant proof.
+          const destination = await destinationCheck(ctx, mapping, drive);
+          check = {
+            ...destination,
+            check:
+              destination.status === "passed" ? "membership_and_destination" : destination.check,
+            evidence: { expected, actual, ...destination.evidence },
+          };
+        }
+      } catch (error) {
+        check = unavailableGoLiveCheck(ctx, error, {
+          expected,
+          scope: membershipOnly ? "membership" : "membership_and_destination",
+        });
+      }
+      // A new membership observation supersedes content proof finished after the old one.
+      const { destinationCheck: _superseded, ...live } = drive.goLive!;
+      drive.goLive = { ...live, check };
     }
-    drive.goLive = { ...drive.goLive!, check };
-    yield unit(mapping, drive, JSON.stringify(["go-live-check", drive.driveId, digest(check)]));
+    yield unit(
+      mapping,
+      drive,
+      JSON.stringify([
+        unsettled === "check" ? "go-live-check" : "go-live-destination-check",
+        drive.driveId,
+        digest(check),
+      ]),
+    );
     if (check.status === "failed")
       failures.push({
         mappingId: mapping.id,
@@ -2649,7 +2665,9 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
           mappingId: drive.mappingId,
           driveId: drive.driveId,
           ...drive.goLive,
-          ...(drive.goLive?.check?.check === "go_live_check_unavailable"
+          ...([drive.goLive?.check, drive.goLive?.destinationCheck].some(
+            (check) => check?.check === "go_live_check_unavailable",
+          )
             ? { proof: "unverified" }
             : {}),
         })),

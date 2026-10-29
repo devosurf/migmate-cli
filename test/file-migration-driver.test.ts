@@ -1498,6 +1498,111 @@ describe("deferred member go-live", () => {
     assert.equal(closed.createdDrives[0]?.preGrantCheck, undefined);
   });
 
+  it("finishes missing legacy destination proof after an acknowledged membership difference", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    h.port.scriptEffect({
+      method: "addDriveMember",
+      timing: "after",
+      count: 1,
+      error: new Error("legacy interrupted grant"),
+    });
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
+      /legacy interrupted grant/,
+    );
+    // Model a job fenced by the pre-ADR-0017 driver: no pregrant observation exists.
+    editRecoveryState(
+      h,
+      "UPDATE created_drive SET payload = json_remove(payload, '$.preGrantCheck')",
+    );
+    const drive = value(await h.engine.reader(h.ref).status()).createdDrives[0]!;
+    await h.port.addDriveMember(drive.driveId!, {
+      email: "outside@example.com",
+      type: "user",
+      role: "writer",
+    });
+    const file = (await h.port.listDestinationChildren(drive.driveId!)).find(
+      (item) => item.name === "report.docx",
+    )!;
+    h.port.mutateDestinationContent(file.id, new Uint8Array([9, 9, 9, 9]));
+    assert.equal((await h.engine.withWriterResult(h.ref, (w) => w.close())).ok, false);
+    const membership = value(await h.engine.reader(h.ref).status()).createdDrives[0]?.goLive?.check;
+    assert.equal(membership?.check, "drive_membership_mismatch");
+    const membershipAcknowledgment = await acknowledgeChecks(h);
+
+    // Accepting the access difference does not accept content the legacy check never observed.
+    const unfinished = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(unfinished.ok, false);
+    if (!unfinished.ok) assert.equal(unfinished.refusal.code, "verification_unaccepted");
+    const drifted = value(await h.engine.reader(h.ref).status());
+    assert.notEqual(drifted.state, "closed");
+    assert.equal(drifted.incompleteClose?.checksSettled, false);
+    assert.deepEqual(drifted.createdDrives[0]?.goLive?.check, membership);
+    const destination = drifted.createdDrives[0]?.goLive?.destinationCheck;
+    assert.equal(destination?.check, "destination_drift");
+    assert.equal(
+      destination?.evidence.expectedDestinationDigest,
+      drive.verifiedDestination?.digest,
+    );
+    assert.notEqual(
+      destination?.evidence.observedDestinationDigest,
+      drive.verifiedDestination?.digest,
+    );
+    assert.deepEqual(
+      drifted.goLiveReview?.checks.map((check) => check.check),
+      [destination],
+    );
+    const destinationAcknowledgment = await acknowledgeChecks(h);
+
+    const originalSections = fileMigrationDriver.reportSections;
+    const failingReport = t.mock.method(
+      fileMigrationDriver,
+      "reportSections",
+      async function* (ctx: DriverContext<FileMigrationConfig>) {
+        if (ctx.resume.goLiveAcknowledgments?.length) throw new Error("final report unavailable");
+        yield* originalSections(ctx);
+      },
+    );
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, (w) => w.close()),
+      /final report unavailable/,
+    );
+    failingReport.mock.restore();
+    t.mock.method(h.port, "listDriveMembers", async () => {
+      throw new Error("acknowledged membership must not be rechecked");
+    });
+    t.mock.method(h.port, "listFileHashes", async () => {
+      throw new Error("acknowledged destination drift must not be relisted");
+    });
+    const closure = value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.equal(closure.outcome, "completed_with_accepted_exceptions");
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(closed.createdDrives[0]?.goLive, drifted.createdDrives[0]?.goLive);
+    assert.deepEqual(closed.goLiveAcknowledgments, [
+      membershipAcknowledgment,
+      destinationAcknowledgment,
+    ]);
+    const artifacts = value(await h.engine.reader(h.ref).artifacts());
+    const exceptions: Record<string, string>[] = parse(
+      await readFile(
+        artifacts.artifacts.find((item) => item.name === "exceptions.csv")!.path,
+        "utf8",
+      ),
+      { columns: true },
+    );
+    for (const [check, acknowledgment] of [
+      [membership!, membershipAcknowledgment],
+      [destination!, destinationAcknowledgment],
+    ] as const) {
+      const row = exceptions.find((item) => item.code === check.check)!;
+      assert.equal(row.status, "acknowledged (failed)");
+      assert.equal(row.approver, acknowledgment.approver);
+      assert.deepEqual(JSON.parse(row.reason!), check.evidence);
+    }
+  });
+
   it("binds acknowledgment to selected evidence and authority, never to other or future failures", async (t) => {
     const h = await provisioningHarness(
       t,

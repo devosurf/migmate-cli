@@ -144,12 +144,17 @@ report ends the job.
 
 `acknowledge` reviews selected `drive_membership_mismatch`, `go_live_check_unavailable`
 or already-live `destination_drift` evidence with one required rationale. CLI/web
-capture the exact review; changed evidence or authority refuses. Initial authorization
+capture the exact review; the terminal selects displayed failure numbers, so mapping
+IDs containing commas or surrounding spaces remain selectable. Changed evidence or
+authority refuses. Initial authorization
 does not cover later failures. Durable `goLiveAcknowledgments` retain selected evidence,
 rationale, declared identity, mode and time independently of check success. Unknown
 proof stays unverified; drift retains the original baseline and is not presumed
 legitimate user activity. Missing checks and incomplete/ambiguous grants remain work
 for `close`; acknowledgment neither repairs permissions nor abandons approved grants.
+An already-live membership failure without passed pre-grant proof did not observe
+content, so acknowledging it leaves the original-baseline destination check
+(`goLive.destinationCheck`) as separate work with its own acknowledgment.
 
 Closure relying on an acknowledgment has `completed_with_accepted_exceptions` in its
 result, durable `status.closureOutcome` and final report's `job.closureOutcome`.

@@ -67,6 +67,11 @@ export interface CreatedDrive {
     revision: number;
     verificationAt: string;
     check?: GoLiveCheck;
+    /**
+     * Already-live drives without passed pre-grant proof whose membership check failed
+     * before observing content: the separately finished original-baseline content check.
+     */
+    destinationCheck?: GoLiveCheck;
   };
   /** Point-in-time destination proof before this batch's first fence or grant. */
   preGrantCheck?: {

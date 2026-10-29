@@ -541,21 +541,25 @@ async function acknowledge(
     if (!evidenceDigest || !review?.checks.length)
       return refusal("verification_unaccepted", "No eligible post-grant failures to acknowledge.");
     await output.io.stderr.write(
-      `Post-grant failure evidence and consequences (unavailable checks remain unverified; acknowledgment does not make a check pass):\n${JSON.stringify(redact(review), null, 2)}\n`,
+      `Post-grant failure evidence and consequences (unavailable checks remain unverified; acknowledgment does not make a check pass):\n${JSON.stringify(redact(review), null, 2)}\nFailures:\n${review.checks.map((check, index) => `  ${index + 1}. ${JSON.stringify(redact(check.mappingId))} · ${check.check.check}\n`).join("")}`,
     );
+    // Numbers, not IDs: valid mapping IDs may contain commas or surrounding whitespace.
     const selection = await answer(
       output,
-      "Select exact mapping IDs separated by commas (no default; blank cancels): ",
+      "Select failure numbers separated by commas or spaces (no default; blank cancels): ",
     );
-    mappingIds = [...new Set(selection?.split(",").map((id) => id.trim()) ?? [])];
+    const numbers = selection?.split(/[\s,]+/u).filter(Boolean) ?? [];
     if (
-      !mappingIds.length ||
-      mappingIds.some((id) => !id || !review.checks.some((check) => check.mappingId === id))
+      !numbers.length ||
+      numbers.some((number) => !/^[1-9]\d*$/u.test(number) || Number(number) > review.checks.length)
     )
       return refusal(
         "verification_unaccepted",
-        "Select only reviewed, unacknowledged mapping IDs.",
+        "Select only displayed failure numbers from this review.",
       );
+    mappingIds = [
+      ...new Set(numbers.map((number) => review.checks[Number(number) - 1]!.mappingId)),
+    ];
     rationale =
       (await answer(output, "One required rationale for the selected failures: ")) ?? undefined;
     if (!rationale || rationale === "/cancel")

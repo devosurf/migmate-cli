@@ -343,8 +343,10 @@ Recovery preserves passed checks and explicitly acknowledged failed or unavailab
 checks, resuming only unfinished grants, checks and reporting. **Some access may
 already exist after a failed close.** Retry unresolved checks with `close`, or review
 `status.goLiveReview` and hand the human `migmate acknowledge --job "$ID"` or the
-acknowledgment form in the web close view. Select exact mapping failures, supply
-one non-empty rationale and confirm with the existing unverified declared identity.
+acknowledgment form in the web close view. In the terminal, select the displayed
+failure numbers (mapping IDs may contain commas or surrounding spaces); the web view
+uses checkboxes. Supply one non-empty rationale and confirm with the existing
+unverified declared identity.
 The decision is bound to the displayed evidence and authority; stale submissions
 refuse. Initial go-live authorization never acknowledges later failures.
 
@@ -353,8 +355,12 @@ or changed roles), `go_live_check_unavailable` (still unverified), and recorded
 `destination_drift` in already-live jobs (original baseline retained). Acknowledgment
 records the specific risk, not a passed check or proof that drift is legitimate.
 It cannot waive pre-grant proof, accept other/future failures, abandon incomplete
-grants, repair permissions or close the job. Observe `status.goLiveAcknowledgments`,
-then separately retry `close`.
+grants, repair permissions or close the job. An already-live drive without passed
+pre-grant proof whose membership check failed never observed its content: after
+that membership difference is acknowledged, `close` still checks the destination
+against the original verification baseline and records `goLive.destinationCheck`;
+a failed or unavailable result needs its own acknowledgment. Observe
+`status.goLiveAcknowledgments`, then separately retry `close`.
 
 Once fenced, copy/mirror and `cancel` refuse `go_live_started` (exit 4). The final
 report remains mandatory. Checks record observations at their original timestamps,
@@ -368,7 +374,8 @@ explicitly reports `accessMayExist`, the permanent transfer fence, `checksPassed
 `checksSettled` (passed or exactly acknowledged), and whether reporting is `unfinished`
 or `complete`. A `verified` state with this disclosure is **not a completed close**.
 Pre-grant evidence is in `status.createdDrives[].preGrantCheck`; grants and post-grant
-checks remain in `status.memberGrants` and `status.createdDrives[].goLive`.
+checks remain in `status.memberGrants` and `status.createdDrives[].goLive` (`check`,
+plus `destinationCheck` for separately finished already-live content proof).
 Acknowledgment records retain selected evidence, rationale, identity, mode and time.
 Closure relying on an acknowledgment returns and records `completed_with_accepted_exceptions`
 in `status.closureOutcome` and the final report's `job.closureOutcome`, even without
@@ -397,7 +404,7 @@ same artifact set and digests. Teams archive reports and packages are unchanged.
   `created_by_job`, `files`, `bytes`, `verification_outcome`,
   `outstanding_exceptions`, `accepted_exceptions`, `go_live_member_grants`,
   `freeze_by`, `freeze_at`, `freeze_how`, `go_live_pre_grant_check`, `go_live_check`,
-  `go_live_acknowledgments`. Files and bytes are the latest completed
+  `go_live_destination_check`, `go_live_acknowledgments`. Files and bytes are the latest completed
   pass's recorded totals, not an inventory or a sum of attempts. Verification is
   `clean` or `findings` (acceptance does not turn findings into proof), or empty
   before verification. Exception counts cover planned omissions and verification
