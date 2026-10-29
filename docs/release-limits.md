@@ -328,7 +328,8 @@ without assembling them in memory. Verification commits retain their individual
 idempotence keys within bounded transactions. No job-store schema migration is
 needed. Historical stores and reports remain readable, and destination digest
 compatibility covers Unicode locale ties, duplicate paths, escaping and missing IDs.
-The bound is per listing record and page, not a limit on individual provider record size.
+A single JSON value or token is bounded at 16 Mi characters; the complete listing
+has no size cap.
 
 Report generation does not build whole-job row/finding arrays, execution resume
 state, settled-inventory section strings or complete artifact strings. It reads
@@ -348,6 +349,13 @@ It records sampled heap/RSS peaks, listing time and total wall time. This is a
 synthetic single-host qualification, not live-provider throughput, rclone-process
 memory, or a guarantee that one destination container accepts five million items.
 Provider container limits still apply.
+
+The recorded darwin-arm64 / Node 26.4.0 run passed in **99.4 minutes**, with
+**93,651,744 bytes sampled peak JS heap** (89.3 MiB), 646,643,712 bytes sampled
+peak RSS, and **259.9 seconds listing time** across 35 million parsed records.
+The final five-artifact set was 19,453,922,524 bytes (19.45 GB), in addition to
+the job store, readiness artifacts and temporary indexes. Reserve disk for all
+of them; this gate is intentionally separate from the ordinary test suite.
 
 The separate scale gate avoids imposing five-million-file disk I/O on every
 ordinary suite. The default `npm test` includes a 6,003-file version of the same
