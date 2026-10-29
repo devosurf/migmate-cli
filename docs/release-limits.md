@@ -4,10 +4,17 @@ This page separates shipped guarantees from historical live observations. File m
 
 The file route now executes rclone mapping copy passes ([ADR-0010](adr/0010-rclone-executes-file-transfers.md)). Earlier measurements of Migmate's per-item file writer do not prove this implementation. Archive uploads retain their own reserved IDs, private markers, revision checks and create-only behavior.
 
+## Unreleased changes — ADR-0017
+
+- Deferred close checks the entire destination batch before any new fence/grant.
+- CLI/web `acknowledge` records evidence-bound post-grant exceptions separately from initial authorization.
+- Recovery preserves passed and acknowledged checks; closure and the mandatory final report disclose `completed_with_accepted_exceptions`.
+- This implementation adds no acknowledgment requirement to `before_copy` or Teams archive jobs. No new live-tenant qualification is claimed.
+
 ## Human decisions are local attestations
 
-Interactive CLI and web approval, named exception acceptance and initial close
-capture the exact evidence digest shown in the review; there is no human digest
+Interactive CLI and web approval, named exception acceptance, initial close and
+post-grant acknowledgment capture the exact evidence digest shown in the review; there is no human digest
 transcription. The engine rechecks the binding before recording a decision.
 Declining, cancellation, interruption, failed confirmation and stale evidence
 create no new authority. Reverification invalidates explicit exception acceptance.
@@ -113,26 +120,43 @@ after the latest required verification and acceptance of all blocking findings
 (`verification_unaccepted` otherwise). Staged finality, settling and full
 verification are required before any grant. Close renders and publishes the
 readiness report before new authorization, the first fence or grant; failure
-leaves access unchanged. It then records authorization, durably fences future
-copy/mirror work for each affected drive before the first grant request, grants
-approved members, checks membership and destination content/permission drift,
-records grant evidence, and produces the final report before closing. A crash,
-ambiguous response, partial grant or failed check leaves that fence in place.
-Some access may already exist; resolve failed checks manually without another
-transfer pass, and do not treat failed post-grant checks as successful go-live.
+leaves access unchanged. After recording authorization, it checks every affected
+destination against verification before any new fence/grant. Failed or unavailable
+pre-grant proof refuses the whole batch without new fences or grants; it is not
+acknowledgeable, and ordinary repair/reverification remains available. After every
+destination passes, close fences all drives before the first grant request, grants
+approved members, checks membership and publishes the final report before closing.
+New jobs do not repeat the moved content check after grants. A crash, ambiguous
+response, partial grant or failed post-grant check leaves the fence in place.
 
 An unfinished deferred close is also durable status evidence:
 `status.incompleteClose` reports that access may exist, transfers remain fenced,
-whether recorded checks passed, and `reporting = "unfinished"` or `"complete"`.
+`checksPassed`, `checksSettled` (passed or exactly acknowledged), and `reporting = "unfinished"` or `"complete"`.
 It remains distinct from the job's verification state and disappears only when
 close completes. Grant timestamps and check details remain available after
 reopening. Matching `status.closeAuthorization` and `status.closeReview` establish
 recovery authority without another initial confirmation; conversation memory or
-an old approval does not. Recovery preserves checks that passed under their
-current fence and resumes the first unfinished step. Correct reporting/storage
-failures and retry `close`, never a copy pass or report bypass. Once a drive is
-fenced, `cancel` refuses `go_live_started`; only close with its final report ends
-the job.
+an old approval does not. Recovery preserves passed and explicitly acknowledged
+checks under their current fence and resumes unfinished grants, checks and reporting.
+Correct reporting/storage failures and retry `close`, never a copy pass or report
+bypass. Once fenced, `cancel` refuses `go_live_started`; only close with its final
+report ends the job.
+
+`acknowledge` reviews selected `drive_membership_mismatch`, `go_live_check_unavailable`
+or already-live `destination_drift` evidence with one required rationale. CLI/web
+capture the exact review; changed evidence or authority refuses. Initial authorization
+does not cover later failures. Durable `goLiveAcknowledgments` retain selected evidence,
+rationale, declared identity, mode and time independently of check success. Unknown
+proof stays unverified; drift retains the original baseline and is not presumed
+legitimate user activity. Missing checks and incomplete/ambiguous grants remain work
+for `close`; acknowledgment neither repairs permissions nor abandons approved grants.
+
+Closure relying on an acknowledgment has `completed_with_accepted_exceptions` in its
+result, durable `status.closureOutcome` and final report's `job.closureOutcome`.
+Failed checks remain failed, and verification exceptions remain disclosed. The
+mandatory report includes all timestamped grant/check/decision evidence. A report
+failure leaves closure incomplete; retry does not rerun passed/acknowledged checks
+against users' later edits or demand the same acknowledgment again.
 
 The short drift check re-lists destination file paths, sizes, stored hashes and
 object IDs, plus folder paths, against the listing recorded by verification. It

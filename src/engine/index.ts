@@ -36,7 +36,9 @@ import {
   type ArtifactSet,
   type CheckResult,
   type Closure,
+  type ClosureOutcome,
   type ExecuteResult,
+  type GoLiveAcknowledgment,
   type UploadQuotaStop,
   type FacetCount,
   type JobEvent,
@@ -55,6 +57,7 @@ import {
 } from "./types.ts";
 import { CODE_BY_NAME, isAcceptable, exceptionConsequence } from "./codes.ts";
 import { approvalAuthority } from "./decisions.ts";
+import { goLiveCheckSettled, reviewGoLiveFailures } from "./go-live.ts";
 import {
   nextState,
   reconcileOnWriterOpen,
@@ -931,15 +934,38 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
       withStore((s) => {
         const status = s.status();
         if (!status.currentPlan || !status.verificationDigest)
-          return { ...status, closeReview: null };
+          return { ...status, closeReview: null, goLiveReview: null };
         try {
+          const config = readConfig(pathsFor(deps, ref), status.jobType, s);
+          const review = closeReview(s, config);
+          const acknowledgments = status.goLiveAcknowledgments ?? [];
+          const authority = review?.authorized ? review.evidenceDigest : undefined;
           return {
             ...status,
-            closeReview: closeReview(s, readConfig(pathsFor(deps, ref), status.jobType, s)),
+            closeReview: review,
+            goLiveReview: currentGoLiveReview(s, config),
+            ...(status.incompleteClose
+              ? {
+                  incompleteClose: {
+                    ...status.incompleteClose,
+                    checksSettled:
+                      "mappings" in config &&
+                      config.mappings
+                        .filter((mapping) => mapping.createDrive)
+                        .every((mapping) =>
+                          status.createdDrives.some(
+                            (drive) =>
+                              drive.mappingId === mapping.id &&
+                              goLiveCheckSettled(drive, authority, acknowledgments),
+                          ),
+                        ),
+                  },
+                }
+              : {}),
           };
         } catch (error) {
           // Preserve read-only recovery evidence while operator configuration is broken.
-          if (expectedFailure(error)) return { ...status, closeReview: null };
+          if (expectedFailure(error)) return { ...status, closeReview: null, goLiveReview: null };
           throw error;
         }
       }),
@@ -1321,13 +1347,43 @@ function closeReview(store: Store, config: JobConfig) {
                   `${mapping.id}: ${mapping.createDrive!.name} — ${member.email} (${member.type}), role ${member.role}, timing after_verification.`,
               ) ?? [],
           ) ?? []),
-          "Close requires go-live membership and destination checks plus the final report. Access is never revoked automatically.",
+          "Every affected destination must pass drift checking before any new fence or grant. Post-grant checks must pass or be explicitly acknowledged, and the final report must succeed. Access is never revoked automatically.",
         ]
       : [
           "Complete this job with its current verification and explicitly recorded exceptions.",
           "No deferred member access will be granted by close.",
         ],
   };
+}
+function currentGoLiveReview(store: Store, config: JobConfig) {
+  const job = store.readJob()!;
+  const plan = job.planRevision === null ? null : store.readPlanRevision(job.planRevision);
+  const verification = currentVerification(store);
+  const review = closeReview(store, config);
+  if (
+    job.state !== "verified" ||
+    !plan ||
+    !verification ||
+    !("mappings" in config) ||
+    memberGrantTiming(approvedOptions(plan)) !== "after_verification" ||
+    !review?.authorized
+  )
+    return null;
+  const mappings = new Set(
+    config.mappings.filter((mapping) => mapping.createDrive).map((mapping) => mapping.id),
+  );
+  return reviewGoLiveFailures(
+    store
+      .readCreatedDrives()
+      .filter(
+        (drive) =>
+          mappings.has(drive.mappingId) &&
+          drive.goLive?.revision === plan.revision &&
+          drive.goLive.verificationAt === verification.at,
+      ),
+    review.evidenceDigest,
+    store.readGoLiveAcknowledgments(),
+  );
 }
 function outstanding(store: Store, revision: number, digest?: string): string[] {
   const accepted = new Set(digest ? store.readAcceptances(digest).map((a) => a.code) : []);
@@ -1606,6 +1662,7 @@ function makeWriter(
     const actingGoogleAccount = plan
       ? object(plan.evidence, "plan.evidence").actingGoogleAccount
       : undefined;
+    const authority = reporting ? closeReview(store, config) : null;
     return {
       config: config as never,
       revision,
@@ -1616,6 +1673,12 @@ function makeWriter(
       resume: {
         ...(reporting ? store.readReportResume(revision) : store.readResume(revision)),
         checkpoint: job().lastCheckpoint,
+        ...(reporting
+          ? {
+              goLiveAcknowledgments: store.readGoLiveAcknowledgments(),
+              ...(authority?.authorized ? { goLiveAuthorityDigest: authority.evidenceDigest } : {}),
+            }
+          : {}),
       },
       ...(reporting ? { reportEvidence: store.reportEvidence(revision) } : {}),
       provider: p,
@@ -2050,7 +2113,7 @@ function makeWriter(
       ...(uploadQuota ? { uploadQuota } : {}),
     });
   }
-  async function createReport(): Promise<Outcome<ArtifactSet>> {
+  async function createReport(closureOutcome?: ClosureOutcome): Promise<Outcome<ArtifactSet>> {
     const revision = job().planRevision ?? 0,
       verification = currentVerification(store);
     const config = revision > 0 ? readConfig(paths, job().type, store) : undefined;
@@ -2083,10 +2146,18 @@ function makeWriter(
     const acceptedCodes = new Set(accepted.map((a) => a.code));
     const report = {
       schemaVersion: 1,
-      job: { id: job().id, type: job().type, label: job().label, state: job().state },
+      job: {
+        id: job().id,
+        type: job().type,
+        label: job().label,
+        state: job().state,
+        closureOutcome:
+          closureOutcome ?? (job().state === "closed" ? store.status().closureOutcome : undefined),
+      },
       plan: revision ? store.readReportPlan(revision) : null,
       approval: revision ? store.readApproval(revision) : null,
       closeAuthorization: store.readCloseAuthorization(),
+      goLiveAcknowledgments: store.readGoLiveAcknowledgments(),
       verification,
       sections: reportSections,
       disclosures: [
@@ -2135,6 +2206,7 @@ function makeWriter(
         store,
         revision,
         config: config as FileMigrationConfig | undefined,
+        goLiveAuthorityDigest: config ? closeReview(store, config)?.evidenceDigest : undefined,
         findings: () =>
           store.iterateCurrentFindings(revision, phase, { includePlannedOmissions: true }),
         accepted,
@@ -2876,6 +2948,52 @@ function makeWriter(
         });
       }),
     report: () => operation("report", createReport),
+    acknowledgeGoLive: (input) =>
+      operation("close", async () => {
+        if (
+          !input ||
+          typeof input.evidenceDigest !== "string" ||
+          typeof input.approver !== "string" ||
+          !input.approver.trim() ||
+          typeof input.rationale !== "string" ||
+          !input.rationale.trim() ||
+          !["interactive", "unattended"].includes(input.mode) ||
+          !Array.isArray(input.mappingIds) ||
+          !input.mappingIds.length ||
+          input.mappingIds.some((id) => typeof id !== "string" || !id.trim())
+        )
+          return refuse(
+            "verification_unaccepted",
+            "Acknowledgment requires selected mappings, a non-empty rationale and a declared identity and mode.",
+          );
+        const config = readConfig(paths, job().type, store);
+        const review = currentGoLiveReview(store, config);
+        if (!review || input.evidenceDigest !== review.evidenceDigest)
+          return refuse(
+            "approval_digest_stale",
+            "The reviewed go-live failures or their authority have changed; review current evidence.",
+          );
+        const selected = new Set(input.mappingIds);
+        if ([...selected].some((id) => !review.checks.some((check) => check.mappingId === id)))
+          return refuse(
+            "verification_unaccepted",
+            "Select only the recorded, unacknowledged post-grant failures in this review.",
+          );
+        const record: GoLiveAcknowledgment = {
+          evidenceDigest: review.evidenceDigest,
+          authorityDigest: review.authorityDigest,
+          checks: review.checks.filter((check) => selected.has(check.mappingId)),
+          rationale: input.rationale.trim(),
+          approver: input.approver.trim(),
+          mode: input.mode,
+          identityAssurance: "declared_unverified",
+          at: deps.now().toISOString(),
+        };
+        return store.atomic(() => {
+          store.writeGoLiveAcknowledgment(record);
+          return ok(record);
+        });
+      }),
     close: (input) =>
       operation("close", async () => {
         const verification = currentVerification(store),
@@ -2977,12 +3095,11 @@ function makeWriter(
             "The durable go-live authorization no longer matches current evidence.",
           );
         const authorizeClose = async (): Promise<Outcome<void>> => {
-          if (review.authorized) return ok(undefined);
-          input?.signal?.throwIfAborted();
-          if (deferredGrants) {
+          if (deferredGrants && !store.readCreatedDrives().some((drive) => drive.goLive)) {
             const readiness = await createReport();
             if (!readiness.ok) return readiness;
           }
+          input?.signal?.throwIfAborted();
           // Recheck editable inputs after readiness, before any durable authority or fence.
           if (
             closeReview(store, readConfig(paths, job().type, store))?.evidenceDigest !==
@@ -2992,6 +3109,7 @@ function makeWriter(
               "approval_digest_stale",
               "Close evidence changed during report readiness.",
             );
+          if (review.authorized) return ok(undefined);
           input?.signal?.throwIfAborted();
           store.atomic(() =>
             store.writeCloseAuthorization({
@@ -3005,19 +3123,32 @@ function makeWriter(
           return ok(undefined);
         };
         const closeDrives = store.readCreatedDrives();
+        const grants = store.readMemberGrants();
+        const acknowledgments = store.readGoLiveAcknowledgments();
+        const recovery = { authorityDigest: review.evidenceDigest, acknowledgments };
         const pendingGoLive =
           "mappings" in config &&
-          config.mappings.some(
-            (mapping) =>
-              mapping.createDrive &&
-              !closeDrives.some(
-                (drive) =>
-                  drive.mappingId === mapping.id &&
-                  drive.goLive?.revision === revision &&
-                  drive.goLive.verificationAt === verification.at &&
-                  drive.goLive.check?.status === "passed",
-              ),
-          );
+          config.mappings.some((mapping) => {
+            if (!mapping.createDrive) return false;
+            const drive = closeDrives.find((item) => item.mappingId === mapping.id);
+            return (
+              !drive ||
+              drive.goLive?.revision !== revision ||
+              drive.goLive.verificationAt !== verification.at ||
+              !goLiveCheckSettled(drive, review.evidenceDigest, acknowledgments) ||
+              mapping.createDrive.members.some(
+                (member) =>
+                  !grants.some(
+                    (grant) =>
+                      grant.mappingId === mapping.id &&
+                      grant.driveId === drive.driveId &&
+                      grant.member.email === member.email &&
+                      grant.member.type === member.type &&
+                      grant.member.role === member.role,
+                  ),
+              )
+            );
+          });
         if ("mappings" in config && deferredGrants && pendingGoLive) {
           const p = provider(config, true);
           let worker: TransferWorkerHandle | undefined;
@@ -3051,8 +3182,19 @@ function makeWriter(
             for await (const unit of goLive(
               context(p, config, revision, undefined, true),
               verification.at,
+              recovery,
             )) {
               guard("close");
+              if (
+                unit.createdDrive?.goLive &&
+                !store.readCreatedDrives().some((drive) => drive.goLive) &&
+                closeReview(store, readConfig(paths, job().type, store))?.evidenceDigest !==
+                  review.evidenceDigest
+              )
+                return refuse(
+                  "approval_digest_stale",
+                  "Close authority changed during pre-grant checking.",
+                );
               store.commit(unit);
             }
           } catch (error) {
@@ -3066,18 +3208,30 @@ function makeWriter(
           const authorized = await authorizeClose();
           if (!authorized.ok) return authorized;
         }
-        if (deferredGrants) {
-          const report = await createReport();
-          if (!report.ok) return report;
-        }
         const acceptedExceptions = store
           .readAcceptances(verification.verificationDigest)
           .map((a) => a.code);
+        const acknowledgedFailure = store
+          .readCreatedDrives()
+          .some(
+            (drive) =>
+              drive.goLive?.check?.status === "failed" &&
+              goLiveCheckSettled(drive, review.evidenceDigest, acknowledgments),
+          );
+        const outcome: ClosureOutcome =
+          acceptedExceptions.length || acknowledgedFailure
+            ? "completed_with_accepted_exceptions"
+            : "completed";
+        if (deferredGrants) {
+          const report = await createReport(outcome);
+          if (!report.ok) return report;
+        }
         const result: Closure = {
           state: "closed",
           at: deps.now().toISOString(),
           acceptedExceptions,
-          outcome: acceptedExceptions.length ? "completed_with_accepted_exceptions" : "completed",
+          ...(acknowledgments.length ? { goLiveAcknowledgments: acknowledgments } : {}),
+          outcome,
         };
         store.atomic(() => {
           transition("close", "close");
@@ -3249,6 +3403,7 @@ function* reportHtml(report: {
   plan: unknown;
   approval: unknown;
   closeAuthorization: unknown;
+  goLiveAcknowledgments: unknown[];
   verification: unknown;
 }): Generator<string> {
   function* section(title: string, value: unknown): Generator<string> {
@@ -3267,6 +3422,10 @@ function* reportHtml(report: {
   yield* section("Standing disclosures", report.disclosures.join("\n"));
   yield* section("Plan and approval", { plan: report.plan, approval: report.approval });
   yield* section("Go-live authorization (unverified declaration)", report.closeAuthorization);
+  yield* section(
+    "Acknowledged go-live exceptions (failed or unverified, not passed)",
+    report.goLiveAcknowledgments,
+  );
   for (const item of report.sections) yield* section(item.title, item.body);
   yield* section("Preflight evidence", report.checks);
   yield* section("Verification", report.verification);

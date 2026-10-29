@@ -25,6 +25,7 @@ import {
   type ApprovalRecord,
   type AcceptedException,
   type CloseAuthorization,
+  type GoLiveAcknowledgment,
   type ArtifactSet,
   type CheckResult,
   type EventKind,
@@ -175,6 +176,8 @@ export interface Store {
   latestApprovedPlan(): PlanRevisionRecord | null;
   readCloseAuthorization(): CloseAuthorization | null;
   writeCloseAuthorization(record: CloseAuthorization): void;
+  readGoLiveAcknowledgments(): GoLiveAcknowledgment[];
+  writeGoLiveAcknowledgment(record: GoLiveAcknowledgment): void;
   lastInteractiveIdentity(): string | null;
   recordInteractiveIdentity(approver: string): void;
   writeApproval(record: ApprovalRecord): void;
@@ -212,6 +215,7 @@ export interface Store {
   ): string | undefined;
   readMappingPasses(revision: number): MappingPass[];
   readCreatedDrives(): CreatedDrive[];
+  readMemberGrants(): MemberGrant[];
   readAllRows(revision: number, phase?: RowPhase): CommitRow[];
   writeArtifactSet(value: ArtifactSet): void;
   readArtifactSet(): ArtifactSet;
@@ -961,6 +965,28 @@ class StoreImpl implements Store {
       )
       .run(canonicalJson(record));
     if (record.mode === "interactive") this.recordInteractiveIdentity(record.approver);
+  }
+  readGoLiveAcknowledgments(): GoLiveAcknowledgment[] {
+    return this.db
+      .prepare(
+        "SELECT payload FROM decision_evidence WHERE key GLOB 'go_live_ack:*' ORDER BY rowid",
+      )
+      .all()
+      .map((row) => JSON.parse(String(row.payload)) as GoLiveAcknowledgment);
+  }
+  writeGoLiveAcknowledgment(record: GoLiveAcknowledgment): void {
+    this.db
+      .prepare(
+        "INSERT INTO decision_evidence (key,payload) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+      )
+      .run(`go_live_ack:${record.evidenceDigest}`, canonicalJson(record));
+    if (record.mode === "interactive") this.recordInteractiveIdentity(record.approver);
+    this.appendEvent({
+      verb: "close",
+      phase: "close",
+      kind: "phase_completed",
+      payload: { decision: "go_live_acknowledgment", evidenceDigest: record.evidenceDigest },
+    });
   }
   lastInteractiveIdentity(): string | null {
     const row = this.db
@@ -2569,6 +2595,13 @@ class StoreImpl implements Store {
           : job.state === "verified" || job.state === "needs_attention" || job.state === "closed"
             ? "completed"
             : null;
+      const closureOutcome = terminal
+        ? this.db
+            .prepare(
+              "SELECT json_extract(payload, '$.outcome') AS outcome FROM event WHERE kind='terminal' AND verb IN ('close','cancel') ORDER BY cursor DESC LIMIT 1",
+            )
+            .get()?.outcome
+        : undefined;
       const createdDrives = this.readCreatedDrives();
       const goLiveDrives = createdDrives.filter((drive) => drive.goLive);
       const incompleteClose: JobStatus["incompleteClose"] =
@@ -2588,7 +2621,7 @@ class StoreImpl implements Store {
                 Number(
                   this.db
                     .prepare(
-                      "SELECT COALESCE(MAX(cursor),0) AS cursor FROM event WHERE kind='unit_committed'",
+                      "SELECT COALESCE(MAX(cursor),0) AS cursor FROM event WHERE kind='unit_committed' OR (verb='close' AND kind='phase_completed')",
                     )
                     .get()?.cursor,
                 )
@@ -2599,6 +2632,9 @@ class StoreImpl implements Store {
           : undefined;
       return {
         jobId: job.id,
+        ...(typeof closureOutcome === "string"
+          ? { closureOutcome: closureOutcome as NonNullable<JobStatus["closureOutcome"]> }
+          : {}),
         jobType: job.type,
         state: job.state,
         schemaVersion: job.schemaVersion,
@@ -2636,6 +2672,7 @@ class StoreImpl implements Store {
         currentApproval: plan ? this.readApproval(plan.revision) : null,
         lastInteractiveIdentity: this.lastInteractiveIdentity(),
         closeAuthorization: this.readCloseAuthorization(),
+        goLiveAcknowledgments: this.readGoLiveAcknowledgments(),
         acceptedExceptions: verification
           ? this.readAcceptances(verification.verificationDigest).map((record) => ({
               ...record,

@@ -3,7 +3,15 @@ import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
 import { canonicalJson } from "../store/digest.ts";
-import type { CheckResult, MappingPass, UploadQuotaStop } from "../types.ts";
+import type {
+  CheckResult,
+  CreatedDrive,
+  GoLiveAcknowledgment,
+  GoLiveCheck,
+  MappingPass,
+  UploadQuotaStop,
+} from "../types.ts";
+import { goLiveCheckSettled } from "../go-live.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
 import type {
   CopyPassReference,
@@ -304,7 +312,9 @@ export class GoLiveCheckError extends Error {
   readonly detail: Record<string, unknown>;
   constructor(detail: Record<string, unknown>) {
     super(
-      "Go-live checks failed. Some access may already exist; resolve the evidence with an operator and retry close, never a copy or mirror pass.",
+      detail.accessMayExist
+        ? "Go-live checks failed. Some access may already exist; review the evidence and retry or explicitly acknowledge the failed checks, then retry close."
+        : "Pre-grant destination checks failed. No go-live access was granted; repair and reverify before retrying close.",
     );
     this.detail = detail;
   }
@@ -328,40 +338,141 @@ function destinationDigest(
   return digest([entries(files), entries(md5), [...folders].sort()]);
 }
 
-/** Close is the explicit authorization to open verified destinations to members. */
-export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIterable<CommitUnit> {
-  // Every affected drive is fenced before the first permission request, including
-  // drives later in the batch when an earlier grant crashes or has an ambiguous response.
-  for (const mapping of ctx.config.mappings) {
-    if (!mapping.createDrive) continue;
+async function destinationCheck(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  drive: CreatedDrive,
+): Promise<GoLiveCheck> {
+  const baseline = drive.verifiedDestination;
+  const pass = await ctx.provider.resolveFilePass(
+    destinationMapping(provisionedMapping(ctx, mapping)),
+  );
+  const files = await ctx.provider.listFileHashes({
+    socketPath: pass.socketPath,
+    root: pass.destination,
+    hashType: baseline?.hashType ?? "sha256",
+    download: false,
+    ...abortable(ctx),
+  });
+  const md5 = baseline?.md5
+    ? await ctx.provider.listFileHashes({
+        socketPath: pass.socketPath,
+        root: pass.destination,
+        hashType: "md5",
+        download: false,
+        ...abortable(ctx),
+      })
+    : [];
+  const folders = await ctx.provider.listFolders({
+    socketPath: pass.socketPath,
+    root: pass.destination,
+    ...abortable(ctx),
+  });
+  const observed = destinationDigest(files, md5, folders);
+  const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
+  return {
+    at: ctx.now().toISOString(),
+    status: matches ? "passed" : "failed",
+    check: matches ? "destination" : "destination_drift",
+    evidence: {
+      expectedDestinationDigest: baseline?.digest ?? null,
+      observedDestinationDigest: observed,
+    },
+  };
+}
+
+function unavailableGoLiveCheck(
+  ctx: FileContext,
+  error: unknown,
+  evidence: Record<string, unknown>,
+): GoLiveCheck {
+  if (
+    !(error instanceof TypeError) &&
+    !(error instanceof HttpProviderFault) &&
+    !terminalUnavailable(error)
+  )
+    throw error;
+  return {
+    at: ctx.now().toISOString(),
+    status: "failed",
+    check: "go_live_check_unavailable",
+    evidence: {
+      ...evidence,
+      ...(error instanceof HttpProviderFault ? { status: error.status } : {}),
+    },
+  };
+}
+
+/** Close checks the whole unfenced batch before authorizing any new access. */
+export async function* goLive(
+  ctx: FileContext,
+  verificationAt: string,
+  recovery: { authorityDigest: string; acknowledgments: GoLiveAcknowledgment[] },
+): AsyncIterable<CommitUnit> {
+  const affected = ctx.config.mappings.filter((mapping) => mapping.createDrive);
+  const unit = (mapping: FileMappingConfig, drive: CreatedDrive, key: string): CommitUnit => ({
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: key,
+    checkpoint: mapping.id,
+    rows: [],
+    findings: [],
+    createdDrive: drive,
+  });
+  const failures: Record<string, unknown>[] = [];
+  for (const mapping of affected) {
     const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
     if (!drive?.driveId) throw new Error("Go-live requires a durable created drive");
     if (drive.goLive) continue;
-    drive.goLive = { startedAt: ctx.now().toISOString(), revision: ctx.revision, verificationAt };
-    yield {
-      rev: ctx.revision,
-      phase: "execute",
-      unitKey: JSON.stringify(["go-live-fence", drive.driveId]),
-      checkpoint: mapping.id,
-      rows: [],
-      findings: [],
-      createdDrive: drive,
-    };
+    let check: GoLiveCheck;
+    try {
+      check = await destinationCheck(ctx, mapping, drive);
+    } catch (error) {
+      check = unavailableGoLiveCheck(ctx, error, { scope: "destination" });
+    }
+    // Always observe again on a fresh attempt: repair may have changed even a prior pass.
+    drive.preGrantCheck = { revision: ctx.revision, verificationAt, check };
+    yield unit(
+      mapping,
+      drive,
+      JSON.stringify(["pre-grant-check", drive.driveId, digest(drive.preGrantCheck)]),
+    );
+    if (check.status === "failed")
+      failures.push({
+        mappingId: mapping.id,
+        driveId: drive.driveId,
+        check: check.check,
+        ...check.evidence,
+      });
   }
+  if (failures.length)
+    throw new GoLiveCheckError({
+      accessMayExist: ctx.resume.createdDrives?.some((drive) => drive.goLive) ?? false,
+      ...failures[0],
+      failures,
+    });
+
+  // Persist every fence before the first request, including later drives in a crash.
+  for (const mapping of affected) {
+    const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+    if (drive.goLive) continue;
+    drive.goLive = { startedAt: ctx.now().toISOString(), revision: ctx.revision, verificationAt };
+    yield unit(mapping, drive, JSON.stringify(["go-live-fence", drive.driveId]));
+  }
+  // Settled checks never substitute for missing or ambiguous grant checkpoints.
   yield* grantMembers({
     ...ctx,
     now: () => new Date(Math.max(ctx.now().getTime(), Date.parse(verificationAt) + 1)),
   });
-  for (const mapping of ctx.config.mappings) {
-    if (!mapping.createDrive) continue;
+  for (const mapping of affected) {
     const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
     if (
       drive.goLive?.revision === ctx.revision &&
       drive.goLive.verificationAt === verificationAt &&
-      drive.goLive.check?.status === "passed"
+      goLiveCheckSettled(drive, recovery.authorityDigest, recovery.acknowledgments)
     )
       continue;
-    const expected = [...mapping.createDrive.members];
+    const expected = [...mapping.createDrive!.members];
     if (
       !expected.some(
         (member) =>
@@ -369,7 +480,13 @@ export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIt
       )
     )
       expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
-    let check: NonNullable<NonNullable<typeof drive.goLive>["check"]>;
+    const preGrant = drive.preGrantCheck;
+    const checkedBeforeGrant =
+      preGrant?.revision === drive.goLive!.revision &&
+      preGrant.verificationAt === drive.goLive!.verificationAt &&
+      preGrant.check.status === "passed" &&
+      preGrant.check.check === "destination";
+    let check: GoLiveCheck;
     try {
       const actual = await ctx.provider.listDriveMembers(drive.driveId!);
       if (
@@ -382,82 +499,40 @@ export async function* goLive(ctx: FileContext, verificationAt: string): AsyncIt
           check: "drive_membership_mismatch",
           evidence: { expected, actual },
         };
-      } else {
-        const baseline = drive.verifiedDestination;
-        const pass = await ctx.provider.resolveFilePass(
-          destinationMapping(provisionedMapping(ctx, mapping)),
-        );
-        const files = await ctx.provider.listFileHashes({
-          socketPath: pass.socketPath,
-          root: pass.destination,
-          hashType: baseline?.hashType ?? "sha256",
-          download: false,
-          ...abortable(ctx),
-        });
-        const md5 = baseline?.md5
-          ? await ctx.provider.listFileHashes({
-              socketPath: pass.socketPath,
-              root: pass.destination,
-              hashType: "md5",
-              download: false,
-              ...abortable(ctx),
-            })
-          : [];
-        const folders = await ctx.provider.listFolders({
-          socketPath: pass.socketPath,
-          root: pass.destination,
-          ...abortable(ctx),
-        });
-        const observed = destinationDigest(files, md5, folders);
-        const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
+      } else if (checkedBeforeGrant) {
         check = {
           at: ctx.now().toISOString(),
-          status: matches ? "passed" : "failed",
-          check: matches ? "membership_and_destination" : "destination_drift",
-          evidence: {
-            expected,
-            actual,
-            expectedDestinationDigest: baseline?.digest ?? null,
-            observedDestinationDigest: observed,
-          },
+          status: "passed",
+          check: "membership",
+          evidence: { expected, actual },
+        };
+      } else {
+        // Already-live jobs retain their original content baseline, not invented pregrant proof.
+        const destination = await destinationCheck(ctx, mapping, drive);
+        check = {
+          ...destination,
+          check: destination.status === "passed" ? "membership_and_destination" : destination.check,
+          evidence: { expected, actual, ...destination.evidence },
         };
       }
     } catch (error) {
-      if (
-        !(error instanceof TypeError) &&
-        !(error instanceof HttpProviderFault) &&
-        !terminalUnavailable(error)
-      )
-        throw error;
-      check = {
-        at: ctx.now().toISOString(),
-        status: "failed",
-        check: "go_live_check_unavailable",
-        evidence: {
-          expected,
-          ...(error instanceof HttpProviderFault ? { status: error.status } : {}),
-        },
-      };
+      check = unavailableGoLiveCheck(ctx, error, {
+        expected,
+        scope: checkedBeforeGrant ? "membership" : "membership_and_destination",
+      });
     }
     drive.goLive = { ...drive.goLive!, check };
-    yield {
-      rev: ctx.revision,
-      phase: "execute",
-      unitKey: JSON.stringify(["go-live-check", drive.driveId, digest(check)]),
-      checkpoint: mapping.id,
-      rows: [],
-      findings: [],
-      createdDrive: drive,
-    };
+    yield unit(mapping, drive, JSON.stringify(["go-live-check", drive.driveId, digest(check)]));
     if (check.status === "failed")
-      throw new GoLiveCheckError({
-        accessMayExist: true,
+      failures.push({
         mappingId: mapping.id,
         driveId: drive.driveId,
         check: check.check,
         ...check.evidence,
       });
   }
+  if (failures.length)
+    throw new GoLiveCheckError({ accessMayExist: true, ...failures[0], failures });
 }
 
 function digest(value: unknown): string {
@@ -2548,15 +2623,35 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         checksPassed:
           goLiveDrives.length > 0 &&
           goLiveDrives.every((drive) => drive.goLive?.check?.status === "passed"),
+        checksSettled:
+          goLiveDrives.length > 0 &&
+          goLiveDrives.every((drive) =>
+            goLiveCheckSettled(
+              drive,
+              ctx.resume.goLiveAuthorityDigest,
+              ctx.resume.goLiveAcknowledgments ?? [],
+            ),
+          ),
+        preGrantChecks: (ctx.resume.createdDrives ?? [])
+          .filter((drive) => drive.preGrantCheck)
+          .map((drive) => ({
+            mappingId: drive.mappingId,
+            driveId: drive.driveId,
+            ...drive.preGrantCheck,
+          })),
+        acknowledgments: ctx.resume.goLiveAcknowledgments ?? [],
         ...(!goLiveDrives.length
           ? { status: "Go-live has not started. Migmate has granted no member access." }
           : {}),
         resolution:
-          "If close fails or is interrupted, some access may already exist. Resolve membership or destination drift with an operator and retry close; do not run another copy or mirror pass.",
+          "Before go-live, failed or unavailable destination checks require repair and reverification; they cannot be acknowledged. After access starts, retry or explicitly acknowledge reviewed failed checks, then retry close; do not run another copy or mirror pass. Acknowledgment preserves failures, and unavailable checks remain unverified.",
         drives: goLiveDrives.map((drive) => ({
           mappingId: drive.mappingId,
           driveId: drive.driveId,
           ...drive.goLive,
+          ...(drive.goLive?.check?.check === "go_live_check_unavailable"
+            ? { proof: "unverified" }
+            : {}),
         })),
         driftScope:
           "Destination file paths, sizes, stored hashes and identities plus folder paths are compared with verification. This is a point-in-time listing check, not downloaded content, inherited permissions, effective group membership, or a future-write guarantee.",

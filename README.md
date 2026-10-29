@@ -326,34 +326,55 @@ The confirmation captures the exact reviewed evidence and an editable, unverifie
 declared identity. For staged jobs, the latest revision must also be final,
 settled and fully verified. Deferred close renders and publishes the readiness
 report before recording authorization, fencing or granting access. A readiness
-failure therefore grants nothing. Close then durably fences further copy/mirror
-work for each affected drive **before the first grant request**, grants approved
-members, checks membership and destination-content/permission drift, and writes
-timestamped grant evidence and the final report before closing.
+failure therefore grants nothing. It checks every affected destination against
+the current verification baseline **before any new fence or grant**. Failed or
+unavailable pre-grant proof refuses the entire batch without new fences or grants;
+repair and reverification remain possible under the ordinary approval rules.
+After all destinations pass, close fences the whole batch before the first grant
+request, grants approved members, checks explicit membership, and writes
+timestamped evidence and the final report before closing. The moved content check
+is not repeated after new grants.
 
 If close fails or is interrupted after authorization, unchanged durable authority
 permits `close` to resume without repeating the initial go-live challenge.
 `status.closeAuthorization.evidenceDigest` must match `status.closeReview.evidenceDigest`,
 with `closeReview.authorized = true`; conversation memory is not recovery authority.
-Recovery preserves checks that already passed under their fence and resumes the
-first unfinished grant, check or report. **Some access may already exist after a
-failed close.** Resolve failed membership or destination checks manually; another
-copy/mirror pass is not a recovery path. Passed checks record go-live at their
-original timestamps, not a guarantee that members never change content afterward.
-Once fenced, `cancel` also refuses `go_live_started`; the final report is mandatory.
-`execute` against a fenced drive refuses `go_live_started` (exit 4). The short
-destination drift check compares file paths, sizes, stored hashes and IDs plus
-folder paths with verification; it is not another content download or a guarantee
-against later writes. Its permission check covers explicit drive membership, not
-inherited permissions or effective group membership.
+Recovery preserves passed checks and explicitly acknowledged failed or unavailable
+checks, resuming only unfinished grants, checks and reporting. **Some access may
+already exist after a failed close.** Retry unresolved checks with `close`, or review
+`status.goLiveReview` and hand the human `migmate acknowledge --job "$ID"` or the
+acknowledgment form in the web close view. Select exact mapping failures, supply
+one non-empty rationale and confirm with the existing unverified declared identity.
+The decision is bound to the displayed evidence and authority; stale submissions
+refuse. Initial go-live authorization never acknowledges later failures.
+
+Eligible post-grant failures are `drive_membership_mismatch` (missing/extra members
+or changed roles), `go_live_check_unavailable` (still unverified), and recorded
+`destination_drift` in already-live jobs (original baseline retained). Acknowledgment
+records the specific risk, not a passed check or proof that drift is legitimate.
+It cannot waive pre-grant proof, accept other/future failures, abandon incomplete
+grants, repair permissions or close the job. Observe `status.goLiveAcknowledgments`,
+then separately retry `close`.
+
+Once fenced, copy/mirror and `cancel` refuse `go_live_started` (exit 4). The final
+report remains mandatory. Checks record observations at their original timestamps,
+not a guarantee against later changes. Destination proof compares file paths,
+sizes, stored hashes and IDs plus folder paths with verification; it is not another
+content download or a destination lock. Membership proof covers explicit drive
+members, not inherited permissions or effective group membership.
 
 After deferred go-live starts, `status.incompleteClose` survives reopening and
-explicitly reports `accessMayExist`, the permanent transfer fence, whether checks
-passed, and whether reporting is `unfinished` or `complete`. A `verified` state
-with this disclosure is **not a completed close**. Recorded grants and checks
-remain in `status.memberGrants` and `status.createdDrives[].goLive`. If report
-generation fails (for example, insufficient disk space), correct that failure and
-repeat `close`; do not re-copy, mirror, or bypass the report.
+explicitly reports `accessMayExist`, the permanent transfer fence, `checksPassed`,
+`checksSettled` (passed or exactly acknowledged), and whether reporting is `unfinished`
+or `complete`. A `verified` state with this disclosure is **not a completed close**.
+Pre-grant evidence is in `status.createdDrives[].preGrantCheck`; grants and post-grant
+checks remain in `status.memberGrants` and `status.createdDrives[].goLive`.
+Acknowledgment records retain selected evidence, rationale, identity, mode and time.
+Closure relying on an acknowledgment returns and records `completed_with_accepted_exceptions`
+in `status.closureOutcome` and the final report's `job.closureOutcome`, even without
+verification exceptions. Failed checks remain failed; unavailable checks remain
+unverified. Report failure leaves the job incomplete; fix reporting and retry
+`close` without rechecking settled evidence or repeating acknowledgment.
 
 Reports stream complete rows, findings, accepted exceptions and driver evidence,
 including settled inventories, into JSON, JSONL and HTML while hashing the bytes.
@@ -375,18 +396,19 @@ same artifact set and digests. Teams archive reports and packages are unchanged.
   `destination_drive_id`, `destination_name`, `destination_web_link`,
   `created_by_job`, `files`, `bytes`, `verification_outcome`,
   `outstanding_exceptions`, `accepted_exceptions`, `go_live_member_grants`,
-  `freeze_by`, `freeze_at`, `freeze_how`. Files and bytes are the latest completed
+  `freeze_by`, `freeze_at`, `freeze_how`, `go_live_pre_grant_check`, `go_live_check`,
+  `go_live_acknowledgments`. Files and bytes are the latest completed
   pass's recorded totals, not an inventory or a sum of attempts. Verification is
   `clean` or `findings` (acceptance does not turn findings into proof), or empty
-  before verification. Counts refer to the exception rows below and accepted
-  counts include advance acceptance. Go-live grants are a JSON array of the
+  before verification. Exception counts cover planned omissions and verification
+  findings, including advance acceptance, not go-live checks. Go-live grants are a JSON array of the
   recorded mapping/drive/member/timestamp objects; before-copy grants are not
   presented as go-live. Freeze cells contain the current final approval's human
   attestation, not an assertion that Migmate locked the source.
   A destination's planned creation name is available before execute, but
   `created_by_job` becomes `true` only once a created drive ID is recorded.
 - **`exceptions.csv`** has one row per current planned omission or verification
-  finding, including accepted exceptions without duplicating them. Columns:
+  finding, plus current failed/unavailable go-live checks. Accepted exceptions are not duplicated. Columns:
   `mapping_id`, `path`, `code`, `status`, `approver`, `note`, `reason`.
   Status is `outstanding`, `accepted in advance`, or `accepted`. Approver and note
   come from recorded acceptance (or the approval for an advance-accepted plan
@@ -394,8 +416,13 @@ same artifact set and digests. Teams archive reports and packages are unchanged.
   bound to the approved plan's options: later edits to `job.toml` cannot add or
   revoke it. Current-revision planned omissions remain present during execution
   and after verification, without duplicating omissions verification re-emits;
-  `mappings.csv` counts those same exceptions. With `proof = "rclone"`,
-  a single-cell disclosure row precedes the column header: **per-file omission
+  `mappings.csv` counts those same planned/verification exceptions.
+  Go-live rows retain the failed check code and recorded evidence in `reason`;
+  their status is `outstanding (failed)`, `outstanding (unverified)`,
+  `acknowledged (failed)` or `acknowledged (unverified)`. Acknowledged rows carry
+  the declared approver and shared rationale in `note`. Full check/decision records
+  are also retained in the mapping CSV and JSON/JSONL/HTML report.
+  With `proof = "rclone"`, a single-cell disclosure row precedes the column header: **per-file omission
   findings are not collected at this proof level**. CSV consumers must skip that
   first row for rclone-proof reports; full-proof reports start at the column header.
 
@@ -839,6 +866,7 @@ stdin/stderr), or use `migmate web --job "$ID"`:
 migmate approve --job "$ID"
 migmate accept --job "$ID"
 migmate close --job "$ID"
+migmate acknowledge --job "$ID" # selected post-grant failures; then separately retry close
 ```
 
 CLI and web capture the digest of the evidence actually displayed; humans never
@@ -871,10 +899,13 @@ migmate approve --job "$ID" --plan-digest "$PLAN_DIGEST" --approver "$CI_ID" --o
 migmate accept --job "$ID" --verification-digest "$VERIFY_DIGEST" --approver "$CI_ID" \
   --code size_mismatch --code content_mismatch --note "Reviewed discrepancy retained in archive" --output json
 migmate close --job "$ID" --close-digest "$CLOSE_DIGEST" --approver "$CI_ID" --output json
+migmate acknowledge --job "$ID" --go-live-digest "$GO_LIVE_DIGEST" --mapping finance \
+  --note "Reviewed the recorded membership discrepancy" --approver "$CI_ID" --output json
 ```
 
-Read `CLOSE_DIGEST` from `status.closeReview.evidenceDigest`. Noninteractive output
-never prompts or silently consents. New records label interaction mode as
+Read `CLOSE_DIGEST` from `status.closeReview.evidenceDigest` and `GO_LIVE_DIGEST`
+from `status.goLiveReview.evidenceDigest`; repeat `--mapping` for each selected
+failure. Noninteractive output never prompts or silently consents. New records label interaction mode as
 `interactive` or `unattended` and identity assurance as `declared_unverified`;
 legacy acceptances lacking mode are `legacy_unknown`. CI uses the same evidence,
 named-code and closure gates without claiming interactive questions were answered.

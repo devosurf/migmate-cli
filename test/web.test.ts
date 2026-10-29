@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { hostname, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -164,7 +165,236 @@ function noDefaultConsent(form: Element): void {
     assert.equal(attr(field, "checked"), undefined);
 }
 
+class RecoveryProvider extends FakeFileMigrationPort {
+  unavailableMember: string | null = null;
+
+  override async listDriveMembers(driveId: string) {
+    const members = await super.listDriveMembers(driveId);
+    if (members.some((member) => member.email === this.unavailableMember))
+      throw new TypeError("Post-grant membership observation unavailable");
+    return members;
+  }
+}
+
 describe("windowless native protocol", () => {
+  it("binds selected go-live failures to rendered evidence and authority, retaining durable decisions without auto-close", async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "migmate-web-go-live-recovery-"));
+    const fixture = fileFixture([
+      { id: "one", parentId: "source-root", name: "one", kind: "folder" },
+      { id: "two", parentId: "source-root", name: "two", kind: "folder" },
+      { id: "first", parentId: "one", name: "first.txt", kind: "file", content: "first" },
+      { id: "second", parentId: "two", name: "second.txt", kind: "file", content: "second" },
+    ]);
+    fixture.googleAbout = {
+      user: { emailAddress: "files@example.com" },
+      canCreateDrives: true,
+    };
+    const provider = new RecoveryProvider(fixture);
+    let engine = openEngine({ home, provider, adapter: "web" });
+    const created = await engine.initJob({
+      type: "file_migration",
+      config: { mappings: [], options: { memberGrants: "after_verification" } },
+    });
+    assert.ok(created.ok);
+    let session = new WebSession({ engine, job: created.value });
+    t.after(async () => {
+      await session.close();
+      engine.close();
+      rmSync(home, { recursive: true, force: true });
+    });
+    const loaded = await engine.withWriterResult(created.value, (writer) =>
+      writer.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: ["one", "two"].map((id) => ({
+            id,
+            source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+            destination: { type: "google_shared_drive", create: id },
+            members: [{ email: `${id}@example.test`, type: "group", role: "writer" }],
+          })),
+        }),
+      }),
+    );
+    assert.ok(loaded.ok);
+    await session.open();
+    let handle = createProtocolHandler({ session });
+    const view = async (stage = "close") =>
+      parse(await (await handle(new Request(`migmate://localhost/view?stage=${stage}`))).text());
+    const run = async (action: string, input: Record<string, unknown> = {}) => {
+      assert.equal((await handle(request(action, input, "close"))).status, 202);
+      await settled(session);
+    };
+    const current = async () => {
+      const result = await engine.reader(created.value).status();
+      assert.ok(result.ok);
+      return result.value;
+    };
+    const refused = async (input: Record<string, unknown>) => {
+      const before = (await current()).goLiveAcknowledgments;
+      await run("acknowledge", input);
+      const snapshot = await session.snapshot({ stage: "close", phase: "plan" });
+      assert.ok(snapshot.refusal);
+      assert.ok(
+        ["approval_digest_stale", "verification_unaccepted"].includes(snapshot.refusal.code),
+      );
+      assert.deepEqual((await current()).goLiveAcknowledgments, before);
+      await run("acquire");
+    };
+    await run("plan");
+    await run("approve", {
+      approver: "plan reviewer",
+      planDigest: capturedField(renderedForm(await view("approve"), "approve"), "planDigest"),
+      confirm: true,
+      confirmAccess: true,
+    });
+    await run("execute");
+    await run("verify");
+    await run("report");
+    const firstDrive = (await current()).createdDrives.find((drive) => drive.mappingId === "one");
+    assert.ok(firstDrive?.driveId);
+    const extraMember = { email: "<extra>@example.test", type: "user", role: "reader" };
+    await provider.addDriveMember(firstDrive.driveId, {
+      email: extraMember.email,
+      type: "user",
+      role: "reader",
+    });
+    provider.unavailableMember = "two@example.test";
+    await run("close", {
+      approver: "go-live reviewer",
+      evidenceDigest: capturedField(renderedForm(await view(), "close"), "evidenceDigest"),
+      confirmGoLive: true,
+    });
+    await run("acquire");
+    const initial = await current();
+    assert.equal(initial.goLiveReview?.checks.length, 2);
+    const initialAuthorization = initial.closeAuthorization;
+    let document = await view();
+    let form = renderedForm(document, "acknowledge");
+    noDefaultConsent(form);
+    assert.equal(attr(formField(form, "rationale"), "required"), "");
+    assert.equal(attr(formField(form, "approver"), "value"), "go-live reviewer");
+    assert.equal(elements(form, (element) => attr(element, "name") === "mappingIds").length, 2);
+    for (const failure of initial.goLiveReview!.checks) {
+      assert.ok(text(form).includes(failure.consequence));
+      assert.ok(text(form).includes(JSON.stringify(failure.check.evidence, null, 2)));
+      assert.ok(text(form).includes(failure.verificationAt));
+    }
+    assert.match(text(form), /unverified \(failed check\)/);
+    assert.equal(elements(form, (element) => element.tagName === "extra").length, 0);
+    assert.equal(attr(formField(renderedForm(document, "close"), "recovery"), "type"), "hidden");
+    const input = {
+      evidenceDigest: capturedField(form, "evidenceDigest"),
+      mappingIds: ["one"],
+      rationale: "  Retain the explicitly reviewed additional access <not a pass>  ",
+      approver: "recovery reviewer",
+      confirm: true,
+    };
+    for (const invalid of [
+      { ...input, mappingIds: [] },
+      { ...input, mappingIds: ["one", "one"] },
+      { ...input, rationale: " " },
+      { ...input, approver: " " },
+      { ...input, confirm: false },
+      { ...input, confirm: undefined },
+    ])
+      assert.equal((await handle(request("acknowledge", invalid, "close"))).status, 409);
+    assert.deepEqual((await current()).goLiveAcknowledgments, []);
+    await refused({ ...input, mappingIds: ["unknown"] });
+
+    // A later failed observation is not the evidence captured by the old form.
+    await provider.addDriveMember(firstDrive.driveId, {
+      email: extraMember.email,
+      type: "user",
+      role: "writer",
+    });
+    await run("close");
+    await run("acquire");
+    assert.notEqual((await current()).goLiveReview?.evidenceDigest, input.evidenceDigest);
+    await refused(input);
+    form = renderedForm(await view(), "acknowledge");
+    input.evidenceDigest = capturedField(form, "evidenceDigest");
+
+    // A rendered decision cannot authorize a changed deferred-access policy.
+    const configPath = join(home, "jobs", created.value.id, "job.toml");
+    const originalConfig = await readFile(configPath, "utf8");
+    await writeFile(configPath, originalConfig.replace("after_verification", "before_copy"));
+    assert.equal((await current()).goLiveReview, null);
+    await refused(input);
+    await writeFile(configPath, originalConfig);
+
+    const reviewed = (await current()).goLiveReview;
+    assert.ok(reviewed);
+    await run("acknowledge", input);
+    const acknowledged = await current();
+    assert.notEqual(acknowledged.state, "closed");
+    assert.equal(acknowledged.goLiveAcknowledgments?.length, 1);
+    const record = acknowledged.goLiveAcknowledgments![0]!;
+    assert.equal(record.evidenceDigest, input.evidenceDigest);
+    assert.equal(record.authorityDigest, reviewed.authorityDigest);
+    assert.deepEqual(
+      record.checks,
+      reviewed.checks.filter((check) => check.mappingId === "one"),
+    );
+    assert.equal(record.approver, input.approver);
+    assert.equal(record.rationale, input.rationale.trim());
+    assert.equal(record.mode, "interactive");
+    assert.equal(record.identityAssurance, "declared_unverified");
+    assert.ok(Number.isFinite(Date.parse(record.at)));
+    assert.equal(record.checks.length, 1);
+    assert.equal(record.checks[0]?.mappingId, "one");
+    assert.equal(record.checks[0]?.check.status, "failed");
+    assert.deepEqual(acknowledged.closeAuthorization, initialAuthorization);
+    assert.deepEqual(
+      acknowledged.goLiveReview?.checks.map((check) => check.mappingId),
+      ["two"],
+    );
+    assert.equal(acknowledged.incompleteClose?.checksPassed, false);
+    assert.equal(acknowledged.incompleteClose?.checksSettled, false);
+
+    // Old selection/digest cannot implicitly accept a remaining or already-settled check.
+    await refused({ ...input, mappingIds: ["two"] });
+    form = renderedForm(await view(), "acknowledge");
+    assert.equal(attr(formField(form, "approver"), "value"), input.approver);
+    noDefaultConsent(form);
+    const remainingDigest = capturedField(form, "evidenceDigest");
+    await refused({ ...input, evidenceDigest: remainingDigest, mappingIds: ["one"] });
+    await run("acknowledge", {
+      ...input,
+      evidenceDigest: remainingDigest,
+      mappingIds: ["two"],
+      rationale: "End the job without membership proof for this selected drive",
+    });
+    const decisions = (await current()).goLiveAcknowledgments;
+    assert.equal(decisions?.length, 2);
+    assert.equal((await current()).incompleteClose?.checksPassed, false);
+    assert.equal((await current()).incompleteClose?.checksSettled, true);
+    assert.notEqual((await current()).state, "closed");
+
+    await session.close();
+    engine.close();
+    engine = openEngine({ home, provider, adapter: "web" });
+    session = new WebSession({ engine, job: created.value });
+    await session.open();
+    handle = createProtocolHandler({ session });
+    assert.deepEqual((await current()).goLiveAcknowledgments, decisions);
+    document = await view();
+    assert.ok(text(document).includes(input.rationale.trim()));
+    assert.ok(text(document).includes("declared_unverified"));
+    assert.equal(
+      elements(document, (element) => attr(element, "data-action") === "acknowledge").length,
+      0,
+    );
+    await run("close");
+    const closed = await current();
+    assert.equal(closed.state, "closed");
+    assert.equal(closed.closureOutcome, "completed_with_accepted_exceptions");
+    assert.deepEqual(closed.goLiveAcknowledgments, decisions);
+    assert.ok(closed.createdDrives.every((drive) => drive.goLive?.check?.status === "failed"));
+    assert.deepEqual(closed.closeAuthorization, initialAuthorization);
+    assert.ok(text(await view()).includes(input.rationale.trim()));
+  });
+
   it("projects the ten-verb rail and unknown-denominator counts without inventing progress", async () => {
     const engine = readerEngine(status(), EMPTY);
     const session = new WebSession({ engine, job: JOB });
@@ -1001,7 +1231,7 @@ describe("windowless native protocol", () => {
       user: { emailAddress: "files@example.com" },
       canCreateDrives: true,
     };
-    const provider = new FakeFileMigrationPort(fixture);
+    const provider = new RecoveryProvider(fixture);
     const engine = openEngine({ home, provider, adapter: "web" });
     const created = await engine.initJob({
       type: "file_migration",
@@ -1084,11 +1314,7 @@ describe("windowless native protocol", () => {
     await run("execute");
     const closeForm = renderedForm(await view("close"), "close");
     noDefaultConsent(closeForm);
-    provider.scriptEffect({
-      method: "listFileHashes",
-      count: 1,
-      error: new TypeError("listing temporarily unavailable"),
-    });
+    provider.unavailableMember = "two@example.test";
     await run("close", {
       approver: "go-live reviewer",
       evidenceDigest: capturedField(closeForm, "evidenceDigest"),
@@ -1106,6 +1332,7 @@ describe("windowless native protocol", () => {
     assert.equal(attr(formField(recovery, "recovery"), "type"), "hidden");
     for (const name of ["confirmGoLive", "approver"])
       assert.equal(elements(recovery, (element) => attr(element, "name") === name).length, 0);
+    provider.unavailableMember = null;
     await run("close");
     projected = await engine.reader(created.value).status();
     assert.ok(projected.ok);
@@ -1187,6 +1414,7 @@ describe("windowless native protocol", () => {
         approve: unsupported,
         verify: unsupported,
         accept: unsupported,
+        acknowledgeGoLive: unsupported,
         report: unsupported,
         close: unsupported,
         cancel: unsupported,

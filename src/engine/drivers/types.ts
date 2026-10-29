@@ -1,4 +1,10 @@
-import type { CheckResult, CreatedDrive, MemberGrant, MappingPass } from "../types.ts";
+import type {
+  CheckResult,
+  CreatedDrive,
+  MemberGrant,
+  MappingPass,
+  GoLiveAcknowledgment,
+} from "../types.ts";
 import type { ProviderPort } from "../providers/port.ts";
 
 import type { CommitFinding, CommitRow, CommitUnit } from "../commit.ts";
@@ -24,6 +30,8 @@ export interface DriverResumeState extends ArchiveResumeState {
   mappingPasses?: MappingPass[];
   createdDrives?: CreatedDrive[];
   memberGrants?: MemberGrant[];
+  goLiveAcknowledgments?: GoLiveAcknowledgment[];
+  goLiveAuthorityDigest?: string;
 }
 
 export interface DriverContext<Cfg> {

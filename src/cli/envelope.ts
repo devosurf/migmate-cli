@@ -52,11 +52,22 @@ const enums: Record<string, readonly unknown[]> = {
   state: [...JOB_STATES, ...EXECUTION_TERMINAL_STATES, ...VERB_STATES],
   terminalState: [...EXECUTION_TERMINAL_STATES, null],
   outcome: [...EXECUTION_TERMINAL_STATES, ...CLOSURE_OUTCOMES],
+  closureOutcome: CLOSURE_OUTCOMES,
   mode: ["interactive", "unattended", "legacy_unknown", "copy", "mirror"],
   identityAssurance: ["declared_unverified"],
   format: ["json", "jsonl", "html", "csv"],
   unit: PROGRESS_UNITS,
-  status: ["pass", "fail", "skip", "pending", "running", "completed", "failed", "interrupted"],
+  status: [
+    "pass",
+    "passed",
+    "fail",
+    "skip",
+    "pending",
+    "running",
+    "completed",
+    "failed",
+    "interrupted",
+  ],
 };
 // Inspect only contract-bearing members. Arbitrary provider evidence, prose, and
 // code-specific detail are not new enum namespaces for the adapter to interpret.
@@ -73,6 +84,19 @@ export function knownContract(value: unknown): boolean {
       return false;
     if (Object.hasOwn(enums, key) && !enums[key]!.includes(entry)) return false;
     if (
+      key === "check" &&
+      typeof entry === "string" &&
+      ![
+        "drive_membership_mismatch",
+        "destination_drift",
+        "go_live_check_unavailable",
+        "membership_and_destination",
+        "destination",
+        "membership",
+      ].includes(entry)
+    )
+      return false;
+    if (
       [
         "value",
         "payload",
@@ -80,6 +104,7 @@ export function knownContract(value: unknown): boolean {
         "rows",
         "facets",
         "checks",
+        "check",
         "findings",
         "outstandingFindings",
         "rail",
@@ -96,6 +121,9 @@ export function knownContract(value: unknown): boolean {
         "acceptedExceptions",
         "closeReview",
         "closeAuthorization",
+        "goLiveReview",
+        "goLiveAcknowledgments",
+        "closure",
       ].includes(key) &&
       !knownContract(entry)
     )

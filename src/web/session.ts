@@ -125,7 +125,7 @@ export class WebSession {
   #validate({ action, input }: WebCommand): Outcome<true> {
     if (
       !VERBS.includes(action as Verb) &&
-      !["onboard", "accept", "reclaim", "acquire"].includes(action)
+      !["onboard", "accept", "acknowledge", "reclaim", "acquire"].includes(action)
     ) {
       return invalid("Unknown web action.");
     }
@@ -207,6 +207,22 @@ export class WebSession {
         )
           return invalid(
             "Acceptance requires explicitly selected registered exception groups, a common non-empty rationale, declared identity, captured verification digest, and confirmation; accept-all is not supported.",
+          );
+        break;
+      case "acknowledge":
+        if (
+          !exact(input, ["approver", "evidenceDigest", "mappingIds", "rationale", "confirm"]) ||
+          !text(input.approver) ||
+          !text(input.evidenceDigest) ||
+          !text(input.rationale) ||
+          input.confirm !== true ||
+          !Array.isArray(input.mappingIds) ||
+          input.mappingIds.length === 0 ||
+          input.mappingIds.some((mappingId: unknown) => !text(mappingId)) ||
+          new Set(input.mappingIds).size !== input.mappingIds.length
+        )
+          return invalid(
+            "Acknowledgment requires explicitly selected failed checks, a shared non-empty rationale, declared identity, captured evidence digest, and affirmative confirmation.",
           );
         break;
       case "cancel":
@@ -362,6 +378,15 @@ export class WebSession {
           result = outcome;
           break;
         }
+        case "acknowledge":
+          result = await writer.acknowledgeGoLive({
+            evidenceDigest: String(input.evidenceDigest),
+            mappingIds: input.mappingIds as string[],
+            rationale: String(input.rationale),
+            approver: String(input.approver),
+            mode: "interactive",
+          });
+          break;
         case "report":
           result = await writer.report();
           break;

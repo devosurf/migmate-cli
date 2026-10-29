@@ -57,7 +57,7 @@ function progress(snapshot: WebSnapshot): string {
   const archive = status?.archiveProgress;
   const passes = status?.mappingPasses ?? [];
   return `<dl class="progress"><dt>Durable state</dt><dd>${escapeHtml(status?.state ?? "unavailable")}</dd>
-    <dt>Terminal outcome</dt><dd>${escapeHtml(status?.terminalState ?? "not terminal")}</dd><dt>Resumable</dt><dd>${status?.resumable ? "Yes — re-invoke execute" : "No"}</dd>
+    <dt>Terminal outcome</dt><dd>${escapeHtml(status?.closureOutcome ?? status?.terminalState ?? "not terminal")}</dd><dt>Resumable</dt><dd>${status?.resumable ? "Yes — re-invoke execute" : "No"}</dd>
     ${value ? `<dt>${escapeHtml(value.unit)}</dt><dd>${escapeHtml(value.done)}${value.total === null ? " · total not known" : ` of ${escapeHtml(value.total)}`}</dd>` : passes.length ? "" : "<dt>Progress</dt><dd>No committed progress yet</dd>"}
     ${archive ? `<dt>Conversations</dt><dd>${archive.conversations} of ${archive.totalConversations}</dd><dt>Records</dt><dd>${archive.records}${archive.totalRecords === null ? " · total not known" : ` of ${archive.totalRecords}`}</dd><dt>Assets</dt><dd>${archive.assets}</dd><dt>Bytes</dt><dd>${archive.bytes}</dd>` : ""}</dl>
     ${passes.length ? `<section aria-label="Mapping copy progress"><h3>Mapping passes</h3><div class="table-scroll"><table><thead><tr><th>Mapping</th><th>Pass</th><th>State</th><th>Bytes</th><th>Files</th><th>Speed</th><th>Errors</th><th>Failure</th></tr></thead><tbody>${passes.map((pass) => `<tr><td>${escapeHtml(pass.mappingId)}</td><td>${escapeHtml(pass.passNumber)}</td><td>${escapeHtml(pass.status)}</td><td>${escapeHtml(pass.lastStats?.bytes ?? "—")}</td><td>${escapeHtml(pass.lastStats?.files ?? "—")}</td><td>${pass.lastStats ? `${escapeHtml(pass.lastStats.speed)} bytes/s` : "—"}</td><td>${escapeHtml(pass.lastStats?.errors ?? "—")}</td><td>${escapeHtml(pass.error ?? "—")}</td></tr>`).join("")}</tbody></table></div></section>` : ""}`;
@@ -98,10 +98,27 @@ function decisionRecords(snapshot: WebSnapshot): string {
       value: status?.acceptedExceptions?.length ? status.acceptedExceptions : null,
     },
     { title: "Go-live authorization", value: status?.closeAuthorization },
+    {
+      title: "Go-live failure acknowledgments · failed checks remain failed",
+      value: status?.goLiveAcknowledgments?.length ? status.goLiveAcknowledgments : null,
+    },
   ].filter((record) => record.value);
   return records.length
     ? `<section aria-label="Recorded local attestations"><h3>Recorded local attestations · identities unverified</h3>${records.map((record) => `<details open><summary>${record.title}</summary><pre>${escapeHtml(JSON.stringify(record.value, null, 2))}</pre></details>`).join("")}</section>`
     : "";
+}
+
+function goLiveRecovery(snapshot: WebSnapshot, disabled: boolean): string {
+  const status = snapshot.status;
+  const review = status?.goLiveReview;
+  const incomplete = status?.incompleteClose;
+  const progress = incomplete
+    ? `<h3>Close recovery</h3><p>All checks passed: ${incomplete.checksPassed ? "Yes" : "No"}. All checks settled (passed or exactly acknowledged): ${incomplete.checksSettled ? "Yes" : "No"}. Acknowledgment never changes a failed check into a pass.</p>`
+    : "";
+  if (!review?.checks.length) return progress;
+  return `${progress}<section aria-label="Post-grant failure review"><h3>Acknowledge selected go-live failures</h3><p>Access may already be live. Keeping this job open does not revoke access. This decision accepts only the selected recorded failures; it does not repair permissions or content, authorize new grants, or close the job. Missing or incomplete grants and checks still require recovery. Resume close separately after reviewing the recorded decision.</p>
+    ${actionForm("acknowledge", "Acknowledge selected failures", disabled || status?.state === "closed", `<input type="hidden" name="evidenceDigest" value="${escapeHtml(review.evidenceDigest)}">${review.checks.map((failure) => `<section class="check"><h4>${escapeHtml(failure.mappingId)} · <code>${escapeHtml(failure.check.check)}</code> · ${failure.check.check === "go_live_check_unavailable" ? "unverified (failed check)" : "failed"}</h4><dl><dt>Drive</dt><dd>${escapeHtml(failure.driveId)}</dd><dt>Go-live fence</dt><dd>${escapeHtml(failure.startedAt)}</dd><dt>Revision / original verification baseline</dt><dd>${failure.revision} / ${escapeHtml(failure.verificationAt)}</dd><dt>Check observed at</dt><dd>${escapeHtml(failure.check.at)}</dd></dl><p>${escapeHtml(failure.consequence)}</p><h4>Recorded evidence · expected and observed where available</h4><pre>${escapeHtml(JSON.stringify(failure.check.evidence, null, 2))}</pre><label class="confirmation"><input type="checkbox" name="mappingIds" value="${escapeHtml(failure.mappingId)}">Select this exact failed check</label></section>`).join("")}<label>Shared rationale for the selected failures<textarea name="rationale" required rows="3"></textarea></label>${declaredIdentity(snapshot)}<label class="confirmation"><input type="checkbox" name="confirm" required><span data-check-confirmation>I acknowledge 0 selected failed checks and their disclosed consequences with this rationale.</span></label>`)}
+    </section>`;
 }
 
 function stagePanel(snapshot: WebSnapshot, query: ViewQuery): string {
@@ -157,7 +174,7 @@ function stagePanel(snapshot: WebSnapshot, query: ViewQuery): string {
               disabled || !review || status?.state === "closed",
               `${declaredIdentity(snapshot)}<input type="hidden" name="evidenceDigest" value="${escapeHtml(review?.evidenceDigest ?? "")}"><label class="confirmation"><input type="checkbox" name="confirmGoLive" required>I have reviewed the pre-close report and exceptions and authorize the listed go-live access consequences.</label>`,
             )
-      }${progress(snapshot)}`;
+      }${goLiveRecovery(snapshot, disabled)}${progress(snapshot)}`;
     }
     case "cancel":
       return `<h2>cancel · Terminal stop</h2><p>Cancellation is irreversible for this job and never rolls back or deletes destination writes. To interrupt a run resumably, quit the owning process instead.</p>${actionForm("cancel", "Cancel job permanently", disabled, '<label>Reason<textarea name="reason" required rows="3"></textarea></label><label class="confirmation"><input type="checkbox" name="confirm" required>I understand this is a terminal cancellation, not an interruption or undo.</label>')}`;
@@ -175,7 +192,7 @@ export function renderView(snapshot: WebSnapshot, query: ViewQuery): string {
   const refusal = snapshot.refusal;
   const recovery = refusal?.recovery;
   const holder = status?.ownership;
-  return `<div id="workspace" data-access="${readOnly ? "read-only" : "writer"}" data-busy="${escapeHtml(snapshot.busy ?? "")}" data-plan-digest="${escapeHtml(status?.planDigest ?? "")}" data-verification-digest="${escapeHtml(status?.verificationDigest ?? "")}" data-close-digest="${escapeHtml(status?.closeReview?.evidenceDigest ?? "")}">
+  return `<div id="workspace" data-access="${readOnly ? "read-only" : "writer"}" data-busy="${escapeHtml(snapshot.busy ?? "")}" data-plan-digest="${escapeHtml(status?.planDigest ?? "")}" data-verification-digest="${escapeHtml(status?.verificationDigest ?? "")}" data-close-digest="${escapeHtml(status?.closeReview?.evidenceDigest ?? "")}" data-go-live-digest="${escapeHtml(status?.goLiveReview?.evidenceDigest ?? "")}">
     <header><div><span class="eyebrow">MIGMATE · ${escapeHtml(status?.jobType ?? "job")}</span><h1>${escapeHtml(snapshot.job.id)}</h1></div><p data-ownership>${escapeHtml(ownership)}</p></header>
     <div class="layout"><nav aria-label="Job lifecycle"><ol>${VERBS.map((verb) => `<li><button type="button" data-stage="${verb}"${query.stage === verb ? ' aria-current="step"' : ""}><span>${verb}</span><small>${escapeHtml(status?.rail.find((entry) => entry.verb === verb)?.state ?? "pending")}</small></button></li>`).join("")}</ol></nav>
     <main id="stage" aria-live="polite">${

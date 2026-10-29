@@ -39,6 +39,19 @@ export interface MappingPass {
   uploadQuota?: UploadQuotaStop;
 }
 
+export interface GoLiveCheck {
+  at: string;
+  status: "passed" | "failed";
+  check:
+    | "drive_membership_mismatch"
+    | "destination_drift"
+    | "go_live_check_unavailable"
+    | "membership_and_destination"
+    | "destination"
+    | "membership";
+  evidence: Record<string, unknown>;
+}
+
 export interface CreatedDrive {
   mappingId: string;
   requestId: string;
@@ -53,16 +66,13 @@ export interface CreatedDrive {
     startedAt: string;
     revision: number;
     verificationAt: string;
-    check?: {
-      at: string;
-      status: "passed" | "failed";
-      check:
-        | "drive_membership_mismatch"
-        | "destination_drift"
-        | "go_live_check_unavailable"
-        | "membership_and_destination";
-      evidence: Record<string, unknown>;
-    };
+    check?: GoLiveCheck;
+  };
+  /** Point-in-time destination proof before this batch's first fence or grant. */
+  preGrantCheck?: {
+    revision: number;
+    verificationAt: string;
+    check: GoLiveCheck;
   };
   /** Listing observed by the latest verification; never rebased once go-live starts. */
   verifiedDestination?: {
@@ -325,6 +335,30 @@ export interface CloseAuthorization {
   at: string;
 }
 
+export interface GoLiveFailure {
+  mappingId: string;
+  driveId: string;
+  startedAt: string;
+  revision: number;
+  verificationAt: string;
+  check: GoLiveCheck;
+  consequence: string;
+}
+
+export interface GoLiveReview {
+  evidenceDigest: string;
+  authorityDigest: string;
+  checks: GoLiveFailure[];
+}
+
+export interface GoLiveAcknowledgment extends GoLiveReview {
+  rationale: string;
+  approver: string;
+  mode: "interactive" | "unattended";
+  identityAssurance: "declared_unverified";
+  at: string;
+}
+
 export interface ApprovalAuthority {
   mirrorChanges: {
     mappingId: string;
@@ -375,6 +409,7 @@ export interface Closure {
   state: "closed" | "cancelled";
   at: string;
   acceptedExceptions: string[];
+  goLiveAcknowledgments?: GoLiveAcknowledgment[];
   outcome?: ClosureOutcome;
   reason?: string;
 }
@@ -477,6 +512,8 @@ export interface JobStatus {
   acceptedExceptions?: AcceptedException[];
   closeReview?: { evidenceDigest: string; consequences: string[]; authorized: boolean } | null;
   closeAuthorization?: CloseAuthorization | null;
+  goLiveReview?: GoLiveReview | null;
+  goLiveAcknowledgments?: GoLiveAcknowledgment[];
   verificationDigest: string | null;
   progress: Progress | null;
   mappingPasses: MappingPass[];
@@ -487,6 +524,8 @@ export interface JobStatus {
     accessMayExist: true;
     transfersFenced: true;
     checksPassed: boolean;
+    /** Failed/unavailable checks remain failed, even when explicitly acknowledged. */
+    checksSettled?: boolean;
     reporting: "unfinished" | "complete";
     nextAction: "close";
   };
@@ -495,6 +534,7 @@ export interface JobStatus {
   worker: { active: boolean; group: string | null };
   resumable: boolean;
   terminalState: TerminalState | null;
+  closureOutcome?: ClosureOutcome;
   archiveProgress?: {
     conversations: number;
     totalConversations: number;
