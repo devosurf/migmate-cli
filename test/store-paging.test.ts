@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { it, type TestContext } from "node:test";
 import { fileMigrationDriver } from "../src/engine/drivers/file-migration.ts";
 import { openEngine } from "../src/engine/index.ts";
@@ -324,6 +325,7 @@ for (const ending of ["complete", "abort", "read-failure"] as const)
             checkpoint: id,
             rows: [row],
             findings: [],
+            watermark: { unitKey: id, value: id },
           };
         }
         if (ending === "abort") {
@@ -353,4 +355,16 @@ for (const ending of ["complete", "abort", "read-failure"] as const)
       Array.from({ length: 260 }, (_, index) => `batch-${index}`),
     );
     assert.equal(value(await engine.reader(ref).status()).lastCheckpoint, "batch-259");
+    const db = new DatabaseSync(join(home, "jobs", ref.id, "state.db"), { readOnly: true });
+    try {
+      assert.equal(
+        Number(
+          db.prepare("SELECT COUNT(*) AS count FROM watermark WHERE unit_key LIKE 'batch-%'").get()!
+            .count,
+        ),
+        260,
+      );
+    } finally {
+      db.close();
+    }
   });

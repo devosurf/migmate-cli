@@ -20,7 +20,8 @@ it(
     assert.equal(result.files, 6003);
     assert.equal(result.mappings, 3);
     assert.ok(result.peakHeap < 192 * 1024 * 1024);
-    assert.ok(result.listingRecords >= 6003 * 8);
+    // Two comparisons (both sides), verification (both sides), pre-grant drift check.
+    assert.ok(result.listingRecords >= 6003 * 7);
     assert.ok(result.reportRows >= 6003);
     t.diagnostic(stdout.trim());
   },

@@ -1492,7 +1492,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
             coveragePage++,
           ]);
           coverageRow.fileScope = { mapOnly: true, verification: { scope: "full", coveredPaths } };
-          yield commit(ctx, "verify", coverageRow, [], "verification-coverage", ++done);
+          yield commit(ctx, "verify", coverageRow, [], coverageRow.id, ++done);
           coveredPaths = [];
         }
       }
@@ -1500,7 +1500,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         const coverageRow = row(ctx, "verify", mapping, root, "unchanged");
         coverageRow.id = JSON.stringify([mapping.id, root.id, "verify", "coverage", coveragePage]);
         coverageRow.fileScope = { mapOnly: true, verification: { scope: "full", coveredPaths } };
-        yield commit(ctx, "verify", coverageRow, [], "verification-coverage", ++done);
+        yield commit(ctx, "verify", coverageRow, [], coverageRow.id, ++done);
       }
       coverage[Symbol.dispose]();
       const latest = (ctx.resume.mappingPasses ?? [])

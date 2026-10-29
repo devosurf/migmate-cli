@@ -2175,7 +2175,7 @@ function makeWriter(
               "mappings" in config &&
               !unit.assets?.length &&
               !unit.archiveFiles?.length &&
-              !unit.watermark &&
+              (unit.rows.length > 0 || unit.findings.length > 0) &&
               !unit.mappingPass &&
               !unit.createdDrive &&
               !unit.memberGrant
