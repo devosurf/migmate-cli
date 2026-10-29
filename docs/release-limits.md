@@ -10,6 +10,9 @@ pair; saved file configs name both providers. An explicit `route` in a new file
 config refuses `configuration_invalid`: replace it with the two provider fields
 above (swap the values for reverse jobs). Historical persisted file routes are
 decoded read-only and preserved, so historical status and reports remain readable.
+Recorded close authorizations and go-live acknowledgments keep the frozen plan's original
+configuration-digest encoding. Equivalent provider-pair spelling preserves their authority;
+changes to the current authority-bearing settings still invalidate it.
 Teams archives keep `route = "teams_global_archive"`.
 
 Shared member roles are `reader`, `writer`, and `manager`. Google keeps the first

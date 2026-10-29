@@ -242,7 +242,10 @@ An empty config defaults to the forward pair; saved file configs name both provi
 New file configs containing `route` refuse `configuration_invalid`: replace that
 field with `sourceProvider` and `destinationProvider` as shown above, rather than
 renaming its old value. Historical persisted `job.toml` route values are decoded
-without rewriting them; historical status and reports remain readable.
+without rewriting them; historical status and reports remain readable. Their recorded
+close authorizations and go-live acknowledgments retain the frozen plan's original
+digest encoding. Equivalent provider-pair spelling preserves those bindings; changing
+the current authority-bearing settings does not.
 Teams archives retain `route = "teams_global_archive"`.
 
 ### Mapping manifests
@@ -494,9 +497,9 @@ item rows.
 
 ### Google Shared Drives to SharePoint
 
-A job whose top-level TOML sets `route = "shared_drive_to_sharepoint_library"` copies
-Google Shared Drive folders into existing SharePoint document libraries or folders.
-The route (default `sharepoint_library_to_shared_drive`) fixes one direction for the
+A job whose top-level TOML sets `sourceProvider = "google_shared_drive"` and
+`destinationProvider = "sharepoint"` copies Google Shared Drive folders into existing
+SharePoint document libraries or folders. The provider pair fixes one direction for the
 whole job and is frozen into the plan and report: `manifest load` refuses any row in the
 other direction, including every row of a mixed manifest, with its row and `source.type`.
 Each reverse mapping looks like:

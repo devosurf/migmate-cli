@@ -131,7 +131,7 @@ export function parseManifest(
   try {
     raw = format === "csv" ? csv(content) : JSON.parse(content);
   } catch (error) {
-    if (error instanceof ManifestError) throw error;
+    if (error instanceof ManifestError || error instanceof ProviderFault) throw error;
     throw new ManifestError(0, "json");
   }
   function object(

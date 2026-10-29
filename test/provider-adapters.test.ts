@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { parse, stringify } from "smol-toml";
-import { openEngine } from "../src/engine/index.ts";
+import { openEngine, type JobStatus } from "../src/engine/index.ts";
 import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
 import { fileConfig, fileFixture, value, approve } from "./engine-fixture.ts";
 
@@ -180,4 +180,172 @@ test("route-named stored configuration and frozen plan remain readable without r
   assert.ok(json);
   assert.match(await readFile(json.path, "utf8"), /sharepoint_library_to_shared_drive/);
   assert.equal(await readFile(configPath, "utf8"), legacyToml);
+});
+
+const manifestFormats: Array<"json" | "csv"> = ["json", "csv"];
+for (const format of manifestFormats) {
+  test(`unsupported manifest provider pairs retain their refusal in ${format}`, async (t) => {
+    const h = await harness(t);
+    for (const [source, destination] of [
+      ["dropbox", "google_shared_drive"],
+      ["google_shared_drive", "dropbox"],
+      ["sharepoint", "sharepoint"],
+      ["google_shared_drive", "google_shared_drive"],
+    ]) {
+      const content =
+        format === "json"
+          ? JSON.stringify({
+              version: 1,
+              mappings: [
+                {
+                  id: "mapping",
+                  source: { type: source, driveId: "source-drive", folderId: "source-root" },
+                  destination: {
+                    type: destination,
+                    driveId: "destination-drive",
+                    folderId: "destination-root",
+                  },
+                },
+              ],
+            })
+          : [
+              "id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members,source.folderId,destination.folderPath",
+              [
+                "mapping",
+                source,
+                "source-drive",
+                "",
+                destination,
+                "destination-drive",
+                "destination-root",
+                "",
+                "",
+                "source-root",
+                "",
+              ].join(","),
+            ].join("\n");
+      const result = await h.engine.withWriterResult(h.ref, (writer) =>
+        writer.loadManifest({ format, content }),
+      );
+      assert.equal(result.ok, false);
+      if (result.ok) throw new Error("Unsupported pair accepted");
+      assert.equal(result.refusal.code, "unsupported_route", `${source} → ${destination}`);
+    }
+  });
+}
+
+async function historicalGoLiveHarness(t: TestContext) {
+  // Captured by running a315893's real lifecycle through authorization and acknowledgment.
+  // Restore evidence, not recomputed expected digests from the current implementation.
+  const legacy: {
+    config: string;
+    status: Pick<
+      JobStatus,
+      | "jobId"
+      | "planDigest"
+      | "verificationDigest"
+      | "currentApproval"
+      | "closeAuthorization"
+      | "goLiveAcknowledgments"
+      | "closeReview"
+      | "goLiveReview"
+      | "createdDrives"
+      | "incompleteClose"
+    >;
+    tables: Record<string, Array<Record<string, string | number | null>>>;
+  } = JSON.parse(
+    await readFile(new URL("./fixtures/route-named-go-live.json", import.meta.url), "utf8"),
+  );
+  const h = await harness(t);
+  const initialDirectory = join(h.home, "jobs", h.ref.id);
+  const database = new DatabaseSync(join(initialDirectory, "state.db"));
+  try {
+    const host = database.prepare("SELECT host_id FROM job").get()!.host_id;
+    assert.ok(typeof host === "string");
+    database.exec("PRAGMA foreign_keys=OFF; BEGIN");
+    for (const table of database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .all())
+      database.exec(`DELETE FROM "${String(table.name)}"`);
+    for (const [table, rows] of Object.entries(legacy.tables))
+      for (const row of rows) {
+        const columns = Object.keys(row);
+        database
+          .prepare(
+            `INSERT INTO "${table}" (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
+          )
+          .run(...Object.values(row));
+      }
+    database.prepare("UPDATE job SET host_id=?").run(host);
+    database.exec("COMMIT");
+  } finally {
+    database.close();
+  }
+  const directory = join(h.home, "jobs", legacy.status.jobId);
+  await rename(initialDirectory, directory);
+  h.ref.id = legacy.status.jobId;
+  await writeFile(join(directory, "job.toml"), legacy.config, { mode: 0o600 });
+  return { ...h, directory, legacy };
+}
+
+test("historical close authorization and acknowledged go-live failures retain their interpretation", async (t) => {
+  const h = await historicalGoLiveHarness(t);
+  const status = value(await h.engine.reader(h.ref).status());
+  assert.deepEqual(status.closeReview, h.legacy.status.closeReview);
+  assert.deepEqual(status.closeAuthorization, h.legacy.status.closeAuthorization);
+  assert.deepEqual(status.goLiveAcknowledgments, h.legacy.status.goLiveAcknowledgments);
+  assert.deepEqual(status.goLiveReview, h.legacy.status.goLiveReview);
+  assert.equal(status.planDigest, h.legacy.status.planDigest);
+  assert.equal(status.verificationDigest, h.legacy.status.verificationDigest);
+  assert.deepEqual(status.currentApproval, h.legacy.status.currentApproval);
+  const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+  const reportJson = report.artifacts.find((artifact) => artifact.name === "report.json")!;
+  const json = JSON.parse(await readFile(reportJson.path, "utf8"));
+  const goLive = JSON.parse(
+    json.sections.find((section: { title: string }) => section.title === "Go-live").body,
+  );
+  assert.equal(goLive.checksSettled, true);
+  assert.equal(goLive.checksPassed, false);
+  assert.deepEqual(goLive.acknowledgments, h.legacy.status.goLiveAcknowledgments);
+  const exceptions = report.artifacts.find((artifact) => artifact.name === "exceptions.csv")!;
+  assert.match(await readFile(exceptions.path, "utf8"), /acknowledged \(failed\)/);
+  assert.equal(await readFile(join(h.directory, "job.toml"), "utf8"), h.legacy.config);
+});
+
+test("historical authorization survives equivalent provider-pair config and closes without another decision", async (t) => {
+  const h = await historicalGoLiveHarness(t);
+  const configuration = parse(h.legacy.config);
+  delete configuration.route;
+  configuration.sourceProvider = "sharepoint";
+  configuration.destinationProvider = "google_shared_drive";
+  await writeFile(join(h.directory, "job.toml"), stringify(configuration), { mode: 0o600 });
+  const before = value(await h.engine.reader(h.ref).status());
+  assert.equal(before.closeReview?.evidenceDigest, h.legacy.status.closeReview?.evidenceDigest);
+  assert.equal(before.closeReview?.authorized, true);
+  const closed = value(await h.engine.withWriterResult(h.ref, (writer) => writer.close()));
+  assert.equal(closed.outcome, "completed_with_accepted_exceptions");
+  const after = value(await h.engine.reader(h.ref).status());
+  assert.equal(after.state, "closed");
+  assert.equal(after.planDigest, h.legacy.status.planDigest);
+  assert.equal(after.verificationDigest, h.legacy.status.verificationDigest);
+  assert.deepEqual(after.currentApproval, h.legacy.status.currentApproval);
+  assert.deepEqual(after.closeAuthorization, h.legacy.status.closeAuthorization);
+  assert.deepEqual(after.goLiveAcknowledgments, h.legacy.status.goLiveAcknowledgments);
+});
+
+test("historical authorization does not ignore current option changes", async (t) => {
+  const h = await historicalGoLiveHarness(t);
+  const configuration = parse(h.legacy.config);
+  assert.ok(configuration.options && typeof configuration.options === "object");
+  Object.assign(configuration.options, { verificationMode: "hash" });
+  await writeFile(join(h.directory, "job.toml"), stringify(configuration), { mode: 0o600 });
+  const status = value(await h.engine.reader(h.ref).status());
+  assert.equal(status.closeReview?.authorized, false);
+  assert.notEqual(status.closeReview?.evidenceDigest, h.legacy.status.closeReview?.evidenceDigest);
+  assert.deepEqual(status.closeAuthorization, h.legacy.status.closeAuthorization);
+  assert.deepEqual(status.goLiveAcknowledgments, h.legacy.status.goLiveAcknowledgments);
+  const result = await h.engine.withWriterResult(h.ref, (writer) => writer.close());
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("Changed historical configuration accepted");
+  assert.equal(result.refusal.code, "plan_revision_required");
 });

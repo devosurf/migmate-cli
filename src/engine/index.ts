@@ -1220,36 +1220,45 @@ function contentDigest(rows: unknown[]): string {
     hash.update(row).update("\n");
   return hash.digest("hex");
 }
-/** The authority-bearing configuration, excluding credentials and runtime progress. */
-function configurationAuthority(config: JobConfig): string {
-  const settings =
-    "mappings" in config
-      ? {
-          mappings: config.mappings,
-          options: config.options,
-          ...(config.manifestDigest ? { manifestDigest: config.manifestDigest } : {}),
-          sourceProvider: config.sourceProvider,
-          destinationProvider: config.destinationProvider,
-        }
-      : {
-          scopes: config.scopes,
-          cloud: config.cloud,
-          window: config.window,
-          timezone: config.timezone,
-          retainedHistory: config.retainedHistory,
-          transcripts: config.transcripts,
-          attachmentBytes: config.attachmentBytes,
-          lineage: config.lineage,
-          ...(config.destination ? { destination: config.destination } : {}),
-          route: config.route,
-        };
-  return canonicalJson(settings);
+/** Reproduce a frozen plan's encoding while still binding the current semantic settings. */
+function configurationAuthority(config: JobConfig, frozenConfiguration?: string): string {
+  if ("mappings" in config) {
+    const route: unknown = frozenConfiguration
+      ? JSON.parse(frozenConfiguration).route
+      : config.route;
+    const legacyPair = historicalProviderPair(route);
+    const pair = fileProviderPair(config);
+    const sameLegacyPair =
+      legacyPair?.sourceProvider === pair.source.id &&
+      legacyPair.destinationProvider === pair.destination.id;
+    return canonicalJson({
+      mappings: config.mappings,
+      options: config.options,
+      ...(config.manifestDigest ? { manifestDigest: config.manifestDigest } : {}),
+      ...(sameLegacyPair
+        ? { route }
+        : { sourceProvider: pair.source.id, destinationProvider: pair.destination.id }),
+    });
+  }
+  return canonicalJson({
+    scopes: config.scopes,
+    cloud: config.cloud,
+    window: config.window,
+    timezone: config.timezone,
+    retainedHistory: config.retainedHistory,
+    transcripts: config.transcripts,
+    attachmentBytes: config.attachmentBytes,
+    lineage: config.lineage,
+    ...(config.destination ? { destination: config.destination } : {}),
+    route: config.route,
+  });
 }
 function inputFields(
   config: JobConfig,
   evidence: BoundEvidence,
   rows: CommitRow[],
   archivePlan: unknown,
+  frozenConfiguration?: string,
 ): Record<string, string> {
   const scopes = rows
     .filter((r) => r.jobType === "file_migration" && r.phase === "plan" && r.fileScope)
@@ -1263,7 +1272,7 @@ function inputFields(
     .sort();
   const { binaryPath: _path, ...binding } = evidence;
   return {
-    configuration: configurationAuthority(config),
+    configuration: configurationAuthority(config, frozenConfiguration),
     identity: canonicalJson(binding),
     scope: canonicalJson(scopes),
     archive: canonicalJson(semantic(archivePlan ?? null)),
@@ -1293,7 +1302,7 @@ function closeReview(store: Store, config: JobConfig) {
     approvalDigest: approval.approvalDigest,
     verificationDigest: verification.verificationDigest,
     acceptedExceptions: store.readAcceptances(verification.verificationDigest),
-    configuration: configurationAuthority(bindingConfig),
+    configuration: configurationAuthority(bindingConfig, plan.inputs.configuration),
   });
   const deferred =
     "mappings" in config && memberGrantTiming(approvedOptions(plan)) === "after_verification";
@@ -2659,6 +2668,7 @@ function makeWriter(
           evidence,
           store.readAllRows(plan.revision, "plan"),
           resume.archivePlan,
+          plan.inputs.configuration,
         );
         if (digestJson(currentInputs) !== plan.inputsDigest)
           return refuse(
@@ -2965,6 +2975,7 @@ function makeWriter(
                 readBoundEvidence(plan.evidence),
                 store.readAllRows(revision, "plan"),
                 undefined,
+                plan.inputs.configuration,
               ),
             ) !== plan.inputsDigest
           )
@@ -3067,7 +3078,13 @@ function makeWriter(
               const bound = readBoundEvidence(plan.evidence);
               if (
                 digestJson(
-                  inputFields(config, evidence, store.readAllRows(revision, "plan"), undefined),
+                  inputFields(
+                    config,
+                    evidence,
+                    store.readAllRows(revision, "plan"),
+                    undefined,
+                    plan.inputs.configuration,
+                  ),
                 ) !== plan.inputsDigest
               )
                 return refuse(
