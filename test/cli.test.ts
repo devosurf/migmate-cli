@@ -30,7 +30,7 @@ import {
   type ExecuteResult,
   type ArtifactSet,
 } from "../src/engine/index.ts";
-import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
+import { FakeFileMigrationPort, type FakeSourceItemFixture } from "../src/engine/providers/fake.ts";
 import { cliFixture, CLI_JOB_CONFIG } from "./cli-fixture.ts";
 import { discoverSharePoint, type SharePointDiscovery } from "../src/engine/providers/discovery.ts";
 import type { GraphTransport } from "../src/engine/providers/http.ts";
@@ -180,14 +180,27 @@ async function planned(t: TestContext) {
   return { ...h, id, plan: plan.value };
 }
 
-async function verifiedDecisionJob(t: TestContext, deferred = false) {
+async function verifiedDecisionJob(t: TestContext, deferred = false, mappingIds = ["map-1"]) {
   const fixture = cliFixture(deferred ? 1 : 0);
-  if (deferred)
+  if (deferred) {
     fixture.googleAbout = {
       user: { emailAddress: "files@example.com" },
       canCreateDrives: true,
     };
-  else
+    if (mappingIds.length > 1)
+      fixture.sourceItems.push(
+        ...mappingIds.flatMap((_, index): FakeSourceItemFixture[] => [
+          { id: `folder-${index}`, parentId: "src-root", name: `folder-${index}`, kind: "folder" },
+          {
+            id: `folder-${index}-file`,
+            parentId: `folder-${index}`,
+            name: "file.txt",
+            kind: "file",
+            content: `folder-${index}`,
+          },
+        ]),
+      );
+  } else
     fixture.sourceItems.push(
       { id: "notebook", parentId: "src-root", name: "Notebook", kind: "package" },
       { id: "excluded", parentId: "src-root", name: "Excluded", kind: "package" },
@@ -216,14 +229,22 @@ async function verifiedDecisionJob(t: TestContext, deferred = false) {
               format: "json",
               content: JSON.stringify({
                 version: 1,
-                mappings: [
-                  {
-                    id: "map-1",
-                    source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
-                    destination: { type: "google_shared_drive", create: "Reviewed destination" },
-                    members: [{ email: "reviewers@example.com", type: "group", role: "writer" }],
+                mappings: mappingIds.map((id, index) => ({
+                  id,
+                  source: {
+                    type: "sharepoint",
+                    driveId: "src-drive",
+                    folderPath: mappingIds.length > 1 ? `folder-${index}` : "",
                   },
-                ],
+                  destination: {
+                    type: "google_shared_drive",
+                    create:
+                      mappingIds.length > 1
+                        ? `Reviewed destination ${index}`
+                        : "Reviewed destination",
+                  },
+                  members: [{ email: "reviewers@example.com", type: "group", role: "writer" }],
+                })),
               }),
             })
           ).ok,
@@ -1318,12 +1339,18 @@ it("initial close records only confirmed current evidence and authorized recover
     const before = document<JobStatus>(
       await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
     ).value;
-    if (scenario === "recovery")
-      h.provider.scriptEffect({
-        method: "listFileHashes",
-        count: 1,
-        error: new TypeError("listing temporarily unavailable"),
-      });
+    if (scenario === "recovery") {
+      const listMembers = h.provider.listDriveMembers.bind(h.provider);
+      let unavailable = true;
+      h.provider.listDriveMembers = async (driveId) => {
+        const members = await listMembers(driveId);
+        if (unavailable && members.some((member) => member.email === "reviewers@example.com")) {
+          unavailable = false;
+          throw new TypeError("membership temporarily unavailable");
+        }
+        return members;
+      };
+    }
     const flags =
       scenario === "unattended"
         ? [
@@ -1388,6 +1415,298 @@ it("initial close records only confirmed current evidence and authorized recover
       ),
     );
   }
+});
+
+async function failedGoLiveJob(t: TestContext, mappingIds?: string[]) {
+  const h = await verifiedDecisionJob(t, true, mappingIds);
+  h.provider.listDriveMembers = async () => [];
+  const result = await invoke(["close", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: ["", "yes"],
+  });
+  assert.equal(result.code, 4);
+  const status = document<JobStatus>(
+    await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+  ).value;
+  assert.ok(status.goLiveReview?.checks.length);
+  return { ...h, status };
+}
+
+it("acknowledge selects displayed failure numbers, so every valid mapping ID is selectable", async (t) => {
+  const ids = ["Finance, Europe", "  Padded  "];
+  const h = await failedGoLiveJob(t, ids);
+  const review = h.status.goLiveReview!;
+  assert.deepEqual(review.checks.map((check) => check.mappingId).sort(), [...ids].sort());
+  for (const selection of ["Finance, Europe", "0", "3", "1,3", "1.5", "1,,x"]) {
+    const refused = await invoke(["acknowledge", "--job", h.id], h.engine(), {
+      tty: [true, false, true],
+      answers: [selection],
+    });
+    assert.equal(refused.code, 4);
+    assert.equal(refused.prompts, 1);
+  }
+  const comma = review.checks.findIndex((check) => check.mappingId === "Finance, Europe") + 1;
+  const first = await invoke(["acknowledge", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: [` ${comma} `, "Reviewed missing access", "", "yes"],
+  });
+  assert.equal(first.code, 0);
+  for (const [index, check] of review.checks.entries())
+    assert.ok(first.stderr.includes(`${index + 1}. ${JSON.stringify(check.mappingId)}`));
+  const second = await invoke(["acknowledge", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: ["1", "Reviewed missing access", "", "yes"],
+  });
+  assert.equal(second.code, 0);
+  const after = document<JobStatus>(
+    await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+  ).value;
+  assert.deepEqual(
+    after.goLiveAcknowledgments?.map((record) => record.checks.map((check) => check.mappingId)),
+    [["Finance, Europe"], ["  Padded  "]],
+  );
+  assert.equal(after.incompleteClose?.checksSettled, true);
+});
+
+it("acknowledge strictly separates mapping selections from row queries and other decisions", () => {
+  const parsed = parseInvocation([
+    "acknowledge",
+    "--job",
+    "job",
+    "--mapping",
+    "one",
+    "--mapping",
+    "two",
+    "--go-live-digest",
+    "digest",
+    "--note",
+    "Reviewed",
+    "--approver",
+    "CI",
+    "--output",
+    "json",
+  ]);
+  assert.deepEqual(parsed.mappingIds, ["one", "two"]);
+  assert.equal(parsed.query.mappingId, undefined);
+  for (const args of [
+    ["status", "--job", "job", "--mapping", "one", "--mapping", "two"],
+    ["close", "--job", "job", "--go-live-digest", "digest"],
+    ["acknowledge", "--job", "job", "--code", "destination_drift"],
+    ["acknowledge", "--job", "job", "--confirm"],
+    ["acknowledge", "--job", "job", "--review"],
+    ["acknowledge", "--job", "job", "--go-live-digest", "a", "--go-live-digest", "b"],
+  ])
+    assert.throws(() => parseInvocation(args));
+});
+
+it("acknowledge requires exact selection, rationale and affirmative consent without defaults", async (t) => {
+  const h = await failedGoLiveJob(t);
+  for (const answers of [
+    [null],
+    [""],
+    ["unknown"],
+    ["1", ""],
+    ["1", "/cancel"],
+    ["1", "Reviewed", "/cancel"],
+    ["1", "Reviewed", "", ""],
+    ["1", "Reviewed", "", "no"],
+  ]) {
+    const result = await invoke(["acknowledge", "--job", h.id], h.engine(), {
+      tty: [true, false, true],
+      answers,
+    });
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /consequences/u);
+    assert.match(result.stderr, /reviewers@example.com/u);
+  }
+  for (const output of ["json", "jsonl"]) {
+    const result = await invoke(["acknowledge", "--job", h.id, "--output", output], h.engine(), {
+      tty: [true, true, true],
+      answer: "yes",
+    });
+    assert.equal(result.code, 4);
+    assert.equal(result.prompts, 0);
+  }
+  const piped = await invoke(["acknowledge", "--job", h.id], h.engine(), {
+    tty: [false, false, false],
+    answer: "yes",
+  });
+  assert.equal(piped.code, 4);
+  assert.equal(piped.prompts, 0);
+  const unattended = [
+    "--go-live-digest",
+    h.status.goLiveReview!.evidenceDigest,
+    "--mapping",
+    "map-1",
+    "--note",
+    "Reviewed",
+    "--approver",
+    "CI",
+  ];
+  for (let omitted = 0; omitted < unattended.length; omitted += 2) {
+    const flags = unattended.filter((_, index) => index < omitted || index > omitted + 1);
+    const result = await invoke(
+      ["acknowledge", "--job", h.id, "--output", "json", ...flags],
+      h.engine(),
+      { tty: [true, true, true], answer: "yes" },
+    );
+    assert.equal(result.code, 4);
+    assert.equal(result.prompts, 0);
+  }
+  const stale = await invoke(
+    [
+      "acknowledge",
+      "--job",
+      h.id,
+      "--output",
+      "json",
+      "--go-live-digest",
+      "stale",
+      "--mapping",
+      "map-1",
+      "--note",
+      "Reviewed",
+      "--approver",
+      "CI",
+    ],
+    h.engine(),
+  );
+  assert.equal(stale.code, 4);
+  assert.equal(document<never>(stale).refusal.code, "approval_digest_stale");
+  const after = document<JobStatus>(
+    await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+  ).value;
+  assert.deepEqual(after.goLiveAcknowledgments, []);
+  assert.deepEqual(after.goLiveReview, h.status.goLiveReview);
+  assert.deepEqual(after.closeAuthorization, h.status.closeAuthorization);
+});
+
+it("acknowledge returns a durable selected decision without closing or relabelling a failed check", async (t) => {
+  for (const interactive of [true, false]) {
+    const h = await failedGoLiveJob(t);
+    const flags = interactive
+      ? []
+      : [
+          "--go-live-digest",
+          h.status.goLiveReview!.evidenceDigest,
+          "--mapping",
+          "map-1",
+          "--note",
+          "Reviewed missing access",
+          "--approver",
+          "CI",
+          "--output",
+          "json",
+        ];
+    const result = await invoke(["acknowledge", "--job", h.id, ...flags], h.engine(), {
+      tty: [true, false, true],
+      answers: ["1", "Reviewed missing access", "", "yes"],
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.prompts, interactive ? 4 : 0);
+    const after = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    const acknowledgment = after.goLiveAcknowledgments?.[0];
+    assert.ok(acknowledgment);
+    assert.deepEqual(JSON.parse(result.stdout).value, acknowledgment);
+    assert.equal(acknowledgment.evidenceDigest, h.status.goLiveReview!.evidenceDigest);
+    assert.deepEqual(acknowledgment.checks, h.status.goLiveReview!.checks);
+    assert.equal(acknowledgment.rationale, "Reviewed missing access");
+    assert.equal(acknowledgment.approver, interactive ? "Alice" : "CI");
+    assert.equal(acknowledgment.mode, interactive ? "interactive" : "unattended");
+    assert.equal(acknowledgment.identityAssurance, "declared_unverified");
+    assert.equal(after.lastInteractiveIdentity, "Alice");
+    assert.equal(after.state, "verified");
+    assert.equal(after.createdDrives[0]?.goLive?.check?.status, "failed");
+    assert.equal(after.incompleteClose?.checksPassed, false);
+    assert.equal(after.incompleteClose?.checksSettled, true);
+    assert.deepEqual(after.closeAuthorization, h.status.closeAuthorization);
+    const resumed = await invoke(["close", "--job", h.id, "--output", "json"], h.engine());
+    assert.equal(resumed.code, 0);
+    assert.equal(resumed.prompts, 0);
+    const closed = document<JobStatus>(
+      await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+    ).value;
+    assert.equal(closed.state, "closed");
+    assert.deepEqual(closed.goLiveAcknowledgments, after.goLiveAcknowledgments);
+    assert.equal(closed.createdDrives[0]?.goLive?.check?.status, "failed");
+  }
+});
+
+it("acknowledge submits the frozen reviewed digest when evidence changes during confirmation", async (t) => {
+  const h = await failedGoLiveJob(t);
+  const result = await invoke(["acknowledge", "--job", h.id], h.engine(), {
+    tty: [true, false, true],
+    answers: ["1", "Reviewed", "", "yes"],
+    async onPrompt(index) {
+      if (index !== 3) return;
+      h.provider.listDriveMembers = async () => {
+        throw new TypeError("membership evidence unavailable");
+      };
+      assert.equal(
+        (await invoke(["close", "--job", h.id, "--output", "json"], h.engine())).code,
+        4,
+      );
+    },
+  });
+  assert.equal(result.code, 4);
+  assert.match(result.stderr, /approval_digest_stale/u);
+  const after = document<JobStatus>(
+    await invoke(["status", "--job", h.id, "--output", "json"], h.engine()),
+  ).value;
+  assert.notEqual(after.goLiveReview?.evidenceDigest, h.status.goLiveReview!.evidenceDigest);
+  assert.deepEqual(after.goLiveAcknowledgments, []);
+});
+
+it("CLI envelope traverses go-live decisions without interpreting provider evidence", () => {
+  assert.equal(
+    knownContract({
+      goLiveReview: {
+        checks: [
+          {
+            check: {
+              status: "failed",
+              check: "go_live_check_unavailable",
+              evidence: { status: "future" },
+            },
+          },
+        ],
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    knownContract({
+      goLiveReview: {
+        checks: [
+          {
+            check: {
+              status: "future",
+              check: "membership",
+            },
+          },
+        ],
+      },
+    }),
+    false,
+  );
+  assert.equal(knownContract({ goLiveAcknowledgments: [{ mode: "future" }] }), false);
+  assert.equal(
+    knownContract({
+      goLiveReview: {
+        checks: [
+          {
+            check: {
+              status: "passed",
+              check: "future",
+            },
+          },
+        ],
+      },
+    }),
+    false,
+  );
 });
 
 it("interruption during writer acquisition records no decision", async (t) => {

@@ -40,7 +40,8 @@ export const CLIENT = `"use strict";
     template.innerHTML = html;
     const current = template.content.querySelector("#workspace");
     const oldStage = root.querySelector("#stage");
-    const decision = oldStage?.querySelector('form[data-action="approve"],form[data-action="accept"],form[data-action="close"]');
+    const decisions = oldStage?.querySelectorAll('form[data-action="approve"],form[data-action="accept"],form[data-action="close"],form[data-action="acknowledge"]');
+    const decision = decisions?.[0];
     const retainReview = preserveReview && preserveFilters && decision &&
       old?.dataset.access === "writer" && current?.dataset.access === "writer" &&
       (decision.dataset.reviewCaptured === "true" ||
@@ -50,7 +51,7 @@ export const CLIENT = `"use strict";
       if (field.type === "hidden" || field.readOnly) return;
       const action = field.closest("form").dataset.action ?? "filter";
       // Decision forms are retained intact, never transplanted onto newly reviewed evidence.
-      if (["approve","accept","close"].includes(action) || action === "filter" && !preserveFilters) return;
+      if (["approve","accept","close","acknowledge"].includes(action) || action === "filter" && !preserveFilters) return;
       drafts.push({action,name:field.name,value:field.value,checked:field.checked,type:field.type});
     });
     if (retainReview) {
@@ -70,10 +71,14 @@ export const CLIENT = `"use strict";
         }
         activity.textContent = current.dataset.busy + " is running. Your captured review is unchanged; actions are disabled until it finishes.";
       } else activity?.remove();
-      const binding = decision.querySelector('input[name="planDigest"],input[name="verificationDigest"],input[name="evidenceDigest"]');
-      const latest = decision.dataset.action === "approve" ? current.dataset.planDigest :
-        decision.dataset.action === "accept" ? current.dataset.verificationDigest : current.dataset.closeDigest;
-      if (binding && binding.value !== latest && !oldStage.querySelector("[data-review-changed]")) {
+      const stale = [...decisions].some(form => {
+        const binding = form.querySelector('input[name="planDigest"],input[name="verificationDigest"],input[name="evidenceDigest"]');
+        const latest = form.dataset.action === "approve" ? current.dataset.planDigest :
+          form.dataset.action === "accept" ? current.dataset.verificationDigest :
+          form.dataset.action === "acknowledge" ? current.dataset.goLiveDigest : current.dataset.closeDigest;
+        return binding && binding.value !== latest;
+      });
+      if (stale && !oldStage.querySelector("[data-review-changed]")) {
         const notice = document.createElement("p");
         notice.dataset.reviewChanged = "";
         notice.setAttribute("role","alert");
@@ -168,6 +173,11 @@ export const CLIENT = `"use strict";
       if (!codes.length) { connection.textContent = "Explicitly select at least one exception group."; connection.hidden = false; return; }
       input = {approver:data.get("approver"),verificationDigest:data.get("verificationDigest"),codes,rationale:data.get("rationale"),confirm:data.has("confirm")};
     }
+    else if (action === "acknowledge") {
+      const mappingIds = data.getAll("mappingIds");
+      if (!mappingIds.length) { connection.textContent = "Explicitly select at least one failed go-live check."; connection.hidden = false; return; }
+      input = {approver:data.get("approver"),evidenceDigest:data.get("evidenceDigest"),mappingIds,rationale:data.get("rationale"),confirm:data.has("confirm")};
+    }
     else if (action === "cancel") input = {reason:data.get("reason"),confirm:data.has("confirm")};
     else if (action === "close") input = data.has("recovery") ? {} : {approver:data.get("approver"),evidenceDigest:data.get("evidenceDigest"),confirmGoLive:data.has("confirmGoLive")};
     else if (action === "reclaim") input = {confirm:data.has("confirm"),stopWorker:data.has("stopWorker")};
@@ -186,6 +196,11 @@ export const CLIENT = `"use strict";
     if (form?.dataset.action === "accept" && field.name === "codes") {
       const count = form.querySelectorAll('input[name="codes"]:checked').length;
       form.querySelector("[data-group-confirmation]").textContent = "I confirm acceptance of " + count + " selected groups with this rationale.";
+      form.querySelector('input[name="confirm"]').checked = false;
+    }
+    if (form?.dataset.action === "acknowledge" && field.name === "mappingIds") {
+      const count = form.querySelectorAll('input[name="mappingIds"]:checked').length;
+      form.querySelector("[data-check-confirmation]").textContent = "I acknowledge " + count + " selected failed checks and their disclosed consequences with this rationale.";
       form.querySelector('input[name="confirm"]').checked = false;
     }
     if (!field.hasAttribute("data-config-file") || !field.files?.[0]) return;

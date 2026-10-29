@@ -15,6 +15,7 @@ import type {
   ArtifactSet,
   Closure,
   ExecuteResult,
+  GoLiveAcknowledgment,
   JobEvent,
   JobRef,
   JobSpec,
@@ -92,6 +93,14 @@ export interface JobWriter {
     approver: string;
   }): Promise<Outcome<VerificationRevision>>;
   report(): Promise<Outcome<ArtifactSet>>;
+  /** A separate decision about selected recorded failures; does not resume close. */
+  acknowledgeGoLive(input: {
+    evidenceDigest: string;
+    mappingIds: string[];
+    rationale: string;
+    approver: string;
+    mode: "interactive" | "unattended";
+  }): Promise<Outcome<GoLiveAcknowledgment>>;
   close(input?: {
     evidenceDigest: string;
     approver: string;

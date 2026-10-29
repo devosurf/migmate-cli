@@ -713,6 +713,7 @@ async function provisioningHarness(
   t: TestContext,
   input = fixture(),
   options?: FileMigrationConfig["options"],
+  mappingIds = ["finance"],
 ): Promise<Harness> {
   input.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
   input.now ??= () => new Date(now);
@@ -723,20 +724,47 @@ async function provisioningHarness(
         format: "json",
         content: JSON.stringify({
           version: 1,
-          mappings: [
-            {
-              id: "finance",
-              source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
-              destination: { type: "google_shared_drive", create: "Finance" },
-              members: [{ email: "finance@example.com", type: "group", role: "writer" }],
+          mappings: mappingIds.map((id) => ({
+            id,
+            source: {
+              type: "sharepoint",
+              driveId: "source-drive",
+              folderPath: id === "finance" ? "" : id,
             },
-          ],
+            destination: { type: "google_shared_drive", create: id === "finance" ? "Finance" : id },
+            members: [{ email: `${id}@example.com`, type: "group", role: "writer" }],
+          })),
         }),
       }),
     ),
   );
   await approve(h);
   return h;
+}
+
+async function acknowledgeChecks(h: Harness, mappingIds?: string[]) {
+  const review = value(await h.engine.reader(h.ref).status()).goLiveReview;
+  assert.ok(review);
+  return value(
+    await h.engine.withWriterResult(h.ref, (writer) =>
+      writer.acknowledgeGoLive({
+        evidenceDigest: review.evidenceDigest,
+        mappingIds: mappingIds ?? review.checks.map((check) => check.mappingId),
+        rationale: "Reviewed the specific unresolved evidence and accept its consequences",
+        approver: "recovery-operator@example.com",
+        mode: "unattended",
+      }),
+    ),
+  );
+}
+
+function editRecoveryState(h: Harness, sql: string): void {
+  const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+  try {
+    database.exec(sql);
+  } finally {
+    database.close();
+  }
 }
 
 function notebookFixture(): FakeFileMigrationFixture {
@@ -1050,6 +1078,7 @@ describe("deferred member go-live", () => {
       accessMayExist: true,
       transfersFenced: true,
       checksPassed: true,
+      checksSettled: true,
       reporting: "unfinished",
       nextAction: "close",
     });
@@ -1087,47 +1116,42 @@ describe("deferred member go-live", () => {
     );
     assert.deepEqual(closed.closeAuthorization, status.closeAuthorization);
   });
-  for (const drift of ["membership", "content"] as const)
-    it(`blocks go-live on ${drift} drift and never reopens transfers`, async (t) => {
-      const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
-      await execute(h);
-      value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
-      const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
-      if (drift === "membership")
-        await h.port.addDriveMember(driveId, {
-          email: "outside@example.com",
-          type: "user",
-          role: "writer",
-        });
-      else {
-        const file = (await h.port.listDestinationChildren(driveId)).find(
-          (item) => item.name === "report.docx",
-        )!;
-        h.port.mutateDestinationContent(file.id, new Uint8Array([9, 9, 9, 9]));
-      }
-      const closing = await h.engine.withWriterResult(h.ref, async (w) =>
-        w.close(await closeDecision(h)),
-      );
-      assert.equal(closing.ok, false);
-      if (!closing.ok) {
-        assert.equal(closing.refusal.code, "verification_unaccepted");
-        assert.equal(closing.refusal.detail?.accessMayExist, true);
-        assert.equal(
-          closing.refusal.detail?.check,
-          drift === "membership" ? "drive_membership_mismatch" : "destination_drift",
-        );
-      }
-      const status = value(await h.engine.reader(h.ref).status());
-      assert.notEqual(status.state, "closed");
-      assert.equal(status.memberGrants[0]?.member.email, "finance@example.com");
-      const executeResult = await h.engine.withWriterResult(h.ref, (w) => w.execute());
-      assert.equal(executeResult.ok, false);
-      if (!executeResult.ok) assert.equal(executeResult.refusal.code, "go_live_started");
-      const retry = await h.engine.withWriterResult(h.ref, async (w) =>
-        w.close(await closeDecision(h)),
-      );
-      assert.equal(retry.ok, false);
+  it("blocks post-grant membership drift without silently repairing access", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    const driveId = value(await h.engine.reader(h.ref).status()).createdDrives[0]!.driveId!;
+    await h.port.addDriveMember(driveId, {
+      email: "outside@example.com",
+      type: "user",
+      role: "writer",
     });
+    const closing = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
+    assert.equal(closing.ok, false);
+    if (!closing.ok) {
+      assert.equal(closing.refusal.code, "verification_unaccepted");
+      assert.equal(closing.refusal.detail?.accessMayExist, true);
+      assert.equal(closing.refusal.detail?.check, "drive_membership_mismatch");
+    }
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.memberGrants[0]?.member.email, "finance@example.com");
+    assert.equal(status.createdDrives[0]?.preGrantCheck?.check.status, "passed");
+    const executeResult = await h.engine.withWriterResult(h.ref, (w) => w.execute());
+    assert.equal(executeResult.ok, false);
+    if (!executeResult.ok) assert.equal(executeResult.refusal.code, "go_live_started");
+    const retry = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(retry.ok, false);
+    assert.equal((await h.port.listDriveMembers(driveId)).length, 3);
+    await acknowledgeChecks(h);
+    const closure = value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.equal(closure.outcome, "completed_with_accepted_exceptions");
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).createdDrives[0]?.goLive?.check?.status,
+      "failed",
+    );
+  });
   it("writes the final grant and check evidence before closing", async (t) => {
     const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
     await execute(h);
@@ -1273,7 +1297,7 @@ describe("deferred member go-live", () => {
     await writeFile(path, original);
     value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
   });
-  it("discloses unavailable post-grant checks and resumes close without transfers", async (t) => {
+  it("keeps unavailable pregrant proof unwaivable but allows explicit postgrant unverified closure", async (t) => {
     const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
     await execute(h);
     value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
@@ -1282,23 +1306,591 @@ describe("deferred member go-live", () => {
       count: 1,
       error: new TypeError("listing unavailable"),
     });
-    const closing = await h.engine.withWriterResult(h.ref, async (w) =>
+    const refused = await h.engine.withWriterResult(h.ref, async (w) =>
       w.close(await closeDecision(h)),
     );
-    assert.equal(closing.ok, false);
-    if (!closing.ok) {
-      assert.equal(closing.refusal.code, "verification_unaccepted");
-      assert.equal(closing.refusal.detail?.accessMayExist, true);
-      assert.equal(closing.refusal.detail?.check, "go_live_check_unavailable");
+    assert.equal(refused.ok, false);
+    if (!refused.ok) {
+      assert.equal(refused.refusal.code, "verification_unaccepted");
+      assert.equal(refused.refusal.detail?.accessMayExist, false);
+      assert.equal(refused.refusal.detail?.check, "go_live_check_unavailable");
     }
+    const before = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(before.memberGrants, []);
+    assert.equal(before.createdDrives[0]?.goLive, undefined);
+    assert.equal(before.createdDrives[0]?.preGrantCheck?.check.check, "go_live_check_unavailable");
+    assert.equal(before.goLiveReview, null);
+    const waiver = await h.engine.withWriterResult(h.ref, (w) =>
+      w.acknowledgeGoLive({
+        evidenceDigest: "not-postgrant-evidence",
+        mappingIds: ["finance"],
+        rationale: "Cannot waive pregrant checks",
+        approver: "operator",
+        mode: "unattended",
+      }),
+    );
+    assert.equal(waiver.ok, false);
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).goLiveAcknowledgments, []);
+
+    const listMembers = h.port.listDriveMembers.bind(h.port);
+    const unavailable = t.mock.method(h.port, "listDriveMembers", async (driveId: string) => {
+      const members = await listMembers(driveId);
+      if (members.some((member) => member.email === "finance@example.com"))
+        throw new TypeError("membership evidence unavailable after grant");
+      return members;
+    });
+    const closing = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(closing.ok, false);
     const partial = value(await h.engine.reader(h.ref).status());
     assert.equal(partial.memberGrants.length, 1);
-    assert.equal(partial.createdDrives[0]!.goLive!.check!.status, "failed");
-    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
-    assert.deepEqual(
-      value(await h.engine.reader(h.ref).status()).mappingPasses,
-      partial.mappingPasses,
+    assert.equal(partial.createdDrives[0]?.goLive?.check?.check, "go_live_check_unavailable");
+    assert.equal(partial.createdDrives[0]?.goLive?.check?.status, "failed");
+    const acknowledgment = await acknowledgeChecks(h);
+    const closure = value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.equal(closure.outcome, "completed_with_accepted_exceptions");
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(closed.mappingPasses, partial.mappingPasses);
+    assert.deepEqual(closed.createdDrives[0]?.goLive, partial.createdDrives[0]?.goLive);
+    assert.deepEqual(closed.goLiveAcknowledgments, [acknowledgment]);
+    unavailable.mock.restore();
+    const artifacts = value(await h.engine.reader(h.ref).artifacts());
+    const report = JSON.parse(
+      await readFile(artifacts.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
     );
+    const section = JSON.parse(
+      report.sections.find((item: { title: string }) => item.title === "Go-live").body,
+    );
+    assert.equal(section.checksPassed, false);
+    assert.equal(section.checksSettled, true);
+    assert.equal(section.drives[0].proof, "unverified");
+    assert.equal(section.drives[0].check.status, "failed");
+    assert.equal(section.preGrantChecks[0].check.status, "passed");
+    assert.deepEqual(section.acknowledgments, [acknowledgment]);
+    const exceptions: Record<string, string>[] = parse(
+      await readFile(
+        artifacts.artifacts.find((item) => item.name === "exceptions.csv")!.path,
+        "utf8",
+      ),
+      { columns: true },
+    );
+    const unverified = exceptions.find((item) => item.code === "go_live_check_unavailable")!;
+    assert.equal(unverified.status, "acknowledged (unverified)");
+    assert.equal(unverified.note, acknowledgment.rationale);
+    assert.equal(unverified.approver, acknowledgment.approver);
+    assert.deepEqual(JSON.parse(unverified.reason!), acknowledgment.checks[0]!.check.evidence);
+  });
+  it("checks every unfenced drive before any grants, reruns prior passes, and permits repair and reverification", async (t) => {
+    const h = await provisioningHarness(
+      t,
+      multiMapping().input,
+      { memberGrants: "after_verification" },
+      ["a", "b"],
+    );
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    const initial = value(await h.engine.reader(h.ref).status());
+    const a = initial.createdDrives.find((drive) => drive.mappingId === "a")!;
+    const b = initial.createdDrives.find((drive) => drive.mappingId === "b")!;
+    const first = (await h.port.listDestinationChildren(a.driveId!))[0]!;
+    const second = (await h.port.listDestinationChildren(b.driveId!))[0]!;
+    h.port.mutateDestinationContent(second.id, "bad");
+    const addMember = t.mock.method(h.port, "addDriveMember");
+    const failed = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
+    assert.equal(failed.ok, false);
+    if (!failed.ok) assert.equal(failed.refusal.detail?.accessMayExist, false);
+    const blocked = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(
+      blocked.createdDrives.map((drive) => drive.preGrantCheck?.check.status),
+      ["passed", "failed"],
+    );
+    assert.ok(blocked.createdDrives.every((drive) => !drive.goLive));
+    assert.deepEqual(blocked.memberGrants, []);
+    assert.equal(addMember.mock.callCount(), 0);
+    assert.equal(blocked.goLiveReview, null);
+
+    h.port.mutateDestinationContent(first.id, "new");
+    h.port.mutateDestinationContent(second.id, "two");
+    const retry = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(retry.ok, false);
+    const rechecked = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(
+      rechecked.createdDrives.map((drive) => drive.preGrantCheck?.check.status),
+      ["failed", "passed"],
+    );
+    assert.ok(rechecked.createdDrives.every((drive) => !drive.goLive));
+    assert.equal(addMember.mock.callCount(), 0);
+
+    h.port.mutateDestinationContent(first.id, "one");
+    await approve(h);
+    await execute(h);
+    const verification = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verification.clean, true);
+    const originalGrant = h.port.addDriveMember.bind(h.port);
+    addMember.mock.restore();
+    t.mock.method(
+      h.port,
+      "addDriveMember",
+      async (...[driveId, member]: Parameters<FakeFileMigrationPort["addDriveMember"]>) => {
+        const fenced = value(await h.engine.reader(h.ref).status());
+        assert.ok(
+          fenced.createdDrives.every(
+            (drive) => drive.goLive && drive.preGrantCheck?.check.status === "passed",
+          ),
+        );
+        await originalGrant(driveId, member);
+        // Intended users may immediately edit content; fresh close must not recheck it.
+        if (driveId === a.driveId)
+          h.port.mutateDestinationContent(first.id, "legitimate new content");
+      },
+    );
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.state, "closed");
+    assert.equal(closed.memberGrants.length, 2);
+    assert.ok(closed.createdDrives.every((drive) => drive.goLive?.check?.check === "membership"));
+  });
+
+  it("retains the original content baseline for an already-live legacy drive and acknowledges real drift", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    h.port.scriptEffect({
+      method: "addDriveMember",
+      timing: "after",
+      count: 1,
+      error: new Error("legacy interrupted grant"),
+    });
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
+      /legacy interrupted grant/,
+    );
+    // Model a job fenced by the pre-ADR-0017 driver: no pregrant observation exists.
+    editRecoveryState(
+      h,
+      "UPDATE created_drive SET payload = json_remove(payload, '$.preGrantCheck')",
+    );
+    const legacy = value(await h.engine.reader(h.ref).status());
+    const drive = legacy.createdDrives[0]!;
+    const file = (await h.port.listDestinationChildren(drive.driveId!)).find(
+      (item) => item.name === "report.docx",
+    )!;
+    h.port.mutateDestinationContent(file.id, new Uint8Array([9, 9, 9, 9]));
+    const refusal = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(refusal.ok, false);
+    const failed = value(await h.engine.reader(h.ref).status());
+    assert.equal(failed.createdDrives[0]?.preGrantCheck, undefined);
+    assert.deepEqual(failed.createdDrives[0]?.verifiedDestination, drive.verifiedDestination);
+    const check = failed.createdDrives[0]?.goLive?.check;
+    assert.equal(check?.check, "destination_drift");
+    assert.equal(check?.evidence.expectedDestinationDigest, drive.verifiedDestination?.digest);
+    assert.notEqual(check?.evidence.observedDestinationDigest, drive.verifiedDestination?.digest);
+    await acknowledgeChecks(h);
+    t.mock.method(h.port, "listFileHashes", async () => {
+      throw new Error("settled legacy evidence must not be relisted");
+    });
+    const closure = value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.equal(closure.outcome, "completed_with_accepted_exceptions");
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(closed.createdDrives[0]?.goLive?.check, check);
+    assert.deepEqual(closed.createdDrives[0]?.verifiedDestination, drive.verifiedDestination);
+    assert.equal(closed.createdDrives[0]?.preGrantCheck, undefined);
+  });
+
+  it("finishes missing legacy destination proof after an acknowledged membership difference", async (t) => {
+    const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    h.port.scriptEffect({
+      method: "addDriveMember",
+      timing: "after",
+      count: 1,
+      error: new Error("legacy interrupted grant"),
+    });
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
+      /legacy interrupted grant/,
+    );
+    // Model a job fenced by the pre-ADR-0017 driver: no pregrant observation exists.
+    editRecoveryState(
+      h,
+      "UPDATE created_drive SET payload = json_remove(payload, '$.preGrantCheck')",
+    );
+    const drive = value(await h.engine.reader(h.ref).status()).createdDrives[0]!;
+    await h.port.addDriveMember(drive.driveId!, {
+      email: "outside@example.com",
+      type: "user",
+      role: "writer",
+    });
+    const file = (await h.port.listDestinationChildren(drive.driveId!)).find(
+      (item) => item.name === "report.docx",
+    )!;
+    h.port.mutateDestinationContent(file.id, new Uint8Array([9, 9, 9, 9]));
+    assert.equal((await h.engine.withWriterResult(h.ref, (w) => w.close())).ok, false);
+    const membership = value(await h.engine.reader(h.ref).status()).createdDrives[0]?.goLive?.check;
+    assert.equal(membership?.check, "drive_membership_mismatch");
+    const membershipAcknowledgment = await acknowledgeChecks(h);
+
+    // Accepting the access difference does not accept content the legacy check never observed.
+    const unfinished = await h.engine.withWriterResult(h.ref, (w) => w.close());
+    assert.equal(unfinished.ok, false);
+    if (!unfinished.ok) assert.equal(unfinished.refusal.code, "verification_unaccepted");
+    const drifted = value(await h.engine.reader(h.ref).status());
+    assert.notEqual(drifted.state, "closed");
+    assert.equal(drifted.incompleteClose?.checksSettled, false);
+    assert.deepEqual(drifted.createdDrives[0]?.goLive?.check, membership);
+    const destination = drifted.createdDrives[0]?.goLive?.destinationCheck;
+    assert.equal(destination?.check, "destination_drift");
+    assert.equal(
+      destination?.evidence.expectedDestinationDigest,
+      drive.verifiedDestination?.digest,
+    );
+    assert.notEqual(
+      destination?.evidence.observedDestinationDigest,
+      drive.verifiedDestination?.digest,
+    );
+    assert.deepEqual(
+      drifted.goLiveReview?.checks.map((check) => check.check),
+      [destination],
+    );
+    const destinationAcknowledgment = await acknowledgeChecks(h);
+
+    const originalSections = fileMigrationDriver.reportSections;
+    const failingReport = t.mock.method(
+      fileMigrationDriver,
+      "reportSections",
+      async function* (ctx: DriverContext<FileMigrationConfig>) {
+        if (ctx.resume.goLiveAcknowledgments?.length) throw new Error("final report unavailable");
+        yield* originalSections(ctx);
+      },
+    );
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, (w) => w.close()),
+      /final report unavailable/,
+    );
+    failingReport.mock.restore();
+    t.mock.method(h.port, "listDriveMembers", async () => {
+      throw new Error("acknowledged membership must not be rechecked");
+    });
+    t.mock.method(h.port, "listFileHashes", async () => {
+      throw new Error("acknowledged destination drift must not be relisted");
+    });
+    const closure = value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.equal(closure.outcome, "completed_with_accepted_exceptions");
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.deepEqual(closed.createdDrives[0]?.goLive, drifted.createdDrives[0]?.goLive);
+    assert.deepEqual(closed.goLiveAcknowledgments, [
+      membershipAcknowledgment,
+      destinationAcknowledgment,
+    ]);
+    const artifacts = value(await h.engine.reader(h.ref).artifacts());
+    const exceptions: Record<string, string>[] = parse(
+      await readFile(
+        artifacts.artifacts.find((item) => item.name === "exceptions.csv")!.path,
+        "utf8",
+      ),
+      { columns: true },
+    );
+    for (const [check, acknowledgment] of [
+      [membership!, membershipAcknowledgment],
+      [destination!, destinationAcknowledgment],
+    ] as const) {
+      const row = exceptions.find((item) => item.code === check.check)!;
+      assert.equal(row.status, "acknowledged (failed)");
+      assert.equal(row.approver, acknowledgment.approver);
+      assert.deepEqual(JSON.parse(row.reason!), check.evidence);
+    }
+  });
+
+  it("binds acknowledgment to selected evidence and authority, never to other or future failures", async (t) => {
+    const h = await provisioningHarness(
+      t,
+      multiMapping().input,
+      { memberGrants: "after_verification" },
+      ["a", "b"],
+    );
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    const initial = value(await h.engine.reader(h.ref).status());
+    for (const drive of initial.createdDrives)
+      await h.port.addDriveMember(drive.driveId!, {
+        email: "outside@example.com",
+        type: "user",
+        role: "writer",
+      });
+    assert.equal(
+      (await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h)))).ok,
+      false,
+    );
+    const review = value(await h.engine.reader(h.ref).status()).goLiveReview!;
+    assert.deepEqual(
+      review.checks.map((check) => check.mappingId),
+      ["a", "b"],
+    );
+    const submit = (
+      evidenceDigest: string,
+      mappingIds: string[],
+      rationale = "Reviewed this discrepancy",
+      approver = "operator",
+    ) =>
+      h.engine.withWriterResult(h.ref, (w) =>
+        w.acknowledgeGoLive({
+          evidenceDigest,
+          mappingIds,
+          rationale,
+          approver,
+          mode: "unattended",
+        }),
+      );
+    for (const mappingIds of [[], ["unknown"]]) {
+      const refused = await submit(review.evidenceDigest, mappingIds);
+      assert.equal(refused.ok, false);
+    }
+    assert.equal((await submit(review.evidenceDigest, ["a"], " ")).ok, false);
+    assert.equal((await submit(review.evidenceDigest, ["a"], "Reviewed", " ")).ok, false);
+    const acknowledgment = value(await submit(review.evidenceDigest, ["a"]));
+    assert.deepEqual(
+      acknowledgment.checks.map((check) => check.mappingId),
+      ["a"],
+    );
+    assert.equal(acknowledgment.identityAssurance, "declared_unverified");
+    assert.equal(acknowledgment.mode, "unattended");
+    const selected = value(await h.engine.reader(h.ref).status());
+    assert.equal(selected.incompleteClose?.checksPassed, false);
+    assert.equal(selected.incompleteClose?.checksSettled, false);
+    assert.deepEqual(
+      selected.goLiveReview?.checks.map((check) => check.mappingId),
+      ["b"],
+    );
+    const stale = await submit(review.evidenceDigest, ["b"]);
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.refusal.code, "approval_digest_stale");
+    assert.equal((await submit(selected.goLiveReview!.evidenceDigest, ["a"])).ok, false);
+    assert.equal((await h.engine.withWriterResult(h.ref, (w) => w.close())).ok, false);
+
+    const b = initial.createdDrives.find((drive) => drive.mappingId === "b")!;
+    await h.port.addDriveMember(b.driveId!, {
+      email: "outside@example.com",
+      type: "user",
+      role: "reader",
+    });
+    assert.equal((await h.engine.withWriterResult(h.ref, (w) => w.close())).ok, false);
+    const changed = value(await h.engine.reader(h.ref).status());
+    assert.notEqual(changed.goLiveReview?.evidenceDigest, selected.goLiveReview?.evidenceDigest);
+    const changedEvidence = await submit(selected.goLiveReview!.evidenceDigest, ["b"]);
+    assert.equal(changedEvidence.ok, false);
+    if (!changedEvidence.ok) assert.equal(changedEvidence.refusal.code, "approval_digest_stale");
+    assert.deepEqual(
+      changed.createdDrives.find((drive) => drive.mappingId === "a")?.goLive,
+      selected.createdDrives.find((drive) => drive.mappingId === "a")?.goLive,
+    );
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const original = await readFile(path, "utf8");
+    const changedAuthority = original.replace(
+      'memberGrants = "after_verification"',
+      'memberGrants = "before_copy"',
+    );
+    assert.notEqual(changedAuthority, original);
+    await writeFile(path, changedAuthority);
+    const authority = await submit(changed.goLiveReview!.evidenceDigest, ["b"]);
+    assert.equal(authority.ok, false);
+    assert.equal(value(await h.engine.reader(h.ref).status()).goLiveReview, null);
+    await writeFile(path, original);
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).goLiveAcknowledgments, [
+      acknowledgment,
+    ]);
+    await acknowledgeChecks(h, ["b"]);
+    assert.equal(
+      value(await h.engine.withWriterResult(h.ref, (w) => w.close())).outcome,
+      "completed_with_accepted_exceptions",
+    );
+  });
+
+  for (const settlement of ["passed", "acknowledged"] as const)
+    it(`recovers ambiguous grants with a ${settlement} check and never treats a missing check as settled`, async (t) => {
+      const h = await provisioningHarness(t, fixture(), { memberGrants: "after_verification" });
+      await execute(h);
+      value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      h.port.scriptEffect({
+        method: "addDriveMember",
+        timing: "after",
+        count: 1,
+        error: new Error("ambiguous grant"),
+      });
+      await assert.rejects(
+        h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
+        /ambiguous grant/,
+      );
+      const missing = value(await h.engine.reader(h.ref).status());
+      assert.deepEqual(missing.memberGrants, []);
+      assert.equal(missing.createdDrives[0]?.goLive?.check, undefined);
+      assert.equal(missing.incompleteClose?.checksSettled, false);
+      assert.equal(missing.goLiveReview, null);
+      const invalid = await h.engine.withWriterResult(h.ref, (w) =>
+        w.acknowledgeGoLive({
+          evidenceDigest: "missing-check",
+          mappingIds: ["finance"],
+          rationale: "Cannot settle a missing check",
+          approver: "operator",
+          mode: "unattended",
+        }),
+      );
+      assert.equal(invalid.ok, false);
+      // A recovered legacy check cannot stand in for the missing durable grant receipt.
+      const recoveredCheck =
+        settlement === "passed"
+          ? { at: now, status: "passed", check: "membership", evidence: {} }
+          : {
+              at: now,
+              status: "failed",
+              check: "go_live_check_unavailable",
+              evidence: { scope: "membership" },
+            };
+      editRecoveryState(
+        h,
+        `UPDATE created_drive SET payload = json_set(payload, '$.goLive.check', json('${JSON.stringify(recoveredCheck)}'))`,
+      );
+      if (settlement === "acknowledged") await acknowledgeChecks(h);
+      const settled = value(await h.engine.reader(h.ref).status()).createdDrives[0]?.goLive?.check;
+      t.mock.method(h.port, "addDriveMember", async () => {
+        throw new Error("ambiguous grant already exists; do not duplicate it");
+      });
+      const membership = t.mock.method(h.port, "listDriveMembers");
+      const closure = value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+      assert.equal(
+        closure.outcome,
+        settlement === "passed" ? "completed" : "completed_with_accepted_exceptions",
+      );
+      const closed = value(await h.engine.reader(h.ref).status());
+      assert.equal(closed.memberGrants.length, 1);
+      assert.equal(membership.mock.callCount(), 1);
+      assert.deepEqual(closed.createdDrives[0]?.goLive?.check, settled);
+      assert.deepEqual(closed.mappingPasses, missing.mappingPasses);
+    });
+
+  it("preserves passed and acknowledged checks after final-report failure despite later content and membership edits", async (t) => {
+    const h = await provisioningHarness(
+      t,
+      multiMapping().input,
+      { memberGrants: "after_verification" },
+      ["a", "b"],
+    );
+    await execute(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    const initial = value(await h.engine.reader(h.ref).status());
+    const b = initial.createdDrives.find((drive) => drive.mappingId === "b")!;
+    await h.port.addDriveMember(b.driveId!, {
+      email: "outside@example.com",
+      type: "user",
+      role: "writer",
+    });
+    assert.equal(
+      (await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h)))).ok,
+      false,
+    );
+    const acknowledgment = await acknowledgeChecks(h, ["b"]);
+    const reviewed = value(await h.engine.reader(h.ref).status());
+    assert.equal(reviewed.incompleteClose?.checksPassed, false);
+    assert.equal(reviewed.incompleteClose?.checksSettled, true);
+    const originalSections = fileMigrationDriver.reportSections;
+    const failingReport = t.mock.method(
+      fileMigrationDriver,
+      "reportSections",
+      async function* (ctx: DriverContext<FileMigrationConfig>) {
+        if (ctx.resume.goLiveAcknowledgments?.length) throw new Error("final report unavailable");
+        yield* originalSections(ctx);
+      },
+    );
+    await assert.rejects(
+      h.engine.withWriterResult(h.ref, (w) => w.close()),
+      /final report unavailable/,
+    );
+    h.engine.close();
+    h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
+    const incomplete = value(await h.engine.reader(h.ref).status());
+    assert.notEqual(incomplete.state, "closed");
+    assert.equal(incomplete.incompleteClose?.reporting, "unfinished");
+    assert.equal(incomplete.incompleteClose?.checksSettled, true);
+    for (const drive of initial.createdDrives) {
+      const file = (await h.port.listDestinationChildren(drive.driveId!))[0]!;
+      h.port.mutateDestinationContent(file.id, "users edit after access is live");
+      await h.port.addDriveMember(drive.driveId!, {
+        email: "later@example.com",
+        type: "user",
+        role: "reader",
+      });
+    }
+    failingReport.mock.restore();
+    t.mock.method(h.port, "listDriveMembers", async () => {
+      throw new Error("settled membership must not be rechecked");
+    });
+    t.mock.method(h.port, "listFileHashes", async () => {
+      throw new Error("settled content must not be rechecked");
+    });
+    t.mock.method(h.port, "startTransferWorker", async () => {
+      throw new Error("report-only retry must not start a worker");
+    });
+    const closure = value(await h.engine.withWriterResult(h.ref, (w) => w.close()));
+    assert.equal(closure.outcome, "completed_with_accepted_exceptions");
+    const closed = value(await h.engine.reader(h.ref).status());
+    assert.equal(closed.state, "closed");
+    assert.deepEqual(closed.createdDrives, reviewed.createdDrives);
+    assert.deepEqual(closed.goLiveAcknowledgments, [acknowledgment]);
+    assert.deepEqual(closed.closeAuthorization, reviewed.closeAuthorization);
+    assert.deepEqual(closed.mappingPasses, reviewed.mappingPasses);
+    const artifacts = value(await h.engine.reader(h.ref).artifacts());
+    const report = JSON.parse(
+      await readFile(artifacts.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+    );
+    const section = JSON.parse(
+      report.sections.find((item: { title: string }) => item.title === "Go-live").body,
+    );
+    assert.equal(section.checksPassed, false);
+    assert.equal(section.checksSettled, true);
+    assert.deepEqual(section.acknowledgments, [acknowledgment]);
+    assert.deepEqual(
+      section.drives.map((drive: { check: unknown }) => drive.check),
+      reviewed.createdDrives.map((drive) => drive.goLive?.check),
+    );
+    assert.deepEqual(report.goLiveAcknowledgments, [acknowledgment]);
+    assert.equal(report.job.closureOutcome, "completed_with_accepted_exceptions");
+    assert.equal(closed.closureOutcome, "completed_with_accepted_exceptions");
+    assert.deepEqual(closure.goLiveAcknowledgments, [acknowledgment]);
+    const html = await readFile(
+      artifacts.artifacts.find((item) => item.name === "report.html")!.path,
+      "utf8",
+    );
+    assert.ok(html.includes(acknowledgment.rationale));
+    assert.ok(html.includes(acknowledgment.approver));
+    assert.ok(html.includes(acknowledgment.evidenceDigest));
+    const mappings: Record<string, string>[] = parse(
+      await readFile(
+        artifacts.artifacts.find((item) => item.name === "mappings.csv")!.path,
+        "utf8",
+      ),
+      { columns: true },
+    );
+    const acceptedMapping = mappings.find((item) => item.mapping_id === "b")!;
+    assert.deepEqual(
+      JSON.parse(acceptedMapping.go_live_pre_grant_check!),
+      b.preGrantCheck ??
+        reviewed.createdDrives.find((drive) => drive.mappingId === "b")!.preGrantCheck,
+    );
+    assert.deepEqual(JSON.parse(acceptedMapping.go_live_check!), acknowledgment.checks[0]!.check);
+    assert.deepEqual(JSON.parse(acceptedMapping.go_live_acknowledgments!), [acknowledgment]);
+    const exceptions: Record<string, string>[] = parse(
+      await readFile(
+        artifacts.artifacts.find((item) => item.name === "exceptions.csv")!.path,
+        "utf8",
+      ),
+      { columns: true },
+    );
+    const acceptedFailure = exceptions.find((item) => item.code === "drive_membership_mismatch")!;
+    assert.equal(acceptedFailure.status, "acknowledged (failed)");
+    assert.equal(acceptedFailure.note, acknowledgment.rationale);
+    assert.equal(acceptedFailure.approver, acknowledgment.approver);
+    assert.deepEqual(JSON.parse(acceptedFailure.reason!), acknowledgment.checks[0]!.check.evidence);
   });
 });
 

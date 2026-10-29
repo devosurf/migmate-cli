@@ -2,11 +2,13 @@ import { ReportText, reportJson } from "./report.ts";
 import type { FileMigrationConfig } from "./drivers/file-migration.ts";
 import type { Store, FindingRecord, AcceptanceRecord } from "./store/store.ts";
 import type { ApprovalRecord, VerificationRevision } from "./types.ts";
+import { goLiveAcknowledgment } from "./go-live.ts";
 
 interface CsvEvidence {
   store: Store;
   revision: number;
   config: FileMigrationConfig | undefined;
+  goLiveAuthorityDigest?: string | undefined;
   findings: () => Iterable<FindingRecord>;
   accepted: AcceptanceRecord[];
   approval: ApprovalRecord | null;
@@ -86,6 +88,31 @@ export function* exceptionsCsv(evidence: CsvEvidence): Generator<string> {
       item.acceptance?.note,
       item.reason,
     ]);
+  const acknowledgments = evidence.store.readGoLiveAcknowledgments();
+  for (const drive of evidence.store.readCreatedDrives()) {
+    const checks = drive.goLive
+      ? [drive.goLive.check, drive.goLive.destinationCheck]
+      : [drive.preGrantCheck?.check];
+    for (const check of checks) {
+      if (check?.status !== "failed") continue;
+      const accepted = goLiveAcknowledgment(
+        drive,
+        check,
+        evidence.goLiveAuthorityDigest,
+        acknowledgments,
+      );
+      const proof = check.check === "go_live_check_unavailable" ? "unverified" : "failed";
+      yield* csvRow([
+        drive.mappingId,
+        undefined,
+        check.check,
+        `${accepted ? "acknowledged" : "outstanding"} (${proof})`,
+        accepted?.approver,
+        accepted?.rationale,
+        check.evidence,
+      ]);
+    }
+  }
 }
 
 export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
@@ -100,6 +127,7 @@ export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
     counts.set(item.mappingId, count);
   }
   const resume = store.readReportResume(revision);
+  const acknowledgments = store.readGoLiveAcknowledgments();
   for (const mapping of config?.mappings ?? []) {
     const drive = resume.createdDrives.find((entry) => entry.mappingId === mapping.id);
     const pass = resume.mappingPasses.findLast(
@@ -131,6 +159,14 @@ export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
       approval?.freeze?.by,
       approval?.freeze?.at,
       approval?.freeze?.how,
+      drive?.preGrantCheck,
+      drive?.goLive?.check,
+      drive?.goLive?.destinationCheck,
+      acknowledgments.filter((record) =>
+        record.checks.some(
+          (check) => check.mappingId === mapping.id && check.driveId === drive?.driveId,
+        ),
+      ),
     ]);
   }
 }
@@ -173,6 +209,10 @@ export const mappingColumns = [
   "freeze_by",
   "freeze_at",
   "freeze_how",
+  "go_live_pre_grant_check",
+  "go_live_check",
+  "go_live_destination_check",
+  "go_live_acknowledgments",
 ];
 export const exceptionColumns = [
   "mapping_id",

@@ -60,6 +60,9 @@ migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code 
   [--code CODE ...]                          # unattended; one rationale for the selection
 migmate close --job ID                      # human go-live review, or authorized recovery
 migmate close --job ID --close-digest DIGEST --approver IDENTITY  # unattended initial close
+migmate acknowledge --job ID                # review and acknowledge selected post-grant failures
+migmate acknowledge --job ID --go-live-digest DIGEST --mapping ID [--mapping ID ...]
+  --note RATIONALE --approver IDENTITY --output json  # explicit unattended acknowledgment
 migmate cancel --job ID [--reason TEXT]
 migmate reclaim --job ID --confirm [--stop-worker]
 migmate web --job ID
@@ -87,12 +90,14 @@ JSONL streams durable events live during a verb. --from CURSOR resumes exclusive
 without --from a writer streams only its new attempt. status --output jsonl replays
 the log and exits; it is not a watcher. Terminals are durable, never synthesized.
 json and jsonl write refusals to stdout; only text mode diverts them to stderr.
-Text-mode approve, accept and initial close prompt only with stdin and stderr TTYs
+Text-mode approve, accept, acknowledge and initial close prompt only with stdin and stderr TTYs
 and no explicit evidence digest. Each displays an editable unverified declared identity.
 Confirmations have no affirmative default. Explicit digest and identity select unattended
 local attestation, not authenticated human authorization. JSON/JSONL never prompt.
 Acceptance requires named groups and one non-empty rationale. Matching durable close
 authorization permits recovery without a new decision. Freeze attestation flags are unchanged.
+Acknowledgment records selected failed checks, not a pass or new access authority.
+Unavailable checks remain unverified. Inspect status afterward, then separately retry close.
 
 Exit codes: 0 success; 1 internal defect or unknown code/enum; 2 usage/configuration
 (including unavailable web runtime); 3 lease/recovery refusal; 4 preflight/approval/
@@ -520,6 +525,83 @@ async function accept(
   );
 }
 
+async function acknowledge(
+  invocation: Invocation,
+  output: Output,
+  engine: Engine,
+  status: JobStatus,
+): Promise<AdapterOutcome> {
+  const interactive = interactiveDecision(invocation, output, invocation.goLiveDigest);
+  const review = status.goLiveReview;
+  const evidenceDigest = interactive ? review?.evidenceDigest : invocation.goLiveDigest;
+  let mappingIds = [...new Set(invocation.mappingIds)];
+  let rationale = invocation.note?.trim();
+  let approver = invocation.approver?.trim();
+  if (interactive) {
+    if (!evidenceDigest || !review?.checks.length)
+      return refusal("verification_unaccepted", "No eligible post-grant failures to acknowledge.");
+    await output.io.stderr.write(
+      `Post-grant failure evidence and consequences (unavailable checks remain unverified; acknowledgment does not make a check pass):\n${JSON.stringify(redact(review), null, 2)}\nFailures:\n${review.checks.map((check, index) => `  ${index + 1}. ${JSON.stringify(redact(check.mappingId))} · ${check.check.check}\n`).join("")}`,
+    );
+    // Numbers, not IDs: valid mapping IDs may contain commas or surrounding whitespace.
+    const selection = await answer(
+      output,
+      "Select failure numbers separated by commas or spaces (no default; blank cancels): ",
+    );
+    const numbers = selection?.split(/[\s,]+/u).filter(Boolean) ?? [];
+    if (
+      !numbers.length ||
+      numbers.some((number) => !/^[1-9]\d*$/u.test(number) || Number(number) > review.checks.length)
+    )
+      return refusal(
+        "verification_unaccepted",
+        "Select only displayed failure numbers from this review.",
+      );
+    mappingIds = [
+      ...new Set(numbers.map((number) => review.checks[Number(number) - 1]!.mappingId)),
+    ];
+    rationale =
+      (await answer(output, "One required rationale for the selected failures: ")) ?? undefined;
+    if (!rationale || rationale === "/cancel")
+      return refusal("verification_unaccepted", "Acknowledgment requires a non-empty rationale.");
+    await output.io.stderr.write(
+      `Selected failures:\n${JSON.stringify(redact(review.checks.filter((check) => mappingIds.includes(check.mappingId))), null, 2)}\nRationale: ${rationale}\n`,
+    );
+    approver = (await declaredIdentity(invocation, output, status)) ?? undefined;
+    if (
+      !approver ||
+      !(await confirm(
+        output,
+        `Acknowledge ${mappingIds.length} selected post-grant failures as ${approver} (unverified)?`,
+      ))
+    )
+      return refusal("verification_unaccepted", "Acknowledgment was not confirmed.");
+  }
+  if (
+    !evidenceDigest?.trim() ||
+    !mappingIds.length ||
+    mappingIds.some((id) => !id.trim()) ||
+    !rationale ||
+    !approver ||
+    output.abort.signal.aborted
+  )
+    return refusal(
+      "verification_unaccepted",
+      "Unattended acknowledgment requires --go-live-digest, named --mapping values, one non-empty --note rationale and --approver.",
+    );
+  return engine.withWriterResult({ id: invocation.jobId! }, async (writer) =>
+    output.abort.signal.aborted
+      ? interruptedDecision()
+      : writer.acknowledgeGoLive({
+          evidenceDigest,
+          mappingIds,
+          rationale,
+          approver,
+          mode: interactive ? "interactive" : "unattended",
+        }),
+  );
+}
+
 async function close(
   invocation: Invocation,
   output: Output,
@@ -659,6 +741,8 @@ async function executeCommand(
     if (invocation.command === "approve")
       return approve(invocation, output, engine, reader, status.value);
     if (invocation.command === "accept") return accept(invocation, output, engine, status.value);
+    if (invocation.command === "acknowledge")
+      return acknowledge(invocation, output, engine, status.value);
     if (invocation.command === "close") return close(invocation, output, engine, status.value);
     if (invocation.command === "reclaim")
       return engine.reclaim(job, { confirm: true, stopWorker: invocation.stopWorker });

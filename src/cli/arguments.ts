@@ -5,7 +5,15 @@ import { VERBS, type JobType, type RowQuery, type Verb } from "../engine/types.t
 
 export type OutputMode = "text" | "json" | "jsonl";
 export type CommandName =
-  Verb | "creds init" | "manifest load" | "discover" | "accept" | "reclaim" | "web" | "version";
+  | Verb
+  | "creds init"
+  | "manifest load"
+  | "discover"
+  | "accept"
+  | "acknowledge"
+  | "reclaim"
+  | "web"
+  | "version";
 export interface Invocation {
   command: CommandName;
   output: OutputMode;
@@ -21,6 +29,8 @@ export interface Invocation {
   freeze?: { by: string; at: string; how: string };
   verificationDigest?: string;
   closeDigest?: string;
+  goLiveDigest?: string;
+  mappingIds: string[];
   codes: string[];
   note?: string;
   reason?: string;
@@ -118,6 +128,7 @@ export function parseInvocation(argv: string[]): Invocation {
     "--freeze-how",
     "--verification-digest",
     "--close-digest",
+    "--go-live-digest",
     "--code",
     "--note",
     "--reason",
@@ -153,7 +164,7 @@ export function parseInvocation(argv: string[]): Invocation {
     const value = equal === -1 ? argv[++index] : token.slice(equal + 1);
     if (!value || value.startsWith("--") || /[\u0000]/u.test(value))
       throw new UsageFailure("An option needs a non-empty value.");
-    if (values.has(flag) && flag !== "--code")
+    if (values.has(flag) && flag !== "--code" && flag !== "--mapping")
       throw new UsageFailure("An option was supplied more than once.");
     const prior = values.get(flag);
     if (prior) prior.push(value);
@@ -165,11 +176,19 @@ export function parseInvocation(argv: string[]): Invocation {
   const command = words.join(" ");
   if (
     !VERBS.includes(command as Verb) &&
-    !["creds init", "manifest load", "discover", "accept", "reclaim", "web"].includes(command) &&
+    ![
+      "creds init",
+      "manifest load",
+      "discover",
+      "accept",
+      "acknowledge",
+      "reclaim",
+      "web",
+    ].includes(command) &&
     !((help || version) && words.length === 0)
   ) {
     throw new UsageFailure(
-      "Supply a lifecycle command, creds init, manifest load, discover, accept, reclaim, or web.",
+      "Supply a lifecycle command, creds init, manifest load, discover, accept, acknowledge, reclaim, or web.",
     );
   }
   if (version && words.length > 0) throw new UsageFailure("--version takes no command.");
@@ -222,14 +241,18 @@ export function parseInvocation(argv: string[]): Invocation {
   if (view !== undefined) query.view = view;
   if (view === "mappings" && sort !== undefined && sort !== "natural")
     throw new UsageFailure("Mapping rows are ordered by mapping id; use --sort natural.");
-  const mapping = get("--mapping");
-  if (mapping !== undefined) query.mappingId = mapping;
+  const mappingIds = values.get("--mapping") ?? [];
+  if (command !== "acknowledge" && mappingIds.length > 1)
+    throw new UsageFailure("Review accepts only one --mapping.");
+  const mapping = mappingIds[0];
+  if (mapping !== undefined && command !== "acknowledge") query.mappingId = mapping;
   const invocation: Invocation = {
     command: (version ? "version" : command || "status") as CommandName,
     output: output as OutputMode,
     // Help and version never open a store and must remain available with a broken workspace.
     home: resolve(get("--home") ?? (help || version ? "." : defaultHome())),
     codes,
+    mappingIds,
     ...(get("--note") === undefined ? {} : { note: get("--note")! }),
     confirm: switches.has("--confirm"),
     stopWorker: switches.has("--stop-worker"),
@@ -247,6 +270,7 @@ export function parseInvocation(argv: string[]): Invocation {
     planDigest: "--plan-digest",
     verificationDigest: "--verification-digest",
     closeDigest: "--close-digest",
+    goLiveDigest: "--go-live-digest",
     reason: "--reason",
   } as const;
   for (const [key, flag] of Object.entries(strings)) {
@@ -271,9 +295,10 @@ export function parseInvocation(argv: string[]): Invocation {
   for (const flag of ["--type", "--label"]) only(flag, ["init"]);
   only("--config", ["init", "creds init"]);
   only("--file", ["manifest load", "discover"]);
-  only("--approver", ["approve", "accept", "close"]);
+  only("--approver", ["approve", "accept", "close", "acknowledge"]);
   only("--plan-digest", ["approve"]);
   only("--close-digest", ["close"]);
+  only("--go-live-digest", ["acknowledge"]);
   only("--final", ["plan"]);
   for (const flag of ["--freeze-by", "--freeze-at", "--freeze-how"]) only(flag, ["approve"]);
   if (switches.has("--final")) {
@@ -299,14 +324,14 @@ export function parseInvocation(argv: string[]): Invocation {
   }
   only("--verification-digest", ["accept"]);
   only("--reason", ["cancel"]);
-  only("--note", ["accept"]);
+  only("--note", ["accept", "acknowledge"]);
   only("--confirm", ["reclaim"]);
   only("--stop-worker", ["reclaim"]);
   only("--code", ["plan", "status", "verify", "accept"]);
+  only("--mapping", ["plan", "status", "verify", "acknowledge"]);
   for (const flag of [
     "--review",
     "--view",
-    "--mapping",
     "--phase",
     "--search",
     "--cursor",
