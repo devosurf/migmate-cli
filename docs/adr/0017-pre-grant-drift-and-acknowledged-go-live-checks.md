@@ -4,6 +4,7 @@
 - Date: 2026-10-27
 - Accepted: Morgan, after the focused grilling and explicit confirmation of the complete policy for [#95](https://github.com/devosurf/migmate-cli/issues/95).
 - Amends: [ADR-0012](0012-staged-migrations-and-access-timing.md) A6, for check ordering and the post-grant hard-stop rule; [ADR-0015](0015-close-report-readiness-and-resume.md), for pre-grant drift checks and recovery from acknowledged checks; [ADR-0016](0016-human-handoff-without-digest-transcription.md), for a separately acknowledged post-grant failure, without changing its human-handoff or local-attestation model.
+- Amended by: [ADR-0019](0019-acting-account-pools.md), for the post-grant membership check: it runs after uploader membership is removed, so it compares only approved members.
 
 For a fresh deferred go-live, every affected destination must pass its drift check before the first permanent fence or member grant. After access is live, an explicit acknowledgment may permit closure with a failed or unavailable check, retaining that result as an exception rather than relabelling it as passed. Keeping a job open does not revoke already-live access; the useful recovery boundary is a deliberate decision about the unresolved evidence, followed by the required final report.
 
