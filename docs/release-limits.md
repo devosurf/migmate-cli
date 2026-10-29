@@ -72,7 +72,8 @@ transfer-permission change is introduced. See
 Both existing file directions now use ADR-0014 map-only approval. Approval binds
 mapping roots, drives to create, members and options, not a file inventory.
 There is no file/deletion preview or inventory-age/freshness gate.
-Informational account-activity snapshots in #78 remain separate work.
+Informational account-activity snapshots are described next; they add no planning
+scan, prediction, quota threshold or inventory-age gate.
 
 Local verification covers fake-provider stale submissions, cancelled confirmations,
 identity reuse, unattended labels, authority expansion, required rationale and
@@ -81,6 +82,40 @@ web HTML/client/protocol was exercised in Chromium through a loopback bridge,
 including pending-review preservation across another window's replan/reverification.
 This is not native-window or live-tenant qualification. No tenant mutations or
 identity-provider calls were needed.
+
+## Observed upload accounting — #78
+
+Plan snapshots and current `status.uploadActivity` report job-content uploads
+observed in one engine home, keyed by the approved Google account email (trim/case
+normalization only). Concurrent jobs share `uploads.sqlite`; per-job schema stays
+at version 6. This is local accounting, with no discovery, merging or coordination
+across engine homes or hosts. Other homes/hosts and non-Migmate uploads are
+unobserved even when local coverage is complete.
+
+Coverage includes file-migration uploads to Google and acknowledged Teams Google
+content uploads, including failed/stopped attempts. Existing recovered archive
+objects are not charged again. Downloads, Google-to-SharePoint uploads, local-only
+archives and packaging, verification/hash reads, metadata/HTTP overhead and
+preflight probes are excluded. Observed counters are not Google's charged bytes;
+provider retries and ambiguous responses retain uncertainty.
+
+The UTC window is `(asOf - 24 hours, asOf]`. File progress uses its roughly
+ten-second cadence; Teams uses bounded chunk acknowledgments. Partial totals
+remain visible, but new/uninstrumented history, unattributed attempts, missing
+terminal counters, unresolved crashes, decreases and sampling intervals over
+30 seconds disclose gaps. Unattributed attempts prevent known-account completeness
+while relevant. Unresolved active attempts never age into complete coverage.
+Only complete local coverage yields the clamped estimate against decimal
+750,000,000,000 bytes. It is neither a safe budget nor an authoritative quota.
+
+Measurements retain their observation timestamps for 48 hours. Writer-side
+maintenance prunes measurements and expired resolved gaps, retaining lifetime
+attempt tombstones for replay protection. Status performs no repair, worker
+launch or ledger maintenance; storage failures surface instead of empty totals.
+Plan snapshots are immutable and contain no predicted upload size. Estimates do
+not gate approval/execution, allocate allowance or schedule jobs. The existing
+provider quota stop, exit 5, hit + 24-hour estimate and manual resume are unchanged.
+Local worker/fake-provider tests are not live Google charging qualification.
 
 ## 1. File copy is path-based, not collision-protected
 

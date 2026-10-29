@@ -6,6 +6,7 @@
 
 import type { CopyPassStats, DriveMember } from "./providers/port.ts";
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
+import type { UploadActivity } from "./store/uploads.ts";
 
 export interface UploadQuotaStop {
   code: "upload_quota_exceeded";
@@ -503,6 +504,7 @@ export interface JobStatus {
   planRevision: number | null;
   planDigest: string | null;
   currentPlan: PlanRevision | null;
+  uploadActivity?: UploadActivity;
   lastInteractiveIdentity?: string | null;
   currentApproval?: ApprovalRecord | null;
   approvalAuthority?: ApprovalAuthority;

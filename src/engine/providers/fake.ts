@@ -882,6 +882,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     };
     this.insertDestinationEntry(entry);
     this.reservedIds.delete(targetId);
+    input.onUploadProgress?.(bytes.byteLength);
     this.throwEffect("uploadDestinationContent", targetId, "after");
     return cloneDestination(entry);
   }

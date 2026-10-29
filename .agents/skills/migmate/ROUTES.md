@@ -113,6 +113,39 @@ For `blocked` (exit 5) with `uploadQuota.code = "upload_quota_exceeded"` in the 
 
 Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File migration uses no reserved IDs, private markers, move-by-id or local staging; Teams archive uploads retain their own protections. rclone copies empty directories and supported file timestamps/content type with owner, permission and label metadata off; folders get modification times only. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary.
 
+## Observed Google uploads
+
+Before approval and on status, present `uploadActivity`: the dated plan snapshot
+versus the current cross-job view in **this engine home**. Name each approved,
+provider-observed account, `(asOf - 24 hours, asOf]`, coverage start, partial
+observed bytes and gaps. Unknown accounts remain separate attempts. A changed
+observed account requires a new plan; credential-file rotation alone does not
+reset its ledger.
+
+File uploads to Google and acknowledged Teams cold-storage content count,
+including unsuccessful attempts; recovered objects do not count again.
+Downloads, reverse-route writes, local packaging/archives, verification,
+metadata/HTTP overhead and preflight probes are excluded. Other engine homes,
+hosts and non-Migmate uploads are unobserved, with no cross-home/host coordination.
+
+Treat `estimatedRemainingBytes: null` as unavailable, not zero. New or older
+uninstrumented history, unknown identities, missing terminal stats, crashes,
+counter decreases and sampling gaps preserve partial totals without complete
+coverage. File observations are normally ten seconds apart; archive observations
+follow acknowledged chunks, and intervals over 30 seconds disclose timing
+uncertainty. Unresolved attempts do not become complete through expiry.
+Even a complete local window only estimates `max(0, 750,000,000,000 - bytes)`;
+provider retries and excluded activity make this different from Google's charge.
+
+Planned upload bytes are unavailable; explain that Migmate cannot assess whether
+the plan fits. The snapshot adds no scan or predicted-size warning, and current
+status never rewrites approval. Estimates neither reserve allowance nor gate
+execution or concurrency. Use the existing manual quota-resume procedure above;
+scheduling and freeze-window suitability remain the operator/agent's decision.
+Keep the home ledger: measurements last 48 hours, compact replay checkpoints last
+its lifetime. Status is read-only; a ledger error needs investigation, not a
+fabricated empty balance.
+
 ## Teams archive destination
 
 When driving a `teams_archive` job, distinguish the destination-free local package from the optional Google Shared Drive cold-storage copy. Both support `retainedHistory`, `transcripts`, and `attachmentBytes`, subject to option-specific permissions and tenant probes. Live-test evidence is not required; per-job verification findings are the signal. A hosted-content probe with no non-empty sample skips rather than blocking a text-only or empty scope; an unreadable found asset still fails. `docs/release-limits.md` limit 5 states the coverage and prerequisites.

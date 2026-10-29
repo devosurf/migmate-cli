@@ -447,6 +447,8 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
   assert.equal(doctor.code, 0, doctor.stdout);
   assert.equal(document<{ passed: boolean }>(doctor).value.passed, true);
   const before = await h.engine().reader({ id }).status();
+  assert.ok(before.ok);
+  const { uploadActivity: _beforeActivity, ...beforeDurable } = before.value;
   const file = join(h.home, "draft.json");
   const capture = await invoke(
     ["discover", "--job", id, "--file", file, "--output", "json"],
@@ -474,11 +476,10 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
   const envelopeOnly = await invoke(["discover", "--job", id, "--output", "json"], h.engine());
   assert.equal(envelopeOnly.code, 0);
   assert.deepEqual(document<SharePointDiscovery>(envelopeOnly).value, result.value);
-  assert.deepEqual(
-    await h.engine().reader({ id }).status(),
-    before,
-    "discovery never loads its draft",
-  );
+  const after = await h.engine().reader({ id }).status();
+  assert.ok(after.ok);
+  const { uploadActivity: _afterActivity, ...afterDurable } = after.value;
+  assert.deepEqual(afterDurable, beforeDurable, "discovery never loads its draft");
   const reviewed = {
     ...result.value.manifest,
     mappings: result.value.manifest.mappings.map((mapping) => ({

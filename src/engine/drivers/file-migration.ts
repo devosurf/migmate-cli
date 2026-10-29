@@ -5,6 +5,7 @@ import { CODE_BY_NAME } from "../codes.ts";
 import { canonicalJson } from "../store/digest.ts";
 import { validateMappingTrees } from "../manifest.ts";
 import { fileProviderPair, type FileProviderId } from "../providers/adapters/capabilities.ts";
+import { UploadLedgerError, type UploadAttempt } from "../store/uploads.ts";
 import type {
   CheckResult,
   CreatedDrive,
@@ -1012,6 +1013,8 @@ async function* copyPass(
   });
   yield unit();
   let reference: CopyPassReference | undefined;
+  let upload: UploadAttempt | undefined;
+  let lastObservation: { bytes: number; at: Date } | undefined;
   try {
     ctx.signal?.throwIfAborted();
     if (ctx.config.options?.mirror) {
@@ -1027,6 +1030,12 @@ async function* copyPass(
         );
     }
     const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+    if (resolved.destination.kind === "google_drive")
+      upload = ctx.beginUpload?.(
+        "file",
+        JSON.stringify([mapping.id, passNumber]),
+        ctx.actingGoogleAccount,
+      );
     const handle = await ctx.provider.startCopyPass({
       ...resolved,
       ...(ctx.config.options?.mirror
@@ -1035,12 +1044,19 @@ async function* copyPass(
       transfers: ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
     });
     reference = { socketPath: resolved.socketPath, pass: handle };
+    upload?.observe(
+      0,
+      ctx.now(),
+      false,
+      JSON.stringify([handle.executeId, handle.group, handle.jobid]),
+    );
     pass = { ...pass, ...handle, status: "running", startedAt: ctx.now().toISOString() };
     yield unit();
     for (;;) {
       ctx.signal?.throwIfAborted();
       const status = await ctx.provider.copyPassStatus(reference);
       const stats = await ctx.provider.copyPassStats(reference);
+      lastObservation = { bytes: stats.bytes, at: ctx.now() };
       const transferring = stats.transferring.slice(0, 5);
       const transferringTotal = stats.transferringTotal ?? stats.transferring.length;
       const lastStats = {
@@ -1075,6 +1091,7 @@ async function* copyPass(
         observedAt - publishedAt >= 10_000
       ) {
         publishedAt = observedAt;
+        upload?.observe(stats.bytes, new Date(observedAt), status.state !== "running");
         yield unit();
       } else {
         yield null;
@@ -1086,8 +1103,34 @@ async function* copyPass(
       ctx.signal?.aborted || (error instanceof Error && error.name === "AbortError");
     if (reference) {
       await ctx.provider.stopCopyPass(reference);
+      if (upload) {
+        let finalStats;
+        try {
+          finalStats = await ctx.provider.copyPassStats(reference);
+        } catch {
+          // A stopped worker may already have discarded its counter.
+        }
+        if (finalStats) {
+          const transferring = finalStats.transferring.slice(0, 5);
+          const transferringTotal = finalStats.transferringTotal ?? finalStats.transferring.length;
+          pass = {
+            ...pass,
+            lastStats: {
+              ...finalStats,
+              transferring,
+              transferringTotal,
+              transferringTruncated: transferringTotal > transferring.length,
+            },
+          };
+          upload.observe(finalStats.bytes, ctx.now(), true);
+        } else {
+          if (lastObservation) upload.observe(lastObservation.bytes, lastObservation.at);
+          upload.missing(ctx.now(), "terminal_counter_unavailable_after_stop");
+        }
+      }
       reference = undefined;
     }
+    if (error instanceof UploadLedgerError) throw error;
     const message = interrupted ? null : error instanceof Error ? error.message : String(error);
     const uploadQuota = fileProviderPair(ctx.config).destination.quotaStop?.(ctx, message);
     pass = {
@@ -1111,7 +1154,11 @@ async function* copyPass(
     yield unit();
     if (interrupted) return;
   } finally {
-    if (reference && pass.status === "running") await ctx.provider.stopCopyPass(reference);
+    if (reference && pass.status === "running") {
+      await ctx.provider.stopCopyPass(reference);
+      if (lastObservation) upload?.observe(lastObservation.bytes, lastObservation.at);
+      upload?.missing(ctx.now(), "upload_observation_interrupted");
+    }
   }
 }
 

@@ -438,6 +438,16 @@ export const teamsArchiveDriver = {
       return;
     }
     yield* provider(ctx).preflight(plan.config, plan, ctx.signal);
+    if (plan.config.destination) {
+      const actualSubject = (await ctx.provider.googleAbout(ctx.signal)).user.emailAddress;
+      yield {
+        id: "google.actingAccount",
+        title: "Google identifies the acting archive destination account",
+        status: actualSubject ? "pass" : "fail",
+        ...(actualSubject ? {} : { code: "preflight_failed" as const }),
+        evidence: { actualSubject },
+      };
+    }
     try {
       const root = directory(ctx);
       await access(root, constants.W_OK);
