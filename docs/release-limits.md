@@ -312,19 +312,23 @@ implementation covered two small SharePoint libraries through prestage, a mirror
 delta, a final pass and go-live, plus a copy-only run. That observation does not
 qualify the new all-route cutover or establish large-library scale.
 
-rclone listings and hash sums run as polled rclone jobs with no
-request deadline. rclone retries each Graph and Drive request up to 10 times, honoring
-`Retry-After`, and its own I/O timeouts still apply. One listing response is capped at
-256 MiB, roughly 900,000 files at the ~260 bytes per file observed on SharePoint. Split
-a larger library into folder mappings.
+rclone listings and hash sums are cancellable synchronous requests without a client
+deadline. rclone retries each Graph and Drive request up to 10 times, honoring
+`Retry-After`, and its own I/O timeouts still apply. Migmate parses their JSON
+incrementally into disposable disk indexes; there is no whole-listing 256 MiB
+response cap. Listing comparison, hash-candidate selection and historical
+locale-ordered destination digests use bounded pages and external sorting.
+Temporary disk usage grows with the active mappings; retain space for these
+indexes as well as the durable job store and complete report artifacts.
 
-Verification finalization hashes canonical evidence one SQLite row or finding at
-a time and reads the archive manifest digest directly. It no longer builds a
-whole-evidence string or reloads execution resume state merely to compute that
-digest. Existing evidence digests remain byte-identical; jobs need no migration.
-The synthetic digest regression exceeds V8's single-string limit. This is not a
-whole-job memory guarantee: individual records, driver resume state and verification
-snapshots elsewhere still have their existing memory costs.
+File-job resume loads mapping metadata rather than every verified item.
+Reverification snapshots iterate stored rows, coverage and changed-path observations
+are stored in pages, and reports reconstruct the complete historical array shapes
+without assembling them in memory. Verification commits retain their individual
+idempotence keys within bounded transactions. No job-store schema migration is
+needed. Historical stores and reports remain readable, and destination digest
+compatibility covers Unicode locale ties, duplicate paths, escaping and missing IDs.
+The bound is per listing record and page, not a limit on individual provider record size.
 
 Report generation does not build whole-job row/finding arrays, execution resume
 state, settled-inventory section strings or complete artifact strings. It reads
@@ -335,17 +339,22 @@ serialization or write cannot replace a previously published set or complete
 deferred close. Disk usage still scales with complete evidence; unchanged reports
 are regenerated into staging before the existing immutable set is reused.
 
-The local report regression uses synthetic evidence for 250,000 files across
-three mappings after prestage, delta and final settling, with a 192 MiB Node heap.
-It includes large settled inventories, findings and accepted exceptions, and
-aggregate artifact bytes exceeding the runtime's single-string limit. Fixtures
-are bulk-inserted transactionally; deferred close renders readiness and final artifacts.
-The default `npm test` gate runs this regression after the other suites to avoid
-I/O contention with timing-sensitive tests. This qualifies reporting,
-not a 250,000-file live-provider migration, provider listing memory, or the memory
-needed to perform execution/verification. JSONL's compatible header contains
-complete driver evidence and accepted exceptions; consume large headers with a
-streaming JSON parser, not a line-sized string.
+`npm run test:scale` exercises **5,000,000 files across three mappings** under
+`--max-old-space-size=192`: fake rclone JSON streams pass through the production
+parser and comparison, a changed final observation triggers catch-up settling,
+verification persists every file and paged coverage, status reads the resulting
+store, and close repeats destination checks and renders readiness/final reports.
+It records sampled heap/RSS peaks, listing time and total wall time. This is a
+synthetic single-host qualification, not live-provider throughput, rclone-process
+memory, or a guarantee that one destination container accepts five million items.
+Provider container limits still apply.
+
+The separate scale gate avoids imposing five-million-file disk I/O on every
+ordinary suite. The default `npm test` includes a 6,003-file version of the same
+lifecycle and retains the isolated 250,000-file report regression, which includes
+findings, accepted exceptions and aggregate artifacts exceeding V8's string limit.
+JSONL's compatible header contains complete coverage, settling and accepted
+exceptions: consume it with a streaming JSON parser, not a line-sized string.
 
 ### Staged migrations and cutover evidence
 

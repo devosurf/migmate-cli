@@ -79,6 +79,8 @@ export interface FileSettleState {
   observations: Array<{
     at: string;
     changedPaths: string[];
+    /** Bounded path pages under file-settle-paths:${mappingId}:${observationIndex}:${page}. */
+    changedPathPages?: number;
     outcome: "changed" | "settled" | "exhausted";
   }>;
 }

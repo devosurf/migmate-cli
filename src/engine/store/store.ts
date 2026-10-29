@@ -63,10 +63,9 @@ import type {
 } from "../providers/archive.ts";
 import { canonicalJson, digestJson, digestVerificationEvidence } from "./digest.ts";
 import type { StoredMappings } from "../manifest.ts";
-import { readReportJson } from "./report.ts";
+import { readReportJson, readReportSettlement, reportCoverage } from "./report.ts";
 import { exceptionConsequence, isAcceptable } from "../codes.ts";
 import { approvalAuthority } from "../decisions.ts";
-import { ReportArray } from "../report.ts";
 import type { DriverContext } from "../drivers/types.ts";
 
 export const SCHEMA_VERSION = 7;
@@ -218,6 +217,7 @@ export interface Store {
   readMappingPasses(revision: number): MappingPass[];
   readCreatedDrives(): CreatedDrive[];
   readMemberGrants(): MemberGrant[];
+  readPlanScopes(revision: number): FileCommitRow[];
   readAllRows(revision: number, phase?: RowPhase): CommitRow[];
   writeArtifactSet(value: ArtifactSet): void;
   readArtifactSet(): ArtifactSet;
@@ -1059,15 +1059,23 @@ class StoreImpl implements Store {
     if (record.mode === "interactive") this.recordInteractiveIdentity(record.approver);
   }
   #snapshotVerification(planRev: number, run: number): void {
-    const insert = this.db.prepare(
-      "INSERT OR IGNORE INTO verification_history (run,plan_rev,category,row_key,payload) VALUES (?,?,?,?,?)",
-    );
     for (const table of ["item", "conversation", "finding"] as const) {
-      for (const row of this.db
-        .prepare(`SELECT * FROM ${table} WHERE rev=? AND phase='verify' ORDER BY id`)
-        .all(planRev)) {
-        insert.run(run, planRev, table, String(row.id), canonicalJson(row));
-      }
+      // Serialize inside SQLite: even an old single-row coverage inventory must
+      // not cross into the JavaScript heap. Column order matches canonicalJson.
+      const fields = this.db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map((column) => String(column.name))
+        .sort()
+        .map((name) => `'${name}',"${name}"`)
+        .join(",");
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO verification_history (run,plan_rev,category,row_key,payload)
+           SELECT ?,?, ?,CAST(id AS TEXT),json_object(${fields})
+           FROM ${table} WHERE rev=? AND phase='verify' ORDER BY id`,
+        )
+        .run(run, planRev, table, planRev);
     }
   }
   beginVerification(planRev: number, verificationRun: number): void {
@@ -1402,26 +1410,9 @@ class StoreImpl implements Store {
     const db = this.db;
     return {
       settled(mappingId) {
-        return readReportJson(
-          db,
-          "SELECT value AS document FROM watermark WHERE rev=? AND unit_key=? AND json_extract(value,'$.revision')=?",
-          [revision, `file-settle:${mappingId}`, revision],
-        );
+        return readReportSettlement(db, revision, mappingId);
       },
-      coverage: new ReportArray(function* () {
-        for (const row of db
-          .prepare(
-            "SELECT id,mapping_id FROM item WHERE rev=? AND phase='verify' AND json_type(payload,'$.fileScope.verification') IS NOT NULL ORDER BY id",
-          )
-          .iterate(revision)) {
-          const verification = readReportJson(
-            db,
-            "SELECT json_remove(json_extract(payload,'$.fileScope.verification'),'$.sourceInventory') AS document FROM item WHERE rev=? AND phase='verify' AND id=?",
-            [revision, String(row.id)],
-          );
-          yield { mappingId: String(row.mapping_id), ...(verification as Record<string, unknown>) };
-        }
-      }),
+      coverage: reportCoverage(db, revision),
     };
   }
   inventoryPlanRevision(): number | null {
@@ -1497,7 +1488,7 @@ class StoreImpl implements Store {
     return {
       rows: this.db
         .prepare(
-          "SELECT json_remove(payload,'$.fileScope.preview','$.fileScope.verification.sourceInventory','$.fileScope.verification.coveredPaths','$.fileScope.verification.deletedPaths') AS payload FROM item WHERE rev=? AND json_type(payload,'$.fileScope') IS NOT NULL ORDER BY phase,id",
+          "SELECT json_remove(payload,'$.fileScope.preview','$.fileScope.verification') AS payload FROM item WHERE rev=? AND phase='plan' AND json_type(payload,'$.fileScope') IS NOT NULL ORDER BY id",
         )
         .all(revision)
         .map((row) => rowToCommit("item", row)),
@@ -1515,6 +1506,14 @@ class StoreImpl implements Store {
       memberGrants: this.readMemberGrants(),
       ...(plan ? { archivePlan: JSON.parse(String(plan.payload)) as ArchivePlan } : {}),
     };
+  }
+  readPlanScopes(revision: number): FileCommitRow[] {
+    return this.db
+      .prepare(
+        "SELECT payload FROM item WHERE rev=? AND phase='plan' AND json_type(payload,'$.fileScope') IS NOT NULL ORDER BY id",
+      )
+      .all(revision)
+      .map((row) => rowToCommit("item", row) as FileCommitRow);
   }
   readAllRows(revision: number, phase?: RowPhase): CommitRow[] {
     return this.#snapshot(() => {
@@ -1550,6 +1549,22 @@ class StoreImpl implements Store {
   }
   readResume(revision: number): ResumeRecord {
     return this.#snapshot(() => {
+      if (this.readJob()?.type === "file_migration") {
+        // Only mapping scope and settle state participate in file recovery.
+        // Item rows, coverage pages and commit keys belong to durable evidence,
+        // not to a per-operation in-memory revision snapshot.
+        return {
+          ...this.readReportResume(revision),
+          watermarks: Object.fromEntries(
+            this.db
+              .prepare(
+                "SELECT unit_key,json_remove(value,'$.copiedInventory') AS value FROM watermark WHERE rev=? AND unit_key LIKE 'file-settle:%' ORDER BY unit_key",
+              )
+              .all(revision)
+              .map((row) => [String(row.unit_key), String(row.value)]),
+          ),
+        };
+      }
       const rows = this.readAllRows(revision);
       const watermarks = Object.fromEntries(
         this.db

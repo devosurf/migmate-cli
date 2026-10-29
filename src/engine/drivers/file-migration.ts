@@ -15,6 +15,7 @@ import type {
 } from "../types.ts";
 import { checkedBeforeGrant, goLiveCheckSettled, unsettledGoLiveCheck } from "../go-live.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
+import { DiskListing, indexListing, disposeListing } from "../providers/listing.ts";
 import type {
   CopyPassReference,
   DestinationEntry,
@@ -281,16 +282,36 @@ function membershipIdentities(members: DriveMembership[]): string[] {
     .sort();
 }
 
-function destinationDigest(
-  files: Iterable<FileHashEntry>,
-  md5: Iterable<FileHashEntry>,
-  folders: Iterable<string>,
+/** Hash the historical JSON representation without building its arrays or string. */
+export function destinationDigest(
+  files: DiskListing<FileHashEntry>,
+  md5: DiskListing<FileHashEntry>,
+  folders: DiskListing<string>,
 ): string {
-  const entries = (items: Iterable<FileHashEntry>) =>
-    [...items]
-      .map((item) => [item.path, item.size, item.hash, item.id ?? null])
-      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-  return digest([entries(files), entries(md5), [...folders].sort()]);
+  const hash = createHash("sha256").update("[");
+  const array = <T>(values: Iterable<T>, encode: (value: T) => unknown) => {
+    hash.update("[");
+    let comma = false;
+    for (const value of values) {
+      if (comma) hash.update(",");
+      hash.update(JSON.stringify(encode(value)));
+      comma = true;
+    }
+    hash.update("]");
+  };
+  for (const [index, items] of [files, md5].entries()) {
+    if (index) hash.update(",");
+    array(
+      items.sorted((a, b) => a.path.localeCompare(b.path)),
+      (item) => [item.path, item.size, item.hash, item.id ?? null],
+    );
+  }
+  hash.update(",");
+  array(
+    folders.sorted((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    (path) => path,
+  );
+  return hash.update("]").digest("hex");
 }
 
 async function destinationCheck(
@@ -302,38 +323,53 @@ async function destinationCheck(
   const pass = await ctx.provider.resolveFilePass(
     destinationMapping(provisionedMapping(ctx, mapping)),
   );
-  const files = await ctx.provider.listFileHashes({
-    socketPath: pass.socketPath,
-    root: pass.destination,
-    hashType: baseline?.hashType ?? "sha256",
-    download: false,
-    ...abortable(ctx),
-  });
-  const md5 = baseline?.md5
-    ? await ctx.provider.listFileHashes({
+  const resources: Disposable[] = [];
+  try {
+    const files = indexListing(
+      await ctx.provider.listFileHashes({
         socketPath: pass.socketPath,
         root: pass.destination,
-        hashType: "md5",
+        hashType: baseline?.hashType ?? "sha256",
         download: false,
         ...abortable(ctx),
-      })
-    : [];
-  const folders = await ctx.provider.listFolders({
-    socketPath: pass.socketPath,
-    root: pass.destination,
-    ...abortable(ctx),
-  });
-  const observed = destinationDigest(files, md5, folders);
-  const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
-  return {
-    at: ctx.now().toISOString(),
-    status: matches ? "passed" : "failed",
-    check: matches ? "destination" : "destination_drift",
-    evidence: {
-      expectedDestinationDigest: baseline?.digest ?? null,
-      observedDestinationDigest: observed,
-    },
-  };
+      }),
+    );
+    resources.push(files);
+    const md5 = indexListing(
+      baseline?.md5
+        ? await ctx.provider.listFileHashes({
+            socketPath: pass.socketPath,
+            root: pass.destination,
+            hashType: "md5",
+            download: false,
+            ...abortable(ctx),
+          })
+        : [],
+    );
+    resources.push(md5);
+    const folders = indexListing(
+      await ctx.provider.listFolders({
+        socketPath: pass.socketPath,
+        root: pass.destination,
+        ...abortable(ctx),
+      }),
+      (path) => path,
+    );
+    resources.push(folders);
+    const observed = destinationDigest(files, md5, folders);
+    const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
+    return {
+      at: ctx.now().toISOString(),
+      status: matches ? "passed" : "failed",
+      check: matches ? "destination" : "destination_drift",
+      evidence: {
+        expectedDestinationDigest: baseline?.digest ?? null,
+        observedDestinationDigest: observed,
+      },
+    };
+  } finally {
+    for (const resource of resources) resource[Symbol.dispose]();
+  }
 }
 
 function unavailableGoLiveCheck(
@@ -658,37 +694,57 @@ function abortable(ctx: FileContext): { signal?: AbortSignal } {
  * What a pass would still change, from rclone listings of each side. Folders
  * are compared too: rclone's file listing cannot see a new empty source folder.
  */
-async function rclonePending(ctx: FileContext, mapping: FileMappingConfig): Promise<string[]> {
+async function rclonePending(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+): Promise<DiskListing<string>> {
   const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
-  const [comparison, sourceFolders, destinationFolders] = await Promise.all([
-    ctx.provider.compareFileListings({
+  const resources: unknown[] = [];
+  const pending = new DiskListing<string>((path) => path);
+  try {
+    const comparison = await ctx.provider.compareFileListings({
       ...resolved,
       mode: ctx.config.options?.mirror ? "mirror" : "copy",
       ...abortable(ctx),
-    }),
-    ctx.provider.listFolders({
-      socketPath: resolved.socketPath,
-      root: resolved.source,
-      ...abortable(ctx),
-    }),
-    ctx.provider.listFolders({
-      socketPath: resolved.socketPath,
-      root: resolved.destination,
-      ...abortable(ctx),
-    }),
-  ]);
-  const present = new Set(destinationFolders);
-  const expected = new Set(sourceFolders);
-  return [
-    ...[
-      ...comparison.new,
-      ...comparison.changed,
-      ...comparison.timestampOnly,
-      ...comparison.deleted,
-    ].map((item) => item.path),
-    ...sourceFolders.filter((path) => !present.has(path)),
-    ...(ctx.config.options?.mirror ? destinationFolders.filter((path) => !expected.has(path)) : []),
-  ].sort();
+    });
+    resources.push(...Object.values(comparison));
+    const expected = indexListing(
+      await ctx.provider.listFolders({
+        socketPath: resolved.socketPath,
+        root: resolved.source,
+        ...abortable(ctx),
+      }),
+      (path) => path,
+    );
+    resources.push(expected);
+    const present = indexListing(
+      await ctx.provider.listFolders({
+        socketPath: resolved.socketPath,
+        root: resolved.destination,
+        ...abortable(ctx),
+      }),
+      (path) => path,
+    );
+    resources.push(present);
+    for (const entries of [
+      comparison.new,
+      comparison.changed,
+      comparison.timestampOnly,
+      comparison.deleted,
+    ]) {
+      for (const entry of entries) pending.add(entry.path);
+    }
+    for (const path of expected) if (!present.has(path)) pending.add(path);
+    if (ctx.config.options?.mirror) {
+      for (const path of present) if (!expected.has(path)) pending.add(path);
+    }
+    return pending;
+  } catch (error) {
+    pending[Symbol.dispose]();
+    throw error;
+  } finally {
+    for (const resource of resources) disposeListing(resource);
+  }
 }
 
 /**
@@ -703,57 +759,89 @@ async function* mirrorDeletions(
 ): AsyncGenerator<CommitUnit, number> {
   if (!ctx.config.options?.mirror) return 0;
   const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
-  const [{ deleted }, sourceFolders, destinationFolders] = await Promise.all([
-    ctx.provider.compareFileListings({
+  const resources: unknown[] = [];
+  try {
+    const comparison = await ctx.provider.compareFileListings({
       ...resolved,
       mode: "mirror",
       ...abortable(ctx),
-    }),
-    ctx.provider.listFolders({
-      socketPath: resolved.socketPath,
-      root: resolved.source,
-      ...abortable(ctx),
-    }),
-    ctx.provider.listFolders({
-      socketPath: resolved.socketPath,
-      root: resolved.destination,
-      ...abortable(ctx),
-    }),
-  ]);
-  const expectedFolders = new Set(sourceFolders);
-  const deletedFolders = destinationFolders.filter(
-    (path) => path !== "." && !expectedFolders.has(path),
-  );
-  if (reserved + deleted.length > ctx.config.options.deleteLimit!)
-    throw new FilePlanRevisionRequiredError(
-      "Mirror would delete more destination files than deleteLimit allows; review the source, then raise deleteLimit in a new plan.",
-    );
-  if (!deleted.length && !deletedFolders.length) return 0;
-  yield {
-    rev: ctx.revision,
-    phase: "execute",
-    unitKey: JSON.stringify(["mirror-deletions", mapping.id, passNumber]),
-    checkpoint: mapping.id,
-    rows: [
-      ...deleted.map((entry) => ({ ...entry, kind: "file" as const })),
-      ...deletedFolders.map((path) => ({ path, size: null, kind: "folder" as const })),
-    ].map((entry) => {
-      const id = `destination:${entry.path}`;
-      const evidence = row(
-        ctx,
-        "execute",
-        mapping,
-        listedItem(mapping.sourceDriveId, id, entry.path, entry.kind, entry.size),
-        "to_be_deleted",
+    });
+    resources.push(...Object.values(comparison));
+    const deleted = indexListing(comparison.deleted);
+    resources.push(deleted);
+    if (reserved + deleted.size > ctx.config.options.deleteLimit!)
+      throw new FilePlanRevisionRequiredError(
+        "Mirror would delete more destination files than deleteLimit allows; review the source, then raise deleteLimit in a new plan.",
       );
-      delete evidence.sourceEvidence;
-      evidence.id = JSON.stringify([mapping.id, id, "execute", passNumber]);
-      evidence.destinationDriveId = mapping.destDriveId ?? null;
-      return evidence;
-    }),
-    findings: [],
-  };
-  return deleted.length;
+    const expectedFolders = indexListing(
+      await ctx.provider.listFolders({
+        socketPath: resolved.socketPath,
+        root: resolved.source,
+        ...abortable(ctx),
+      }),
+      (path) => path,
+    );
+    resources.push(expectedFolders);
+    const destinationFolders = indexListing(
+      await ctx.provider.listFolders({
+        socketPath: resolved.socketPath,
+        root: resolved.destination,
+        ...abortable(ctx),
+      }),
+      (path) => path,
+    );
+    resources.push(destinationFolders);
+    let rows: FileEvidenceRow[] = [];
+    let page = 0;
+    for (const entries of [
+      (function* () {
+        for (const entry of deleted) yield { ...entry, kind: "file" as const };
+      })(),
+      (function* () {
+        for (const path of destinationFolders)
+          if (path !== "." && !expectedFolders.has(path))
+            yield { path, size: null, kind: "folder" as const };
+      })(),
+    ]) {
+      for (const entry of entries) {
+        const id = `destination:${entry.path}`;
+        const evidence = row(
+          ctx,
+          "execute",
+          mapping,
+          listedItem(mapping.sourceDriveId, id, entry.path, entry.kind, entry.size),
+          "to_be_deleted",
+        );
+        delete evidence.sourceEvidence;
+        evidence.id = JSON.stringify([mapping.id, id, "execute", passNumber]);
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        rows.push(evidence);
+        if (rows.length === 1000) {
+          yield {
+            rev: ctx.revision,
+            phase: "execute",
+            unitKey: JSON.stringify(["mirror-deletions", mapping.id, passNumber, page++]),
+            checkpoint: mapping.id,
+            rows,
+            findings: [],
+          };
+          rows = [];
+        }
+      }
+    }
+    if (rows.length)
+      yield {
+        rev: ctx.revision,
+        phase: "execute",
+        unitKey: JSON.stringify(["mirror-deletions", mapping.id, passNumber, page]),
+        checkpoint: mapping.id,
+        rows,
+        findings: [],
+      };
+    return deleted.size;
+  } finally {
+    for (const resource of resources) disposeListing(resource);
+  }
 }
 
 function pendingPass(
@@ -966,18 +1054,50 @@ async function* copyMapping(
     if (ctx.waitForConsistency)
       await ctx.waitForConsistency(state.consistencyIntervalMs, ctx.signal);
     else await delay(state.consistencyIntervalMs, undefined, { signal: ctx.signal });
-    const changedPaths = await rclonePending(ctx, mapping);
-    state.outcome =
-      changedPaths.length === 0
-        ? "settled"
-        : state.passes >= state.maxPasses
-          ? "exhausted"
-          : "pending";
-    state.observations.push({
-      at: ctx.now().toISOString(),
-      changedPaths,
-      outcome: state.outcome === "pending" ? "changed" : state.outcome,
-    });
+    const pending = await rclonePending(ctx, mapping);
+    try {
+      state.outcome =
+        pending.size === 0 ? "settled" : state.passes >= state.maxPasses ? "exhausted" : "pending";
+      let changedPaths: string[] = [];
+      let changedPathPages = 0;
+      for (const path of pending.sorted((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+        changedPaths.push(path);
+        if (pending.size > 1000 && changedPaths.length === 1000) {
+          const unitKey = `file-settle-paths:${mapping.id}:${state.observations.length}:${changedPathPages++}`;
+          yield {
+            rev: ctx.revision,
+            phase: "execute",
+            unitKey,
+            checkpoint: mapping.id,
+            rows: [],
+            findings: [],
+            watermark: { unitKey, value: JSON.stringify(changedPaths) },
+          };
+          changedPaths = [];
+        }
+      }
+      if (changedPathPages && changedPaths.length) {
+        const unitKey = `file-settle-paths:${mapping.id}:${state.observations.length}:${changedPathPages++}`;
+        yield {
+          rev: ctx.revision,
+          phase: "execute",
+          unitKey,
+          checkpoint: mapping.id,
+          rows: [],
+          findings: [],
+          watermark: { unitKey, value: JSON.stringify(changedPaths) },
+        };
+        changedPaths = [];
+      }
+      state.observations.push({
+        at: ctx.now().toISOString(),
+        changedPaths,
+        ...(changedPathPages ? { changedPathPages } : {}),
+        outcome: state.outcome === "pending" ? "changed" : state.outcome,
+      });
+    } finally {
+      pending[Symbol.dispose]();
+    }
     yield settleUnit(ctx, state);
     if (state.outcome === "settled") return;
     if (state.outcome === "exhausted") throw cutoverIncomplete();
@@ -1278,282 +1398,338 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
     const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
     const hash = ctx.config.options?.verificationMode === "hash";
     const primaryHash = destinationAdapter.hashType;
-    const list = (
-      side: FilePassRoot,
-      hashType: "quickxor" | "sha256" | "md5",
-      download = false,
-      paths?: string[],
-    ) =>
-      ctx.provider.listFileHashes({
-        socketPath: pass.socketPath,
-        root: side,
-        hashType,
-        download,
-        ...(paths ? { paths } : {}),
-        ...abortable(ctx),
-      });
-    const [sources, destinations, sourceFolders, destinationFolders] = await Promise.all([
-      list(pass.source, primaryHash, hash),
-      list(pass.destination, primaryHash),
-      ctx.provider.listFolders({
-        socketPath: pass.socketPath,
-        root: pass.source,
-        ...abortable(ctx),
-      }),
-      ctx.provider.listFolders({
-        socketPath: pass.socketPath,
-        root: pass.destination,
-        ...abortable(ctx),
-      }),
-    ]);
-    const needsMd5 = primaryHash === "sha256" && destinations.some((entry) => entry.hash === null);
-    const destinationMd5 = needsMd5 ? await list(pass.destination, "md5") : [];
-    const md5ByPath = new Map(destinationMd5.map((entry) => [entry.path, entry.hash]));
-    const fallbackPaths = destinations
-      .filter((entry) => entry.hash === null)
-      .map((entry) => entry.path);
-    const sourceMd5 = new Map(
-      hash && needsMd5
-        ? (await list(pass.source, "md5", true, fallbackPaths)).map((entry) => [
-            entry.path,
-            entry.hash,
-          ])
-        : [],
-    );
-    const destinationByPath = new Map(destinations.map((entry) => [entry.path, entry]));
-    const sourcePaths = new Set(sources.map((entry) => entry.path));
-    const coverageRow = row(ctx, "verify", mapping, root, "unchanged");
-    coverageRow.id = JSON.stringify([mapping.id, root.id, "verify", "coverage"]);
-    coverageRow.fileScope = {
-      ...planRow.fileScope,
-      verification: {
-        scope: "full",
-        coveredPaths: [...sourcePaths, ...sourceFolders].sort(),
-      },
-    };
-    yield commit(ctx, "verify", coverageRow, [], "verification-coverage", ++done);
-    const latest = (ctx.resume.mappingPasses ?? [])
-      .filter((item) => item.mappingId === mapping.id)
-      .at(-1);
-    if (latest?.status !== "completed") {
-      const evidence = row(ctx, "verify", mapping, root, "destination_write_failed");
-      evidence.id = JSON.stringify([mapping.id, root.id, "verify", "copy-pass"]);
-      yield commit(
-        ctx,
-        "verify",
-        evidence,
-        [
-          finding(ctx, "verify", "destination_write_failed", mapping.id, {
-            mappingId: mapping.id,
-            passNumber: latest?.passNumber ?? null,
-            status: latest?.status ?? null,
-            error: latest?.error ?? null,
-            errors: latest?.lastStats?.errors ?? null,
+    const resources: Disposable[] = [];
+    try {
+      const list = async (
+        side: FilePassRoot,
+        hashType: "quickxor" | "sha256" | "md5",
+        download = false,
+        paths?: string[],
+      ) => {
+        const result = indexListing(
+          await ctx.provider.listFileHashes({
+            socketPath: pass.socketPath,
+            root: side,
+            hashType,
+            download,
+            ...(paths ? { paths } : {}),
+            ...abortable(ctx),
           }),
-        ],
-        "copy-pass",
-        ++done,
+        );
+        resources.push(result);
+        return result;
+      };
+      const sources = await list(pass.source, primaryHash, hash);
+      const destinations = await list(pass.destination, primaryHash);
+      const sourceFolders = indexListing(
+        await ctx.provider.listFolders({
+          socketPath: pass.socketPath,
+          root: pass.source,
+          ...abortable(ctx),
+        }),
+        (path) => path,
       );
-    }
-    for (const source of sources) {
-      const copied = destinationByPath.get(source.path);
-      // rclone's OneDrive IDs are `driveId#itemId`; durable rows keep the item ID.
-      const listedId = source.id?.startsWith(`${mapping.sourceDriveId}#`)
-        ? source.id.slice(mapping.sourceDriveId.length + 1)
-        : source.id;
-      const view = listedItem(
-        mapping.sourceDriveId,
-        listedId ?? `path:${source.path}`,
-        source.path,
-        "file",
-        source.size,
+      resources.push(sourceFolders);
+      const destinationFolders = indexListing(
+        await ctx.provider.listFolders({
+          socketPath: pass.socketPath,
+          root: pass.destination,
+          ...abortable(ctx),
+        }),
+        (path) => path,
       );
-      const hashType = needsMd5 && copied?.hash === null ? "md5" : primaryHash;
-      const sourceHash = hashType === "md5" ? (sourceMd5.get(source.path) ?? null) : source.hash;
-      const destinationHash = copied ? (copied.hash ?? md5ByPath.get(copied.path) ?? null) : null;
-      const codes: string[] = [];
-      let servedSize = view.size;
-      if (
-        hash &&
-        primaryHash === "sha256" &&
-        sourceHash &&
-        copied &&
-        (source.size !== copied.size || sourceHash !== destinationHash)
-      ) {
-        if (sourceHash === destinationHash) servedSize = copied.size;
-        else {
-          try {
-            const measured = await hashStream(
-              ctx.provider.openSourceContent({ driveId: mapping.sourceDriveId, itemId: view.id }),
-              ctx.signal,
-            );
-            if (measured.sha256 !== source.hash) codes.push("source_read_failed");
-            else servedSize = measured.size;
-          } catch (error) {
-            if (!terminalUnavailable(error)) throw error;
-            codes.push("source_read_failed");
+      resources.push(destinationFolders);
+      let needsMd5 = false;
+      if (primaryHash === "sha256") {
+        for (const entry of destinations) {
+          if (entry.hash === null) {
+            needsMd5 = true;
+            break;
           }
         }
-        if (servedSize !== source.size) codes.push("source_size_inconsistent");
       }
-      if (!copied)
-        codes.push(
-          destinationFolders.includes(source.path)
-            ? "destination_type_conflict"
-            : "destination_missing",
-        );
-      if (hash && !sourceHash) codes.push("source_read_failed");
-      if (copied) {
-        const sizeMismatch = servedSize !== null && copied.size >= 0 && servedSize !== copied.size;
-        const hashMismatch =
-          hash && !!sourceHash && !!destinationHash && sourceHash !== destinationHash;
-        const rewritten =
-          destinationAdapter.rewritesPath(source.path) && (sizeMismatch || hashMismatch);
-        if (rewritten) codes.push("destination_rewrote_file");
-        else {
-          if (sizeMismatch) codes.push("size_mismatch");
-          if (hashMismatch) codes.push("content_mismatch");
+      const destinationMd5 = needsMd5
+        ? await list(pass.destination, "md5")
+        : new DiskListing<FileHashEntry>();
+      resources.push(destinationMd5);
+      const sourceMd5 = new DiskListing<FileHashEntry>();
+      resources.push(sourceMd5);
+      if (hash && needsMd5) {
+        let paths: string[] = [];
+        for (const entry of destinations) {
+          if (entry.hash !== null) continue;
+          paths.push(entry.path);
+          if (paths.length === 1000) {
+            const page = await list(pass.source, "md5", true, paths);
+            for (const value of page) sourceMd5.add(value);
+            page[Symbol.dispose]();
+            resources.pop();
+            paths = [];
+          }
         }
-        if (hash && !destinationHash) codes.push("destination_read_failed");
+        if (paths.length) {
+          const page = await list(pass.source, "md5", true, paths);
+          for (const value of page) sourceMd5.add(value);
+          page[Symbol.dispose]();
+          resources.pop();
+        }
       }
-      const evidence = row(ctx, "verify", mapping, view, codes[0] ?? "unchanged");
-      evidence.destinationDriveId = mapping.destDriveId ?? null;
-      evidence.destinationFileId = copied?.id ?? null;
-      evidence.sourceFingerprint = sourceHash;
-      evidence.destinationFingerprint = destinationHash;
-      evidence.provenanceState = codes.some((code) => code !== "source_size_inconsistent")
-        ? "drifted"
-        : "verified";
-      yield commit(
-        ctx,
-        "verify",
-        evidence,
-        codes.map((code) =>
-          finding(ctx, "verify", code, view.id, {
-            path: source.path,
-            sourceSize: servedSize,
-            destinationSize: copied?.size ?? null,
-            sourceHash,
-            destinationHash,
-            hashType: hash ? hashType : null,
-            ...(codes.includes("source_size_inconsistent")
-              ? {
-                  listedSize: source.size,
-                  ...(code === "source_size_inconsistent" ? { servedSize } : {}),
-                  ...(code === "size_mismatch" || code === "content_mismatch"
-                    ? { cause: "source_size_inconsistent" }
-                    : {}),
-                }
-              : {}),
-          }),
-        ),
-        "verification",
-        ++done,
-      );
-    }
-    const presentFolders = new Set(destinationFolders);
-    const expectedFolders = new Set(sourceFolders);
-    for (const path of sourceFolders) {
-      if (presentFolders.has(path)) continue;
-      const conflicting = destinationByPath.get(path);
-      const code = conflicting ? "destination_type_conflict" : "destination_missing";
-      const view = listedItem(mapping.sourceDriveId, `folder:${path}`, path, "folder", null);
-      const evidence = row(ctx, "verify", mapping, view, code);
-      evidence.destinationDriveId = mapping.destDriveId ?? null;
-      evidence.destinationFileId = conflicting?.id ?? null;
-      yield commit(
-        ctx,
-        "verify",
-        evidence,
-        [
-          finding(
-            ctx,
+      const coverage = new DiskListing<string>((path) => path);
+      resources.push(coverage);
+      for (const entry of sources) if (!coverage.has(entry.path)) coverage.add(entry.path);
+      for (const path of sourceFolders) coverage.add(path);
+      let coveredPaths: string[] = [];
+      let coveragePage = 0;
+      for (const path of coverage.sorted((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+        coveredPaths.push(path);
+        if (coveredPaths.length === 1000) {
+          const coverageRow = row(ctx, "verify", mapping, root, "unchanged");
+          coverageRow.id = JSON.stringify([
+            mapping.id,
+            root.id,
             "verify",
-            code,
-            view.id,
-            conflicting
-              ? {
-                  path,
-                  ...(conflicting.id ? { destinationId: conflicting.id } : {}),
-                  destinationSize: conflicting.size,
-                  destinationHash: conflicting.hash,
-                }
-              : { path, itemType: "folder" },
+            "coverage",
+            coveragePage++,
+          ]);
+          coverageRow.fileScope = { mapOnly: true, verification: { scope: "full", coveredPaths } };
+          yield commit(ctx, "verify", coverageRow, [], "verification-coverage", ++done);
+          coveredPaths = [];
+        }
+      }
+      if (coveredPaths.length || coveragePage === 0) {
+        const coverageRow = row(ctx, "verify", mapping, root, "unchanged");
+        coverageRow.id = JSON.stringify([mapping.id, root.id, "verify", "coverage", coveragePage]);
+        coverageRow.fileScope = { mapOnly: true, verification: { scope: "full", coveredPaths } };
+        yield commit(ctx, "verify", coverageRow, [], "verification-coverage", ++done);
+      }
+      coverage[Symbol.dispose]();
+      const latest = (ctx.resume.mappingPasses ?? [])
+        .filter((item) => item.mappingId === mapping.id)
+        .at(-1);
+      if (latest?.status !== "completed") {
+        const evidence = row(ctx, "verify", mapping, root, "destination_write_failed");
+        evidence.id = JSON.stringify([mapping.id, root.id, "verify", "copy-pass"]);
+        yield commit(
+          ctx,
+          "verify",
+          evidence,
+          [
+            finding(ctx, "verify", "destination_write_failed", mapping.id, {
+              mappingId: mapping.id,
+              passNumber: latest?.passNumber ?? null,
+              status: latest?.status ?? null,
+              error: latest?.error ?? null,
+              errors: latest?.lastStats?.errors ?? null,
+            }),
+          ],
+          "copy-pass",
+          ++done,
+        );
+      }
+      for (const source of sources) {
+        const copied = destinations.get(source.path);
+        // rclone's OneDrive IDs are `driveId#itemId`; durable rows keep the item ID.
+        const listedId = source.id?.startsWith(`${mapping.sourceDriveId}#`)
+          ? source.id.slice(mapping.sourceDriveId.length + 1)
+          : source.id;
+        const view = listedItem(
+          mapping.sourceDriveId,
+          listedId ?? `path:${source.path}`,
+          source.path,
+          "file",
+          source.size,
+        );
+        const hashType = needsMd5 && copied?.hash === null ? "md5" : primaryHash;
+        const sourceHash =
+          hashType === "md5" ? (sourceMd5.get(source.path)?.hash ?? null) : source.hash;
+        const destinationHash = copied
+          ? (copied.hash ?? destinationMd5.get(copied.path)?.hash ?? null)
+          : null;
+        const codes: string[] = [];
+        let servedSize = view.size;
+        if (
+          hash &&
+          primaryHash === "sha256" &&
+          sourceHash &&
+          copied &&
+          (source.size !== copied.size || sourceHash !== destinationHash)
+        ) {
+          if (sourceHash === destinationHash) servedSize = copied.size;
+          else {
+            try {
+              const measured = await hashStream(
+                ctx.provider.openSourceContent({ driveId: mapping.sourceDriveId, itemId: view.id }),
+                ctx.signal,
+              );
+              if (measured.sha256 !== source.hash) codes.push("source_read_failed");
+              else servedSize = measured.size;
+            } catch (error) {
+              if (!terminalUnavailable(error)) throw error;
+              codes.push("source_read_failed");
+            }
+          }
+          if (servedSize !== source.size) codes.push("source_size_inconsistent");
+        }
+        if (!copied)
+          codes.push(
+            destinationFolders.has(source.path)
+              ? "destination_type_conflict"
+              : "destination_missing",
+          );
+        if (hash && !sourceHash) codes.push("source_read_failed");
+        if (copied) {
+          const sizeMismatch =
+            servedSize !== null && copied.size >= 0 && servedSize !== copied.size;
+          const hashMismatch =
+            hash && !!sourceHash && !!destinationHash && sourceHash !== destinationHash;
+          const rewritten =
+            destinationAdapter.rewritesPath(source.path) && (sizeMismatch || hashMismatch);
+          if (rewritten) codes.push("destination_rewrote_file");
+          else {
+            if (sizeMismatch) codes.push("size_mismatch");
+            if (hashMismatch) codes.push("content_mismatch");
+          }
+          if (hash && !destinationHash) codes.push("destination_read_failed");
+        }
+        const evidence = row(ctx, "verify", mapping, view, codes[0] ?? "unchanged");
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        evidence.destinationFileId = copied?.id ?? null;
+        evidence.sourceFingerprint = sourceHash;
+        evidence.destinationFingerprint = destinationHash;
+        evidence.provenanceState = codes.some((code) => code !== "source_size_inconsistent")
+          ? "drifted"
+          : "verified";
+        yield commit(
+          ctx,
+          "verify",
+          evidence,
+          codes.map((code) =>
+            finding(ctx, "verify", code, view.id, {
+              path: source.path,
+              sourceSize: servedSize,
+              destinationSize: copied?.size ?? null,
+              sourceHash,
+              destinationHash,
+              hashType: hash ? hashType : null,
+              ...(codes.includes("source_size_inconsistent")
+                ? {
+                    listedSize: source.size,
+                    ...(code === "source_size_inconsistent" ? { servedSize } : {}),
+                    ...(code === "size_mismatch" || code === "content_mismatch"
+                      ? { cause: "source_size_inconsistent" }
+                      : {}),
+                  }
+                : {}),
+            }),
           ),
-        ],
-        "folder-verification",
-        ++done,
-      );
+          "verification",
+          ++done,
+        );
+      }
+      for (const path of sourceFolders) {
+        if (destinationFolders.has(path)) continue;
+        const conflicting = destinations.get(path);
+        const code = conflicting ? "destination_type_conflict" : "destination_missing";
+        const view = listedItem(mapping.sourceDriveId, `folder:${path}`, path, "folder", null);
+        const evidence = row(ctx, "verify", mapping, view, code);
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        evidence.destinationFileId = conflicting?.id ?? null;
+        yield commit(
+          ctx,
+          "verify",
+          evidence,
+          [
+            finding(
+              ctx,
+              "verify",
+              code,
+              view.id,
+              conflicting
+                ? {
+                    path,
+                    ...(conflicting.id ? { destinationId: conflicting.id } : {}),
+                    destinationSize: conflicting.size,
+                    destinationHash: conflicting.hash,
+                  }
+                : { path, itemType: "folder" },
+            ),
+          ],
+          "folder-verification",
+          ++done,
+        );
+      }
+      for (const retained of destinations) {
+        if (sources.has(retained.path) || sourceFolders.has(retained.path)) continue;
+        const view = listedItem(
+          mapping.sourceDriveId,
+          `destination:${retained.path}`,
+          retained.path,
+          "file",
+          retained.size,
+        );
+        const destinationHash = retained.hash ?? destinationMd5.get(retained.path)?.hash ?? null;
+        const evidence = row(ctx, "verify", mapping, view, "destination_only_retained");
+        delete evidence.sourceEvidence;
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        evidence.destinationFileId = retained.id ?? null;
+        evidence.destinationFingerprint = destinationHash;
+        yield commit(
+          ctx,
+          "verify",
+          evidence,
+          [
+            finding(ctx, "verify", "destination_only_retained", view.id, {
+              path: retained.path,
+              sourceSize: null,
+              destinationSize: retained.size,
+              sourceHash: null,
+              destinationHash,
+              hashType: hash
+                ? retained.hash === null && destinationMd5.has(retained.path)
+                  ? "md5"
+                  : primaryHash
+                : null,
+            }),
+          ],
+          "retained",
+          ++done,
+        );
+      }
+      for (const path of destinationFolders) {
+        if (sourceFolders.has(path) || sources.has(path)) continue;
+        const view = listedItem(
+          mapping.sourceDriveId,
+          `destination-folder:${path}`,
+          path,
+          "folder",
+          null,
+        );
+        const evidence = row(ctx, "verify", mapping, view, "destination_only_retained");
+        delete evidence.sourceEvidence;
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        yield commit(
+          ctx,
+          "verify",
+          evidence,
+          [
+            finding(ctx, "verify", "destination_only_retained", view.id, {
+              path,
+              itemType: "folder",
+            }),
+          ],
+          "retained-folder",
+          ++done,
+        );
+      }
+      const baseline = goLiveBaseline(ctx, mapping, {
+        hashType: primaryHash,
+        md5: needsMd5,
+        digest: destinationDigest(destinations, destinationMd5, destinationFolders),
+      });
+      if (baseline) yield baseline;
+    } finally {
+      for (const resource of resources) resource[Symbol.dispose]();
     }
-    for (const retained of destinations) {
-      if (sourcePaths.has(retained.path) || expectedFolders.has(retained.path)) continue;
-      const view = listedItem(
-        mapping.sourceDriveId,
-        `destination:${retained.path}`,
-        retained.path,
-        "file",
-        retained.size,
-      );
-      const destinationHash = retained.hash ?? md5ByPath.get(retained.path) ?? null;
-      const evidence = row(ctx, "verify", mapping, view, "destination_only_retained");
-      delete evidence.sourceEvidence;
-      evidence.destinationDriveId = mapping.destDriveId ?? null;
-      evidence.destinationFileId = retained.id ?? null;
-      evidence.destinationFingerprint = destinationHash;
-      yield commit(
-        ctx,
-        "verify",
-        evidence,
-        [
-          finding(ctx, "verify", "destination_only_retained", view.id, {
-            path: retained.path,
-            sourceSize: null,
-            destinationSize: retained.size,
-            sourceHash: null,
-            destinationHash,
-            hashType: hash
-              ? retained.hash === null && md5ByPath.has(retained.path)
-                ? "md5"
-                : primaryHash
-              : null,
-          }),
-        ],
-        "retained",
-        ++done,
-      );
-    }
-    for (const path of destinationFolders) {
-      if (expectedFolders.has(path) || sourcePaths.has(path)) continue;
-      const view = listedItem(
-        mapping.sourceDriveId,
-        `destination-folder:${path}`,
-        path,
-        "folder",
-        null,
-      );
-      const evidence = row(ctx, "verify", mapping, view, "destination_only_retained");
-      delete evidence.sourceEvidence;
-      evidence.destinationDriveId = mapping.destDriveId ?? null;
-      yield commit(
-        ctx,
-        "verify",
-        evidence,
-        [
-          finding(ctx, "verify", "destination_only_retained", view.id, {
-            path,
-            itemType: "folder",
-          }),
-        ],
-        "retained-folder",
-        ++done,
-      );
-    }
-    const baseline = goLiveBaseline(ctx, mapping, {
-      hashType: primaryHash,
-      md5: needsMd5,
-      digest: destinationDigest(destinations, destinationMd5, destinationFolders),
-    });
-    if (baseline) yield baseline;
   }
 }
 

@@ -951,7 +951,13 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.throwRetryAfter("compareFileListings", input.source.fs);
     const source = this.tree(input.source.fs);
     const destination = this.tree(input.destination.fs);
-    const comparison: FileListingComparison = {
+    const comparison: {
+      [K in keyof FileListingComparison]: FileListingComparison[K] extends Iterable<infer T>
+        ? FileListingComparison[K] extends string
+          ? string
+          : T[]
+        : FileListingComparison[K];
+    } = {
       new: [],
       changed: [],
       unchanged: [],

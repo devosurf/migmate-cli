@@ -6,8 +6,20 @@ import { join, resolve } from "node:path";
 import { it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createTransferSupervisor, type TransferSupervisor } from "./transfer-worker.ts";
-import type { CopyPassReference } from "./port.ts";
+import type { CopyPassReference, FileListingComparison } from "./port.ts";
 import { FakeFileMigrationPort } from "./fake.ts";
+
+function comparisonArrays(comparison: FileListingComparison) {
+  return {
+    ...comparison,
+    new: [...comparison.new],
+    changed: [...comparison.changed],
+    unchanged: [...comparison.unchanged],
+    deleted: [...comparison.deleted],
+    retained: [...comparison.retained],
+    timestampOnly: [...comparison.timestampOnly],
+  };
+}
 
 it("compares Google source downloaded hashes with SharePoint fixture hashes", async () => {
   const provider = new FakeFileMigrationPort({
@@ -177,9 +189,10 @@ it(
         destination: { fs: destination, kind: "google_drive" as const },
         mode: "copy" as const,
       };
-      assert.deepEqual((await supervisor.compareFileListings(input)).new, [
-        { path: "file.txt", size: 5 },
-      ]);
+      assert.deepEqual(
+        [...(await supervisor.compareFileListings(input)).new],
+        [{ path: "file.txt", size: 5 }],
+      );
       const pass = await supervisor.startCopyPass({ ...input, transfers: 1 });
       assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass }), {
         state: "completed",
@@ -191,26 +204,32 @@ it(
         hashType: "sha256" as const,
         download: false,
       };
-      assert.deepEqual(await supervisor.listFileHashes(listing), [
-        {
-          path: "file.txt",
-          size: 5,
-          hash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-        },
-      ]);
-      assert.deepEqual(await supervisor.listFolders(listing), ["empty"]);
+      assert.deepEqual(
+        [...(await supervisor.listFileHashes(listing))],
+        [
+          {
+            path: "file.txt",
+            size: 5,
+            hash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          },
+        ],
+      );
+      assert.deepEqual([...(await supervisor.listFolders(listing))], ["empty"]);
       // Same-size mutation defeats size-only/cached copy evidence.
       await writeFile(join(destination, "file.txt"), "world");
       await rm(join(destination, "empty"), { recursive: true });
       await mkdir(join(destination, "new-empty"));
-      assert.deepEqual(await supervisor.listFileHashes(listing), [
-        {
-          path: "file.txt",
-          size: 5,
-          hash: "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7",
-        },
-      ]);
-      assert.deepEqual(await supervisor.listFolders(listing), ["new-empty"]);
+      assert.deepEqual(
+        [...(await supervisor.listFileHashes(listing))],
+        [
+          {
+            path: "file.txt",
+            size: 5,
+            hash: "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7",
+          },
+        ],
+      );
+      assert.deepEqual([...(await supervisor.listFolders(listing))], ["new-empty"]);
       assert.equal(await readFile(join(directory, "outside.txt"), "utf8"), "never in the mapping");
     } finally {
       await supervisor.close();
@@ -268,7 +287,7 @@ it(
         destination: { fs: `:local,hashes=md5:${destination}`, kind: "local" as const },
       };
       const comparison = await supervisor.compareFileListings({ ...input, mode: "mirror" });
-      assert.deepEqual(comparison, {
+      assert.deepEqual(comparisonArrays(comparison), {
         new: [{ path: "new.txt", size: 3 }],
         changed: [
           { path: "boundary.txt", size: 4 },
@@ -285,8 +304,8 @@ it(
         modifyWindowNs: "1000000000",
       });
       const copyComparison = await supervisor.compareFileListings({ ...input, mode: "copy" });
-      assert.deepEqual(copyComparison.deleted, []);
-      assert.deepEqual(copyComparison.retained, [{ path: "deleted.txt", size: 4 }]);
+      assert.deepEqual([...copyComparison.deleted], []);
+      assert.deepEqual([...copyComparison.retained], [{ path: "deleted.txt", size: 4 }]);
       // Comparison has no write effects, including timestamp changes.
       assert.equal(await readFile(join(destination, "same-size.txt"), "utf8"), "AAAA");
       assert.equal(await readFile(join(destination, "deleted.txt"), "utf8"), "gone");
@@ -320,8 +339,8 @@ it(
       });
       const precise = await supervisor.compareFileListings({ ...input, mode: "copy" });
       assert.equal(precise.modifyWindowNs, "1000000001");
-      assert.deepEqual(precise.changed, []);
-      assert.deepEqual(precise.timestampOnly, []);
+      assert.deepEqual([...precise.changed], []);
+      assert.deepEqual([...precise.timestampOnly], []);
       const skipped = await supervisor.startCopyPass({ ...input, mode: "copy", transfers: 1 });
       assert.deepEqual(await finish(supervisor, { socketPath: worker.socketPath, pass: skipped }), {
         state: "completed",
@@ -369,7 +388,7 @@ it(
         mode: "copy" as const,
       };
       const comparison = await supervisor.compareFileListings(input);
-      assert.deepEqual(comparison, {
+      assert.deepEqual(comparisonArrays(comparison), {
         new: [],
         changed: [{ path: "different.txt", size: 4 }],
         unchanged: [{ path: "skipped.txt", size: 4 }],
@@ -1047,12 +1066,14 @@ it(
       await supervisor.stopCopyPass(reference);
       assert.equal((await finish(supervisor, reference)).state, "failed");
       assert.equal((await supervisor.copyPassStatus(independentReference)).state, "running");
-      const already = await supervisor.listFileHashes({
-        socketPath: worker.socketPath,
-        root: input.destination,
-        hashType: "md5",
-        download: false,
-      });
+      const already = [
+        ...(await supervisor.listFileHashes({
+          socketPath: worker.socketPath,
+          root: input.destination,
+          hashType: "md5",
+          download: false,
+        })),
+      ];
       assert.ok(already.length >= 1 && already.length < 3);
       await supervisor.call(worker.socketPath, "core/bwlimit", { rate: "off" });
       const resumed = await supervisor.startCopyPass(input);
