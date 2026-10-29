@@ -684,6 +684,10 @@ async function close(
   );
 }
 
+function jobCommand(verb: string, invocation: Invocation): string {
+  return `migmate ${verb} --home '${invocation.home.replaceAll("'", "'\\''")}' --job ${invocation.jobId}`;
+}
+
 async function executeCommand(
   invocation: Invocation,
   output: Output,
@@ -731,9 +735,9 @@ async function executeCommand(
         logPath,
         follow: {
           tail: `tail -f '${logPath.replaceAll("'", "'\\''")}'`,
-          watch: `migmate status --job ${job.id}`,
-          stop: `migmate stop --job ${job.id}`,
-          cancel: `migmate cancel --job ${job.id}`,
+          watch: jobCommand("status", invocation),
+          stop: jobCommand("stop", invocation),
+          cancel: jobCommand("cancel", invocation),
         },
       },
     };
@@ -974,7 +978,7 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     else if (invocation?.detach && result.ok && output.mode === "text") {
       const value = result.value as { pid: number; logPath: string };
       await io.stdout.write(
-        `Started ${invocation.jobId} in the background (PID ${value.pid}).\nLog:   ${value.logPath}\nStop:  migmate stop --job ${invocation.jobId}\n`,
+        `Started ${invocation.jobId} in the background (PID ${value.pid}).\nLog:   ${value.logPath}\nStop:  ${jobCommand("stop", invocation)}\n`,
       );
     } else if (
       (invocation?.command === "stop" || invocation?.command === "cancel") &&
@@ -987,7 +991,7 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
           ? `Cancelled ${invocation.jobId}.\n`
           : value.stopped === false
             ? `Nothing running for ${invocation.jobId}.\n`
-            : `Stopped ${invocation.jobId}.\n${output.resumeVerb ? `Resume with: migmate ${output.resumeVerb} --job ${invocation.jobId}\n` : ""}`,
+            : `Stopped ${invocation.jobId}.\n${output.resumeVerb ? `Resume with: ${jobCommand(output.resumeVerb, invocation)}\n` : ""}`,
       );
     } else if (
       output.mode !== "jsonl" ||

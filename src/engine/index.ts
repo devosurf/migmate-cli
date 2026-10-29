@@ -25,6 +25,7 @@ import type {
   JobReader,
   JobWriter,
   ReclaimDecision,
+  WriterOptions,
 } from "./engine.ts";
 import { mappingsCsv, exceptionsCsv } from "./report-csv.ts";
 import {
@@ -133,6 +134,7 @@ export type {
   JobWriter,
   EngineOptions,
   ReclaimDecision,
+  WriterOptions,
 } from "./engine.ts";
 export * from "./types.ts";
 
@@ -792,7 +794,7 @@ export function openEngine(opts: ProvidedEngineOptions): Engine {
   return {
     initJob: (spec) => initJob(deps, spec),
     reader: (ref) => makeReader(deps, ref),
-    withWriter: (ref, fn) => withWriter(deps, ref, fn),
+    withWriter: (ref, fn, options) => withWriter(deps, ref, fn, options),
     async withWriterResult(ref, fn) {
       const outer = await withWriter(deps, ref, fn);
       return outer.ok ? outer.value : outer;
@@ -1004,6 +1006,7 @@ async function withWriter<T>(
   deps: EngineDeps,
   ref: JobRef,
   fn: (writer: JobWriter) => Promise<T>,
+  options?: WriterOptions,
 ): Promise<Outcome<T>> {
   let store: Store | undefined;
   try {
@@ -1043,7 +1046,14 @@ async function withWriter<T>(
     });
     if (!acquired.ok) return acquired;
     let active = true;
-    const session = makeWriter(deps, store, paths, () => active, acquired.value.row.ownerUuid);
+    const session = makeWriter(
+      deps,
+      store,
+      paths,
+      () => active,
+      acquired.value.row.ownerUuid,
+      options?.onControl,
+    );
     checkControl = session.checkControl;
     let value: T | undefined;
     let operationError: unknown;
@@ -1661,6 +1671,7 @@ function makeWriter(
   paths: JobPaths,
   active: () => boolean,
   ownerUuid: string,
+  onControl?: () => void,
 ): {
   writer: JobWriter;
   checkControl: () => void;
@@ -1688,7 +1699,7 @@ function makeWriter(
   }
   function checkControl(): void {
     if (!active() || finishingControl || store.readLease()?.ownerUuid !== ownerUuid) return;
-    store.atomic(() => {
+    const admitted = store.atomic(() => {
       const request = pendingControl(store, ownerUuid);
       if (!request) return;
       if (request.kind === "cancel") {
@@ -1698,9 +1709,12 @@ function makeWriter(
           return;
         }
       }
+      const notify = !stopping;
       stopping = true;
       executionInterrupt?.abort(new Error(`${request.kind} requested`));
+      return notify;
     });
+    if (admitted) onControl?.();
   }
   async function finishControl(): Promise<Refusal | null> {
     checkControl();

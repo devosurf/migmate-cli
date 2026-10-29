@@ -61,6 +61,15 @@ export interface ControlResult {
   cancelled?: boolean;
 }
 
+export interface WriterOptions {
+  /**
+   * Called once when an admitted stop/cancel requires this writer lifetime to end.
+   * The engine interrupts the operation; persistent adapters must let it settle
+   * and return from their writer callback. Refused controls never notify.
+   */
+  onControl?: () => void;
+}
+
 export interface ReclaimDecision {
   /** Acknowledges the recovery report; a reclaim is an explicit operator act. */
   confirm: true;
@@ -72,7 +81,11 @@ export interface Engine {
   initJob(spec: JobSpec): Promise<Outcome<JobRef>>;
   /** Never takes the lease. */
   reader(ref: JobRef): JobReader;
-  withWriter<T>(ref: JobRef, fn: (w: JobWriter) => Promise<T>): Promise<Outcome<T>>;
+  withWriter<T>(
+    ref: JobRef,
+    fn: (w: JobWriter) => Promise<T>,
+    options?: WriterOptions,
+  ): Promise<Outcome<T>>;
   /**
    * The form every adapter wants: a lease refusal and a verb refusal collapse into
    * one envelope. Nesting them makes a refused verb look like a successful call,

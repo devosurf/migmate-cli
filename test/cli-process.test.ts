@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcess,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import {
   mkdtempSync,
@@ -67,13 +72,15 @@ function setup(
   type: JobType = "file_migration",
   signal = t.signal,
   fileConfig: typeof CLI_JOB_CONFIG | typeof CLI_REVERSE_JOB_CONFIG = CLI_JOB_CONFIG,
+  homeName = "home",
+  initialTime = FIXTURE_TIME,
 ) {
   const root = mkdtempSync(join(tmpdir(), "migmate-cli-process-"));
-  const home = join(root, "home");
+  const home = join(root, homeName);
   const destination = join(root, "destination.json");
   const config = join(root, "input.toml");
   writeFileSync(config, stringifyToml(type === "teams_archive" ? CLI_ARCHIVE_CONFIG : fileConfig));
-  let now = Date.parse(FIXTURE_TIME);
+  let now = Date.parse(initialTime);
   const destinationRecords = (): DestinationRecord[] =>
     existsSync(destination) ? JSON.parse(readFileSync(destination, "utf8")) : [];
   const children = new Set<Running>();
@@ -1211,5 +1218,80 @@ it(
     } finally {
       db.close();
     }
+  },
+);
+
+it(
+  "generated detached control commands retain an explicitly selected engine home",
+  { timeout: 30000 },
+  async (t) => {
+    const h = setup(t, "file_migration", t.signal, CLI_JOB_CONFIG, "home with ' quotes", new Date().toISOString());
+    const id = await h.approve();
+    const launched = await h.start(
+      ["execute", "--job", id, "--home", h.home, "--detach", "--output", "json"],
+      true,
+    ).done;
+    assert.equal(launched.code, 0, launched.stdout);
+    const ack: Document<
+      DetachedLaunch & { follow: { watch: string; stop: string; cancel: string } }
+    > = JSON.parse(launched.stdout);
+    const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
+    const runHint = (hint: string, output = "json") => {
+      const shell = hint.replace(
+        /^migmate /u,
+        `'${process.execPath.replaceAll("'", "'\\''")}' '${entry.replaceAll("'", "'\\''")}' `,
+      );
+      const result = spawnSync("/bin/sh", ["-c", `${shell} --output ${output}`], {
+        env: { ...process.env, MIGMATE_HOME: join(h.root, "ambient-home") },
+        cwd: h.root,
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      return output === "json" ? JSON.parse(result.stdout) : result.stdout;
+    };
+    assert.equal(runHint(ack.value.follow.watch).value.state, "executing");
+    assert.equal(runHint(ack.value.follow.stop).value.stopped, true);
+    await h.reapDetached(ack.value.pid);
+    const textLaunch = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL("./cli-process-fixture.ts", import.meta.url)),
+        "execute",
+        "--job",
+        id,
+        "--home",
+        h.home,
+        "--detach",
+      ],
+      {
+        env: {
+          ...process.env,
+          CLI_TEST_HOME: h.home,
+          CLI_TEST_DESTINATION: h.destination,
+          CLI_TEST_NOW: new Date().toISOString(),
+          CLI_TEST_HOLD: "1",
+        },
+        encoding: "utf8",
+        timeout: 15000,
+      },
+    );
+    assert.equal(textLaunch.status, 0, textLaunch.stdout + textLaunch.stderr);
+    const pid = Number(textLaunch.stdout.match(/\(PID (\d+)\)/u)?.[1]);
+    assert.ok(pid);
+    h.trackDetached(pid);
+    const stopHint = textLaunch.stdout.match(/^Stop:\s+(.+)$/mu)?.[1];
+    assert.ok(stopHint);
+    const stopped: string = runHint(stopHint, "text");
+    await h.reapDetached(pid);
+    const resume = stopped.match(/^Resume with: (.+)$/mu)?.[1];
+    assert.ok(resume);
+    // Inspect the resumed job through the same shell-parsed target arguments;
+    // the real provider cannot execute this fixture's approved fake-provider plan.
+    assert.equal(
+      runHint(resume.replace(/^migmate execute /u, "migmate status ")).value.state,
+      "interrupted",
+    );
+    assert.equal(runHint(ack.value.follow.cancel).value.cancelled, true);
   },
 );
