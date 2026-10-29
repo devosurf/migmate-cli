@@ -694,7 +694,7 @@ function migrateConfig(paths: JobPaths, type: JobType): void {
     } catch {
       configError("legacy_config");
     }
-    atomicFile(paths.configPath, stringifyToml(parseConfig(persisted(parsed), type, paths)));
+    atomicFile(paths.configPath, stringifyToml(parseConfig(persisted(parsed, type), type, paths)));
   }
   rmSync(legacy);
   syncDirectory(paths.dir);

@@ -5,9 +5,12 @@ import type { BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { JobType } from "../types.ts";
-import { fileProviderPair } from "./adapters/capabilities.ts";
-import type { FileProviderId } from "./adapters/capabilities.ts";
-import { credentialAdapters, credentialBindings } from "./adapters/credentials/registry.ts";
+import {
+  fileProviderPair,
+  fileProvider,
+  credentialBindings,
+  type FileProviderId,
+} from "./adapters/capabilities.ts";
 import {
   assertSeparateSharePointApplications,
   loadArchiveGraph,
@@ -209,10 +212,9 @@ function parseMappings(value: unknown): MappingIdentity[] {
     try {
       const mapping = record(item);
       const sourceType =
-        typeof mapping.sourceType === "string" &&
-        Object.hasOwn(credentialAdapters, mapping.sourceType)
-          ? credentialAdapters[mapping.sourceType as FileProviderId].mappingSourceType
-          : undefined;
+        mapping.sourceType === undefined
+          ? undefined
+          : fileProvider(mapping.sourceType).credentials.mappingSourceType;
       const result: MappingIdentity = {
         sourceDriveId: stableId(mapping.sourceDriveId),
         ...(sourceType ? { sourceType } : {}),
@@ -283,8 +285,8 @@ async function loadCredentials(
     const rclone = record(input.rclone);
     allowedKeys(rclone, ["config", ...credentialBindings.map((binding) => binding.key)]);
     const required = [
-      credentialAdapters[pair.source.id].remoteKey.source,
-      credentialAdapters[pair.destination.id].remoteKey.destination,
+      pair.source.credentials.remoteKey.source,
+      pair.destination.credentials.remoteKey.destination,
     ];
     const remotes = new Map<string, string>();
     for (const binding of credentialBindings) {

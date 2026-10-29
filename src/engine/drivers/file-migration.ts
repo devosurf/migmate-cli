@@ -1607,7 +1607,15 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         grants: ctx.resume.memberGrants ?? [],
       }),
     };
-  yield { title: "Route", format: "text", body: JSON.stringify({ route: ctx.config.route }) };
+  const pair = fileProviderPair(ctx.config);
+  yield {
+    title: "Provider pair",
+    format: "text",
+    body: JSON.stringify({
+      sourceProvider: pair.source.id,
+      destinationProvider: pair.destination.id,
+    }),
+  };
   yield {
     title: "Acting Google account",
     format: "text",

@@ -4,7 +4,6 @@ import type { GraphTransport } from "./http.ts";
 import type { CheckResult } from "../types.ts";
 import type { ProviderPort } from "./port.ts";
 import { fileProviderPair } from "./adapters/capabilities.ts";
-import { createFileAdapters } from "./adapters/registry.ts";
 import type { DestinationRoot, Mapping, SourceWorker, FileAdapter } from "./adapters/effects.ts";
 
 function readMappings(config: unknown): Mapping[] {
@@ -66,14 +65,15 @@ export class FileEffects {
             ? [{ destDriveId: m.destDriveId, destFolderId: m.destFolderId }]
             : [],
         );
-    const adapters = createFileAdapters(input.config, {
+    const pair = fileProviderPair(input.config);
+    const adapterInput = {
       ...input,
       mappings: this.mappings,
       destinationRoots: this.#destinationRoots,
-    });
-    this.#source = adapters.source;
-    this.#destination = adapters.destination;
-    this.#sourceProvider = fileProviderPair(input.config).source.id;
+    };
+    this.#source = pair.source.createEffects(adapterInput);
+    this.#destination = pair.destination.createEffects(adapterInput);
+    this.#sourceProvider = pair.source.id;
   }
 
   #effect<K extends keyof FileAdapter>(adapter: FileAdapter, key: K): NonNullable<FileAdapter[K]> {

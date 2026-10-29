@@ -609,7 +609,7 @@ describe("destination folder verification", () => {
 });
 
 describe("Google Shared Drives to SharePoint", () => {
-  const reverse = {
+  const reverse: FileMigrationConfig = {
     mappings: [],
     sourceProvider: "google_shared_drive",
     destinationProvider: "sharepoint",
@@ -697,7 +697,12 @@ describe("Google Shared Drives to SharePoint", () => {
       destinationHash: "0108400002108000000000000600000000000000",
     });
     assert.equal(evidence("destination_only_retained").hashType, "quickxor");
-    assert.match(JSON.stringify(json), /shared_drive_to_sharepoint_library/);
+    assert.deepEqual(
+      JSON.parse(
+        json.sections.find((section: { title: string }) => section.title === "Provider pair").body,
+      ),
+      { sourceProvider: "google_shared_drive", destinationProvider: "sharepoint" },
+    );
     assert.ok(
       json.sections
         .find((section: { title: string }) => section.title === "Acting Google account")

@@ -3,6 +3,7 @@ import type { FileMigrationConfig } from "./drivers/file-migration.ts";
 import type { Store, FindingRecord, AcceptanceRecord } from "./store/store.ts";
 import type { ApprovalRecord, VerificationRevision } from "./types.ts";
 import { goLiveAcknowledgment } from "./go-live.ts";
+import { fileProviderPair } from "./providers/adapters/capabilities.ts";
 
 interface CsvEvidence {
   store: Store;
@@ -132,6 +133,7 @@ export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
   }
   const resume = store.readReportResume(revision);
   const acknowledgments = store.readGoLiveAcknowledgments();
+  const pair = fileProviderPair(config);
   for (const mapping of config?.mappings ?? []) {
     const drive = resume.createdDrives.find((entry) => entry.mappingId === mapping.id);
     const pass = resume.mappingPasses.findLast(
@@ -141,15 +143,14 @@ export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
     const grants = resume.memberGrants.filter(
       (entry) => entry.mappingId === mapping.id && entry.at !== undefined,
     );
-    const sourceType = mapping.sourceType ?? "sharepoint";
     yield* csvRow([
       mapping.id,
-      sourceType,
+      pair.source.id,
       mapping.sourceDriveId,
       mapping.sourceFolderPath,
       undefined,
       undefined,
-      sourceType === "sharepoint" ? "google_shared_drive" : "sharepoint",
+      pair.destination.id,
       drive?.driveId ?? mapping.destDriveId,
       drive?.name ?? mapping.createDrive?.name,
       undefined,
