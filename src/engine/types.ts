@@ -300,7 +300,6 @@ export interface PlanRevision {
   planDigest: string;
   inputsDigest: string;
   createdAt: string;
-  sourceInventoryAt: string;
   rowCount: number;
   manifestDigest?: string;
   disclosures: string[];
@@ -318,8 +317,6 @@ export interface ApprovalRecord {
   riskConfirmations?: { mirror?: boolean; access?: boolean };
   at: string;
   freeze?: { by: string; at: string; how: string };
-  sourceInventoryAt?: string;
-  sourceInventoryAgeMs?: number;
 }
 
 export interface AcceptedException {

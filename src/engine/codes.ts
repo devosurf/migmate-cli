@@ -37,23 +37,9 @@ export const CODES: readonly CodeEntry[] = [
   entry("updated", "policy_outcome", "execute", FILE),
   entry("moved", "policy_outcome", "execute", FILE),
   entry("unchanged", "policy_outcome", "execute", FILE),
+  entry("to_be_deleted", "policy_outcome", "execute", FILE),
   entry("destination_only_retained", "policy_outcome", "plan", FILE),
   entry("source_deleted_destination_retained", "policy_outcome", "plan", FILE),
-  entry("source_package_copied_as_files", "policy_outcome", "plan", FILE),
-  entry("to_be_deleted", "policy_outcome", "plan", FILE),
-  entry("timestamp_only", "policy_outcome", "plan", FILE),
-
-  // ---- file migration: planned omissions -----------------------------------
-  entry("source_package_omitted", "planned_omission", "plan", FILE),
-  entry("source_reference_omitted", "planned_omission", "plan", FILE),
-  entry("source_content_unavailable", "planned_omission", "plan", FILE),
-  entry("route_limit_omission", "planned_omission", "plan", FILE),
-  entry("version_history_omitted", "planned_omission", "plan", FILE),
-  entry("source_metadata_export_only", "planned_omission", "plan", FILE),
-  entry("destination_collision_omitted", "planned_omission", "plan", FILE),
-  entry("metadata_not_preserved", "planned_omission", "plan", FILE),
-  entry("content_verification_degraded", "planned_omission", "verify", FILE),
-  entry("omitted_by_rule", "planned_omission", "plan", FILE),
 
   // ---- file migration: plan / collision blockers ---------------------------
   entry("mapping_overlap", "finding", "plan", FILE),
@@ -73,6 +59,7 @@ export const CODES: readonly CodeEntry[] = [
   entry("drive_creation_ambiguous", "finding", "execute", FILE),
   entry("go_live_started", "finding", "execute", FILE),
   entry("drive_membership_mismatch", "finding", "verify", FILE),
+  entry("destination_read_failed", "finding", "verify", FILE),
   entry("destination_missing", "finding", "verify", FILE),
   entry("destination_path_mismatch", "finding", "verify", FILE),
   entry("provenance_mismatch", "finding", "verify", FILE),
@@ -93,6 +80,8 @@ export const CODES: readonly CodeEntry[] = [
   entry("retained_history_not_requested", "planned_omission", "plan", TEAMS),
   entry("transcript_unsupported_channel_meeting", "planned_omission", "plan", TEAMS),
   entry("attachment_metadata_only", "planned_omission", "plan", TEAMS),
+  // Archive destination verification retains its existing exception contract.
+  entry("content_verification_degraded", "planned_omission", "verify", TEAMS),
 
   // ---- teams archive: collection findings ----------------------------------
   entry("message_collection_incomplete", "finding", "execute", TEAMS, true),
@@ -127,24 +116,14 @@ export function isAcceptable(code: string): boolean {
 }
 
 const consequences: Record<string, string> = {
-  source_package_omitted: "Source packages, including notebooks, are absent from the destination.",
-  source_reference_omitted: "Referenced source content was not copied.",
-  source_content_unavailable: "Unavailable source content is absent from the migration.",
-  route_limit_omission: "Content outside this route's supported limits was omitted.",
-  version_history_omitted:
-    "Historical versions were not migrated; only the current version is covered.",
-  source_metadata_export_only:
-    "Source metadata is retained only in the export, not restored at the destination.",
-  destination_collision_omitted: "Content colliding at the destination was not copied.",
-  metadata_not_preserved: "Some source metadata was not preserved.",
-  content_verification_degraded:
-    "Content equality is not fully proven; verification used weaker evidence.",
-  omitted_by_rule: "Explicitly excluded source content remains absent from the destination.",
   retained_history_not_requested: "Retained historical messages are outside this archive.",
   transcript_unsupported_channel_meeting: "Unsupported channel-meeting transcripts are absent.",
   attachment_metadata_only: "Attachment metadata is retained without attachment bytes.",
+  content_verification_degraded: "Archive destination content equality is not fully proven.",
   source_read_failed: "Source content could not be read and may be absent.",
   destination_write_failed: "Destination writes failed; affected content is not proven complete.",
+  destination_read_failed:
+    "Destination content could not be verified; its required hash evidence is unavailable.",
   drive_membership_mismatch:
     "Destination membership differs from the approved member declarations.",
   destination_missing: "Verified source content is missing from the destination.",

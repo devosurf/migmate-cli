@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release. Releases are GitHub Releases cut from `v*` tags by `.github/workflows/release.yml`; nothing is published to npm, and merging to `main` does not release.
 
-Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. File migrations execute rclone copy passes and verify relative file paths by hash (or explicitly selected size-only proof); archives verify their local package and any uploaded copy. Blocking findings require acceptance before `close`. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on all four platforms. Unsupported shapes refuse with `unsupported_route` (exit 4). Historical live observations and their limits are recorded in `docs/release-limits.md`; they do not prove the new rclone-executed file route.
+Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. File migrations approve mapping roots and options, execute rclone copy passes, and verify listings by path and size, including folders; content hashing is opt-in. Archives verify their local package and any uploaded copy. Blocking findings require acceptance before `close`. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on all four platforms. Unsupported shapes refuse with `unsupported_route` (exit 4). Historical live observations and their limits are recorded in `docs/release-limits.md`; they do not prove the new rclone-executed file route.
 
 ## Requirements
 
@@ -110,23 +110,25 @@ flowchart LR
 
 `init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any blocking finding is unaccepted. With deferred member grants, confirming `close` also authorizes go-live.
 
-For file verification, a source that changed between copy and verify can raise three findings for one path: `source_size_inconsistent`, `size_mismatch`, and `content_mismatch`. `sourceSize` reports the size actually compared with `destinationSize`; when the listing contradicts served bytes, `listedSize` preserves the listing and the inconsistency finding also carries `servedSize`. The dependent size and content findings carry `cause: "source_size_inconsistent"` so they can be reviewed together. All three still block `close` until explicitly accepted; accepting the cause alone does not accept the other findings.
+With opt-in hash verification, a source that changed between copy and verify can raise three findings for one path: `source_size_inconsistent`, `size_mismatch`, and `content_mismatch`. `sourceSize` reports the size actually compared with `destinationSize`; when the listing contradicts served bytes, `listedSize` preserves the listing and the inconsistency finding also carries `servedSize`. The dependent size and content findings carry `cause: "source_size_inconsistent"` so they can be reviewed together. All three still block `close` until explicitly accepted; accepting the cause alone does not accept the other findings.
 
-File jobs may accept route-inherent omissions in advance with `[options] acceptedOmissions`, for example `["version_history_omitted", "source_metadata_export_only"]` on SharePoint → Shared Drive, where Drive cannot hold version history or list-item fields. Only plan-phase planned omissions qualify: `content_verification_degraded` and every verification finding still need `accept`. The option is part of the approved plan digest, and the plan discloses it. Each verification then records each listed code that the approved plan actually disclosed as an accepted exception, under the plan's approver and approval time, with a note naming the plan digest. Its evidence stays in the report, and `clean` and `close` reflect only the remaining findings. A listed code that the plan did not disclose, such as version history that appeared after approval, still needs explicit acceptance.
+File-migration approval binds mapping roots, not individual files or unrelated destination contents. A missing root or changed root identity, drive, or folder type still refuses. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
 
-File-migration approval binds the destination root, not unrelated folder contents. A missing root or changed root identity, drive, or folder type still refuses; an excluded source subtree gaining a new member, or an approved excluded item moving outside that subtree within the mapping, requires replanning before any copy starts. Copies use rclone's path-based comparison: existing same-path content can be updated. **There is no file-level collision protection or compare-then-write guarantee.** Use dedicated destination roots and keep outside writers away during migration.
+### Approve the map, verify by listing
 
-### rclone proof: approve the map, let rclone copy
+Both existing file routes, SharePoint → Shared Drive and Shared Drive → SharePoint, use map-only planning:
 
-By default every file job runs a per-file Graph inventory: two metadata calls per source file (versions and retention label), repeated by `plan`, before `execute` copies anything, and by `verify`. Large libraries spend hours there. `[options] proof = "rclone"` (SharePoint → Shared Drive only) drops that inventory:
+- `plan` resolves each mapping's source and destination roots, drives to create, members and options. Approval binds that map, not a file list. Planning performs no per-file Graph inventory, file/deletion preview or inventory-freshness gate.
+- rclone selects files by size and modification time and checks upload size.
+- Default verification compares rclone listings by relative path and size, including folders and empty folders. It does not compare content bytes, and this disclosed limitation raises no degraded-content finding. Each verification covers whole mappings.
+- Set `[options] verificationMode = "hash"` to opt into content verification. It downloads source bytes to compute the destination's hash type and compares with stored destination hashes, without a Graph inventory or destination download.
+- On Shared Drive → SharePoint, size differences for PDF, Office and HTML files raise `destination_rewrote_file`; other size differences raise `size_mismatch`. On SharePoint → Shared Drive, served-size rewrites can still cause copy failures and `size_mismatch`.
+- Final execution settles by comparing file and folder listings until nothing remains to copy or delete, within the configured catch-up bound.
+- Mirror requires job-created-drive provenance and `deleteLimit`. File/folder listings of both sides immediately before every pass record deletion candidates as execute-phase `to_be_deleted` rows. The limit counts files, with folder removals recorded separately, and is enforced at execution rather than approval.
 
-- `plan` resolves each mapping's source and destination roots, the drives to create, their members and the options. The approved digest binds that map, not a file list. `execute` starts rclone right away.
-- rclone picks files by size and modification time and checks each upload's size. SharePoint and Drive share no hash type, so rclone cannot compare content hashes on this route, and Migmate doesn't either.
-- `verify` compares rclone listings of both sides by path and size, folders included, without re-reading content. It raises `destination_missing`, `size_mismatch`, `destination_type_conflict`, and `destination_write_failed` for a mapping whose last copy pass did not complete. Each verified file row records the source quickXorHash and the destination's stored hash as evidence.
-- Staged jobs work as usual. The final pass settles by repeating rclone's listing comparison until nothing is left to copy or delete.
-- Mirror still requires job-created drives and `deleteLimit`. Before a pass that finds files in the destination, rclone lists both sides and records each destination-only file as an execute-phase `to_be_deleted` row. The pass may delete exactly those, and more than `deleteLimit` refuses `plan_revision_required`.
+Version history, list-item fields, retention labels and permissions are not copied. The plan and report disclose these route-wide omissions once, not as per-file findings or accepted exceptions. OneNote notebooks copy as their section files, not as working Google notebooks. Mapping roots are the only scope selection.
 
-Not available with `proof = "rclone"`: exclusions, `verificationMode`, `deltaVerification = "changed"` and `oneNoteNotebooks = "omit"`. OneNote notebooks are copied as their section files. Version history, list-item fields, retention labels and permissions are not copied, and they are not listed per file as omissions. The plan and report state this proof level.
+Removed configuration fields (`proof`, mapping exclusions, `acceptedOmissions`, `oneNoteNotebooks`, `deltaVerification`, and `verificationMode = "size_only"`) refuse rather than acquiring new meanings. Old inventory-planned jobs refuse mutation; their historical status, evidence and reports remain readable. Historical CSV reports retain omissions accepted by the frozen plan's approval, including reports generated before verification; editing the current job config cannot change that decision. Start a new map-only job to continue migration under this behavior. Teams archive jobs are unchanged.
 
 ### Staged cutover: keep one job open
 
@@ -140,7 +142,6 @@ Configure staged intent before planning:
 staged = true
 consistencyIntervalMs = 30000
 settleMaxPasses = 3
-deltaVerification = "full" # or "changed" for intermediate partial proof
 ```
 
 1. Load the manifest, run `plan`, review it and run interactive `approve --job "$ID"`, then `execute`
@@ -149,11 +150,9 @@ deltaVerification = "full" # or "changed" for intermediate partial proof
    keep the job open.
 2. As the source changes, repeat `plan` → review → `approve` → `execute` → `verify`
    in that same job. Ordinary revisions after a completed execution are
-   **delta**. Each plan lists new, changed, unchanged and (for mirror)
-   to-be-deleted paths with byte totals.
-   Review every deletion against its mapping's `deleteLimit`; an over-limit
-   preview cannot be approved for execution. Copy retains destination-only paths.
-   The preview predicts rclone actions; it is not content-equality proof.
+   **delta**. Review the mapping roots, options and any expanded authority.
+   Mirror deletion candidates are listed and guarded at execution, not previewed
+   for approval. Copy retains destination-only paths.
 3. Arrange the source freeze with its accountable human, then make the final
    revision and hand the human interactive approval with a freeze attestation:
 
@@ -174,36 +173,19 @@ deltaVerification = "full" # or "changed" for intermediate partial proof
    Approved staged intent belongs to the job's history: changing configuration
    or reloading a manifest cannot turn that job into an unstaged migration.
 
-Planning and approval show `sourceInventoryAt` and `sourceInventoryAgeMs`; the web
-plan/approval views show the timestamp and age in seconds. Age is information,
-not an expiry rule. Execute performs a **complete read-only source inventory
-comparison** and refuses `plan_revision_required` when approved source evidence
-changed. Graph delta cursor reads have been observed, but descendant-change
-coverage and consistency latency remain unqualified; cursors and root timestamps
-are not used to bypass the complete comparison.
-
 Final execution waits `consistencyIntervalMs` (default **30000**, a configurable
-wait rather than a measured cloud-convergence guarantee) and completely
-re-inventories. It can make up to `settleMaxPasses` additional catch-up passes
-(default **3**) within the approved scope. A complete unchanged confirmation is
-required before full verification; exhaustion leaves cutover incomplete. New
-paths or deletions outside the approved preview require a new revision. Settling
-does not expand deletion authority: the original authorization and cumulative
-limit remain in force across final catch-up passes.
-The 30-second default exceeds the rehearsal's observed 24-second copy-to-verify
-race; it is a conservative polling interval, not a qualified upper bound on
-provider consistency. The repeated complete comparisons, not the delay alone,
-establish observed quiescence.
+wait rather than a measured cloud-convergence guarantee), then compares source
+and destination listings, including folders. It can make up to `settleMaxPasses`
+additional catch-up passes (default **3**) within the approved mappings.
+Confirmation that nothing remains to copy or delete is required before final
+verification; exhaustion leaves cutover incomplete. Settling does not expand
+deletion authority: the original authorization and cumulative limit remain in
+force across final catch-up passes. Listing comparison establishes observed
+quiescence, not a source snapshot or an administrator-enforced freeze.
 
-`deltaVerification = "changed"` selects explicitly labelled **partial proof** for
-intermediate deltas, naming the last successfully verified baseline revision and
-covered paths. Failed or unverified revisions do not advance that baseline.
-Reuse also requires the same source and destination roots, expanded exclusions,
-OneNote policy and content-verification mode. A repointed mapping, changed scope
-or older evidence without that binding falls back to full verification.
-Prestage, missing baselines and final revisions always use full verification;
-`"full"` remains the default. Verification scope is separate from opting into
-`verificationMode = "size_only"` and its degraded-content finding.
+Every verification covers whole mappings, including intermediate deltas.
+Listing verification is the default; opt-in hash verification changes the
+content check, not the scope.
 
 The web **plan** stage offers **Make final cutover plan**; final approval asks
 who froze the source, when (a timestamp with timezone), and how. This durable
@@ -281,7 +263,7 @@ slashes, empty segments, `.` or `..`. IDs are stable provider IDs, not URLs or t
 alias `root`; mapping IDs must be unique. Both roots must be ordinary folders.
 Mappings overlap if their source roots in the same drive are equal or one is an
 ancestor of the other, **or** their destination roots in the same Shared Drive are
-equal or nested. Sibling trees are allowed; exclusions do not make overlapping roots safe.
+equal or nested. Sibling trees are allowed; mapping roots alone define scope.
 
 For a new Shared Drive, replace `destination` with
 `{ "type": "google_shared_drive", "create": "Finance" }` and optionally add
@@ -407,31 +389,26 @@ same artifact set and digests. Teams archive reports and packages are unchanged.
   `go_live_destination_check`, `go_live_acknowledgments`. Files and bytes are the latest completed
   pass's recorded totals, not an inventory or a sum of attempts. Verification is
   `clean` or `findings` (acceptance does not turn findings into proof), or empty
-  before verification. Exception counts cover planned omissions and verification
-  findings, including advance acceptance, not go-live checks. Go-live grants are a JSON array of the
-  recorded mapping/drive/member/timestamp objects; before-copy grants are not
+  before verification. Exception counts cover verification findings, not go-live
+  checks. Go-live grants are a JSON array of the recorded mapping/drive/member/timestamp
+  objects; before-copy grants are not
   presented as go-live. Freeze cells contain the current final approval's human
   attestation, not an assertion that Migmate locked the source.
   A destination's planned creation name is available before execute, but
   `created_by_job` becomes `true` only once a created drive ID is recorded.
-- **`exceptions.csv`** has one row per current planned omission or verification
-  finding, plus current failed/unavailable go-live checks. Accepted exceptions are not duplicated. Columns:
-  `mapping_id`, `path`, `code`, `status`, `approver`, `note`, `reason`.
-  Status is `outstanding`, `accepted in advance`, or `accepted`. Approver and note
-  come from recorded acceptance (or the approval for an advance-accepted plan
-  omission); reason is the finding's recorded reason text. Advance acceptance is
-  bound to the approved plan's options: later edits to `job.toml` cannot add or
-  revoke it. Current-revision planned omissions remain present during execution
-  and after verification, without duplicating omissions verification re-emits;
-  `mappings.csv` counts those same planned/verification exceptions.
+- **`exceptions.csv`** has one row per verification finding, plus current
+  failed/unavailable go-live checks. Accepted exceptions are not duplicated.
+  Columns: `mapping_id`, `path`, `code`, `status`, `approver`, `note`, `reason`.
+  Status is `outstanding` or `accepted`; approver and note come from recorded
+  acceptance, and reason is the finding's recorded reason text.
+  Route-wide omissions are disclosed separately, not counted as exceptions.
   Go-live rows retain the failed check code and recorded evidence in `reason`;
   their status is `outstanding (failed)`, `outstanding (unverified)`,
   `acknowledged (failed)` or `acknowledged (unverified)`. Acknowledged rows carry
   the declared approver and shared rationale in `note`. Full check/decision records
   are also retained in the mapping CSV and JSON/JSONL/HTML report.
-  With `proof = "rclone"`, a single-cell disclosure row precedes the column header: **per-file omission
-  findings are not collected at this proof level**. CSV consumers must skip that
-  first row for rclone-proof reports; full-proof reports start at the column header.
+  File reports disclose route-wide omissions and verification scope rather than
+  generating per-file omission rows.
 
 These are views of existing report evidence, not additional provider observations.
 Unknown values are empty cells: in particular, existing destination names, source
@@ -471,8 +448,7 @@ record; 0 means document/header), and `refusal.detail.field`. JSON fields and CS
 columns are strict: every unknown field refuses rather than being ignored.
 
 A successful load replaces the entire mapping set in SQLite, not the credential
-settings. Legacy `[[mappings]]` configs move into SQLite on writer open, preserving
-stable IDs and exclusions; mappings no longer remain in `job.toml`. The plan freezes
+settings. Mappings live in SQLite rather than `job.toml`. The plan freezes
 the resolved mappings and `manifestDigest` (SHA-256 of canonical versioned JSON,
 ordered by mapping ID). Editing the input file has no effect until another load.
 Loading after planning/approval collects a new revision requiring approval again.
@@ -599,29 +575,21 @@ provider and HTTP-transport contracts; this does not claim a live tenant run.
 
 ### OneNote notebooks
 
-`[options] oneNoteNotebooks = "omit"` is the default. Each omitted notebook's
-`source_package_omitted` finding in the plan and verification records its SharePoint
-link, section count, reason and manual next step; paged review displays those facts.
-Open the source in OneNote for Windows → File → Export → Notebook (`.onepkg`) or PDF,
-then upload the export to the destination drive.
+Notebooks copy as folders of section files, including `.one` files and
+`Open Notebook.onetoc2`, through ordinary copy, delta, mirror and verification.
+There is no notebook policy option or per-notebook omission finding.
 
-Set `[options] oneNoteNotebooks = "copy"` to copy notebooks as folders of section
-files. The notebook receives the nonblocking `source_package_copied_as_files`
-policy outcome; its files use ordinary copy, delta, mirror and hash verification.
-Other package types remain omitted. `"copy"` refuses on the reverse route with
-`configuration_invalid`, field `options.oneNoteNotebooks`.
-
-The plan and report disclose a **read-only reference copy**, not a working notebook
-in Google. Download the whole folder and open `Open Notebook.onetoc2` in OneNote for
-Windows. It does not open on Mac or in Drive. Editing through Drive for desktop is
-unsafe: notebooks must sync through OneNote itself, not a file-sync client.
-“Read-only” describes the intended use, not a Drive permission enforced by Migmate.
+This is a **read-only reference copy**, not a working notebook in Google.
+Download the whole folder and open `Open Notebook.onetoc2` in OneNote for Windows.
+It does not open on Mac or in Drive. Editing through Drive for desktop is unsafe:
+notebooks must sync through OneNote itself, not a file-sync client. “Read-only”
+describes intended use, not a Drive permission enforced by Migmate.
 
 ### File mapping copies and recovery
 
 Copy passes run concurrently inside the run's single managed rclone worker; one lifecycle writer still records their checkpoints serially. Shared Drive provisioning completes before copying.
 
-The managed worker enables rclone's `--fast-list` for copy/mirror previews and passes, folder listings, and hash listings. Backends such as Google Drive can use recursive ListR traversal to reduce listing API requests; backends without ListR retain ordinary traversal. This trades additional memory for fewer listing requests, not a measured tenant throughput guarantee. Mapping roots, literal exclusions, empty-folder coverage and mirror deletion caps are unchanged. Verification still makes fresh observations: preview/copy listings are not reused as verification evidence. Failed mappings still retry their whole scope; this is not per-file retry or adaptive throttling.
+The managed worker enables rclone's `--fast-list` for copy/mirror passes, folder listings, and hash listings. Backends such as Google Drive can use recursive ListR traversal to reduce listing API requests; backends without ListR retain ordinary traversal. This trades additional memory for fewer listing requests, not a measured tenant throughput guarantee. Mapping roots, empty-folder coverage and mirror deletion caps are unchanged. Verification makes independent observations rather than reusing copy listings. Failed mappings still retry their whole scope; this is not per-file retry or adaptive throttling.
 
 The job's `[options]` controls both limits, shown in the immutable plan's **Copy concurrency** section and the report:
 

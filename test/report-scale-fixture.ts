@@ -37,7 +37,7 @@ try {
       type: "file_migration",
       config: {
         mappings: [],
-        options: { proof: "rclone", staged: true, consistencyIntervalMs: 0 },
+        options: { staged: true, consistencyIntervalMs: 0 },
       },
     }),
   );
@@ -114,18 +114,12 @@ try {
     ),
   );
   db.prepare(
-    `UPDATE watermark SET value=json_set(value, '$.copiedInventory', json((
-    SELECT json_group_array(json_object('id',source_item_id,'path',relative_path,'evidence',json_object('description',json_extract(payload,'$.sourceEvidence.description'))))
-    FROM item WHERE rev=? AND phase='verify' AND mapping_id=json_extract(watermark.value,'$.mappingId')
-  ))) WHERE rev=? AND unit_key LIKE 'file-settle:%'`,
-  ).run(plan.revision, plan.revision);
-  db.prepare(
     `INSERT INTO finding (rev,phase,code,kind,subject_kind,subject_id,evidence,at)
-    SELECT rev,'verify','omitted_by_rule','omission','file',id,json_object('path',relative_path,'reason','reviewed omission'),?
+    SELECT rev,'verify','content_mismatch','finding','file',id,json_object('path',relative_path,'reason','reviewed mismatch'),?
     FROM item WHERE rev=? AND id LIKE 'synthetic-%' ORDER BY id LIMIT 1000`,
   ).run(now().toISOString(), plan.revision);
   db.prepare("UPDATE verification_revision SET findings=? WHERE plan_rev=?").run(
-    JSON.stringify([{ code: "omitted_by_rule", kind: "omission", count: 1000 }]),
+    JSON.stringify([{ code: "content_mismatch", kind: "finding", count: 1000 }]),
     plan.revision,
   );
   db.exec("COMMIT");
@@ -138,7 +132,7 @@ try {
     await engine.withWriterResult(ref, (w) =>
       w.accept({
         verificationDigest: verification,
-        codes: ["omitted_by_rule"],
+        codes: ["content_mismatch"],
         rationale: "Scale fixture accepted exception",
         mode: "unattended",
         approver: "scale-operator",
@@ -203,7 +197,7 @@ try {
       if (entry.kind === "row") rows++;
       else if (entry.kind === "finding") {
         findings++;
-        assert.equal(entry.finding.code, "omitted_by_rule");
+        assert.equal(entry.finding.code, "content_mismatch");
       }
     }
   }
@@ -214,10 +208,10 @@ try {
   let csvExceptions = 0;
   for await (const exception of createReadStream(
     report.artifacts.find((artifact) => artifact.name === "exceptions.csv")!.path,
-  ).pipe(parse({ columns: true, from_line: 2 }))) {
+  ).pipe(parse({ columns: true }))) {
     assert.match(exception.mapping_id, /^mapping-[012]$/u);
     assert.equal(exception.status, "accepted");
-    assert.equal(exception.reason, "reviewed omission");
+    assert.equal(exception.reason, "reviewed mismatch");
     csvExceptions++;
   }
   assert.equal(csvExceptions, 1000);

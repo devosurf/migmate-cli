@@ -112,43 +112,39 @@ export interface FileHashEntry {
   id?: string;
 }
 
-export interface FilePassPreviewEntry {
+export interface FileListingComparisonEntry {
   /** Mapping-relative path; size is the listed byte count, not downloaded proof. */
   path: string;
   size: number;
 }
 
-/** Disjoint action classes, sorted by path. This predicts a pass, not content equality. */
-export interface FilePassPreview {
-  new: FilePassPreviewEntry[];
-  changed: FilePassPreviewEntry[];
-  unchanged: FilePassPreviewEntry[];
-  deleted: FilePassPreviewEntry[];
-  retained: FilePassPreviewEntry[];
+/** Execution-time action classes, sorted by path; not proof of content equality. */
+export interface FileListingComparison {
+  new: FileListingComparisonEntry[];
+  changed: FileListingComparisonEntry[];
+  unchanged: FileListingComparisonEntry[];
+  deleted: FileListingComparisonEntry[];
+  retained: FileListingComparisonEntry[];
   /** Equal common hash with a differing timestamp: no content transfer. */
-  timestampOnly: FilePassPreviewEntry[];
+  timestampOnly: FileListingComparisonEntry[];
   modifyWindowNs: string;
 }
 
 export interface FilePassProvider {
-  previewCopyPass(input: {
+  compareFileListings(input: {
     socketPath: string;
     source: FilePassRoot;
-    /** Omit only for a job-created destination which does not exist yet. */
-    destination?: FilePassRoot;
-    excludePaths?: string[];
+    destination: FilePassRoot;
     mode: "copy" | "mirror";
     /** Listings have no deadline; aborting stops them. */
     signal?: AbortSignal;
-  }): Promise<FilePassPreview>;
+  }): Promise<FileListingComparison>;
   startCopyPass(
     input: {
       socketPath: string;
       source: FilePassRoot;
       destination: FilePassRoot;
       transfers: number;
-      /** Literal mapping-relative paths; each excludes the item and its subtree. */
-      excludePaths?: string[];
     } & ({ mode: "copy" } | { mode: "mirror"; deleteLimit: number }),
   ): Promise<CopyPassHandle>;
   copyPassStatus(input: CopyPassReference): Promise<CopyPassStatus>;
@@ -213,11 +209,6 @@ export interface ProviderPort extends FilePassProvider {
   findSharedDrives(name: string): Promise<SharedDrive[]>;
   listDriveMembers(driveId: string): Promise<DriveMembership[]>;
   addDriveMember(driveId: string, member: DriveMember): Promise<void>;
-  resolveFilePassSource(input: {
-    sourceType?: "sharepoint" | "google_shared_drive";
-    sourceDriveId: string;
-    sourceItemId: string;
-  }): Promise<{ socketPath: string; source: FilePassRoot }>;
   resolveFilePass(input: {
     sourceType?: "sharepoint" | "google_shared_drive";
     sourceDriveId: string;

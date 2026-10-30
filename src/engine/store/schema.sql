@@ -45,6 +45,7 @@ CREATE TABLE plan_revision (
   plan_digest         TEXT NOT NULL,
   inputs_digest       TEXT NOT NULL,
   created_at          TEXT NOT NULL,
+  -- Legacy storage column; new map-only plans write an empty string.
   source_inventory_at TEXT NOT NULL,
   evidence            TEXT NOT NULL,
   payload             TEXT

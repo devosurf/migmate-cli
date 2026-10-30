@@ -28,6 +28,7 @@ Codes worth recognising:
 - **`approval_required` / `approval_digest_stale`** — hand off a fresh review of the current evidence; never substitute a newer digest under an old answer. Initial close also requires a recorded decision. Recover without another handoff only when durable `closeAuthorization` matches the current `closeReview`.
 - **`go_live_started`** — the durable fence prevents transfers and terminal cancellation. Inspect `incompleteClose` and matching authorization, finish grants/checks/reporting, then resume `close`. Passed and exactly acknowledged checks are preserved; the final report cannot be bypassed.
 - **`configuration_invalid` / `usage`** — fix the named field or invocation; manifest row diagnostics are in [ROUTES.md](ROUTES.md).
+- **Old inventory-planned file job** — mutation refuses under the map-only cutover. Read historical status, evidence and reports, then create a new job; do not rewrite its frozen plan or remove old evidence to bypass the refusal. Removed configuration options must be removed from a new operator config rather than interpreted as new defaults.
 - **`job_not_found`** — inspect the resolved home and job identifier.
 - **`local_filesystem_required`** — move the durable store to a supported local filesystem before execution.
 - **`foreign_host`** — inspect the lease's host; do not treat another host's worker as a dead local process.

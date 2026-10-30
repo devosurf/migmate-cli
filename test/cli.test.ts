@@ -202,8 +202,20 @@ async function verifiedDecisionJob(t: TestContext, deferred = false, mappingIds 
       );
   } else
     fixture.sourceItems.push(
-      { id: "notebook", parentId: "src-root", name: "Notebook", kind: "package" },
-      { id: "excluded", parentId: "src-root", name: "Excluded", kind: "package" },
+      {
+        id: "notebook",
+        parentId: "src-root",
+        name: "notebook.bin",
+        kind: "file",
+        content: "original",
+      },
+      {
+        id: "changed",
+        parentId: "src-root",
+        name: "changed.bin",
+        kind: "file",
+        content: "original",
+      },
     );
   const h = harness(t, fixture);
   const engine = h.engine();
@@ -212,12 +224,7 @@ async function verifiedDecisionJob(t: TestContext, deferred = false, mappingIds 
       type: "file_migration",
       config: deferred
         ? { mappings: [], options: { memberGrants: "after_verification" } }
-        : {
-            mappings: CLI_JOB_CONFIG.mappings.map((mapping) => ({
-              ...mapping,
-              exclusions: [{ sourceItemId: "excluded", reason: "Retained separately" }],
-            })),
-          },
+        : { ...CLI_JOB_CONFIG, options: { verificationMode: "hash" } },
     });
     assert.ok(initialized.ok);
     const job = initialized.value;
@@ -259,6 +266,15 @@ async function verifiedDecisionJob(t: TestContext, deferred = false, mappingIds 
       });
       assert.ok(approval.ok);
       assert.ok((await writer.execute()).ok);
+      if (!deferred) {
+        for (const item of h.provider.snapshotDestination())
+          if (item.name === "notebook.bin" || item.name === "changed.bin")
+            h.provider.mutateDestinationContent(
+              item.id,
+              Buffer.from(item.name === "notebook.bin" ? "modified" : "different length"),
+            );
+        assert.ok((await writer.verify()).ok);
+      }
     });
     assert.ok(prepared.ok);
     return { ...h, id: job.id };
@@ -904,7 +920,7 @@ it("refuses missing jobs and malformed config rather than creating state", async
   assert.equal(document(config).refusal.code, "configuration_invalid");
 });
 
-it("pages and filters durable plan evidence without revising the approved digest", async (t) => {
+it("reviews mapping roots without a per-file plan preview or inventory age", async (t) => {
   const h = await planned(t);
   const ids = new Set<string>();
   let cursor: string | null = null;
@@ -918,7 +934,7 @@ it("pages and filters durable plan evidence without revising the approved digest
         "--limit",
         "2",
         "--code",
-        "created",
+        "unchanged",
         ...(cursor ? ["--cursor", cursor] : []),
         "--output",
         "json",
@@ -928,15 +944,17 @@ it("pages and filters durable plan evidence without revising the approved digest
     const doc = document<{ planDigest: string; review: RowPage }>(result);
     assert.equal(result.code, 0);
     assert.equal(doc.value.planDigest, h.plan.planDigest);
-    assert.equal(doc.value.review.totalRows, 8);
-    assert.equal(doc.value.review.facets.find((facet) => facet.code === "created")?.count, 8);
+    assert.equal(doc.value.review.totalRows, 1);
+    assert.equal(doc.value.review.facets.find((facet) => facet.code === "unchanged")?.count, 1);
+    assert.equal("sourceInventoryAt" in doc.value, false);
+    assert.equal("sourceInventoryAgeMs" in doc.value, false);
     for (const row of doc.value.review.rows) {
       assert.equal(ids.has(row.id), false);
       ids.add(row.id);
     }
     cursor = doc.value.review.nextCursor;
   } while (cursor);
-  assert.equal(ids.size, 8);
+  assert.equal(ids.size, 1);
   const search = document<{ review: RowPage }>(
     await invoke(
       [
@@ -947,15 +965,15 @@ it("pages and filters durable plan evidence without revising the approved digest
         "--search",
         "3.txt",
         "--code",
-        "created",
+        "unchanged",
         "--output",
         "json",
       ],
       h.engine(),
     ),
   );
-  assert.equal(search.value.review.totalRows, 1);
-  assert.equal(search.value.review.rows[0]?.code, "created");
+  assert.equal(search.value.review.totalRows, 0);
+  assert.deepEqual(search.value.review.rows, []);
 });
 
 it("machine approval requires both identity and read-back digest, regardless of TTYs", async (t) => {
@@ -1220,10 +1238,10 @@ it("acceptance shows named groups and rejects missing selection, rationale or co
     [""],
     ["all"],
     ["missing"],
-    ["source_package_omitted", ""],
-    ["source_package_omitted", null],
-    ["source_package_omitted", "Reviewed exception", "/cancel"],
-    ["source_package_omitted", "Reviewed exception", "", "no"],
+    ["content_mismatch", ""],
+    ["content_mismatch", null],
+    ["content_mismatch", "Reviewed exception", "/cancel"],
+    ["content_mismatch", "Reviewed exception", "", "no"],
   ]) {
     const result = await invoke(["accept", "--job", h.id], h.engine(), {
       tty: [true, false, true],
@@ -1235,7 +1253,7 @@ it("acceptance shows named groups and rejects missing selection, rationale or co
     ).value;
     assert.deepEqual(after.acceptedExceptions, []);
     assert.equal(after.lastInteractiveIdentity, "Alice");
-    assert.match(result.stderr, /source_package_omitted/u);
+    assert.match(result.stderr, /content_mismatch/u);
     assert.match(result.stderr, /notebook/u);
   }
   for (const command of ["accept", "close"]) {
@@ -1270,9 +1288,9 @@ it("accept records selected groups and one rationale with interactive or unatten
           "--approver",
           "CI",
           "--code",
-          "source_package_omitted",
+          "content_mismatch",
           "--code",
-          "omitted_by_rule",
+          "size_mismatch",
           "--note",
           "Reviewed differences",
           "--output",
@@ -1280,7 +1298,7 @@ it("accept records selected groups and one rationale with interactive or unatten
         ];
     const result = await invoke(["accept", "--job", h.id, ...flags], h.engine(), {
       tty: [true, false, true],
-      answers: ["source_package_omitted, omitted_by_rule", " Reviewed differences ", "", "yes"],
+      answers: ["content_mismatch, size_mismatch", " Reviewed differences ", "", "yes"],
     });
     assert.equal(result.code, 0);
     const after = document<JobStatus>(
@@ -1296,7 +1314,7 @@ it("accept records selected groups and one rationale with interactive or unatten
           mode,
         }))
         .sort((a, b) => a.code.localeCompare(b.code)),
-      ["omitted_by_rule", "source_package_omitted"].map((code) => ({
+      ["content_mismatch", "size_mismatch"].map((code) => ({
         code,
         note: "Reviewed differences",
         verificationDigest: before.verificationDigest,
@@ -1317,7 +1335,7 @@ it("accept refuses verification changed while the human confirmation is pending"
   ).value;
   const result = await invoke(["accept", "--job", h.id], h.engine(), {
     tty: [true, false, true],
-    answers: ["source_package_omitted", "Reviewed notebook", "Stale reviewer", "yes"],
+    answers: ["content_mismatch", "Reviewed notebook", "Stale reviewer", "yes"],
     async onPrompt(index) {
       if (index !== 3) return;
       const verification = await invoke(["verify", "--job", h.id, "--output", "json"], h.engine());
@@ -1733,7 +1751,7 @@ it("interruption during writer acquisition records no decision", async (t) => {
               "--verification-digest",
               before.verificationDigest!,
               "--code",
-              "source_package_omitted",
+              "content_mismatch",
               "--note",
               "Reviewed",
             ]
@@ -2039,6 +2057,9 @@ it("keeps acceptance bound to the verification digest and closes only after name
     0,
   );
   assert.equal((await invoke(["execute", "--job", h.id, "--output", "json"], h.engine())).code, 0);
+  const changed = h.provider.snapshotDestination().find((item) => item.kind === "file");
+  assert.ok(changed);
+  h.provider.mutateDestinationContent(changed.id, Buffer.from("different destination length"));
   const verification = document<{ verificationDigest: string; findings: Array<{ code: string }> }>(
     await invoke(["verify", "--job", h.id, "--output", "json"], h.engine()),
   );
@@ -2052,7 +2073,7 @@ it("keeps acceptance bound to the verification digest and closes only after name
       "--verification-digest",
       "stale",
       "--code",
-      "version_history_omitted",
+      "size_mismatch",
       "--note",
       "Reviewing the previously captured verification",
       "--output",

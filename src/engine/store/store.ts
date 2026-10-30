@@ -197,7 +197,7 @@ export interface Store {
   readResume(revision: number): ResumeRecord;
   readReportResume(revision: number): ResumeRecord;
   readReportPlan(revision: number): Record<string, unknown> | null;
-  readPlanAcceptedOmissions(revision: number): string[];
+  inventoryPlanRevision(): number | null;
   readReportArchive(revision: number): unknown;
   iterateReportRows(revision: number, phase?: RowPhase): Iterable<Record<string, unknown>>;
   reportEvidence(revision: number): NonNullable<DriverContext<never>["reportEvidence"]>;
@@ -891,7 +891,6 @@ class StoreImpl implements Store {
         planDigest: String(row.plan_digest),
         inputsDigest: String(row.inputs_digest),
         createdAt: String(row.created_at),
-        sourceInventoryAt: String(row.source_inventory_at),
         rowCount: Number(count.count),
         inputs,
         evidence: parseEvidence(row.evidence),
@@ -911,7 +910,7 @@ class StoreImpl implements Store {
           record.planDigest,
           record.inputsDigest,
           record.createdAt,
-          record.sourceInventoryAt,
+          "", // Retained SQL column only for historical schema compatibility.
           canonicalJson(record.evidence),
           canonicalJson(record),
         );
@@ -1383,7 +1382,6 @@ class StoreImpl implements Store {
   }
   reportEvidence(revision: number): NonNullable<DriverContext<never>["reportEvidence"]> {
     const db = this.db;
-    const rows = () => this.iterateReportRows(revision);
     return {
       settled(mappingId) {
         return readReportJson(
@@ -1391,24 +1389,6 @@ class StoreImpl implements Store {
           "SELECT value AS document FROM watermark WHERE rev=? AND unit_key=? AND json_extract(value,'$.revision')=?",
           [revision, `file-settle:${mappingId}`, revision],
         );
-      },
-      preview(mappingId) {
-        const value = readReportJson(
-          db,
-          "SELECT json_extract(payload,'$.fileScope.preview') AS document FROM item WHERE rev=? AND phase='plan' AND mapping_id=? AND json_type(payload,'$.fileScope.preview') IS NOT NULL ORDER BY id LIMIT 1",
-          [revision, mappingId],
-        );
-        if (!value) return undefined;
-        const byteTotals: Record<string, number> = {};
-        for (const kind of ["new", "changed", "unchanged", "deleted", "retained", "timestampOnly"])
-          byteTotals[kind] = Number(
-            db
-              .prepare(
-                "SELECT COALESCE(SUM(json_extract(entry.value,'$.size')),0) AS total FROM item,json_each(item.payload,?) AS entry WHERE rev=? AND phase='plan' AND mapping_id=?",
-              )
-              .get(`$.fileScope.preview.${kind}`, revision, mappingId)?.total,
-          );
-        return { value, byteTotals };
       },
       coverage: new ReportArray(function* () {
         for (const row of db
@@ -1424,36 +1404,24 @@ class StoreImpl implements Store {
           yield { mappingId: String(row.mapping_id), ...(verification as Record<string, unknown>) };
         }
       }),
-      sourceMetadata: new ReportArray(function* () {
-        for (const item of rows()) {
-          if (item.jobType !== "file_migration" || item.sourceEvidence === undefined) continue;
-          yield {
-            mappingId: item.mappingId,
-            sourceDriveId: item.sourceDriveId,
-            sourceItemId: item.sourceItemId,
-            relativePath: item.relativePath,
-            phase: item.phase,
-            sourceEvidence: item.sourceEvidence,
-          };
-        }
-      }),
     };
   }
-  readPlanAcceptedOmissions(revision: number): string[] {
-    return this.db
+  inventoryPlanRevision(): number | null {
+    const row = this.db
       .prepare(
-        `SELECT omission.value FROM plan_input,
-        json_each(plan_input.value, '$.options.acceptedOmissions') AS omission
-        WHERE rev=? AND plan_input.key='configuration'`,
+        `SELECT p.rev FROM plan_revision p
+         WHERE EXISTS (SELECT 1 FROM job WHERE type='file_migration')
+         AND (NOT EXISTS (SELECT 1 FROM item i WHERE i.rev=p.rev AND i.phase='plan')
+           OR EXISTS (SELECT 1 FROM item i WHERE i.rev=p.rev AND i.phase='plan'
+             AND COALESCE(json_extract(i.payload,'$.fileScope.mapOnly'),0)<>1))
+         ORDER BY p.rev LIMIT 1`,
       )
-      .all(revision)
-      .map((row) => String(row.value));
+      .get();
+    return row ? Number(row.rev) : null;
   }
   readReportPlan(revision: number): Record<string, unknown> | null {
     const row = this.db
-      .prepare(
-        "SELECT rev,plan_digest,inputs_digest,created_at,source_inventory_at FROM plan_revision WHERE rev=?",
-      )
+      .prepare("SELECT rev,plan_digest,inputs_digest,created_at FROM plan_revision WHERE rev=?")
       .get(revision);
     if (!row) return null;
     const payload = readReportJson(
@@ -1483,7 +1451,6 @@ class StoreImpl implements Store {
       planDigest: String(row.plan_digest),
       inputsDigest: String(row.inputs_digest),
       createdAt: String(row.created_at),
-      sourceInventoryAt: String(row.source_inventory_at),
       rowCount: Number(count.count),
       inputs,
       evidence:
@@ -2581,7 +2548,6 @@ class StoreImpl implements Store {
               planDigest: plan.planDigest,
               inputsDigest: plan.inputsDigest,
               createdAt: plan.createdAt,
-              sourceInventoryAt: plan.sourceInventoryAt,
               ...(plan.stage ? { stage: plan.stage } : {}),
               rowCount: plan.rowCount,
               ...(plan.manifestDigest ? { manifestDigest: plan.manifestDigest } : {}),

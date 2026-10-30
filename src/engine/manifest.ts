@@ -302,6 +302,7 @@ export function validateMappingDirections(
 export async function validateMappingTrees(
   provider: ProviderPort,
   mappings: FileMappingConfig[],
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const side of ["source", "destination"] as const) {
     const roots = new Map<string, number>();
@@ -320,6 +321,7 @@ export async function validateMappingTrees(
       let id: string | null = side === "source" ? m.sourceItemId : m.destFolderId!;
       const seen = new Set<string>();
       while (id !== null) {
+        signal?.throwIfAborted();
         const key: string = JSON.stringify([drive, id]);
         if (seen.has(key))
           throw new ManifestError(index + 1, side, "Folder ancestry is not a tree");
@@ -330,9 +332,17 @@ export async function validateMappingTrees(
         if (!parents.has(key)) {
           const entry =
             side === "source"
-              ? await provider.resolveSourceRoot({ sourceDriveId: drive, sourceItemId: id })
+              ? await provider.resolveSourceRoot({
+                  sourceDriveId: drive,
+                  sourceItemId: id,
+                  ...(signal ? { signal } : {}),
+                })
               : await provider
-                  .resolveDestinationFolder({ destDriveId: drive, destFolderId: id })
+                  .resolveDestinationFolder({
+                    destDriveId: drive,
+                    destFolderId: id,
+                    ...(signal ? { signal } : {}),
+                  })
                   .catch((error: unknown) => {
                     if (
                       error instanceof ProviderFault &&

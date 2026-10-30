@@ -677,7 +677,12 @@ export class FileEffects {
     );
   }
 
-  async resolveFilePassSource(input: Parameters<ProviderPort["resolveFilePassSource"]>[0]) {
+  async #resolveFilePassSource(
+    input: Pick<
+      Parameters<ProviderPort["resolveFilePass"]>[0],
+      "sourceType" | "sourceDriveId" | "sourceItemId"
+    >,
+  ) {
     if (
       (input.sourceType === "google_shared_drive") !==
       this.#googleSourceDrives.has(input.sourceDriveId)
@@ -714,7 +719,7 @@ export class FileEffects {
   }
 
   async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
-    const { source } = await this.resolveFilePassSource(input);
+    const { source } = await this.#resolveFilePassSource(input);
     if (input.sourceType === "google_shared_drive") {
       const destination = await this.resolveDestinationFolder(input);
       if (!destination || destination.kind !== "folder")
@@ -1184,7 +1189,7 @@ export class FileEffects {
     const { file } = await this.#getRaw(objectId, signal);
     if (file.mimeType.startsWith("application/vnd.google-apps."))
       throw new ProviderFault(
-        "content_verification_degraded",
+        "destination_read_failed",
         "The destination does not expose ordinary binary content.",
       );
     yield* authenticatedStream(

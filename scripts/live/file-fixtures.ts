@@ -14,6 +14,7 @@ import {
 } from "../../src/engine/providers/http.ts";
 import type { FileMappingConfig } from "../../src/engine/drivers/file-migration.ts";
 import { LiveTestBlocked } from "./common.ts";
+import { sourceCapabilityKinds, type SourceCapabilityKind } from "./probes.ts";
 
 const folderMime = "application/vnd.google-apps.folder";
 const guid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,11 +40,15 @@ export interface FileFixturesConfig {
     acknowledged: true;
   };
   graphMutation: { tenantId: string; clientId: string; clientSecret: FileCredentialReference };
-  specialSources: {
-    packageId?: string;
-    referenceId?: string;
-    undownloadableId?: string;
-  };
+  capabilityRoots: Partial<
+    Record<
+      SourceCapabilityKind,
+      {
+        sourceItemId: string;
+        sampleItemId: string;
+      }
+    >
+  >;
 }
 
 export function fixtureConfig(value: unknown, mapping: FileMappingConfig): FileFixturesConfig {
@@ -51,7 +56,11 @@ export function fixtureConfig(value: unknown, mapping: FileMappingConfig): FileF
   const roots = object(input.disposableRoots);
   const mutation = object(input.graphMutation);
   const secret = object(mutation.clientSecret);
-  const special = input.specialSources === undefined ? {} : object(input.specialSources);
+  if (input.specialSources !== undefined)
+    throw new LiveTestBlocked("file_special_sources_removed_use_capability_roots");
+  const special = input.capabilityRoots === undefined ? {} : object(input.capabilityRoots);
+  if (Object.keys(special).some((key) => !sourceCapabilityKinds.some((kind) => kind === key)))
+    throw new LiveTestBlocked("file_capability_roots_invalid");
   if (
     roots.acknowledged !== true ||
     mutation.tenantId === undefined ||
@@ -75,12 +84,21 @@ export function fixtureConfig(value: unknown, mapping: FileMappingConfig): FileF
     if (disposableRoots[key] !== mapping[key])
       throw new LiveTestBlocked("file_fixture_roots_must_match_mapping");
   }
-  const specialSources: FileFixturesConfig["specialSources"] = {};
-  for (const key of ["packageId", "referenceId", "undownloadableId"] as const) {
-    if (special[key] !== undefined) specialSources[key] = identifier(special[key]);
+  const capabilityRoots: FileFixturesConfig["capabilityRoots"] = {};
+  const ids = new Set([disposableRoots.sourceItemId]);
+  for (const kind of sourceCapabilityKinds) {
+    if (special[kind] === undefined) continue;
+    const sample = object(special[kind]);
+    if (Object.keys(sample).some((key) => key !== "sourceItemId" && key !== "sampleItemId"))
+      throw new LiveTestBlocked("file_capability_roots_invalid");
+    const sourceItemId = identifier(sample.sourceItemId);
+    const sampleItemId = identifier(sample.sampleItemId);
+    for (const id of [sourceItemId, sampleItemId]) {
+      if (ids.has(id)) throw new LiveTestBlocked("file_special_fixture_ids_must_be_distinct");
+      ids.add(id);
+    }
+    capabilityRoots[kind] = { sourceItemId, sampleItemId };
   }
-  if (new Set(Object.values(specialSources)).size !== Object.values(specialSources).length)
-    throw new LiveTestBlocked("file_special_fixture_ids_must_be_distinct");
   return {
     disposableRoots,
     graphMutation: {
@@ -88,7 +106,7 @@ export function fixtureConfig(value: unknown, mapping: FileMappingConfig): FileF
       clientId: String(mutation.clientId).toLowerCase(),
       clientSecret: { resolver: "file", path: secret.path, mode: "0600" },
     },
-    specialSources,
+    capabilityRoots,
   };
 }
 
@@ -97,6 +115,8 @@ interface GraphItem {
   name: string;
   eTag?: string;
   folder?: unknown;
+  package?: unknown;
+  remoteItem?: unknown;
   parentReference?: { id?: string; driveId?: string };
 }
 interface GoogleItem {
@@ -169,15 +189,20 @@ export class FileFixtures {
     ) {
       throw new LiveTestBlocked("file_fixture_roots_unavailable");
     }
-    // Special fixtures are read-only prerequisites, not tool-owned cleanup targets.
-    for (const id of Object.values(this.#config.specialSources)) {
-      const item = await this.#source(id);
+    // Supplied roots and samples stay read-only and are never cleanup targets.
+    for (const fixture of Object.values(this.#config.capabilityRoots)) {
+      const folder = await this.#source(fixture.sourceItemId);
+      const sample = await this.#source(fixture.sampleItemId);
       if (
-        item.parentReference?.id !== roots.sourceItemId ||
-        item.parentReference.driveId !== roots.sourceDriveId
-      ) {
-        throw new LiveTestBlocked("file_special_fixtures_must_be_direct_children_of_source_root");
-      }
+        !folder.folder ||
+        folder.package ||
+        folder.remoteItem ||
+        folder.parentReference?.id !== roots.sourceItemId ||
+        folder.parentReference.driveId !== roots.sourceDriveId ||
+        sample.parentReference?.id !== folder.id ||
+        sample.parentReference.driveId !== roots.sourceDriveId
+      )
+        throw new LiveTestBlocked("file_capability_roots_must_isolate_direct_child_samples");
     }
   }
 

@@ -314,11 +314,6 @@ async function review(
   const page = await reader.rows(query);
   if (!page.ok) return page;
   const summary: Record<string, unknown> = value && typeof value === "object" ? { ...value } : {};
-  const sourceInventoryAt = status.currentPlan?.sourceInventoryAt;
-  if (sourceInventoryAt && (invocation.command === "plan" || invocation.command === "approve")) {
-    summary.sourceInventoryAt = sourceInventoryAt;
-    summary.sourceInventoryAgeMs = Math.max(0, Date.now() - Date.parse(sourceInventoryAt));
-  }
   if (query.view === "mappings") delete summary.mappingPasses;
   return {
     ok: true,

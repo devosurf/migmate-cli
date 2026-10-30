@@ -111,6 +111,11 @@ async function execute(h: Harness) {
 async function verify(h: Harness) {
   return value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
 }
+function corruptDestination(h: Harness): void {
+  const document = h.port.snapshotDestination().find((item) => item.name === "document.bin");
+  assert.ok(document);
+  h.port.mutateDestinationContent(document.id, Buffer.from("different destination length"));
+}
 
 async function events(engine: Engine, ref: JobRef, from?: number): Promise<JobEvent[]> {
   const result: JobEvent[] = [];
@@ -160,79 +165,7 @@ async function readerRefusals(engine: Engine, ref: JobRef, code: RefusalCode): P
 }
 
 describe("engine durability seam", () => {
-  it("counts the current 61 omitted items once across verification reruns and a second file pass", async (t) => {
-    const h = await harness(
-      t,
-      fileFixture(
-        Array.from({ length: 61 }, (_, index) => ({
-          id: `package-${index}`,
-          parentId: "source-root",
-          name: `package-${index}`,
-          kind: "package" as const,
-        })),
-      ),
-    );
-    let digest = await approve(h);
-    const expected = [{ code: "source_package_omitted", kind: "planned_omission", count: 61 }];
-    await execute(h);
-    for (let pass = 0; pass < 2; pass++) {
-      for (let verification = 0; verification < 2; verification++) {
-        const result = await verify(h);
-        assert.deepEqual(result.findings, expected);
-        assert.deepEqual(
-          value(await h.engine.reader(h.ref).status()).outstandingFindings,
-          expected,
-        );
-        for (const phase of ["plan", "verify"] as const)
-          assert.deepEqual(
-            value(
-              await h.engine.reader(h.ref).rows({
-                phase,
-                codes: ["source_package_omitted"],
-                limit: 7,
-              }),
-            ).facets,
-            expected,
-          );
-      }
-      const result = await verify(h);
-      value(
-        await h.engine.withWriterResult(h.ref, (writer) =>
-          writer.accept({
-            verificationDigest: result.verificationDigest,
-            codes: ["source_package_omitted"],
-            rationale: "Package omitted by policy",
-            mode: "unattended",
-            approver: "operator",
-          }),
-        ),
-      );
-      if (pass === 0) {
-        h.port.mutateSourceItem("package-0", { name: "renamed-package", etag: "next-version" });
-        reopen(h);
-        digest = await approve(h);
-        await execute(h);
-      }
-    }
-    const artifacts = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
-    const report = JSON.parse(
-      await readFile(
-        artifacts.artifacts.find((entry) => entry.name === "report.json")!.path,
-        "utf8",
-      ),
-    );
-    assert.equal(report.plan.planDigest, digest);
-    assert.equal(report.findings.length, 61);
-    assert.equal(report.acceptedExceptions[0].items.length, 61);
-    assert.equal(
-      new Set(
-        report.acceptedExceptions[0].items.map((item: { subjectId: string }) => item.subjectId),
-      ).size,
-      61,
-    );
-  });
-
-  it("retains secondary metadata omissions even when the item has a clean primary outcome", async (t) => {
+  it("discloses route limits once without per-file metadata omissions", async (t) => {
     const h = await harness(
       t,
       fileFixture([
@@ -249,119 +182,88 @@ describe("engine durability seam", () => {
     await approve(h);
     await execute(h);
     const status = value(await h.engine.reader(h.ref).status());
-    const counts = new Map(status.outstandingFindings.map((facet) => [facet.code, facet.count]));
-    assert.equal(counts.get("version_history_omitted"), 1);
-    assert.equal(counts.get("source_metadata_export_only"), 1);
+    assert.deepEqual(status.outstandingFindings, []);
+    assert.equal(status.currentPlan?.rowCount, 1);
     const revision = value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
-    assert.deepEqual(new Map(revision.findings.map((facet) => [facet.code, facet.count])), counts);
+    assert.deepEqual(revision.findings, []);
+    assert.deepEqual(revision.acceptedCodes, []);
   });
 
-  it("records approved route omissions as accepted exceptions on every verification", async (t) => {
-    const h = await harness(
-      t,
-      fileFixture([
-        {
-          id: "metadata-file",
-          parentId: "source-root",
-          name: "metadata-file",
-          kind: "file",
-          content: "bytes",
-          metadata: { versionCount: 3, listItemFields: { Title: "retained evidence" } },
-        },
-      ]),
-      {
-        ...config(),
-        options: { acceptedOmissions: ["version_history_omitted", "source_metadata_export_only"] },
-      },
-    );
-    const planDigest = await approve(h);
-    await execute(h);
-    const executed = value(await h.engine.reader(h.ref).status());
-    assert.equal(executed.state, "verified");
-    assert.deepEqual(executed.outstandingFindings, []);
-    const reverified = value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
-    assert.equal(reverified.clean, true);
-    assert.deepEqual(reverified.acceptedCodes, [
-      "source_metadata_export_only",
-      "version_history_omitted",
-    ]);
-    const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
-    const evidence = JSON.parse(
-      await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
-    );
-    assert.deepEqual(
-      evidence.acceptedExceptions.map((a: { code: string; approver: string; note: string }) => [
-        a.code,
-        a.approver,
-        a.note.includes(planDigest),
-      ]),
-      [
-        ["source_metadata_export_only", "engine-contract-test", true],
-        ["version_history_omitted", "engine-contract-test", true],
-      ],
-    );
-    assert.equal(
-      value(
-        await h.engine.withWriterResult(h.ref, async (writer) =>
-          writer.close(await closeDecision(h)),
-        ),
-      ).outcome,
-      "completed_with_accepted_exceptions",
-    );
-  });
-
-  it("leaves an approved omission code outstanding when the approved plan did not disclose it", async (t) => {
-    const h = await harness(
-      t,
-      fileFixture([
-        {
-          id: "metadata-file",
-          parentId: "source-root",
-          name: "metadata-file",
-          kind: "file",
-          content: "bytes",
-          metadata: { versionCount: 1, listItemFields: { Title: "retained evidence" } },
-        },
-      ]),
-      {
-        ...config(),
-        options: { acceptedOmissions: ["version_history_omitted", "source_metadata_export_only"] },
-      },
-    );
-    await approve(h);
-    await execute(h);
-    h.port.mutateSourceItem("metadata-file", {
-      metadata: { versionCount: 3, listItemFields: { Title: "retained evidence" } },
-    });
-    const verified = value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify()));
-    assert.equal(verified.clean, false);
-    assert.deepEqual(verified.acceptedCodes, ["source_metadata_export_only"]);
-    assert.deepEqual(
-      value(await h.engine.reader(h.ref).status()).outstandingFindings.map((f) => f.code),
-      ["version_history_omitted"],
-    );
-  });
-
-  it("refuses advance acceptance of verification-only or unknown codes", async (t) => {
-    for (const acceptedOmissions of [
-      ["content_verification_degraded"],
-      ["content_mismatch"],
-      ["version_history_omitted", "version_history_omitted"],
-    ]) {
-      const home = await mkdtemp(join(tmpdir(), "migmate-accepted-omissions-"));
-      t.after(() => rm(home, { recursive: true, force: true }));
-      const engine = openEngine({ home, provider: new FakeFileMigrationPort(fixture()) });
-      const init = await engine.initJob({
+  it("refuses every removed file option by its explicit name", async (t) => {
+    const h = await harness(t);
+    for (const [field, options] of [
+      ["options.proof", { proof: "full" }],
+      ["options.proof", { proof: "rclone" }],
+      ["options.acceptedOmissions", { acceptedOmissions: [] }],
+      ["options.oneNoteNotebooks", { oneNoteNotebooks: "copy" }],
+      ["options.deltaVerification", { deltaVerification: "full" }],
+      ['options.verificationMode = "size_only"', { verificationMode: "size_only" }],
+    ] as const) {
+      const init = await h.engine.initJob({
         type: "file_migration",
-        config: { ...config(), options: { acceptedOmissions } },
+        config: { ...config(), options },
       });
       refused(init, "configuration_invalid");
-      if (!init.ok) assert.equal(init.refusal.detail?.field, "options.acceptedOmissions");
+      if (!init.ok) assert.equal(init.refusal.detail?.field, field);
+    }
+    for (const exclusions of [[], [{ sourceItemId: "document", reason: "Excluded" }]]) {
+      const init = await h.engine.initJob({
+        type: "file_migration",
+        config: {
+          ...config(),
+          mappings: config().mappings.map((mapping) => ({ ...mapping, exclusions })),
+        },
+      });
+      refused(init, "configuration_invalid");
+      if (!init.ok) assert.equal(init.refusal.detail?.field, "mappings[0].exclusions");
     }
   });
 
-  it("exposes one verification gate with execution already complete to a live reader", async (t) => {
+  it("accepts listing and opt-in hash configuration on both file routes", async (t) => {
     const h = await harness(t);
+    for (const route of [
+      "sharepoint_library_to_shared_drive",
+      "shared_drive_to_sharepoint_library",
+    ])
+      for (const verificationMode of [undefined, "hash"]) {
+        const initialized = await h.engine.initJob({
+          type: "file_migration",
+          config: {
+            ...config(),
+            route,
+            options: verificationMode === undefined ? {} : { verificationMode },
+          },
+        });
+        assert.equal(initialized.ok, true);
+      }
+  });
+
+  it("copies current source files after approval without an inventory freshness fence", async (t) => {
+    const h = await harness(t);
+    await approve(h);
+    h.port.mutateSourceItem("document", { content: "changed after approval", etag: "v2" });
+    h.now = "2026-10-01T00:00:00.000Z";
+    assert.equal((await execute(h)).outcome, "completed");
+    assert.equal((await verify(h)).clean, true);
+  });
+
+  it("refuses changing the approved verification mode without a new plan", async (t) => {
+    const h = await harness(t, fixture(), { ...config(), options: { verificationMode: "hash" } });
+    await approve(h);
+    await execute(h);
+    const before = value(await h.engine.reader(h.ref).status()).verificationDigest;
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const settings = parseToml(await readFile(path, "utf8"));
+    await writeFile(path, stringifyToml({ ...settings, options: {} }));
+    refused(
+      await h.engine.withWriterResult(h.ref, (writer) => writer.verify()),
+      "plan_revision_required",
+    );
+    assert.equal(value(await h.engine.reader(h.ref).status()).verificationDigest, before);
+  });
+
+  it("exposes one verification gate with execution already complete to a live reader", async (t) => {
+    const h = await harness(t, fixture(), { ...config(), options: { verificationMode: "hash" } });
     await approve(h);
     const original = h.port.listFileHashes.bind(h.port);
     let observedVerification = false;
@@ -418,7 +320,7 @@ describe("engine durability seam", () => {
     );
   });
 
-  it("binds final intent and preserves freeze evidence and inventory age across reopen", async (t) => {
+  it("binds final intent and preserves freeze evidence without inventory age across reopen", async (t) => {
     const h = await harness(t, fixture(), {
       ...config(),
       options: { staged: true, consistencyIntervalMs: 0 },
@@ -440,7 +342,9 @@ describe("engine durability seam", () => {
         }),
       ),
     );
-    assert.equal(approval.sourceInventoryAgeMs, 300_000);
+    assert.equal("sourceInventoryAgeMs" in approval, false);
+    assert.equal("sourceInventoryAt" in approval, false);
+    assert.equal("sourceInventoryAt" in final, false);
     reopen(h);
     assert.equal(value(await h.engine.reader(h.ref).status()).currentPlan?.stage, "final");
     const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
@@ -527,7 +431,7 @@ describe("engine durability seam", () => {
     );
   });
 
-  it("fully verifies a repointed destination instead of borrowing partial proof from the old root", async (t) => {
+  it("fully verifies a repointed destination with the approved hash mode", async (t) => {
     const input = fixture();
     input.destinationItems.push({
       id: "other-root",
@@ -537,7 +441,7 @@ describe("engine durability seam", () => {
     });
     const h = await harness(t, input, {
       ...config(),
-      options: { staged: true, deltaVerification: "changed" },
+      options: { staged: true, verificationMode: "hash" },
     });
     await approve(h);
     await execute(h);
@@ -594,54 +498,41 @@ describe("engine durability seam", () => {
       report.sections.find((section: { title: string }) => section.title === "Verification scope")
         .body,
     );
-    assert.equal(coverage.proof, "full");
-    assert.equal(coverage.mappings[0].baselineRevision, null);
+    assert.equal(coverage.scope, "full");
+    assert.equal(coverage.mappings[0].scope, "full");
   });
 
-  it("retains exception evidence but binds a fresh plan revision for review", async (t) => {
-    const h = await harness(
-      t,
-      fixture(),
-      config([{ sourceItemId: "document", reason: "Approved exclusion" }]),
-    );
+  it("binds a fresh map revision while source file changes leave authority unchanged", async (t) => {
+    const h = await harness(t);
     const first = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     h.now = "2026-09-02T00:00:00.000Z";
+    h.port.mutateSourceItem("document", { content: "new source bytes", etag: "v2" });
     reopen(h);
     const next = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
     assert.ok(next.revision > first.revision);
     assert.notEqual(next.planDigest, first.planDigest);
     assert.equal(next.inputsDigest, first.inputsDigest);
-    assert.ok(
-      value(await h.engine.reader(h.ref).rows({ phase: "plan" })).facets.some(
-        (facet) => facet.code === "omitted_by_rule",
-      ),
-    );
   });
 
   it("requires fresh acceptance after every verification, even for unchanged exception evidence", async (t) => {
-    const h = await harness(
-      t,
-      fixture(),
-      config([{ sourceItemId: "document", reason: "Approved exclusion" }]),
-    );
+    const h = await harness(t);
     await approve(h);
     await execute(h);
+    corruptDestination(h);
     const first = await verify(h);
-    assert.deepEqual(first.findings, [
-      { code: "omitted_by_rule", kind: "planned_omission", count: 1 },
-    ]);
+    assert.deepEqual(first.findings, [{ code: "size_mismatch", kind: "finding", count: 1 }]);
     const accepted = value(
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: first.verificationDigest,
-          codes: ["omitted_by_rule"],
+          codes: ["size_mismatch"],
           rationale: "Keep this source outside the destination",
           mode: "unattended",
           approver: "operator",
         }),
       ),
     );
-    assert.deepEqual(accepted.acceptedCodes, ["omitted_by_rule"]);
+    assert.deepEqual(accepted.acceptedCodes, ["size_mismatch"]);
     assert.deepEqual(value(await h.engine.reader(h.ref).status()).outstandingFindings, []);
     reopen(h);
     const fresh = await verify(h);
@@ -650,20 +541,20 @@ describe("engine durability seam", () => {
     assert.deepEqual(fresh.acceptedCodes, []);
     assert.deepEqual(fresh.findings, first.findings);
     assert.deepEqual(
-      value(await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["omitted_by_rule"] }))
+      value(await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["size_mismatch"] }))
         .facets,
       fresh.findings,
     );
     assert.ok(
       value(await h.engine.reader(h.ref).status()).outstandingFindings.some(
-        (finding) => finding.code === "omitted_by_rule",
+        (finding) => finding.code === "size_mismatch",
       ),
     );
     refused(
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: first.verificationDigest,
-          codes: ["omitted_by_rule"],
+          codes: ["size_mismatch"],
           rationale: "Out of scope",
           mode: "unattended",
           approver: "operator",
@@ -681,7 +572,7 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: fresh.verificationDigest,
-          codes: ["omitted_by_rule"],
+          codes: ["size_mismatch"],
           rationale: "Out of scope",
           mode: "unattended",
           approver: "operator",
@@ -694,25 +585,22 @@ describe("engine durability seam", () => {
           writer.close(await closeDecision(h)),
         ),
       ).acceptedExceptions,
-      ["omitted_by_rule"],
+      ["size_mismatch"],
     );
   });
 
   it("exports immutable byte-addressed evidence after closure with named accepted exceptions", async (t) => {
-    const h = await harness(
-      t,
-      fixture(),
-      config([{ sourceItemId: "document", reason: "Approved exclusion" }]),
-    );
+    const h = await harness(t);
     await approve(h);
     await execute(h);
+    corruptDestination(h);
     const verification = await verify(h),
       note = "<script>operator-note()</script>";
     value(
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: ["omitted_by_rule"],
+          codes: ["size_mismatch"],
           rationale: note,
           mode: "unattended",
           approver: "archive-owner",
@@ -735,11 +623,8 @@ describe("engine durability seam", () => {
     assert.equal(report.acceptedExceptions[0].approver, "archive-owner");
     assert.equal(report.acceptedExceptions[0].note, note);
     assert.deepEqual(
-      report.acceptedExceptions[0].items.map((item: { subjectId: string; phase: string }) => ({
-        subjectId: item.subjectId,
-        phase: item.phase,
-      })),
-      [{ subjectId: "document", phase: "verify" }],
+      report.acceptedExceptions[0].items.map((item: { phase: string }) => item.phase),
+      ["verify"],
     );
     assert.equal(report.findings.length, 1);
     const rendered = await readFile(html.path, "utf8");
@@ -760,20 +645,17 @@ describe("engine durability seam", () => {
   });
 
   it("refuses the whole named acceptance set when a later code is not in the current verification", async (t) => {
-    const h = await harness(
-      t,
-      fixture(),
-      config([{ sourceItemId: "document", reason: "Out of scope" }]),
-    );
+    const h = await harness(t);
     await approve(h);
     await execute(h);
+    corruptDestination(h);
     const verification = await verify(h);
     const outstanding = value(await h.engine.reader(h.ref).status()).outstandingFindings;
     refused(
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: ["omitted_by_rule", "content_mismatch"],
+          codes: ["size_mismatch", "content_mismatch"],
           rationale: "Reviewed exception set",
           mode: "unattended",
           approver: "operator",
@@ -784,7 +666,7 @@ describe("engine durability seam", () => {
     reopen(h);
     assert.deepEqual(value(await h.engine.reader(h.ref).status()).outstandingFindings, outstanding);
     const omissions = value(
-      await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["omitted_by_rule"] }),
+      await h.engine.reader(h.ref).rows({ phase: "verify", codes: ["size_mismatch"] }),
     );
     assert.equal(omissions.totalRows, 1);
     assert.equal(omissions.rows[0]?.accepted, false);
@@ -797,19 +679,16 @@ describe("engine durability seam", () => {
   });
 
   it("requires a rationale and records a repeated selected group only once", async (t) => {
-    const h = await harness(
-      t,
-      fixture(),
-      config([{ sourceItemId: "document", reason: "Out of scope" }]),
-    );
+    const h = await harness(t);
     await approve(h);
     await execute(h);
+    corruptDestination(h);
     const verification = await verify(h);
     refused(
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: ["omitted_by_rule", "omitted_by_rule"],
+          codes: ["size_mismatch", "size_mismatch"],
           rationale: "   ",
           mode: "unattended",
           approver: "operator",
@@ -821,14 +700,14 @@ describe("engine durability seam", () => {
       await h.engine.withWriterResult(h.ref, (writer) =>
         writer.accept({
           verificationDigest: verification.verificationDigest,
-          codes: ["omitted_by_rule", "omitted_by_rule"],
+          codes: ["size_mismatch", "size_mismatch"],
           rationale: "Out of scope",
           mode: "unattended",
           approver: "operator",
         }),
       ),
     );
-    assert.deepEqual(accepted.acceptedCodes, ["omitted_by_rule"]);
+    assert.deepEqual(accepted.acceptedCodes, ["size_mismatch"]);
     assert.equal(accepted.clean, true);
     value(
       await h.engine.withWriterResult(h.ref, async (writer) =>
@@ -862,17 +741,17 @@ describe("engine durability seam", () => {
         content: "retain",
       },
     );
-    const h = await harness(
-      t,
-      input,
-      config([{ sourceItemId: "excluded-folder", reason: "Separate archive" }]),
-    );
+    const h = await harness(t, input);
     await approve(h);
     await execute(h);
+    for (const item of h.port.snapshotDestination())
+      if (item.kind === "file" && item.name !== "document.bin")
+        h.port.mutateDestinationContent(item.id, Buffer.from("changed destination bytes"));
+    await verify(h);
     const full = value(
       await h.engine.reader(h.ref).rows({ phase: "verify", sort: "path", limit: 1000 }),
     );
-    assert.equal(full.facets.find((facet) => facet.code === "omitted_by_rule")?.count, 2);
+    assert.equal(full.facets.find((facet) => facet.code === "size_mismatch")?.count, 2);
     const beforeEvents = await events(h.engine, h.ref);
     const middle = beforeEvents[Math.floor(beforeEvents.length / 2)];
     assert.ok(middle);
@@ -906,7 +785,7 @@ describe("engine durability seam", () => {
 
   it("persists credential references without supplied secret text", async (t) => {
     const selected = {
-      ...config([{ sourceItemId: "document", reason: "Operator-approved exclusion" }]),
+      ...config(),
       rclone: {
         config: {
           resolver: "file",
@@ -1326,7 +1205,7 @@ describe("engine durability seam", () => {
     assert.deepEqual(after.mappingPasses, before.mappingPasses);
   });
 
-  it("resumes pre-manifest approvals without changing frozen inputs and binds the digest only on replanning", async (t) => {
+  it("keeps pre-map approvals readable but refuses lifecycle mutation", async (t) => {
     // The immutable plan and approval were written by cbaa5a3, before manifest support.
     const legacy: {
       plan: Record<string, string | number>;
@@ -1342,7 +1221,7 @@ describe("engine durability seam", () => {
       const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
       try {
         // Reconstruct the old row shape as well as the old immutable approval.
-        database.exec("UPDATE item SET payload=json_remove(payload,'$.fileScope.preview')");
+        database.exec("UPDATE item SET payload=json_remove(payload,'$.fileScope')");
         database.exec(
           "DELETE FROM plan_input; DELETE FROM plan_revision; DROP TABLE mapping; DROP TABLE mapping_manifest; DROP TABLE member_grant; DROP TABLE created_drive",
         );
@@ -1374,26 +1253,28 @@ describe("engine durability seam", () => {
       );
       refused(
         await h.engine.withWriterResult(h.ref, (writer) => writer.execute()),
-        "plan_revision_required",
+        "state_version_unsupported",
       );
-      await writeFile(configPath, stringifyToml(config()));
-      assert.equal((await execute(h)).outcome, "completed");
       const completed = value(await h.engine.reader(h.ref).status());
       assert.equal(completed.planDigest, legacy.plan.plan_digest);
-      assert.equal(completed.currentPlan?.manifestDigest, undefined);
-      assert.equal((await verify(h)).clean, true);
-      const next = value(await h.engine.withWriterResult(h.ref, (writer) => writer.plan()));
-      assert.match(next.manifestDigest!, /^[a-f0-9]{64}$/u);
-      assert.notEqual(next.planDigest, legacy.plan.plan_digest);
       refused(
-        await h.engine.withWriterResult(h.ref, (writer) => writer.execute()),
-        "approval_required",
+        await h.engine.withWriterResult(h.ref, (writer) => writer.plan()),
+        "state_version_unsupported",
       );
+      refused(
+        await h.engine.withWriterResult(h.ref, (writer) => writer.cancel("retire")),
+        "state_version_unsupported",
+      );
+      const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+      const evidence = JSON.parse(
+        await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+      );
+      assert.equal(evidence.plan.planDigest, legacy.plan.plan_digest);
     }
   });
 
-  it("moves legacy config mappings into the store on writer open and retains their exclusions", async (t) => {
-    const selected = config([{ sourceItemId: "document", reason: "Do not migrate this file" }]);
+  it("moves legacy config mapping roots into the store on writer open", async (t) => {
+    const selected = config();
     const h = await harness(t, fixture(), selected);
     const directory = join(h.home, "jobs", h.ref.id);
     const database = new DatabaseSync(join(directory, "state.db"));
@@ -1411,7 +1292,7 @@ describe("engine durability seam", () => {
     const row = plan.rows[0];
     assert.equal(row?.jobType, "file_migration");
     if (row?.jobType !== "file_migration") throw new Error("Expected migrated mapping");
-    assert.deepEqual(row.mapping?.exclusions, selected.mappings[0]!.exclusions);
+    assert.equal(row.mapping?.sourceItemId, selected.mappings[0]!.sourceItemId);
     assert.equal(
       "mappings" in parseToml(await readFile(join(directory, "job.toml"), "utf8")),
       false,
@@ -1420,14 +1301,7 @@ describe("engine durability seam", () => {
     await execute(h);
     assert.equal(
       h.port.snapshotDestination().some((item) => item.name === "document.bin"),
-      false,
-    );
-    const rows = value(await h.engine.reader(h.ref).rows({ phase: "verify" }));
-    assert.equal(
-      rows.rows.find(
-        (item) => item.jobType === "file_migration" && item.sourceItemId === "document",
-      )?.code,
-      "omitted_by_rule",
+      true,
     );
   });
 });
@@ -1718,11 +1592,7 @@ it("durably resumes archive pages and partial assets, deduplicates current/retai
 
 describe("durable local decision attestations", () => {
   it("retains bounded exception groups and interactive identity without inheriting unattended declarations", async (t) => {
-    const h = await harness(
-      t,
-      fixture(),
-      config([{ sourceItemId: "document", reason: "Out of scope" }]),
-    );
+    const h = await harness(t);
     const firstPlan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
     value(
       await h.engine.withWriterResult(h.ref, (w) =>
@@ -1734,6 +1604,7 @@ describe("durable local decision attestations", () => {
       ),
     );
     await execute(h);
+    corruptDestination(h);
     const first = await verify(h);
     const grouped = value(await h.engine.reader(h.ref).status()).exceptionGroups!;
     assert.deepEqual(
@@ -1743,15 +1614,15 @@ describe("durable local decision attestations", () => {
         acceptable,
         accepted,
       })),
-      [{ code: "omitted_by_rule", count: 1, acceptable: true, accepted: false }],
+      [{ code: "size_mismatch", count: 1, acceptable: true, accepted: false }],
     );
-    assert.ok(grouped[0]!.consequence.includes("absent"));
-    assert.deepEqual(grouped[0]!.examples, ["document"]);
+    assert.ok(grouped[0]!.consequence.includes("sizes differ"));
+    assert.equal(grouped[0]!.examples.length, 1);
     refused(
       await h.engine.withWriterResult(h.ref, (w) =>
         w.accept({
           verificationDigest: first.verificationDigest,
-          codes: ["omitted_by_rule"],
+          codes: ["size_mismatch"],
           rationale: "  ",
           approver: "unrecorded@host",
           mode: "interactive",
@@ -1767,15 +1638,15 @@ describe("durable local decision attestations", () => {
       await h.engine.withWriterResult(h.ref, (w) =>
         w.accept({
           verificationDigest: first.verificationDigest,
-          codes: ["omitted_by_rule"],
-          rationale: "  Keep excluded content at source  ",
+          codes: ["size_mismatch"],
+          rationale: "  Reviewed the destination size difference  ",
           approver: "exception-owner@host",
           mode: "interactive",
         }),
       ),
     );
     const accepted = value(await h.engine.reader(h.ref).status()).acceptedExceptions!;
-    assert.equal(accepted[0]?.note, "Keep excluded content at source");
+    assert.equal(accepted[0]?.note, "Reviewed the destination size difference");
     assert.equal(accepted[0]?.mode, "interactive");
     assert.equal(accepted[0]?.identityAssurance, "declared_unverified");
     const next = await verify(h);
@@ -1783,7 +1654,7 @@ describe("durable local decision attestations", () => {
       await h.engine.withWriterResult(h.ref, (w) =>
         w.accept({
           verificationDigest: next.verificationDigest,
-          codes: ["omitted_by_rule"],
+          codes: ["size_mismatch"],
           rationale: "Automated exception policy",
           approver: "automation",
           mode: "unattended",
@@ -1801,7 +1672,7 @@ describe("durable local decision attestations", () => {
       await h.engine.withWriterResult(h.ref, (w) =>
         w.accept({
           verificationDigest: next.verificationDigest,
-          codes: ["omitted_by_rule"],
+          codes: ["size_mismatch"],
           rationale: "Old evidence",
           approver: "stale@host",
           mode: "interactive",
@@ -1819,11 +1690,7 @@ describe("durable local decision attestations", () => {
 
   for (const historicalIdentity of [null, "historical-reviewer@host"]) {
     it(`migrates legacy acceptance while preserving ${historicalIdentity ?? "no interactive identity"}`, async (t) => {
-      const h = await harness(
-        t,
-        fixture(),
-        config([{ sourceItemId: "document", reason: "Out of scope" }]),
-      );
+      const h = await harness(t);
       if (historicalIdentity) {
         for (const approver of ["earlier-reviewer@host", historicalIdentity]) {
           const plan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan()));
@@ -1836,12 +1703,13 @@ describe("durable local decision attestations", () => {
       }
       await approve(h);
       await execute(h);
+      corruptDestination(h);
       const verification = await verify(h);
       value(
         await h.engine.withWriterResult(h.ref, (w) =>
           w.accept({
             verificationDigest: verification.verificationDigest,
-            codes: ["omitted_by_rule"],
+            codes: ["size_mismatch"],
             rationale: "Historical exception",
             approver: "historical-operator",
             mode: "unattended",

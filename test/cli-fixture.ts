@@ -123,6 +123,7 @@ export class PersistentCliPort extends FakeFileMigrationPort {
   private readonly barriers = new Set<() => void>();
   private released = false;
   private copyReady = false;
+  private sourceRootReads = 0;
   constructor(destinationPath: string, control?: { verb: string; ready: () => void }) {
     const fixture = cliFixture();
     fixture.archive = cliArchiveFixture();
@@ -181,9 +182,15 @@ export class PersistentCliPort extends FakeFileMigrationPort {
     }
     return stats;
   }
-  override async listSourceChildren(input: Parameters<ProviderPort["listSourceChildren"]>[0]) {
-    if (this.control?.verb !== "execute") await this.hold(input.signal);
-    return super.listSourceChildren(input);
+  override async resolveSourceRoot(input: Parameters<ProviderPort["resolveSourceRoot"]>[0]) {
+    // The fixture has one mapping: let its preflight root probe finish before
+    // blocking collection, after the durable plan phase_started event.
+    if (this.control?.verb === "plan" && ++this.sourceRootReads > 1) await this.hold(input.signal);
+    return super.resolveSourceRoot(input);
+  }
+  override async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
+    if (this.control?.verb === "verify") await this.hold(input.signal);
+    return super.listFileHashes(input);
   }
   override async uploadDestinationContent(input: {
     destinationId?: string;

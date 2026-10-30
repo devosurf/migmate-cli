@@ -3,17 +3,11 @@ import type { FileCommitRow } from "../commit.ts";
 import type { DriverContext } from "./types.ts";
 import type {
   DestinationEntry,
-  FilePassPreview,
   ProviderPort,
   ProvenanceRecord,
   SourceEntry,
 } from "../providers/port.ts";
 import type { FileMigrationConfig } from "./file-migration.ts";
-
-export interface FileExclusion {
-  sourceItemId: string;
-  reason: string;
-}
 
 /** Explicit allowlist: provider objects and transient download URLs never enter state. */
 export interface FileSourceEvidence {
@@ -57,26 +51,10 @@ export interface FileMarker extends ProvenanceRecord {
 }
 
 export interface FileScope {
-  exclusions: FileExclusion[];
-  sourceInventoryAt: string;
-  preview?: FilePassPreview & { deletedFolders: string[] };
+  mapOnly: true;
   verification?: {
-    /** Absent on older evidence: such proof cannot authorize partial verification. */
-    binding?: {
-      sourceDriveId: string;
-      sourceItemId: string;
-      sourceType: string;
-      destDriveId: string;
-      destFolderId: string;
-      exclusions: FileExclusion[];
-      oneNoteNotebooks: "omit" | "copy";
-      verificationMode: "hash" | "size_only";
-    };
-    scope: "full" | "partial";
-    baselineRevision: number | null;
+    scope: "full";
     coveredPaths: string[];
-    deletedPaths: string[];
-    sourceInventory: Array<{ id: string; path: string; evidence: FileSourceEvidence }>;
   };
 }
 
@@ -98,7 +76,6 @@ export interface FileSettleState {
   copyPending: boolean;
   deletionsReserved: number;
   outcome: "pending" | "settled" | "exhausted";
-  copiedInventory: Array<{ id: string; path: string; evidence: FileSourceEvidence }>;
   observations: Array<{
     at: string;
     changedPaths: string[];
@@ -110,7 +87,7 @@ export type FileContext = DriverContext<FileMigrationConfig>;
 
 export class FilePlanRevisionRequiredError extends Error {
   readonly code = "plan_revision_required";
-  constructor(message = "The expanded stable exclusion set changed; a new plan is required") {
+  constructor(message = "The approved mapping evidence is unavailable; a new plan is required") {
     super(message);
     this.name = "FilePlanRevisionRequiredError";
   }
@@ -183,7 +160,7 @@ export function terminalUnavailable(error: unknown): boolean {
   const detail = error as Error & { status?: number; statusCode?: number; code?: string };
   return (
     [401, 403, 404].includes(detail.status ?? detail.statusCode ?? 0) ||
-    detail.code === "content_verification_degraded"
+    detail.code === "destination_read_failed"
   );
 }
 export async function observe(
@@ -248,6 +225,7 @@ export function outputFindings(actual: Observation, expected: FileOutput): strin
   if (entry.kind !== expected.kind) codes.push("destination_type_conflict");
   if (expected.kind === "file") {
     if (entry.size !== expected.size) codes.push("size_mismatch");
+    // This object-verification helper is used by Teams archive destinations only.
     if (actual.sha256 === null) codes.push("content_verification_degraded");
     else if (expected.sha256 !== actual.sha256) codes.push("content_mismatch");
     if (

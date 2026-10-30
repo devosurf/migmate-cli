@@ -58,13 +58,16 @@ route already requires this write remote and needs no `sourceRemote`; the defaul
 SharePoint-source route requires `sourceRemote` and refuses the write remote.
 Sources are read as the acting account. On `preflight_failed` with
 `unreadableSourceDrives` (from `manifest load` or `doctor`/`plan`), surface those drive IDs: a human must add the acting
-account as a member; Migmate never does. Verification compares quickXorHash computed
+account as a member; Migmate never does. Verification defaults to path-and-size
+listing comparison; opt-in hash verification compares quickXorHash computed
 from the source with SharePoint's. For transformed destination content, use
 [FINDINGS.md](FINDINGS.md)'s reverse-route decision guidance.
 
 ## Content proof
 
-For file migrations, the default `[options] verificationMode = "hash"` re-downloads source bytes and compares each relative path to Drive's stored SHA-256, falling back per file to MD5 without downloading the destination. `"size_only"` instead compares listed sizes; consult [FINDINGS.md](FINDINGS.md) for its acceptance requirement. Missing, size-differing, corrupt and unreadable files carry paths, both sizes and available hashes in the report. Both modes check folder existence, including empty folders, on both file routes; file and folder metadata remain unverified. Excluded and omitted folders and their descendants are outside the folder check. Interpret missing/conflicting paths and leftovers through [FINDINGS.md](FINDINGS.md), not as successful copies.
+Both existing file routes always approve the map: roots, drives to create, members and options. Mapping roots alone select scope. Default verification compares rclone listings by relative path and size, including empty folders, without comparing content bytes; this limitation is disclosed without a finding. Every verification covers whole mappings. Opt-in `[options] verificationMode = "hash"` downloads source bytes to compute the destination's stored hash type: Drive SHA-256 (falling back per file to MD5), or SharePoint quickXorHash. It does not download the destination or require a Graph inventory. File and folder metadata remain unverified. Interpret missing/conflicting paths and leftovers through [FINDINGS.md](FINDINGS.md), not as successful copies.
+
+Version history, list-item fields, retention labels and permissions are omitted and disclosed once in plan/report. OneNote copies as section files. Removed proof, exclusions, omission/OneNote policy, partial-verification and size-only options refuse. Old inventory-planned jobs refuse mutation; historical status, evidence and reports remain readable. Start a new job rather than rewriting old evidence.
 
 ## Copy execution
 

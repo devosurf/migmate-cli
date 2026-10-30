@@ -733,7 +733,7 @@ describe("windowless native protocol", () => {
     await session.close();
   });
 
-  it("reviews final inventory age and requires a complete explicit freeze attestation", async () => {
+  it("reviews final mapping scope and requires a complete explicit freeze attestation", async () => {
     const home = mkdtempSync(join(tmpdir(), "migmate-web-final-"));
     const engine = openEngine({
       home,
@@ -757,7 +757,7 @@ describe("windowless native protocol", () => {
       const document = parse(
         await (await handle(new Request("migmate://localhost/view?stage=approve"))).text(),
       );
-      assert.match(text(document), /inventory age/i);
+      assert.doesNotMatch(text(document), /inventory age/i);
       for (const name of ["freezeBy", "freezeAt", "freezeHow"])
         assert.equal(
           elements(
@@ -812,27 +812,23 @@ describe("windowless native protocol", () => {
     }
   });
 
-  it("pages and facets real file evidence without changing approval, then binds an explicit approval to its digest", async () => {
+  it("reviews a map-only plan and pages verification findings without changing approval", async () => {
     const home = mkdtempSync(join(tmpdir(), "migmate-web-"));
     const provider = new FakeFileMigrationPort(
       fileFixture(
         Array.from({ length: 61 }, (_, index) => ({
-          id: `package-${index}`,
+          id: `file-${index}`,
           parentId: "source-root",
-          name: `package-${String(index).padStart(2, "0")}`,
-          kind: "package" as const,
-          webUrl: `https://source.example/notebook/${index}?a=1&b=2`,
-          packageSections: 3,
+          name: `file-${String(index).padStart(2, "0")}.txt`,
+          kind: "file" as const,
+          content: "original",
         })),
       ),
     );
     const engine = openEngine({ home, provider, adapter: "web" });
     let session: WebSession | undefined;
     try {
-      const created = await engine.initJob({
-        type: "file_migration",
-        config: fileConfig(),
-      });
+      const created = await engine.initJob({ type: "file_migration", config: fileConfig() });
       assert.ok(created.ok);
       session = new WebSession({ engine, job: created.value });
       await session.open();
@@ -841,50 +837,47 @@ describe("windowless native protocol", () => {
       await settled(session);
       const planned = await engine.reader(created.value).status();
       assert.ok(planned.ok);
-      assert.equal(planned.value.state, "planned");
-      const review = await engine.reader(created.value).rows({
-        phase: "plan",
-        codes: ["source_package_omitted"],
-        limit: 25,
-      });
+      const review = await engine.reader(created.value).rows({ phase: "plan", limit: 25 });
       assert.ok(review.ok);
-      const notebook = review.value.rows[0]!;
-      assert.equal(notebook.jobType, "file_migration");
-      if (notebook.jobType !== "file_migration") throw new Error("Expected file evidence");
-      assert.equal(notebook.sourceWebUrl, "https://source.example/notebook/0?a=1&b=2");
-      assert.equal(notebook.sourcePackageSections, 3);
-      assert.ok(notebook.omissionReason);
-      assert.ok(notebook.nextStep);
+      assert.equal(review.value.totalRows, 1);
+      assert.equal(planned.value.state, "planned");
+      assert.equal(
+        (
+          await handle(
+            request(
+              "approve",
+              {
+                approver: "operator",
+                planDigest: planned.value.planDigest,
+                confirm: true,
+              },
+              "approve",
+            ),
+          )
+        ).status,
+        202,
+      );
+      await settled(session);
+      assert.equal((await handle(request("execute"))).status, 202);
+      await settled(session);
+      for (const item of provider.snapshotDestination())
+        if (item.kind === "file") provider.mutateDestinationContent(item.id, "changed and longer");
+      assert.equal((await handle(request("verify"))).status, 202);
+      await settled(session);
       const first = parse(
         await (
           await handle(
-            new Request(
-              "migmate://localhost/view?stage=plan&limit=25&codes=source_package_omitted",
-            ),
+            new Request("migmate://localhost/view?stage=verify&limit=25&codes=size_mismatch"),
           )
         ).text(),
       );
-      assert.equal(
+      const rows = (document: DefaultTreeAdapterMap["document"]) =>
         elements(
-          first,
-          (element) =>
-            element.tagName === "tr" && attr(element, "data-code") === "source_package_omitted",
-        ).length,
-        25,
-      );
+          document,
+          (element) => element.tagName === "tr" && attr(element, "data-code") === "size_mismatch",
+        );
+      assert.equal(rows(first).length, 25);
       assert.match(text(first), /61 matching rows/);
-      const notebookRow = elements(
-        first,
-        (element) =>
-          element.tagName === "tr" && attr(element, "data-code") === "source_package_omitted",
-      )[0]!;
-      assert.equal(
-        attr(elements(notebookRow, (element) => element.tagName === "a")[0]!, "href"),
-        notebook.sourceWebUrl,
-      );
-      assert.match(text(notebookRow), /3 sections/);
-      assert.ok(text(notebookRow).includes(notebook.omissionReason!));
-      assert.ok(text(notebookRow).includes(notebook.nextStep!));
       const cursor = attr(
         elements(first, (element) => attr(element, "data-next-cursor") !== undefined)[0]!,
         "data-next-cursor",
@@ -893,44 +886,17 @@ describe("windowless native protocol", () => {
         await (
           await handle(
             new Request(
-              `migmate://localhost/view?stage=plan&limit=25&codes=source_package_omitted&cursor=${encodeURIComponent(cursor)}`,
+              `migmate://localhost/view?stage=verify&limit=25&codes=size_mismatch&cursor=${encodeURIComponent(cursor)}`,
             ),
           )
         ).text(),
       );
-      assert.match(text(second), /61 matching rows/);
-      const firstIds = elements(
-        first,
-        (element) => element.tagName === "tr" && attr(element, "data-code") !== undefined,
-      ).map(text);
-      const secondIds = elements(
-        second,
-        (element) => element.tagName === "tr" && attr(element, "data-code") !== undefined,
-      ).map(text);
-      assert.equal(
-        secondIds.some((identity) => firstIds.includes(identity)),
-        false,
-      );
-      const beforeApproval = await engine.reader(created.value).status();
-      assert.ok(beforeApproval.ok);
-      assert.equal(beforeApproval.value.state, "planned");
-      assert.equal(
-        (
-          await handle(
-            request(
-              "approve",
-              { approver: "operator", planDigest: planned.value.planDigest, confirm: true },
-              "approve",
-            ),
-          )
-        ).status,
-        202,
-      );
-      await settled(session);
-      const approved = await engine.reader(created.value).status();
-      assert.ok(approved.ok);
-      assert.equal(approved.value.state, "approved");
-      assert.equal(approved.value.planDigest, planned.value.planDigest);
+      assert.equal(rows(second).length, 25);
+      const firstRows = rows(first).map(text);
+      assert.ok(rows(second).every((row) => !firstRows.includes(text(row))));
+      const observed = await engine.reader(created.value).status();
+      assert.ok(observed.ok);
+      assert.equal(observed.value.currentApproval?.planDigest, planned.value.planDigest);
     } finally {
       await session?.close();
       engine.close();
@@ -1062,9 +1028,27 @@ describe("windowless native protocol", () => {
     const home = mkdtempSync(join(tmpdir(), "migmate-web-exceptions-"));
     const provider = new FakeFileMigrationPort(
       fileFixture([
-        { id: "package-1", parentId: "source-root", name: "Notebook one", kind: "package" },
-        { id: "package-2", parentId: "source-root", name: "Notebook two", kind: "package" },
-        { id: "excluded", parentId: "source-root", name: "Excluded notebook", kind: "package" },
+        {
+          id: "file-1",
+          parentId: "source-root",
+          name: "one.txt",
+          kind: "file",
+          content: "original",
+        },
+        {
+          id: "file-2",
+          parentId: "source-root",
+          name: "two.txt",
+          kind: "file",
+          content: "original",
+        },
+        {
+          id: "file-3",
+          parentId: "source-root",
+          name: "missing.txt",
+          kind: "file",
+          content: "original",
+        },
       ]),
     );
     const engine = openEngine({ home, provider, adapter: "web" });
@@ -1072,7 +1056,7 @@ describe("windowless native protocol", () => {
     try {
       const created = await engine.initJob({
         type: "file_migration",
-        config: fileConfig([{ sourceItemId: "excluded", reason: "Outside the destination scope" }]),
+        config: { ...fileConfig(), options: { verificationMode: "hash" } },
       });
       assert.ok(created.ok);
       session = new WebSession({ engine, job: created.value });
@@ -1095,6 +1079,11 @@ describe("windowless native protocol", () => {
         confirm: true,
       });
       await run("execute");
+      for (const item of provider.snapshotDestination()) {
+        if (item.path === "one.txt" || item.path === "two.txt")
+          provider.mutateDestinationContent(item.id, "modified");
+        if (item.path === "missing.txt") provider.removeDestinationItem(item.id);
+      }
       await run("verify");
       const document = await view("verify");
       const form = renderedForm(document, "accept");
@@ -1104,7 +1093,7 @@ describe("windowless native protocol", () => {
       let projected = await engine.reader(created.value).status();
       assert.ok(projected.ok);
       const group = projected.value.exceptionGroups?.find(
-        (entry) => entry.code === "source_package_omitted",
+        (entry) => entry.code === "content_mismatch",
       );
       assert.ok(group);
       assert.equal(group.count, 2);
@@ -1119,8 +1108,8 @@ describe("windowless native protocol", () => {
       const input = {
         approver: "exception reviewer",
         verificationDigest: capturedField(form, "verificationDigest"),
-        codes: [group.code, "omitted_by_rule"],
-        rationale: "  Preserve the notebooks separately  ",
+        codes: [group.code, "destination_missing"],
+        rationale: "  Preserve source originals separately  ",
         confirm: true,
       };
       for (const invalid of [
@@ -1356,9 +1345,9 @@ describe("windowless native protocol", () => {
       const session = new WebSession({ engine, job: created.value });
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
-      const list = provider.listSourceChildren.bind(provider);
-      provider.listSourceChildren = async (
-        input: Parameters<ProviderPort["listSourceChildren"]>[0],
+      const list = provider.resolveSourceRoot.bind(provider);
+      provider.resolveSourceRoot = async (
+        input: Parameters<ProviderPort["resolveSourceRoot"]>[0],
       ) => {
         const abort = () => release.resolve();
         input.signal?.addEventListener("abort", abort, { once: true });
@@ -1387,7 +1376,7 @@ describe("windowless native protocol", () => {
       assert.ok(status.ok);
       assert.equal(status.value.ownership.held, false);
       assert.equal(status.value.planDigest, null);
-      provider.listSourceChildren = list;
+      provider.resolveSourceRoot = list;
       assert.ok((await engine.withWriterResult(created.value, (writer) => writer.plan())).ok);
     },
   );
