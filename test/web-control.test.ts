@@ -145,9 +145,9 @@ describe("persistent web owner control", () => {
       const session = new WebSession({ engine, job: ref });
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
-      const list = provider.listSourceChildren.bind(provider);
-      provider.listSourceChildren = async (
-        input: Parameters<ProviderPort["listSourceChildren"]>[0],
+      const list = provider.resolveSourceRoot.bind(provider);
+      provider.resolveSourceRoot = async (
+        input: Parameters<ProviderPort["resolveSourceRoot"]>[0],
       ) => {
         const abort = () => release.resolve();
         input.signal?.addEventListener("abort", abort, { once: true });

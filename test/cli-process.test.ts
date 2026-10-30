@@ -1226,7 +1226,14 @@ it(
   "generated detached control commands retain an explicitly selected engine home",
   { timeout: 30000 },
   async (t) => {
-    const h = setup(t, "file_migration", t.signal, CLI_JOB_CONFIG, "home with ' quotes", new Date().toISOString());
+    const h = setup(
+      t,
+      "file_migration",
+      t.signal,
+      CLI_JOB_CONFIG,
+      "home with ' quotes",
+      new Date().toISOString(),
+    );
     const id = await h.approve();
     const launched = await h.start(
       ["execute", "--job", id, "--home", h.home, "--detach", "--output", "json"],
