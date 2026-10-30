@@ -19,6 +19,8 @@ import {
 import type { GraphCredential } from "./adapters/credentials/sharepoint.ts";
 import { loadArchiveGoogle, requestGoogleToken } from "./adapters/credentials/google.ts";
 import type { GoogleCredential } from "./adapters/credentials/google.ts";
+import { requestDropboxToken } from "./adapters/credentials/dropbox.ts";
+import type { DropboxCredential } from "./adapters/credentials/dropbox.ts";
 import { ProviderFault } from "./fault.ts";
 import {
   allowedKeys,
@@ -39,6 +41,9 @@ export interface CredentialSession {
   graphToken(signal?: AbortSignal): Promise<string>;
   graphDestinationToken(signal?: AbortSignal): Promise<string>;
   googleToken(signal?: AbortSignal): Promise<string>;
+  dropboxToken(signal?: AbortSignal): Promise<string>;
+  readonly dropboxAdminId?: string | undefined;
+  readonly dropboxRemote?: string | null;
   identity(signal?: AbortSignal): Promise<string>;
   evidence(signal?: AbortSignal): Promise<Record<string, unknown>>;
   readonly rcloneConfigPath: string | null;
@@ -171,7 +176,7 @@ export async function readCredentialFile(
 }
 
 /** A deliberately narrow common subset of rclone's INI parser; no interpolation. */
-function parseIni(bytes: Buffer): Map<string, Map<string, string>> {
+export function parseCredentialIni(bytes: Buffer): Map<string, Map<string, string>> {
   const sections = new Map<string, Map<string, string>>();
   let section: Map<string, string> | undefined;
   const contents = decodeUtf8(bytes);
@@ -247,6 +252,8 @@ interface CredentialState {
   graphDestination?: GraphCredential;
   sharepointDestinationRemote?: string;
   google: GoogleCredential | undefined;
+  dropbox?: DropboxCredential;
+  dropboxRemote?: string;
   mappings: MappingIdentity[];
   configPath: string | null;
   sourceRemote: string | null;
@@ -307,7 +314,7 @@ async function loadCredentials(
     const loaded = await readCredentialFile(fileReference(rclone.config), jobDirectory);
     const sections = (() => {
       try {
-        return parseIni(loaded.bytes);
+        return parseCredentialIni(loaded.bytes);
       } finally {
         loaded.bytes.fill(0);
       }
@@ -332,6 +339,8 @@ async function loadCredentials(
           ? { sharepointDestinationRemote: remotes.get("sharepointDestinationRemote")! }
           : {}),
         google: material.google,
+        ...(material.dropbox ? { dropbox: material.dropbox } : {}),
+        ...(remotes.has("dropboxRemote") ? { dropboxRemote: remotes.get("dropboxRemote")! } : {}),
         mappings,
         configPath: loaded.path,
         sourceRemote: remotes.get("sourceRemote") ?? null,
@@ -344,6 +353,7 @@ async function loadCredentials(
   } catch (error) {
     material.graph?.secret?.fill(0);
     material.graphDestination?.secret?.fill(0);
+    material.dropbox?.refreshToken.fill(0);
     if (error instanceof ProviderFault) throw error;
     throw refused("credential_config_invalid");
   }
@@ -368,6 +378,8 @@ export async function createCredentialSession(input: {
   let destinationPending: Promise<string> | undefined;
   let graphPending: Promise<string> | undefined;
   let googlePending: Promise<string> | undefined;
+  let dropboxCache: Token | undefined;
+  let dropboxPending: Promise<string> | undefined;
   const controller = new AbortController();
 
   function active(): CredentialState {
@@ -449,12 +461,36 @@ export async function createCredentialSession(input: {
     }
   }
 
+  async function dropboxToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    const credential = active().dropbox;
+    if (!credential) throw refused("credential_dropbox_unavailable");
+    if (dropboxCache && dropboxCache.expiresAt > Date.now() + 60_000) return dropboxCache.value;
+    if (dropboxPending) return dropboxPending;
+    dropboxCache = undefined;
+    dropboxPending = (async () => {
+      const token = await requestDropboxToken(
+        credential,
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+      );
+      active();
+      dropboxCache = token;
+      return token.value;
+    })();
+    try {
+      return await dropboxPending;
+    } finally {
+      dropboxPending = undefined;
+    }
+  }
+
   async function authenticate(signal?: AbortSignal): Promise<CredentialState> {
     const current = active();
     await Promise.all([
       ...(current.graph ? [graphToken(signal)] : []),
       ...(current.graphDestination ? [graphDestinationToken(signal)] : []),
       ...(current.google ? [googleToken(signal)] : []),
+      ...(current.dropbox ? [dropboxToken(signal)] : []),
     ]);
     return active();
   }
@@ -466,12 +502,28 @@ export async function createCredentialSession(input: {
       return active().google?.delegatedSubject;
     },
     googleToken,
+    dropboxToken,
+    get dropboxAdminId() {
+      return active().dropbox?.adminId;
+    },
+    get dropboxRemote() {
+      return active().dropboxRemote ?? null;
+    },
     async identity(signal) {
       if (input.mode === "archive_verification") await googleToken(signal);
       else await authenticate(signal);
       const current = active();
       // Key/secret rotation changes no identity. SA principal/client drift does.
       const identity = {
+        ...(current.dropbox
+          ? {
+              dropbox: {
+                clientId: current.dropbox.clientId,
+                teamId: current.dropbox.teamId,
+                adminId: current.dropbox.adminId,
+              },
+            }
+          : {}),
         graph: current.graph
           ? { tenantId: current.graph.tenantId, clientId: current.graph.clientId }
           : null,
@@ -498,6 +550,19 @@ export async function createCredentialSession(input: {
     async evidence(signal) {
       const current = await authenticate(signal);
       return {
+        ...(current.dropbox
+          ? {
+              dropbox: {
+                clientId: current.dropbox.clientId,
+                teamId: current.dropbox.teamId,
+                adminId: current.dropbox.adminId,
+                grantedScopes: [...current.dropbox.grantedScopes],
+                scopeEvidence: "authorization_code",
+                authorizedAt: current.dropbox.authorizedAt,
+                authenticatedAt: dropboxCache!.authenticatedAt,
+              },
+            }
+          : {}),
         ...(current.graph
           ? {
               graph: {
@@ -559,6 +624,9 @@ export async function createCredentialSession(input: {
       controller.abort();
       state?.graph?.secret?.fill(0);
       state?.graphDestination?.secret?.fill(0);
+      state?.dropbox?.refreshToken.fill(0);
+      dropboxCache = undefined;
+      dropboxPending = undefined;
       destinationCache = undefined;
       destinationPending = undefined;
       state = undefined;

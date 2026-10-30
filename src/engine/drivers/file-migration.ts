@@ -4,7 +4,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
 import { canonicalJson } from "../store/digest.ts";
 import { validateMappingTrees } from "../manifest.ts";
-import { fileProviderPair, type FileProviderId } from "../providers/adapters/capabilities.ts";
+import {
+  fileProviderPair,
+  type FileProviderId,
+  type FileProviderCapabilities,
+} from "../providers/adapters/capabilities.ts";
 import { UploadLedgerError, type UploadAttempt } from "../store/uploads.ts";
 import type {
   CheckResult,
@@ -656,6 +660,61 @@ async function destinationRoot(
   return root;
 }
 
+/** Count the observed wrapper and ancestors, not just the source-relative path. */
+async function destinationFolderDepth(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+): Promise<number> {
+  let current = await destinationRoot(ctx, mapping);
+  let depth = 0;
+  const seen = new Set<string>();
+  while (current.parentId !== null) {
+    if (seen.has(current.id)) throw new Error("Destination folder ancestry contains a cycle");
+    seen.add(current.id);
+    depth++;
+    const parent = ctx.provider.readDestinationObject
+      ? await ctx.provider.readDestinationObject({
+          driveId: current.driveId,
+          objectId: current.parentId,
+          ...abortable(ctx),
+        })
+      : await ctx.provider.resolveDestinationFolder({
+          destDriveId: current.driveId,
+          destFolderId: current.parentId,
+          ...abortable(ctx),
+        });
+    if (!parent || parent.kind !== "folder" || parent.driveId !== current.driveId)
+      throw new Error("Destination folder ancestry could not be proven");
+    current = parent;
+  }
+  return depth;
+}
+
+/** Provider-native inventory finds exceptional content omitted by transfer listings. */
+async function* sourceContentFindings(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  root: SourceView,
+  classify: NonNullable<FileProviderCapabilities["sourceEntryFindings"]>,
+): AsyncIterable<{ source: SourceView; codes: readonly string[] }> {
+  const pending = [{ id: root.id, path: "" }];
+  while (pending.length) {
+    const parent = pending.pop()!;
+    const children = await ctx.provider.listSourceChildren({
+      driveId: mapping.sourceDriveId,
+      itemId: parent.id,
+      ...abortable(ctx),
+    });
+    for (const child of children) {
+      const path = parent.path ? `${parent.path}/${child.name}` : child.name;
+      if (child.kind === "folder") pending.push({ id: child.id, path });
+      const codes = classify(child);
+      if (codes.length)
+        yield { source: { ...child, path, representable: true, outsideRoot: false }, codes };
+    }
+  }
+}
+
 /** An item known only from an rclone listing: its path, size and listed provider ID. */
 function listedItem(
   driveId: string,
@@ -881,7 +940,11 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     const evidence = row(ctx, "plan", mapping, root, "unchanged");
     evidence.destinationDriveId = mapping.destDriveId ?? null;
     evidence.destinationFileId = mapping.destFolderId ?? null;
-    evidence.fileScope = { mapOnly: true };
+    const sourceDisclosures = fileProviderPair(ctx.config).source.sourceDisclosures;
+    evidence.fileScope = {
+      mapOnly: true,
+      ...(sourceDisclosures?.length ? { sourceDisclosures } : {}),
+    };
     const unit = commit(ctx, "plan", evidence, [], "plan", ++done);
     unit.mappingPass = pendingPass(
       ctx.revision,
@@ -1203,6 +1266,51 @@ async function* copyPass(
         );
     }
     const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+    const destinationAdapter = fileProviderPair(ctx.config).destination;
+    if (destinationAdapter.destinationPathFindings) {
+      const constraintRoot = { folderDepth: await destinationFolderDepth(ctx, mapping) };
+      const folders = await ctx.provider.listFolders({
+        socketPath: resolved.socketPath,
+        root: resolved.source,
+        ...abortable(ctx),
+      });
+      let blocked = false;
+      for (const path of [".", ...folders]) {
+        const conflicts = destinationAdapter.destinationPathFindings(
+          path,
+          "folder",
+          constraintRoot,
+        );
+        if (!conflicts.length) continue;
+        blocked = true;
+        const source = listedItem(mapping.sourceDriveId, `path:${path}`, path, "folder", null);
+        const evidence = row(ctx, "execute", mapping, source, conflicts[0]!.code);
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        yield {
+          ...unit(),
+          rows: [evidence],
+          findings: conflicts.map((conflict) =>
+            finding(ctx, "execute", conflict.code, source.id, {
+              path,
+              itemType: "folder",
+              destinationRootDepth: constraintRoot.folderDepth,
+              message: conflict.message,
+            }),
+          ),
+        };
+      }
+      if (blocked) {
+        pass = {
+          ...pass,
+          status: "failed",
+          endedAt: ctx.now().toISOString(),
+          error:
+            "Destination path constraints prevent this mapping from copying; fix the named source paths or mapping root before retrying.",
+        };
+        yield unit();
+        return;
+      }
+    }
     if (fileProviderPair(ctx.config).destination.ledgerAccountedUploads)
       upload = ctx.beginUpload?.(
         "file",
@@ -1382,7 +1490,21 @@ function goLiveBaseline(
  */
 async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
   let done = 0;
-  const destinationAdapter = fileProviderPair(ctx.config).destination;
+  const { source: sourceAdapter, destination: destinationAdapter } = fileProviderPair(ctx.config);
+  const coverageFindings = (await ctx.provider.sourceCoverageFindings?.(ctx.signal)) ?? [];
+  if (coverageFindings.length) {
+    yield {
+      rev: ctx.revision,
+      phase: "verify",
+      unitKey: JSON.stringify(["source-coverage", ctx.revision, digest(coverageFindings)]),
+      checkpoint: "source-coverage",
+      rows: [],
+      findings: coverageFindings.map(({ code, evidence }) => ({
+        ...finding(ctx, "verify", code, "source-coverage", evidence),
+        subjectKind: "job",
+      })),
+    };
+  }
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
     if (ctx.stage === "final" && settleState(ctx, mapping)?.outcome !== "settled")
@@ -1785,6 +1907,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
           ]
         : []),
       "Version history, list-item fields, retention labels and permissions are not copied. OneNote notebooks are copied as their section files.",
+      ...(fileProviderPair(ctx.config).source.sourceDisclosures ?? []),
       ...(ctx.config.options?.mirror
         ? [
             "Before each mirror pass, rclone lists both sides and records every destination-only file and folder as to_be_deleted; deleteLimit bounds file deletions, with folder removals recorded separately.",

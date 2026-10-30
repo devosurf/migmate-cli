@@ -1,7 +1,7 @@
 import { openEngine } from "../src/engine/index.ts";
 import { run, initializeDetachedChild } from "../src/cli/main.ts";
 import { errorCode, processIo } from "../src/cli/io.ts";
-import { PersistentCliPort } from "./cli-fixture.ts";
+import { DropboxCliPort, PersistentCliPort } from "./cli-fixture.ts";
 import { writeFileSync } from "node:fs";
 
 const home = process.env.CLI_TEST_HOME;
@@ -11,7 +11,9 @@ if (!home || !destination || !now || !Number.isFinite(Date.parse(now)))
   throw new Error("CLI subprocess fixture needs isolated test paths and a valid clock");
 process.env.MIGMATE_HOME = home;
 const detachedChild = await initializeDetachedChild();
-const provider = new PersistentCliPort(
+const FixturePort =
+  process.env.CLI_TEST_SOURCE_PROVIDER === "dropbox" ? DropboxCliPort : PersistentCliPort;
+const provider = new FixturePort(
   destination,
   process.env.CLI_TEST_HOLD === "1"
     ? {

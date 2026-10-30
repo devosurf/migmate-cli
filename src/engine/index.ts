@@ -2628,10 +2628,11 @@ function makeWriter(
         if (!("mappings" in base)) throw new Error("Expected file configuration");
         const pending = manifest.mappings.map((m) => ({
           id: m.id,
+          sourceType: m.source.type,
           sourceDriveId: m.source.driveId,
           ...("folderPath" in m.source
             ? { sourceFolderPath: m.source.folderPath }
-            : { sourceType: m.source.type, sourceItemId: m.source.folderId }),
+            : { sourceItemId: m.source.folderId }),
           ...("create" in m.destination
             ? { createDrive: { name: m.destination.create, members: m.members ?? [] } }
             : "folderPath" in m.destination

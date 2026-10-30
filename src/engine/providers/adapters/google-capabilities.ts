@@ -29,6 +29,19 @@ export const googleCapabilities: FileProviderCapabilities = {
       : undefined;
   },
   rewritesPath: () => false,
+  destinationPathFindings(path, kind, root) {
+    const folderDepth =
+      (root?.folderDepth ?? 0) +
+      (path === "." || path === "" ? 0 : path.split("/").length - (kind === "file" ? 1 : 0));
+    return folderDepth > 100
+      ? [
+          {
+            code: "path_unrepresentable",
+            message: `Shared Drives allow at most 100 folder levels; this path requires ${folderDepth}, including ${root?.folderDepth ?? 0} destination-root levels.`,
+          },
+        ]
+      : [];
+  },
 };
 function uploadQuotaStop(ctx: FileContext, error: string | null): UploadQuotaStop | undefined {
   if (!error) return;

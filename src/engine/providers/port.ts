@@ -73,7 +73,7 @@ export interface TransferWorkerProbe {
 /** A resolved rclone filesystem; fake trees use their root item id as fs. */
 export interface FilePassRoot {
   fs: string;
-  kind: "local" | "sharepoint" | "google_drive";
+  kind: "local" | "sharepoint" | "google_drive" | "dropbox";
   /** Backend compares timestamps because upload can rewrite size/checksum. */
   ignoreSizeAndChecksum?: boolean;
 }
@@ -213,7 +213,7 @@ export interface ProviderPort extends FilePassProvider {
   listDriveMembers(driveId: string): Promise<DriveMembership[]>;
   addDriveMember(driveId: string, member: DriveMember): Promise<void>;
   resolveFilePass(input: {
-    sourceType?: "sharepoint" | "google_shared_drive";
+    sourceType?: "sharepoint" | "google_shared_drive" | "dropbox";
     sourceDriveId: string;
     sourceItemId: string;
     destDriveId: string;
@@ -221,6 +221,12 @@ export interface ProviderPort extends FilePassProvider {
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
   discoverSharePoint?(): Promise<SharePointDiscovery>;
+  sourceCoverageFindings?(signal?: AbortSignal): Promise<
+    readonly {
+      code: string;
+      evidence: Record<string, unknown>;
+    }[]
+  >;
   preflight?(input: {
     jobType: JobType;
     config: unknown;

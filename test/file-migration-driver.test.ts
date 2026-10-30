@@ -18,6 +18,7 @@ import {
 } from "../src/engine/drivers/file-migration.ts";
 import type { DriverContext, CommitUnit } from "../src/engine/drivers/types.ts";
 import { ProviderFault } from "../src/engine/providers/fault.ts";
+import { fileProvider } from "../src/engine/providers/adapters/capabilities.ts";
 import { fileConfig, fileFixture, value, approve, closeDecision } from "./engine-fixture.ts";
 
 const now = "2026-09-01T00:00:00.000Z";
@@ -57,7 +58,49 @@ async function harness(
   const home = await mkdtemp(join(tmpdir(), "migmate-file-contract-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const engine = openEngine({ home, now: () => new Date(now), provider: port });
-  const ref = value(await engine.initJob({ type: "file_migration", config: selected }));
+  const manifestLoad = selected.sourceProvider && selected.mappings.length > 0;
+  const ref = value(
+    await engine.initJob({
+      type: "file_migration",
+      config: manifestLoad ? { ...selected, mappings: [] } : selected,
+    }),
+  );
+  if (manifestLoad) {
+    const source = fileProvider(selected.sourceProvider);
+    const mappings = selected.mappings.map((mapping) => {
+      const segments: string[] = [];
+      let item = input.sourceItems.find((entry) => entry.id === mapping.sourceItemId);
+      while (item?.parentId) {
+        segments.unshift(item.name);
+        item = input.sourceItems.find((entry) => entry.id === item!.parentId);
+      }
+      return {
+        id: mapping.id,
+        source: {
+          type: source.id,
+          [source.containerField ?? "driveId"]: mapping.sourceDriveId,
+          ...(source.rootField === "folderId"
+            ? { folderId: mapping.sourceItemId }
+            : { folderPath: segments.join("/") }),
+        },
+        destination: {
+          type: selected.destinationProvider ?? "google_shared_drive",
+          ...(mapping.createDrive
+            ? { create: mapping.createDrive.name }
+            : { driveId: mapping.destDriveId, folderId: mapping.destFolderId }),
+        },
+        ...(mapping.createDrive ? { members: mapping.createDrive.members } : {}),
+      };
+    });
+    value(
+      await engine.withWriterResult(ref, (writer) =>
+        writer.loadManifest({
+          format: "json",
+          content: JSON.stringify({ version: 1, mappings }),
+        }),
+      ),
+    );
+  }
   return { home, engine, ref, port };
 }
 
@@ -501,6 +544,361 @@ describe("map-only listing migration", () => {
       );
       assert.equal((await codes(h, "verify")).get("zero"), "size_mismatch");
     });
+  }
+});
+
+describe("provider content findings and destination depth", () => {
+  function sourceConfig(sourceProvider: "sharepoint" | "dropbox"): FileMigrationConfig {
+    return {
+      ...config,
+      sourceProvider,
+      destinationProvider: "google_shared_drive",
+      mappings: config.mappings.map((mapping) => ({ ...mapping, sourceType: sourceProvider })),
+    };
+  }
+
+  it("discloses Paper conversion in a root-only plan and report; pointers remain nonblocking", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        {
+          id: "paper",
+          parentId: "source-root",
+          name: "notes.html",
+          kind: "file",
+          content: "<p>notes</p>",
+          metadata: { contentDisposition: "paper_html" },
+        },
+        {
+          id: "web",
+          parentId: "source-root",
+          name: "linked.web",
+          kind: "file",
+          content: "https://docs.google.com/document/d/example",
+          metadata: { contentDisposition: "web_pointer" },
+        },
+      ]),
+      sourceConfig("dropbox"),
+    );
+    const inventory = t.mock.method(h.port, "listSourceChildren");
+    const listings = t.mock.method(h.port, "listFileHashes");
+    await approve(h);
+    assert.equal(inventory.mock.callCount(), 0);
+    assert.equal(listings.mock.callCount(), 0);
+    const planned = value(await h.engine.reader(h.ref).rows({ phase: "plan" })).rows;
+    assert.equal(planned.length, 1);
+    assert.ok(planned[0]?.jobType === "file_migration");
+    assert.match(planned[0].sourceDisclosures?.join("\n") ?? "", /\.html/);
+    await execute(h);
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, true);
+    const rows = value(await h.engine.reader(h.ref).rows({ phase: "verify", limit: 100 })).rows;
+    for (const code of ["source_paper_html", "source_web_pointer"]) {
+      const matching = rows.filter((item) => item.code === code);
+      assert.equal(matching.length, 1);
+      assert.equal(matching[0]?.kind, "policy_outcome");
+    }
+    const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+    const json = await readFile(
+      report.artifacts.find((item) => item.name === "report.json")!.path,
+      "utf8",
+    );
+    assert.match(json, /\.html/);
+    assert.match(json, /source_web_pointer/);
+    assert.equal(
+      h.port.calls.some((call) => call.startsWith("openSourceContent:")),
+      false,
+    );
+  });
+
+  it("finds one blocking outcome per unsupported document even when transfer listings omit it", async (t) => {
+    const input = fileFixture([
+      { id: "folder", parentId: "source-root", name: "documents", kind: "folder" },
+      {
+        id: "legacy",
+        parentId: "folder",
+        name: "old.paper",
+        kind: "undownloadable",
+        metadata: { contentDisposition: "legacy_paper" },
+      },
+      {
+        id: "unsupported",
+        parentId: "folder",
+        name: "unsupported",
+        kind: "undownloadable",
+        metadata: { contentDisposition: "unsupported_export" },
+      },
+    ]);
+    const port = new FakeFileMigrationPort(input);
+    const nativeChildren = await port.listSourceChildren({
+      driveId: input.sourceDriveId,
+      itemId: "folder",
+    });
+    port.overrideSourceChildren("folder", []);
+    const list = port.listSourceChildren.bind(port);
+    const inventory = t.mock.method(
+      port,
+      "listSourceChildren",
+      async (request: Parameters<FakeFileMigrationPort["listSourceChildren"]>[0]) =>
+        request.itemId === "folder" ? nativeChildren : list(request),
+    );
+    const h = await harness(t, input, sourceConfig("dropbox"), port);
+    await approve(h);
+    assert.equal(inventory.mock.callCount(), 0);
+    await execute(h);
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, false);
+    assert.deepEqual(
+      verified.findings.map(({ code, count }) => ({ code, count })),
+      [
+        { code: "source_legacy_paper", count: 1 },
+        { code: "source_unsupported_export", count: 1 },
+      ],
+    );
+    const rows = value(await h.engine.reader(h.ref).rows({ phase: "verify", limit: 100 })).rows;
+    assert.deepEqual(
+      rows
+        .filter((item) => item.kind === "finding")
+        .map((item) =>
+          item.jobType === "file_migration"
+            ? [item.sourceItemId, item.relativePath, item.code]
+            : [],
+        )
+        .sort(),
+      [
+        ["legacy", "documents/old.paper", "source_legacy_paper"],
+        ["unsupported", "documents/unsupported", "source_unsupported_export"],
+      ],
+    );
+    const closure = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
+    assert.equal(closure.ok, false);
+    if (!closure.ok) assert.equal(closure.refusal.code, "verification_unaccepted");
+  });
+
+  it("requires explicit acceptance of one job-wide legacy coverage gap across mappings", async (t) => {
+    class CoveragePort extends FakeFileMigrationPort {
+      coverageCalls = 0;
+      async sourceCoverageFindings() {
+        this.coverageCalls++;
+        return [
+          {
+            code: "source_legacy_paper_scope_unverified",
+            evidence: {
+              paperAsFiles: true,
+              reason: "Legacy document IDs cannot be attributed to namespace roots",
+            },
+          },
+        ];
+      }
+    }
+    const { input, selected } = multiMapping();
+    const port = new CoveragePort(input);
+    const h = await harness(
+      t,
+      input,
+      {
+        ...sourceConfig("dropbox"),
+        mappings: selected.mappings.map((mapping) => ({ ...mapping, sourceType: "dropbox" })),
+      },
+      port,
+    );
+    await approve(h);
+    assert.equal(port.coverageCalls, 0);
+    await execute(h);
+    assert.equal(port.coverageCalls, 1);
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.deepEqual(
+      verified.findings.map(({ code, count }) => ({ code, count })),
+      [{ code: "source_legacy_paper_scope_unverified", count: 1 }],
+    );
+    const refused = await h.engine.withWriterResult(h.ref, async (w) =>
+      w.close(await closeDecision(h)),
+    );
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.refusal.code, "verification_unaccepted");
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.accept({
+          verificationDigest: verified.verificationDigest,
+          approver: "operator",
+          codes: ["source_legacy_paper_scope_unverified"],
+          rationale: "Legacy Paper is preserved separately; namespace coverage remains unproven",
+          mode: "unattended",
+        }),
+      ),
+    );
+    const closed = value(
+      await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
+    );
+    assert.equal(closed.outcome, "completed_with_accepted_exceptions");
+  });
+
+  it("measures unknown Paper export sizes and blocks a wrong-sized destination", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        {
+          id: "paper",
+          parentId: "source-root",
+          name: "notes.html",
+          kind: "file",
+          size: -1,
+          content: "<p>notes</p>",
+          metadata: { contentDisposition: "paper_html" },
+        },
+      ]),
+      sourceConfig("dropbox"),
+    );
+    await approve(h);
+    await execute(h);
+    assert.deepEqual(value(await h.engine.reader(h.ref).status()).outstandingFindings, []);
+    assert.ok(h.port.calls.includes("openSourceContent:paper"));
+    const copied = h.port.snapshotDestination().find((item) => item.path === "notes.html")!;
+    h.port.mutateDestinationContent(copied.id, "truncated");
+    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+    assert.equal(verified.clean, false);
+    assert.deepEqual(
+      verified.findings.map((item) => item.code),
+      ["size_mismatch"],
+    );
+  });
+
+  it("compares Dropbox paths and sizes without claiming same-size content equality", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        { id: "file", parentId: "source-root", name: "file.bin", kind: "file", content: "abcd" },
+      ]),
+      sourceConfig("dropbox"),
+    );
+    await approve(h);
+    await execute(h);
+    const copied = h.port.snapshotDestination().find((item) => item.path === "file.bin")!;
+    h.port.mutateDestinationContent(copied.id, "wxyz");
+    assert.equal(value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).clean, true);
+    h.port.mutateDestinationContent(copied.id, "longer");
+    assert.deepEqual(
+      value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).findings.map(
+        (item) => item.code,
+      ),
+      ["size_mismatch"],
+    );
+    h.port.removeDestinationItem(copied.id);
+    assert.deepEqual(
+      value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).findings.map(
+        (item) => item.code,
+      ),
+      ["destination_missing"],
+    );
+    assert.equal(
+      h.port.calls.some((call) => call.startsWith("openSourceContent:")),
+      false,
+    );
+  });
+
+  for (const fallback of [false, true]) {
+    it(`downloads source hashes and detects same-size corruption using ${fallback ? "MD5 fallback" : "SHA-256"}`, async (t) => {
+      const h = await harness(
+        t,
+        fileFixture([
+          { id: "file", parentId: "source-root", name: "file.bin", kind: "file", content: "abcd" },
+        ]),
+        { ...sourceConfig("dropbox"), options: { verificationMode: "hash" } },
+      );
+      await approve(h);
+      await execute(h);
+      const copied = h.port.snapshotDestination().find((item) => item.path === "file.bin")!;
+      if (fallback) h.port.withholdDestinationChecksum(copied.id);
+      h.port.blockDestinationStream(copied.id);
+      assert.equal(value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).clean, true);
+      h.port.mutateDestinationContent(copied.id, "wxyz");
+      const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.deepEqual(
+        verified.findings.map((item) => item.code),
+        ["content_mismatch"],
+      );
+      const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+      const json = JSON.parse(
+        await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+      );
+      assert.equal(
+        json.findings.find((item: { code: string }) => item.code === "content_mismatch").evidence
+          .hashType,
+        fallback ? "md5" : "sha256",
+      );
+    });
+  }
+
+  for (const sourceProvider of ["sharepoint", "dropbox"] as const) {
+    for (const wrapperDepth of [0, 2]) {
+      it(`blocks level 101 but allows level 100 from ${sourceProvider}, with ${wrapperDepth} destination wrapper levels`, async (t) => {
+        const input = fileFixture();
+        const relativeLimit = 100 - wrapperDepth;
+        for (let level = 1; level <= relativeLimit + 1; level++) {
+          input.sourceItems.push({
+            id: `folder-${level}`,
+            parentId: level === 1 ? "source-root" : `folder-${level - 1}`,
+            name: `level-${level}`,
+            kind: "folder",
+          });
+        }
+        input.sourceItems.push(
+          {
+            id: "allowed",
+            parentId: `folder-${relativeLimit}`,
+            name: "allowed.bin",
+            kind: "file",
+            content: "allowed",
+          },
+          {
+            id: "blocked",
+            parentId: `folder-${relativeLimit + 1}`,
+            name: "blocked.bin",
+            kind: "file",
+            content: "blocked",
+          },
+        );
+        if (wrapperDepth) {
+          input.destinationItems[0]!.parentId = "wrapper-parent";
+          input.destinationItems.push(
+            { id: "wrapper-parent", parentId: "container-root", name: "parent", kind: "folder" },
+            { id: "container-root", parentId: null, name: "drive", kind: "folder" },
+          );
+        }
+        const h = await harness(t, input, sourceConfig(sourceProvider));
+        const copies = t.mock.method(h.port, "startCopyPass");
+        await approve(h);
+        await execute(h);
+        assert.equal(copies.mock.callCount(), 0);
+        const state = value(await h.engine.reader(h.ref).status());
+        assert.equal(state.state, "blocked");
+        const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+        const json = JSON.parse(
+          await readFile(
+            report.artifacts.find((item) => item.name === "report.json")!.path,
+            "utf8",
+          ),
+        );
+        const conflicts = json.findings.filter(
+          (item: { code: string }) => item.code === "path_unrepresentable",
+        );
+        assert.equal(conflicts.length, 1);
+        for (const conflict of conflicts) {
+          assert.equal(conflict.evidence.destinationRootDepth, wrapperDepth);
+          assert.match(conflict.evidence.message, /requires 101/);
+          assert.ok(!conflict.evidence.path.endsWith("allowed.bin"));
+        }
+        h.port.deleteSourceItem(`folder-${relativeLimit + 1}`);
+        await approve(h);
+        await execute(h);
+        assert.equal(copies.mock.callCount(), 1);
+        const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+        assert.equal(verified.clean, true);
+        assert.ok(h.port.snapshotDestination().some((item) => item.path.endsWith("allowed.bin")));
+      });
+    }
   }
 });
 

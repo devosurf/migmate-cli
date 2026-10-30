@@ -449,6 +449,7 @@ export interface FileItemRow extends RowBase {
   provenanceState: "none" | "marked" | "verified" | "drifted";
   mapping?: FileMappingConfig;
   mappingPass?: MappingPass;
+  sourceDisclosures?: readonly string[];
 }
 
 export interface ConversationRow extends RowBase {

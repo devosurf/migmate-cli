@@ -3,11 +3,13 @@ import { ProviderFault } from "../../fault.ts";
 import type { FileProviderId } from "../capabilities.ts";
 import type { GoogleCredential } from "./google.ts";
 import type { GraphCredential } from "./sharepoint.ts";
+import type { DropboxCredential } from "./dropbox.ts";
 
 export interface CredentialMaterial {
   graph?: GraphCredential;
   graphDestination?: GraphCredential;
   google?: GoogleCredential;
+  dropbox?: DropboxCredential;
 }
 
 export interface CredentialLoadContext {
@@ -178,6 +180,9 @@ export async function tokenResponse(
   } finally {
     body.delete("client_secret");
     body.delete("assertion");
+    body.delete("code");
+    body.delete("code_verifier");
+    body.delete("refresh_token");
   }
 }
 

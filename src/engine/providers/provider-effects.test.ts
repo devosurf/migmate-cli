@@ -35,6 +35,9 @@ const session: CredentialSession = {
   async googleToken() {
     return "secret-google-canary";
   },
+  async dropboxToken() {
+    return "secret-dropbox-canary";
+  },
   async identity() {
     return "stable-application";
   },

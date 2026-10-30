@@ -2369,6 +2369,9 @@ class StoreImpl implements Store {
               jobType: "file_migration",
               mappingId: String(row.mapping_id),
               sourceItemId: String(row.source_item_id),
+              ...(evidence?.jobType === "file_migration" && evidence.fileScope?.sourceDisclosures
+                ? { sourceDisclosures: evidence.fileScope.sourceDisclosures }
+                : {}),
               sourceWebUrl:
                 evidence?.jobType === "file_migration"
                   ? (evidence.sourceEvidence?.webUrl ?? null)

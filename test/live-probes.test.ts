@@ -4,6 +4,8 @@ import { digestJson } from "../src/engine/store/digest.ts";
 import { probeFailures, type ProbeCapture } from "../scripts/live/probes.ts";
 import { fixtureConfig } from "../scripts/live/file-fixtures.ts";
 import { LiveTestBlocked } from "../scripts/live/common.ts";
+import { dropboxHashMatch, dropboxProbeConfig } from "../scripts/live/file-dropbox.ts";
+import { dropboxFileProbeIds } from "../scripts/live/probes.ts";
 
 const census = {
   scope: "capability_source_root_children",
@@ -393,5 +395,128 @@ describe("live retained channel verdict", () => {
       { channel: false, chat: true },
     );
     assert.deepEqual(failures, []);
+  });
+});
+
+describe("Dropbox optional live probe configuration and verdict", () => {
+  const config = {
+    jobConfig: {
+      sourceProvider: "dropbox",
+      destinationProvider: "google_shared_drive",
+      rclone: {
+        config: { resolver: "file", path: "/private/rclone.conf" },
+        sourceRemote: "dropbox",
+        destinationRemote: "drive",
+      },
+    },
+    dropboxProbe: {
+      adminMemberId: "dbmid:admin",
+      namespaceId: "123",
+      destDriveId: "drive",
+      destFolderId: "folder",
+      filePath: "fixtures/file.bin",
+      paperPath: "fixtures/note.paper",
+    },
+  };
+  it("accepts explicit admin and namespace with existing source samples", () => {
+    const parsed = dropboxProbeConfig(config);
+    assert.equal(parsed.namespaceId, "123");
+    assert.equal(parsed.adminMemberId, "dbmid:admin");
+    assert.equal(parsed.paperPath, "fixtures/note.paper");
+  });
+  for (const overrides of [
+    { adminMemberId: "admin@example.com" },
+    { namespaceId: "123,shared_folders=true" },
+    { filePath: "../escape" },
+    { filePath: "/absolute" },
+    { filePath: "a//b" },
+    { paperPath: "note.html" },
+    { destFolderId: "folder:elsewhere" },
+  ]) {
+    it(`rejects unsafe or ambiguous fixture fields ${JSON.stringify(overrides)}`, () => {
+      assert.throws(
+        () =>
+          dropboxProbeConfig({ ...config, dropboxProbe: { ...config.dropboxProbe, ...overrides } }),
+        LiveTestBlocked,
+      );
+    });
+  }
+  it("rejects remote option injection and non-file credentials", () => {
+    for (const rclone of [
+      { ...config.jobConfig.rclone, sourceRemote: "dropbox,shared_folders=true" },
+      { ...config.jobConfig.rclone, config: { resolver: "env", path: "TOKEN" } },
+    ]) {
+      assert.throws(
+        () => dropboxProbeConfig({ ...config, jobConfig: { ...config.jobConfig, rclone } }),
+        LiveTestBlocked,
+      );
+    }
+  });
+  const hashes = { sha256: "a".repeat(64), md5: "b".repeat(32) };
+  it("prefers Drive SHA256 and falls back to MD5 only without SHA256", () => {
+    assert.equal(
+      dropboxHashMatch(hashes, { "SHA-256": hashes.sha256, MD5: "c".repeat(32) }),
+      "sha256",
+    );
+    assert.equal(dropboxHashMatch(hashes, { MD5: hashes.md5 }), "md5");
+    assert.throws(
+      () => dropboxHashMatch(hashes, { "SHA-256": "c".repeat(64), MD5: hashes.md5 }),
+      LiveTestBlocked,
+    );
+    assert.throws(() => dropboxHashMatch(hashes, { Dropbox: hashes.sha256 }), LiveTestBlocked);
+    assert.throws(() => dropboxHashMatch(hashes, {}), LiveTestBlocked);
+    assert.throws(
+      () => dropboxHashMatch(hashes, { "SHA-256": "malformed", MD5: hashes.md5 }),
+      LiveTestBlocked,
+    );
+  });
+  function proven(): ProbeCapture {
+    return capture(dropboxFileProbeIds[0], {
+      assertions: [
+        ["pinned_version", "v1.75.0"],
+        ["dropbox_backend", "dropbox"],
+        ["drive_backend", "drive"],
+        ["paper_is_export", -1],
+        ["paper_html_name", "paper.html"],
+        ["file_hash_verified", true],
+        ["paper_hash_verified", true],
+        ["ordinary_downloadable_file", true],
+        ["paper_html_export", true],
+      ].map(([id, expected]) => ({ id: String(id), expected, observed: expected })),
+      observations: {
+        version: "v1.75.0",
+        sourceMode: "select_admin_namespace",
+        sharedFolders: false,
+        samples: ["file", "paper"].map((kind) => ({
+          kind,
+          algorithm: "sha256",
+          sourceSha256: hashes.sha256,
+          bytes: 12,
+        })),
+      },
+    });
+  }
+  it("requires both ordinary and exported downloaded-byte evidence", () => {
+    const failures = (value: ProbeCapture) =>
+      probeFailures({
+        captures: [value],
+        requiredProbes: dropboxFileProbeIds,
+        retained: noRetained,
+      });
+    assert.deepEqual(failures(proven()), []);
+    for (const observations of [
+      { samples: [] },
+      { sharedFolders: true },
+      { version: "v1.74.0" },
+      { sourceMode: "select_user" },
+      { samples: [{ kind: "file", algorithm: "dropbox", sourceSha256: hashes.sha256, bytes: 12 }] },
+    ]) {
+      const value = proven();
+      Object.assign(value.observations, observations);
+      assert.ok(failures(value).length > 0);
+    }
+    const value = proven();
+    value.assertions = value.assertions.filter((item) => item.id !== "paper_is_export");
+    assert.ok(failures(value).length > 0);
   });
 });

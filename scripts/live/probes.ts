@@ -7,6 +7,8 @@ export const fileProbeIds = [
 ] as const;
 /** A Google Shared Drive source with a SharePoint destination runs this suite instead. */
 export const reverseFileProbeIds = ["shared_drive_to_sharepoint_copy_and_verification"] as const;
+/** Pinned Dropbox backend copy/export qualification, independent of engine lifecycle probes. */
+export const dropboxFileProbeIds = ["dropbox_to_shared_drive_copy_export_and_hash"] as const;
 /** Unusual source kinds the live file suite must account for, each with a proof value: ADR-0006. */
 export const sourceCapabilityKinds = ["package", "reference", "undownloadable"] as const;
 export type SourceCapabilityKind = (typeof sourceCapabilityKinds)[number];
@@ -76,6 +78,45 @@ export function probeFailures(input: {
         (assertion) =>
           assertion.id === id && assertion.expected === expected && assertion.observed === expected,
       );
+    if (capture.probeId === dropboxFileProbeIds[0]) {
+      if (
+        observations.version !== "v1.75.0" ||
+        observations.sourceMode !== "select_admin_namespace" ||
+        observations.sharedFolders !== false
+      )
+        fail("pinned read-only namespace mechanics missing");
+      for (const [id, expected] of [
+        ["pinned_version", "v1.75.0"],
+        ["dropbox_backend", "dropbox"],
+        ["drive_backend", "drive"],
+        ["paper_is_export", -1],
+        ["paper_html_name", "paper.html"],
+        ["file_hash_verified", true],
+        ["paper_hash_verified", true],
+        ["ordinary_downloadable_file", true],
+        ["paper_html_export", true],
+      ] as const) {
+        if (!asserted(id, expected)) fail(`${id} not asserted`);
+      }
+      const samples = observations.samples;
+      if (
+        !Array.isArray(samples) ||
+        samples.length !== 2 ||
+        !["file", "paper"].every((kind) =>
+          samples.some(
+            (sample: unknown) =>
+              record(sample) &&
+              sample.kind === kind &&
+              (sample.algorithm === "sha256" || sample.algorithm === "md5") &&
+              typeof sample.sourceSha256 === "string" &&
+              hashPattern.test(sample.sourceSha256) &&
+              count(sample.bytes) &&
+              sample.bytes >= 0,
+          ),
+        )
+      )
+        fail("downloaded source hash evidence missing");
+    }
     if (capture.probeId === "retained_history" && input.retained.channel)
       for (const reason of retainedFailures(observations, input.retained.chat)) fail(reason);
     if (capture.probeId === "route_limits_and_version_gate") {

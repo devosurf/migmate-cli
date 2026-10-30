@@ -49,6 +49,8 @@ import {
   type AttemptLog,
 } from "./detached.ts";
 export { initializeDetachedChild } from "./detached.ts";
+import { onboardDropboxCredentials } from "./credentials.ts";
+import { ProviderFault } from "../engine/providers/fault.ts";
 
 export type { Io, IoInput, IoStream } from "./io.ts";
 
@@ -87,8 +89,9 @@ Later commands find it automatically, including from subfolders and new sessions
 Without a workspace, defaults remain macOS ~/Library/Application Support/Migmate;
 Linux \${XDG_STATE_HOME:-~/.local/state}/migmate. Any other platform is refused.
 Config input is TOML or JSON containing typed file credential references, never secrets.
-Only the engine writes job.toml and probes credentials. Init without config creates
-an unconfigured job: onboard with creds init before doctor/plan.
+Only the engine writes job.toml. Dropbox creds init uses browser/paste-code PKCE
+and stores its offline token and scope proof only in the referenced credential file.
+Init without config creates an unconfigured job: onboard before doctor/plan.
 
 Review: plan|verify --review reads existing evidence without taking a writer lease.
 --phase plan|execute|verify, --code CODE (repeatable), --search TEXT,
@@ -838,6 +841,28 @@ async function executeCommand(
           return writer.loadManifest({ content, format });
         }
         case "creds init":
+          try {
+            await onboardDropboxCredentials({
+              config,
+              storeDirectory: invocation.home,
+              io: output.io,
+              signal: output.abort.signal,
+            });
+          } catch (error) {
+            if (error instanceof ProviderFault)
+              return {
+                ok: false,
+                refusal: {
+                  code: "preflight_failed",
+                  message:
+                    error.code === "credential_interaction_required"
+                      ? "Dropbox authorization requires a terminal: rerun creds init and paste the browser authorization code."
+                      : "Dropbox credential onboarding did not satisfy credential requirements.",
+                  detail: { check: error.code },
+                },
+              };
+            throw error;
+          }
           return writer.onboard(config);
         case "doctor":
           return writer.doctor();
