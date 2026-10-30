@@ -1057,7 +1057,7 @@ export function createTransferSupervisor(options: {
         source,
         destination,
         mode: input.mode,
-        ignoreSize: input.destination.ignoreSizeAndChecksum,
+        ignoreSize: input.destination.ignoreSizeAndChecksum === true,
         noUnicodeNormalization: main.NoUnicodeNormalization === true,
         ignoreCase: main.IgnoreCaseSync === true,
         window,

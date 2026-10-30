@@ -359,10 +359,10 @@ synthetic single-host qualification, not live-provider throughput, rclone-proces
 memory, or a guarantee that one destination container accepts five million items.
 Provider container limits still apply.
 
-The recorded darwin-arm64 / Node 26.4.0 run passed in **180.5 minutes**, with
-**93,728,544 bytes sampled peak JS heap** (89.4 MiB), 612,040,704 bytes sampled
-peak RSS, and **267.0 seconds listing time** across 35 million parsed records.
-The final five-artifact set was 19,453,922,524 bytes (19.45 GB), in addition to
+The recorded darwin-arm64 / Node 26.4.0 run passed in **124.5 minutes**, with
+**94,046,136 bytes sampled peak JS heap** (89.7 MiB), 583,729,152 bytes sampled
+peak RSS, and **420.0 seconds listing time** across 35 million parsed records.
+The final five-artifact set was 19,453,923,068 bytes (19.45 GB), in addition to
 the job store, readiness artifacts and temporary indexes. Reserve disk for all
 of them; this gate is intentionally separate from the ordinary test suite.
 
