@@ -125,7 +125,8 @@ interface ProcessIdentity {
 }
 
 type ProcessObservation =
-  { status: "alive"; identity: ProcessIdentity } | { status: "absent" | "unknown" };
+  | { status: "alive"; identity: ProcessIdentity }
+  | { status: "absent" | "unknown"; timedOut?: boolean };
 
 const SELECT_LEASE_SQL = `SELECT owner_uuid AS ownerUuid, host_id AS hostId, pid,
   process_start_time AS processStartTime, heartbeat_at AS heartbeatAt, kind,
@@ -181,7 +182,10 @@ function readProcess(pid: number): ProcessObservation {
         },
       );
       if (result.error || result.status !== 0 || !result.stdout.trim()) {
-        return processExistence(pid);
+        const observed = processExistence(pid);
+        return observed.status === "unknown" && isErrnoCode(result.error, "ETIMEDOUT")
+          ? { status: "unknown", timedOut: true }
+          : observed;
       }
       const match =
         /^\s*(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\d+)\s+(\S+)\s+(.+)$/u.exec(
@@ -232,7 +236,13 @@ function statusOf(observation: ProcessObservation, startTime: number): ProcessSt
 }
 
 export function getProcessStartTime(pid = process.pid): number {
-  const observed = readProcess(pid);
+  let observed = readProcess(pid);
+  // One additional authoritative observation only for our own timed-out macOS
+  // lookup. Foreign inspection and all recovery/termination decisions stay
+  // single-shot. Two 2 s identity calls plus the existing 2 s args call cap the
+  // configured subprocess budget at 6 s; no estimated identity is ever used.
+  if (pid === process.pid && observed.status === "unknown" && observed.timedOut)
+    observed = readProcess(pid);
   if (observed.status !== "alive")
     throw new Error("Process start identity could not be established");
   return observed.identity.startTime;

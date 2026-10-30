@@ -488,6 +488,8 @@ Detached execution survives terminal closure and SSH disconnect, not shutdown/re
 
 One lifecycle writer holds a job. Automatic same-host takeover requires a heartbeat at least 30 seconds stale and the owner process and worker proven gone. Stop a recorded orphan worker with explicit `reclaim --confirm --stop-worker`; do not delete lease files.
 
+On macOS, acquiring the writer's own OS-observed start identity retries one explicit `ps` timeout, at most two identity attempts with the unchanged 2-second timeout each. The configured subprocess budget is 4 seconds on repeated identity failure, or up to 6 seconds including the existing arguments lookup on success, plus OS scheduling/reaping overhead; this is not a hard wall-clock guarantee under arbitrary overload. Exhaustion fails closed before the writer callback or lease insertion, with no estimated identity fallback. Foreign-process inspection, Linux `/proc`, reclaim/worker termination, the 5-second heartbeat and 30-second expiry are unchanged.
+
 ## 3. rclone behaviour is version-pinned for a reason
 
 **The pin.** Migmate ships and verifies its own transfer binary and accepts exactly one version, `v1.75.0`, from an exact-version table in code — not a semver range. Below the floor `v1.69.0` the refusal is `version_below_floor`, because below it a unix-socket connection silently skipped the configured RC authentication. Anything outside the table refuses with `version_untested`: no warning, no recorded downgrade, no "probably compatible". Widening the table is a code change, and the optional live test is the only way to observe the new version against a real library first.
