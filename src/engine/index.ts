@@ -944,20 +944,19 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
         const plannedConfig = plan
           ? object(JSON.parse(plan.inputs.configuration ?? "{}"), "plan.configuration")
           : {};
-        const uploadsToGoogle =
+        const ledgerAccountedUploads =
           stored.jobType === "file_migration"
-            ? plannedConfig.route !== "shared_drive_to_sharepoint_library"
+            ? fileProviderPair(persisted(plannedConfig, stored.jobType)).destination
+                .ledgerAccountedUploads
             : plannedConfig.destination !== undefined;
         const status = {
           ...stored,
           uploadActivity: readUploadActivity(
             deps.home,
             deps.now(),
-            typeof approvedAccount === "string"
-              ? [approvedAccount]
-              : plan && uploadsToGoogle
-                ? [""]
-                : [],
+            plan && ledgerAccountedUploads
+              ? [typeof approvedAccount === "string" ? approvedAccount : ""]
+              : [],
           ),
         };
         if (!status.currentPlan || !status.verificationDigest)
@@ -2791,11 +2790,11 @@ function makeWriter(
           const actingGoogleAccount =
             typeof observedAccount === "string" ? observedAccount : undefined;
           const reportSections = await sections(p, config, revision, actingGoogleAccount);
-          const uploadsToGoogle =
+          const ledgerAccountedUploads =
             "mappings" in config
-              ? config.route !== "shared_drive_to_sharepoint_library"
+              ? fileProviderPair(config).destination.ledgerAccountedUploads
               : config.destination !== undefined;
-          const uploadActivity = uploadsToGoogle
+          const uploadActivity = ledgerAccountedUploads
             ? (initializeUploadLedger(deps.home, deps.now()),
               readUploadActivity(deps.home, deps.now(), [actingGoogleAccount ?? ""]))
             : null;

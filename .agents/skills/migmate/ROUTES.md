@@ -122,8 +122,10 @@ observed bytes and gaps. Unknown accounts remain separate attempts. A changed
 observed account requires a new plan; credential-file rotation alone does not
 reset its ledger.
 
-File uploads to Google and acknowledged Teams cold-storage content count,
-including unsuccessful attempts; recovered objects do not count again.
+File accounting follows the destination adapter's policy, not the retired `route`
+option: Google Shared Drive destinations and acknowledged Teams cold-storage
+content count, including unsuccessful attempts; recovered objects do not count again.
+SharePoint destinations and local-only archives have no plan-time upload snapshot.
 Downloads, reverse-route writes, local packaging/archives, verification,
 metadata/HTTP overhead and preflight probes are excluded. Other engine homes,
 hosts and non-Migmate uploads are unobserved, with no cross-home/host coordination.

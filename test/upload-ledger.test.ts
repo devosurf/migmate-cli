@@ -425,7 +425,7 @@ test("real local rclone worker counters reach the file driver's home ledger (not
   const ref = value(
     await engine.initJob({
       type: "file_migration",
-      config: { ...fileConfig(), options: { proof: "rclone" } },
+      config: fileConfig(),
     }),
   );
   const supervisor = createTransferSupervisor({
@@ -452,7 +452,7 @@ test("real local rclone worker counters reach the file driver's home ledger (not
   provider.resolveFilePass = async () => ({
     socketPath,
     source: { fs: source, kind: "sharepoint" },
-    destination: { fs: destination, kind: "google_drive" },
+    destination: { fs: destination, kind: "google_drive", ignoreSizeAndChecksum: false },
   });
   await approve({ engine, ref });
   const executed = value(await engine.withWriterResult(ref, (writer) => writer.execute()));
@@ -464,7 +464,7 @@ test("real local rclone worker counters reach the file driver's home ledger (not
   );
 });
 
-test("reverse-route and local-only archive execution add no Google content observations", async (t) => {
+test("SharePoint destinations and local-only archives expose no applicable upload snapshot or observations", async (t) => {
   const directory = await home(t);
   const provider = new FakeFileMigrationPort({
     ...fileFixture([
@@ -484,7 +484,11 @@ test("reverse-route and local-only archive execution add no Google content obser
   const reverse = value(
     await engine.initJob({
       type: "file_migration",
-      config: { mappings: [], route: "shared_drive_to_sharepoint_library" },
+      config: {
+        mappings: [],
+        sourceProvider: "google_shared_drive",
+        destinationProvider: "sharepoint",
+      },
     }),
   );
   value(
@@ -509,6 +513,9 @@ test("reverse-route and local-only archive execution add no Google content obser
     ),
   );
   await approve({ engine, ref: reverse });
+  const reversePlan = value(await engine.reader(reverse).status());
+  await assert.rejects(stat(join(directory, "uploads.sqlite")), { code: "ENOENT" });
+  assert.deepEqual(reversePlan.uploadActivity?.accounts, []);
   assert.equal(
     value(await engine.withWriterResult(reverse, (writer) => writer.execute())).outcome,
     "completed",
@@ -524,6 +531,8 @@ test("reverse-route and local-only archive execution add no Google content obser
     value(await engine.withWriterResult(archive, (writer) => writer.execute())).outcome,
     "completed",
   );
+  const archiveStatus = value(await engine.reader(archive).status());
+  assert.deepEqual(archiveStatus.uploadActivity?.accounts, []);
   await assert.rejects(stat(join(directory, "uploads.sqlite")), { code: "ENOENT" });
   assert.deepEqual(readUploadActivity(directory, new Date(BASE)).accounts, []);
 });

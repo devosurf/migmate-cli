@@ -10,6 +10,7 @@ export const sharepointCapabilities: FileProviderCapabilities = {
   hashType: "quickxor",
   ignoreSizeAndChecksum: true,
   uploadQuota: false,
+  ledgerAccountedUploads: false,
   creatorRole: "owner",
   memberRole(role) {
     switch (role) {

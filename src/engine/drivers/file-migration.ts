@@ -1082,7 +1082,7 @@ async function* copyPass(
         );
     }
     const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
-    if (resolved.destination.kind === "google_drive")
+    if (fileProviderPair(ctx.config).destination.ledgerAccountedUploads)
       upload = ctx.beginUpload?.(
         "file",
         JSON.stringify([mapping.id, passNumber]),

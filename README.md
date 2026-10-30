@@ -202,6 +202,9 @@ home (`MIGMATE_HOME`, or the home selected above) share its private `uploads.sql
 ledger. Account emails are trimmed and case-normalized; changing credential files
 does not reset an account total. Unknown identities remain separate job/attempt
 evidence. Teams Google destinations bind their observed account too.
+File accounting follows the destination adapter's policy: Google Shared Drive
+destinations contribute; SharePoint destinations do not. The retired `route`
+option is not an accounting switch.
 
 The trailing window is `(asOf - 24 hours, asOf]`, independent of midnight. It
 includes SharePoint-to-Google copy counters and acknowledged Teams cold-storage
@@ -692,7 +695,7 @@ These are conservative defaults: two active mappings, each with up to four file 
 }
 ```
 
-`hitAt` is when Migmate observed the failure. The account comes from plan evidence, falling back to the impersonation subject (or `null` for an older non-impersonated plan without that evidence). `earliestResumeAt` is hit time plus 24 hours, an **estimate**, not Google's reset clock or a guaranteed allowance. Wait until that estimate before retrying `execute` on the same job; an earlier manual retry is allowed. There is no automatic quota resume, allowance warning or trailing-24-hour byte accounting. Quota stops do not count against the ordinary failure budget. Because rclone's aggregate cannot separate quota errors from file failures, the quota pass's final `lastStats.errors` and progress `errors` are `null` (unknown), with the raw aggregate preserved as `rcloneErrors`, not an ordinary per-file failure count. Other Drive limits (storage, Shared Drive file count, downloads, ordinary API throttling) do not receive this daily-upload classification.
+`hitAt` is when Migmate observed the failure. The account comes from plan evidence, falling back to the impersonation subject (or `null` for an older non-impersonated plan without that evidence). `earliestResumeAt` is hit time plus 24 hours, an **estimate**, not Google's reset clock or a guaranteed allowance. Wait until that estimate before retrying `execute` on the same job; an earlier manual retry is allowed. There is no automatic quota resume or allowance warning. The engine-home ledger separately reports trailing-24-hour observed bytes with gaps; it does not gate resumption. Quota stops do not count against the ordinary failure budget. Because rclone's aggregate cannot separate quota errors from file failures, the quota pass's final `lastStats.errors` and progress `errors` are `null` (unknown), with the raw aggregate preserved as `rcloneErrors`, not an ordinary per-file failure count. Other Drive limits (storage, Shared Drive file count, downloads, ordinary API throttling) do not receive this daily-upload classification.
 
 Ctrl-C (SIGINT, exit **130**), SIGTERM (exit **143**) and terminal hangup (SIGHUP, exit **129**) stop foreground work cooperatively. Active passes are checkpointed and stopped; after successful worker cleanup and lease release the job remains resumable, not cancelled. Read `status`, then repeat `execute` without `reclaim`: interrupted/failed passes resume and completed passes are skipped. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
 
