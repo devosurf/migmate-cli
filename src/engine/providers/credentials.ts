@@ -1,30 +1,39 @@
 import { execFile } from "node:child_process";
-import { createHash, createPrivateKey, sign } from "node:crypto";
-import type { KeyObject } from "node:crypto";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { JobType } from "../types.ts";
-
-/** Only static, secret-free messages and explicitly selected evidence belong here. */
-export class ProviderFault extends Error {
-  readonly code: string;
-  readonly evidence: Record<string, unknown>;
-
-  constructor(code: string, message: string, evidence: Record<string, unknown> = {}) {
-    super(message);
-    this.name = "ProviderFault";
-    this.code = code;
-    this.evidence = evidence;
-  }
-}
-
-export interface FileCredentialReference {
-  resolver: "file";
-  path: string;
-  mode?: "0600";
-}
+import {
+  fileProviderPair,
+  fileProvider,
+  credentialBindings,
+  type FileProviderId,
+} from "./adapters/capabilities.ts";
+import {
+  assertSeparateSharePointApplications,
+  loadArchiveGraph,
+  requestGraphToken,
+} from "./adapters/credentials/sharepoint.ts";
+import type { GraphCredential } from "./adapters/credentials/sharepoint.ts";
+import { loadArchiveGoogle, requestGoogleToken } from "./adapters/credentials/google.ts";
+import type { GoogleCredential } from "./adapters/credentials/google.ts";
+import { ProviderFault } from "./fault.ts";
+import {
+  allowedKeys,
+  decodeUtf8,
+  fileReference,
+  record,
+  refused,
+  stableId,
+  text,
+} from "./adapters/credentials/shared.ts";
+import type {
+  CredentialMaterial,
+  FileCredentialReference,
+  Token,
+} from "./adapters/credentials/shared.ts";
 
 export interface CredentialSession {
   graphToken(signal?: AbortSignal): Promise<string>;
@@ -41,7 +50,7 @@ export interface CredentialSession {
 }
 
 interface MappingIdentity {
-  sourceType?: "sharepoint" | "google_shared_drive";
+  sourceType?: FileProviderId;
   sourceDriveId: string;
   sourceItemId?: string;
   sourceFolderPath?: string;
@@ -50,111 +59,8 @@ interface MappingIdentity {
   sourceSiteId?: string;
 }
 
-interface GraphCredential {
-  tenantId: string;
-  clientId: string;
-  secret: Buffer | null;
-}
-
-interface GoogleCredential {
-  clientId: string;
-  subject: string;
-  keyId: string;
-  delegatedSubject?: string;
-  privateKey: KeyObject;
-}
-
-interface Token {
-  value: string;
-  expiresAt: number;
-  authenticatedAt: string;
-  permissions: string[];
-}
-
 const MAX_CREDENTIAL_BYTES = 1024 * 1024;
-const MAX_TOKEN_BYTES = 128 * 1024;
-const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
-const GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive";
-const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-// ADR-0003 amendment: source apps choose one read grant, never both or a write role.
-const FILE_ROLES: Record<string, true> = {
-  "Sites.Selected": true,
-  "Sites.Read.All": true,
-};
-const ARCHIVE_ROLES: Record<string, true> = {
-  // Metadata lookup grants; the archive provider enforces scope/option requirements.
-  // https://learn.microsoft.com/en-us/graph/api/channel-get?view=graph-rest-1.0
-  "Channel.ReadBasic.All": true,
-  "ChannelMessage.Read.All": true,
-  "Chat.Read.All": true,
-  // https://learn.microsoft.com/en-us/graph/api/onlinemeeting-get?view=graph-rest-1.0
-  "OnlineMeetings.Read.All": true,
-  "OnlineMeetingTranscript.Read.All": true,
-  "Files.Read.All": true,
-};
-// ADR-0003 amendment: SharePoint destinations are written by a separate app with its
-// own exclusive allowlist, so the read-only source app never gains a write role.
-const SHAREPOINT_DESTINATION_ROLES: Record<string, true> = {
-  "Sites.ReadWrite.All": true,
-};
-const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-const STABLE_ID = /^[A-Za-z0-9_!.,@-]{1,512}$/;
-
-function refused(code: string, evidence: Record<string, unknown> = {}): ProviderFault {
-  return new ProviderFault(code, "Credential requirements were not satisfied.", evidence);
-}
-
-function record(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw refused("credential_config_invalid");
-  }
-  return value as Record<string, unknown>;
-}
-
-function allowedKeys(value: Record<string, unknown>, keys: readonly string[]): void {
-  if (Object.keys(value).some((key) => !keys.includes(key))) {
-    throw refused("credential_config_unsupported");
-  }
-}
-
-function text(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > 4096 ||
-    /[\x00-\x1f\x7f]/.test(value)
-  ) {
-    throw refused("credential_config_invalid");
-  }
-  return value;
-}
-
-function guid(value: unknown): string {
-  const result = text(value);
-  if (!GUID.test(result)) throw refused("credential_config_invalid");
-  return result.toLowerCase();
-}
-
-function stableId(value: unknown): string {
-  const result = text(value);
-  if (!STABLE_ID.test(result) || result === "." || result === ".." || result === "root") {
-    throw refused("credential_config_invalid");
-  }
-  return result;
-}
-
-function fileReference(value: unknown): FileCredentialReference {
-  const ref = record(value);
-  allowedKeys(ref, ["resolver", "path", "mode"]);
-  if (ref.resolver !== "file" || (ref.mode !== undefined && ref.mode !== "0600")) {
-    throw refused("credential_reference_unsupported");
-  }
-  const path = text(ref.path);
-  // No shell expansion: rclone must open precisely the file inspected here.
-  if (!isAbsolute(path) || /[$%~]/.test(path)) throw refused("credential_reference_invalid");
-  return { resolver: "file", path };
-}
 
 function inside(directory: string, path: string): boolean {
   const child = relative(directory, path);
@@ -264,14 +170,6 @@ export async function readCredentialFile(
   }
 }
 
-function decodeUtf8(bytes: Uint8Array): string {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw refused("credential_file_invalid");
-  }
-}
-
 /** A deliberately narrow common subset of rclone's INI parser; no interpolation. */
 function parseIni(bytes: Buffer): Map<string, Map<string, string>> {
   const sections = new Map<string, Map<string, string>>();
@@ -307,37 +205,19 @@ function parseIni(bytes: Buffer): Map<string, Map<string, string>> {
   return sections;
 }
 
-function iniKeys(section: Map<string, string>, keys: readonly string[]): void {
-  if ([...section.keys()].some((key) => !keys.includes(key)))
-    throw refused("credential_backend_unsupported");
-}
-
-function seedRoots(section: Map<string, string>, keys: readonly string[]): void {
-  for (const key of keys) if (section.has(key)) stableId(section.get(key));
-}
-
-function setting(
-  section: Map<string, string>,
-  key: string,
-  expected: string,
-  required = false,
-): void {
-  const value = section.get(key);
-  if ((required || value !== undefined) && value !== expected)
-    throw refused("credential_backend_unsupported");
-}
-
 function parseMappings(value: unknown): MappingIdentity[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw refused("credential_mapping_invalid");
   return value.map((item: unknown) => {
     try {
       const mapping = record(item);
+      const sourceType =
+        mapping.sourceType === undefined
+          ? undefined
+          : fileProvider(mapping.sourceType).credentials.mappingSourceType;
       const result: MappingIdentity = {
         sourceDriveId: stableId(mapping.sourceDriveId),
-        ...(mapping.sourceType === "google_shared_drive"
-          ? { sourceType: "google_shared_drive" as const }
-          : {}),
+        ...(sourceType ? { sourceType } : {}),
         ...(mapping.createDrive === undefined || mapping.destDriveId !== undefined
           ? {
               destDriveId: stableId(mapping.destDriveId),
@@ -361,65 +241,6 @@ function parseMappings(value: unknown): MappingIdentity[] {
   });
 }
 
-// rclone's onedrive backend is a plain OAuth client: `client_secret` is not one
-// of its password-typed options, so rclone sends the configured bytes verbatim
-// and an obscured value authenticates as invalid_client. The engine therefore
-// reads exactly what rclone reads — the same string, never a decoded one.
-// https://rclone.org/onedrive/#standard-options
-function clientSecret(value: unknown): Buffer {
-  const secret = text(value);
-  if (secret.length > 4096 || /[\x00-\x20\x7f]/.test(secret))
-    throw refused("credential_secret_invalid");
-  return Buffer.from(secret, "utf8");
-}
-
-function googleCredential(bytes: Buffer): GoogleCredential {
-  try {
-    const value = record(JSON.parse(decodeUtf8(bytes)));
-    allowedKeys(value, [
-      "type",
-      "project_id",
-      "private_key_id",
-      "private_key",
-      "client_email",
-      "client_id",
-      "auth_uri",
-      "token_uri",
-      "auth_provider_x509_cert_url",
-      "client_x509_cert_url",
-      "universe_domain",
-    ]);
-    if (
-      value.type !== "service_account" ||
-      value.token_uri !== GOOGLE_TOKEN_ENDPOINT ||
-      (value.universe_domain !== undefined && value.universe_domain !== "googleapis.com")
-    ) {
-      throw refused("credential_backend_unsupported");
-    }
-    const subject = text(value.client_email);
-    const clientId = text(value.client_id);
-    const keyId = text(value.private_key_id);
-    if (
-      !/^[a-z0-9][a-z0-9._-]*@[a-z0-9][a-z0-9.-]*\.gserviceaccount\.com$/.test(subject) ||
-      !/^[0-9]{1,32}$/.test(clientId) ||
-      !/^[a-f0-9]{40}$/.test(keyId) ||
-      typeof value.private_key !== "string"
-    )
-      throw refused("credential_secret_invalid");
-    const privateKey = createPrivateKey(value.private_key);
-    if (
-      privateKey.asymmetricKeyType !== "rsa" ||
-      (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048
-    ) {
-      throw refused("credential_secret_invalid");
-    }
-    return { subject, clientId, keyId, privateKey };
-  } catch (error) {
-    if (error instanceof ProviderFault) throw error;
-    throw refused("credential_secret_invalid");
-  }
-}
-
 interface CredentialState {
   jobType: JobType;
   graph: GraphCredential | undefined;
@@ -441,61 +262,14 @@ async function loadCredentials(
   const input = record(config);
   if (mode && (jobType !== "teams_archive" || input.destination === undefined))
     throw refused("credential_config_unsupported");
-  let graph: GraphCredential | undefined;
-  let graphDestination: GraphCredential | undefined;
+  const material: CredentialMaterial = {};
   try {
     if (jobType === "teams_archive") {
-      const fields = record(input.graph);
-      allowedKeys(fields, ["tenantId", "clientId"]);
-      const secrets = record(input.secrets);
-      allowedKeys(
-        secrets,
-        input.destination === undefined
-          ? ["teams_graph_client_secret"]
-          : ["teams_graph_client_secret", "google_service_account"],
-      );
-      if (input.destination !== undefined) {
-        const destination = record(input.destination);
-        allowedKeys(destination, ["destDriveId", "destFolderId"]);
-        stableId(destination.destDriveId);
-        stableId(destination.destFolderId);
-      }
-      const tenantId = guid(fields.tenantId);
-      const clientId = guid(fields.clientId);
-      if (mode === "archive_verification") {
-        // Retention outlives the source tenant. Bind its configured identity,
-        // but neither open its secret nor authenticate it to read Drive copies.
-        graph = { tenantId, clientId, secret: null };
-      } else {
-        const loaded = await readCredentialFile(
-          fileReference(secrets.teams_graph_client_secret),
-          jobDirectory,
-        );
-        try {
-          // A single conventional trailing newline is not part of an Entra secret.
-          const secret = decodeUtf8(loaded.bytes).replace(/\r?\n$/, "");
-          if (!secret || secret.length > 4096 || /[\x00-\x20\x7f]/.test(secret))
-            throw refused("credential_secret_invalid");
-          graph = { tenantId, clientId, secret: Buffer.from(secret, "utf8") };
-        } finally {
-          loaded.bytes.fill(0);
-        }
-      }
-      let google: GoogleCredential | undefined;
-      if (input.destination !== undefined) {
-        const serviceAccount = await readCredentialFile(
-          fileReference(secrets.google_service_account),
-          jobDirectory,
-        );
-        try {
-          google = googleCredential(serviceAccount.bytes);
-        } finally {
-          serviceAccount.bytes.fill(0);
-        }
-      }
+      material.graph = await loadArchiveGraph(input, jobDirectory, readCredentialFile, mode);
+      const google = await loadArchiveGoogle(input, jobDirectory, readCredentialFile);
       return {
         jobType,
-        graph,
+        graph: material.graph,
         google,
         mappings: [],
         configPath: null,
@@ -504,40 +278,31 @@ async function loadCredentials(
       };
     }
     if (jobType !== "file_migration") throw refused("credential_config_unsupported");
-    // File jobs must authenticate Graph with the same source app as the worker.
+    // File jobs authenticate with the same explicit credentials as the worker.
     if (input.graph !== undefined) throw refused("credential_config_unsupported");
+    const pair = fileProviderPair(input);
     const mappings = parseMappings(input.mappings);
     const rclone = record(input.rclone);
-    allowedKeys(rclone, [
-      "config",
-      "sourceRemote",
-      "destinationRemote",
-      "sharepointDestinationRemote",
-    ]);
-    const sourceRemote = rclone.sourceRemote === undefined ? null : text(rclone.sourceRemote);
-    const destinationRemote = text(rclone.destinationRemote);
-    const sharepointDestinationRemote =
-      rclone.sharepointDestinationRemote === undefined
-        ? undefined
-        : text(rclone.sharepointDestinationRemote);
-    const names = [sourceRemote, destinationRemote, sharepointDestinationRemote].filter(
-      (name): name is string => !!name,
-    );
-    if (
-      names.some((name) => !REMOTE_NAME.test(name)) ||
-      new Set(names.map((name) => name.toLowerCase())).size !== names.length
-    )
-      throw refused("credential_config_invalid");
-    // Before manifest load, the route fixes which credentials the job needs.
-    const readsSharePoint = mappings.length
-      ? mappings.some((m) => m.sourceType !== "google_shared_drive")
-      : input.route === undefined || input.route === "sharepoint_library_to_shared_drive";
-    const writesSharePoint = mappings.length
-      ? mappings.some((m) => m.sourceType === "google_shared_drive")
-      : input.route === "shared_drive_to_sharepoint_library";
-    if (readsSharePoint && !sourceRemote) throw refused("credential_config_invalid");
-    // Exactly the jobs that write into SharePoint hold the SharePoint write credential.
-    if (writesSharePoint !== (sharepointDestinationRemote !== undefined))
+    allowedKeys(rclone, ["config", ...credentialBindings.map((binding) => binding.key)]);
+    const required = [
+      pair.source.credentials.remoteKey.source,
+      pair.destination.credentials.remoteKey.destination,
+    ];
+    const remotes = new Map<string, string>();
+    for (const binding of credentialBindings) {
+      const value = rclone[binding.key];
+      const needed = required.includes(binding.key);
+      if (value === undefined) {
+        if (needed) throw refused("credential_config_invalid");
+        continue;
+      }
+      if (!needed && !binding.allowUnused) throw refused("credential_config_invalid");
+      const name = text(value);
+      if (!REMOTE_NAME.test(name)) throw refused("credential_config_invalid");
+      remotes.set(binding.key, name);
+    }
+    const names = [...remotes.values()];
+    if (new Set(names.map((name) => name.toLowerCase())).size !== names.length)
       throw refused("credential_config_invalid");
     const loaded = await readCredentialFile(fileReference(rclone.config), jobDirectory);
     const sections = (() => {
@@ -548,294 +313,40 @@ async function loadCredentials(
       }
     })();
     try {
-      const source = sourceRemote ? sections.get(sourceRemote) : undefined;
-      const destination = sections.get(destinationRemote);
-      const sharepointDestination = sharepointDestinationRemote
-        ? sections.get(sharepointDestinationRemote)
-        : undefined;
-      if (
-        (sourceRemote && !source) ||
-        !destination ||
-        (sharepointDestinationRemote && !sharepointDestination) ||
-        sections.size !== names.length
-      )
+      if (sections.size !== names.length || names.some((name) => !sections.has(name)))
         throw refused("credential_backend_unsupported");
-      if (source) {
-        iniKeys(source, [
-          "type",
-          "client_id",
-          "client_secret",
-          "tenant",
-          "client_credentials",
-          "drive_id",
-          "drive_type",
-          "root_folder_id",
-          "access_scopes",
-          "region",
-          "disable_site_permission",
-          "expose_onenote_files",
-          // rclone writes its own client-credentials token cache back into the
-          // operator config the managed worker runs with, so a config that has
-          // ever executed a transfer contains this key. The engine never reads
-          // it: onboarding derives every credential from the explicit settings.
-          "token",
-        ]);
-        setting(source, "type", "onedrive", true);
-        setting(source, "client_credentials", "true", true);
-        setting(source, "drive_type", "documentLibrary", true);
-        setting(source, "region", "global");
-        setting(source, "disable_site_permission", "true");
-        setting(source, "expose_onenote_files", "true");
-        if (source.has("access_scopes")) {
-          const scopes = text(source.get("access_scopes")).split(/ +/).sort();
-          if (scopes.length !== 1 || !Object.hasOwn(FILE_ROLES, scopes[0]!))
-            throw refused("credential_permissions_invalid");
-        }
-        // Remote roots are optional seed settings: every pass overrides them with
-        // the approved mapping roots. A root the operator does set is still checked.
-        seedRoots(source, ["drive_id", "root_folder_id"]);
-        const tenantId = guid(source.get("tenant"));
-        const clientId = guid(source.get("client_id"));
-        graph = { tenantId, clientId, secret: clientSecret(source.get("client_secret")) };
+      for (const binding of credentialBindings) {
+        const name = remotes.get(binding.key);
+        if (!name) continue;
+        Object.assign(
+          material,
+          await binding.load(sections.get(name)!, { input, jobDirectory, readCredentialFile }),
+        );
       }
-      if (sharepointDestination) {
-        iniKeys(sharepointDestination, [
-          "type",
-          "client_id",
-          "client_secret",
-          "tenant",
-          "client_credentials",
-          "drive_id",
-          "drive_type",
-          "access_scopes",
-          "region",
-          "disable_site_permission",
-          "expose_onenote_files",
-          "token",
-        ]);
-        setting(sharepointDestination, "type", "onedrive", true);
-        setting(sharepointDestination, "client_credentials", "true", true);
-        setting(sharepointDestination, "drive_type", "documentLibrary", true);
-        setting(sharepointDestination, "region", "global");
-        setting(sharepointDestination, "disable_site_permission", "true");
-        setting(sharepointDestination, "expose_onenote_files", "true");
-        if (sharepointDestination.has("access_scopes")) {
-          const scopes = text(sharepointDestination.get("access_scopes")).split(/ +/).sort();
-          if (scopes.join(" ") !== Object.keys(SHAREPOINT_DESTINATION_ROLES).sort().join(" "))
-            throw refused("credential_permissions_invalid");
-        }
-        seedRoots(sharepointDestination, ["drive_id"]);
-        graphDestination = {
-          tenantId: guid(sharepointDestination.get("tenant")),
-          clientId: guid(sharepointDestination.get("client_id")),
-          secret: clientSecret(sharepointDestination.get("client_secret")),
-        };
-        if (
-          graph?.clientId === graphDestination.clientId &&
-          graph.tenantId === graphDestination.tenantId
-        )
-          throw refused("credential_permissions_invalid");
-      }
-      iniKeys(destination, [
-        "type",
-        "service_account_file",
-        "team_drive",
-        "root_folder_id",
-        "scope",
-        "skip_gdocs",
-        "skip_shortcuts",
-        "import_formats",
-        "metadata_owner",
-        "metadata_permissions",
-        "metadata_labels",
-      ]);
-      setting(destination, "type", "drive", true);
-      setting(destination, "scope", "drive");
-      setting(destination, "skip_gdocs", "true");
-      setting(destination, "skip_shortcuts", "true");
-      setting(destination, "import_formats", "");
-      setting(destination, "metadata_owner", "off");
-      setting(destination, "metadata_permissions", "off");
-      setting(destination, "metadata_labels", "off");
-      seedRoots(destination, ["team_drive", "root_folder_id"]);
-      const serviceAccount = await readCredentialFile(
-        fileReference({ resolver: "file", path: destination.get("service_account_file") }),
-        jobDirectory,
-      );
-      let google: GoogleCredential;
-      try {
-        google = googleCredential(serviceAccount.bytes);
-        if (input.impersonate === true) {
-          if (typeof input.subject !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(input.subject))
-            throw refused("credential_config_invalid");
-          google.delegatedSubject = input.subject;
-        }
-      } finally {
-        serviceAccount.bytes.fill(0);
-      }
+      assertSeparateSharePointApplications(material.graph, material.graphDestination);
       return {
         jobType,
-        graph,
-        ...(graphDestination ? { graphDestination } : {}),
-        ...(sharepointDestinationRemote ? { sharepointDestinationRemote } : {}),
-        google,
+        graph: material.graph,
+        ...(material.graphDestination ? { graphDestination: material.graphDestination } : {}),
+        ...(remotes.has("sharepointDestinationRemote")
+          ? { sharepointDestinationRemote: remotes.get("sharepointDestinationRemote")! }
+          : {}),
+        google: material.google,
         mappings,
         configPath: loaded.path,
-        sourceRemote,
-        destinationRemote,
+        sourceRemote: remotes.get("sourceRemote") ?? null,
+        destinationRemote: remotes.get("destinationRemote") ?? null,
       };
     } finally {
       for (const section of sections.values()) section.clear();
       sections.clear();
     }
   } catch (error) {
-    graph?.secret?.fill(0);
-    graphDestination?.secret?.fill(0);
+    material.graph?.secret?.fill(0);
+    material.graphDestination?.secret?.fill(0);
     if (error instanceof ProviderFault) throw error;
     throw refused("credential_config_invalid");
   }
-}
-
-async function tokenResponse(
-  url: string,
-  body: URLSearchParams,
-  signal: AbortSignal,
-  provider: "microsoft" | "google",
-): Promise<Record<string, unknown>> {
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      redirect: "error",
-      cache: "no-store",
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-      body,
-      signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw refused("credential_authentication_failed", { provider, status: response.status });
-    }
-    const reader = response.body?.getReader();
-    if (!reader) throw refused("credential_token_invalid", { provider });
-    const bytes = Buffer.alloc(MAX_TOKEN_BYTES);
-    let offset = 0;
-    try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        if (chunk.value.length > bytes.length - offset) {
-          chunk.value.fill(0);
-          throw refused("credential_token_invalid", { provider });
-        }
-        bytes.set(chunk.value, offset);
-        offset += chunk.value.length;
-        chunk.value.fill(0);
-      }
-      return record(JSON.parse(decodeUtf8(bytes.subarray(0, offset))));
-    } finally {
-      bytes.fill(0);
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
-    }
-  } catch (error) {
-    if (error instanceof ProviderFault) throw error;
-    throw refused("credential_authentication_failed", { provider });
-  } finally {
-    body.delete("client_secret");
-    body.delete("assertion");
-  }
-}
-
-function parseToken(value: Record<string, unknown>, requestedAt: number): Token {
-  const token = value.access_token;
-  const expiresIn = value.expires_in;
-  if (
-    typeof token !== "string" ||
-    token.length === 0 ||
-    token.length > MAX_TOKEN_BYTES ||
-    /\s|[\x00-\x1f\x7f]/.test(token) ||
-    typeof value.token_type !== "string" ||
-    value.token_type.toLowerCase() !== "bearer" ||
-    typeof expiresIn !== "number" ||
-    !Number.isFinite(expiresIn) ||
-    expiresIn <= 60 ||
-    expiresIn > 86400 ||
-    requestedAt + expiresIn * 1000 <= Date.now() + 60_000 ||
-    value.refresh_token !== undefined
-  )
-    throw refused("credential_token_invalid");
-  return {
-    value: token,
-    expiresAt: requestedAt + expiresIn * 1000,
-    authenticatedAt: new Date().toISOString(),
-    permissions: [],
-  };
-}
-
-function graphPermissions(
-  token: Token,
-  credential: GraphCredential,
-  jobType: JobType,
-  destination = false,
-): void {
-  // These are evidence from a fresh HTTPS token response, NOT local authorization.
-  // Microsoft Graph itself validates the token during the parent's real probes.
-  // An opaque token cannot provide the required granted-role evidence: fail closed.
-  const pieces = token.value.split(".");
-  if (pieces.length !== 3 || !pieces.every((piece) => /^[A-Za-z0-9_-]+$/.test(piece))) {
-    throw refused("credential_permission_evidence_unavailable");
-  }
-  let claims: Record<string, unknown>;
-  const bytes = Buffer.from(pieces[1]!, "base64url");
-  try {
-    claims = record(JSON.parse(decodeUtf8(bytes)));
-  } catch {
-    throw refused("credential_token_invalid");
-  } finally {
-    bytes.fill(0);
-  }
-  if (
-    claims.scp !== undefined ||
-    (claims.idtyp !== undefined && claims.idtyp !== "app") ||
-    typeof claims.tid !== "string" ||
-    claims.tid.toLowerCase() !== credential.tenantId ||
-    typeof (claims.appid ?? claims.azp) !== "string" ||
-    String(claims.appid ?? claims.azp).toLowerCase() !== credential.clientId ||
-    (claims.aud !== "https://graph.microsoft.com" &&
-      claims.aud !== "https://graph.microsoft.com/" &&
-      claims.aud !== "00000003-0000-0000-c000-000000000000") ||
-    typeof claims.exp !== "number" ||
-    !Number.isFinite(claims.exp) ||
-    claims.exp * 1000 <= Date.now() + 60_000 ||
-    (claims.nbf !== undefined &&
-      (typeof claims.nbf !== "number" || claims.nbf * 1000 > Date.now() + 60_000))
-  ) {
-    throw refused("credential_application_identity_invalid");
-  }
-  if (
-    !Array.isArray(claims.roles) ||
-    claims.roles.length === 0 ||
-    !claims.roles.every((role: unknown) => typeof role === "string")
-  ) {
-    throw refused("credential_permission_evidence_unavailable");
-  }
-  const roles = [...new Set<string>(claims.roles)].sort();
-  const permitted = destination
-    ? SHAREPOINT_DESTINATION_ROLES
-    : jobType === "file_migration"
-      ? FILE_ROLES
-      : ARCHIVE_ROLES;
-  if (
-    roles.some((role) => !Object.hasOwn(permitted, role)) ||
-    (jobType === "file_migration" && !destination && roles.length !== 1) ||
-    (jobType === "teams_archive" &&
-      !roles.includes("ChannelMessage.Read.All") &&
-      !roles.includes("Chat.Read.All"))
-  ) {
-    throw refused("credential_permissions_invalid");
-  }
-  token.permissions = roles;
-  token.expiresAt = Math.min(token.expiresAt, claims.exp * 1000);
 }
 
 /** Secrets and caches stay in the closure, never enumerable properties or errors. */
@@ -873,21 +384,13 @@ export async function createCredentialSession(input: {
     graphPending = (async () => {
       const current = active();
       if (!current.graph?.secret) throw refused("credential_graph_unavailable");
-      const requestedAt = Date.now();
-      const response = await tokenResponse(
-        `https://login.microsoftonline.com/${current.graph.tenantId}/oauth2/v2.0/token`,
-        new URLSearchParams({
-          grant_type: "client_credentials",
-          client_id: current.graph.clientId,
-          client_secret: current.graph.secret.toString("utf8"),
-          scope: GRAPH_SCOPE,
-        }),
+      const token = await requestGraphToken(
+        current.graph,
+        current.jobType,
+        false,
         signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
-        "microsoft",
       );
       active();
-      const token = parseToken(response, requestedAt);
-      graphPermissions(token, current.graph, current.jobType);
       graphCache = token;
       return token.value;
     })();
@@ -906,21 +409,13 @@ export async function createCredentialSession(input: {
       return destinationCache.value;
     if (destinationPending) return destinationPending;
     destinationPending = (async () => {
-      const requestedAt = Date.now();
-      const response = await tokenResponse(
-        `https://login.microsoftonline.com/${credential.tenantId}/oauth2/v2.0/token`,
-        new URLSearchParams({
-          grant_type: "client_credentials",
-          client_id: credential.clientId,
-          client_secret: credential.secret!.toString("utf8"),
-          scope: GRAPH_SCOPE,
-        }),
+      const token = await requestGraphToken(
+        credential,
+        "file_migration",
+        true,
         signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
-        "microsoft",
       );
       active();
-      const token = parseToken(response, requestedAt);
-      graphPermissions(token, credential, "file_migration", true);
       destinationCache = token;
       return token.value;
     })();
@@ -939,49 +434,13 @@ export async function createCredentialSession(input: {
     if (googlePending) return googlePending;
     googleCache = undefined;
     googlePending = (async () => {
-      try {
-        const requestedAt = Date.now();
-        const issuedAt = Math.floor(requestedAt / 1000);
-        const header = Buffer.from(
-          JSON.stringify({ alg: "RS256", typ: "JWT", kid: credential.keyId }),
-        ).toString("base64url");
-        const claims = Buffer.from(
-          JSON.stringify({
-            iss: credential.subject,
-            ...(credential.delegatedSubject ? { sub: credential.delegatedSubject } : {}),
-            scope: GOOGLE_SCOPE,
-            aud: GOOGLE_TOKEN_ENDPOINT,
-            iat: issuedAt,
-            exp: issuedAt + 3600,
-          }),
-        ).toString("base64url");
-        const signingInput = `${header}.${claims}`;
-        const signature = sign(
-          "RSA-SHA256",
-          Buffer.from(signingInput),
-          credential.privateKey,
-        ).toString("base64url");
-        const response = await tokenResponse(
-          GOOGLE_TOKEN_ENDPOINT,
-          new URLSearchParams({
-            grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-            assertion: `${signingInput}.${signature}`,
-          }),
-          signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
-          "google",
-        );
-        active();
-        const token = parseToken(response, requestedAt);
-        // RFC 6749 §5.1: absent scope means the granted scope equals the request.
-        if (response.scope !== undefined && response.scope !== GOOGLE_SCOPE)
-          throw refused("credential_permissions_invalid");
-        token.permissions = [GOOGLE_SCOPE];
-        googleCache = token;
-        return token.value;
-      } catch (error) {
-        if (error instanceof ProviderFault) throw error;
-        throw refused("credential_authentication_failed", { provider: "google" });
-      }
+      const token = await requestGoogleToken(
+        credential,
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+      );
+      active();
+      googleCache = token;
+      return token.value;
     })();
     try {
       return await googlePending;

@@ -5,7 +5,8 @@ import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createCredentialSession, ProviderFault, type CredentialSession } from "./credentials.ts";
+import { createCredentialSession, type CredentialSession } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import {
   createGraphTransport,
   fetchProvider,
@@ -77,7 +78,11 @@ const marker: ProvenanceRecord = {
 
 function effects(): FileEffects {
   return new FileEffects({
-    config: { mappings: [mapping] },
+    config: {
+      sourceProvider: "sharepoint",
+      destinationProvider: "google_shared_drive",
+      mappings: [mapping],
+    },
     session,
     graph,
     worker: {
@@ -155,7 +160,11 @@ for (const stalledCleanup of [false, true]) {
         },
       );
       const files = new FileEffects({
-        config: { mappings: [mapping] },
+        config: {
+          sourceProvider: "sharepoint",
+          destinationProvider: "google_shared_drive",
+          mappings: [mapping],
+        },
         session,
         graph: {
           ...graph,
@@ -247,7 +256,11 @@ for (const blocked of [
       },
     );
     const files = new FileEffects({
-      config: { mappings: [mapping] },
+      config: {
+        sourceProvider: "sharepoint",
+        destinationProvider: "google_shared_drive",
+        mappings: [mapping],
+      },
       session,
       graph: createGraphTransport(session),
       worker: {
@@ -320,7 +333,11 @@ test("SharePoint notebook sources retain their web URL and count sections across
     throw new Error(`Unexpected Graph request: ${url.pathname}`);
   });
   const files = new FileEffects({
-    config: { mappings: [mapping] },
+    config: {
+      sourceProvider: "sharepoint",
+      destinationProvider: "google_shared_drive",
+      mappings: [mapping],
+    },
     session,
     graph: createGraphTransport(session),
     worker: {
@@ -375,7 +392,11 @@ test("non-notebook sources have no section count and Google sources have no web 
     },
   };
   const sharepoint = new FileEffects({
-    config: { mappings: [mapping] },
+    config: {
+      sourceProvider: "sharepoint",
+      destinationProvider: "google_shared_drive",
+      mappings: [mapping],
+    },
     session,
     graph: createGraphTransport(session),
     worker,
@@ -394,7 +415,11 @@ test("non-notebook sources have no section count and Google sources have no web 
     ],
   );
   const google = new FileEffects({
-    config: { mappings: [{ ...mapping, sourceType: "google_shared_drive" }] },
+    config: {
+      sourceProvider: "google_shared_drive",
+      destinationProvider: "sharepoint",
+      mappings: [mapping],
+    },
     session,
     graph,
     worker,
@@ -421,6 +446,8 @@ test("libraries of one site resolve and list their shared root item ID within ea
   });
   const files = new FileEffects({
     config: {
+      sourceProvider: "sharepoint",
+      destinationProvider: "google_shared_drive",
       mappings: drives.map((driveId) => ({
         ...mapping,
         id: driveId,
@@ -458,7 +485,11 @@ test("delegated Google copies carry a per-mapping impersonation override", async
     return Response.json({ id: "source-root", name: "root", folder: {} });
   });
   const files = new FileEffects({
-    config: { mappings: [mapping] },
+    config: {
+      sourceProvider: "sharepoint",
+      destinationProvider: "google_shared_drive",
+      mappings: [mapping],
+    },
     session: { ...session, delegatedSubject: "files@example.com" },
     graph: createGraphTransport(session),
     worker: {
@@ -473,10 +504,12 @@ test("delegated Google copies carry a per-mapping impersonation override", async
     'destination,team_drive="shared-drive",root_folder_id="destination-root",impersonate="files@example.com":',
   );
   assert.equal(pass.source.fs, 'source,drive_id="source-drive",root_folder_id=,encoding=Slash:');
+  assert.equal(pass.source.ignoreSizeAndChecksum, true);
+  assert.equal(pass.destination.ignoreSizeAndChecksum, undefined);
 });
 
 test("reverse mappings read Google bytes as the actor and address SharePoint destinations by path", async (t) => {
-  const reverse = { ...mapping, sourceType: "google_shared_drive" as const };
+  const reverse = { ...mapping };
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const auth = new Headers(init?.headers).get("Authorization");
@@ -512,7 +545,11 @@ test("reverse mappings read Google bytes as the actor and address SharePoint des
     });
   });
   const files = new FileEffects({
-    config: { mappings: [reverse] },
+    config: {
+      sourceProvider: "google_shared_drive",
+      destinationProvider: "sharepoint",
+      mappings: [reverse],
+    },
     // A reverse-only job holds no SharePoint source app: only the destination app may reach Graph.
     session: {
       ...session,
@@ -548,6 +585,12 @@ test("reverse mappings read Google bytes as the actor and address SharePoint des
     pass.destination.fs,
     'sp-write,drive_id="shared-drive",encoding=Slash:Parent folder/Sub #folder',
   );
+  assert.equal(pass.source.ignoreSizeAndChecksum, undefined);
+  assert.equal(pass.destination.ignoreSizeAndChecksum, true);
+  await assert.rejects(files.discoverSharePoint(), {
+    code: "unsupported_route",
+    message: "Discovery requires a SharePoint source file job.",
+  });
   const file = await files.readSourceItem({ driveId: "source-drive", itemId: "source-file" });
   assert.equal(file?.driveId, "source-drive");
   assert.equal(
@@ -995,14 +1038,18 @@ function nestedSource(pathFromRoot: string, boundId: string) {
 
 test("source bytes are read by the drive-root path that is bound to the item", async () => {
   const nested = nestedSource("reports/Q4 2026/summary.txt", "stable-source");
-  const requested: Array<{ driveId: string; path: string }> = [];
+  const requested: Array<{ fs: string; path: string }> = [];
   const effects = new FileEffects({
-    config: { mappings: [mapping] },
+    config: {
+      sourceProvider: "sharepoint",
+      destinationProvider: "google_shared_drive",
+      mappings: [mapping],
+    },
     session,
     graph: nested.transport,
     worker: {
       async *read(input) {
-        requested.push({ driveId: input.driveId, path: input.path });
+        requested.push(input);
         yield Buffer.from("bytes");
       },
     },
@@ -1013,7 +1060,9 @@ test("source bytes are read by the drive-root path that is bound to the item", a
     .catch(() => undefined);
   await effects.readSourceItem(stable);
   assert.equal((await bytes(effects.openSourceContent(stable))).toString(), "bytes");
-  assert.deepEqual(requested, [{ driveId: "source-drive", path: "reports/Q4 2026/summary.txt" }]);
+  assert.deepEqual(requested, [
+    { fs: "source,drive_id='source-drive',encoding=Slash:", path: "reports/Q4 2026/summary.txt" },
+  ]);
 });
 
 test("a source path that resolves to another item refuses instead of serving its bytes", async () => {
@@ -1022,7 +1071,11 @@ test("a source path that resolves to another item refuses instead of serving its
   const nested = nestedSource("reports/Q4 2026/summary.txt", "some-other-item");
   let read = false;
   const effects = new FileEffects({
-    config: { mappings: [mapping] },
+    config: {
+      sourceProvider: "sharepoint",
+      destinationProvider: "google_shared_drive",
+      mappings: [mapping],
+    },
     session,
     graph: nested.transport,
     worker: {

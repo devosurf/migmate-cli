@@ -4,13 +4,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
 import { canonicalJson } from "../store/digest.ts";
 import { validateMappingTrees } from "../manifest.ts";
+import { fileProviderPair, type FileProviderId } from "../providers/adapters/capabilities.ts";
 import type {
   CheckResult,
   CreatedDrive,
   GoLiveAcknowledgment,
   GoLiveCheck,
   MappingPass,
-  UploadQuotaStop,
 } from "../types.ts";
 import { checkedBeforeGrant, goLiveCheckSettled, unsettledGoLiveCheck } from "../go-live.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
@@ -21,7 +21,6 @@ import type {
   FilePassRoot,
   DriveMembership,
   FileHashEntry,
-  GoogleAbout,
   ProviderPort,
   SourceEntry,
 } from "../providers/port.ts";
@@ -39,7 +38,7 @@ import {
 
 export interface FileMappingConfig {
   id: string;
-  sourceType?: "sharepoint" | "google_shared_drive";
+  sourceType?: FileProviderId;
   sourceDriveId: string;
   sourceItemId: string;
   sourceFolderPath?: string;
@@ -50,8 +49,9 @@ export interface FileMappingConfig {
 }
 
 export interface FileMigrationConfig {
-  /** Fixes the direction of every mapping; defaults to SharePoint → Google Shared Drive. */
-  route?: string;
+  /** One fixed provider pair for every mapping in the job. */
+  sourceProvider?: FileProviderId;
+  destinationProvider?: FileProviderId;
   mappings: FileMappingConfig[];
   impersonate?: boolean;
   subject?: string;
@@ -78,30 +78,6 @@ export function memberGrantTiming(
 }
 
 const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
-/** PDF, Office and HTML files SharePoint may rewrite on upload (docs/research/provider-byte-integrity.md). */
-const SHAREPOINT_REWRITTEN_TYPES =
-  /\.(pdf|docx?|docm|dotx?|dotm|xlsx?|xlsm|xlsb|xltx?|xltm|pptx?|pptm|potx?|potm|ppsx?|ppsm|html?|mhtml?)$/i;
-
-/** Google source drives the acting account cannot read, checked as that account. */
-export async function unreadableSourceDrives(
-  provider: Pick<ProviderPort, "readSharedDrive">,
-  mappings: { sourceType?: string; sourceDriveId: string }[],
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const unreadable: string[] = [];
-  for (const driveId of new Set(
-    mappings.filter((m) => m.sourceType === "google_shared_drive").map((m) => m.sourceDriveId),
-  )) {
-    try {
-      if ((await provider.readSharedDrive(driveId, signal))?.id !== driveId)
-        unreadable.push(driveId);
-    } catch {
-      signal?.throwIfAborted();
-      unreadable.push(driveId);
-    }
-  }
-  return unreadable;
-}
 
 type Phase = "plan" | "execute" | "verify";
 interface SourceView extends SourceEntry {
@@ -467,7 +443,11 @@ export async function* goLive(
             member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
         )
       )
-        expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
+        expected.push({
+          email: drive.creatorEmail,
+          type: "user",
+          role: fileProviderPair(ctx.config).destination.creatorRole,
+        });
       const membershipOnly = checkedBeforeGrant(drive);
       try {
         const actual = await ctx.provider.listDriveMembers(drive.driveId!);
@@ -1006,35 +986,6 @@ async function* copyMapping(
   }
 }
 
-function uploadQuotaStop(ctx: FileContext, error: string | null): UploadQuotaStop | undefined {
-  if (ctx.config.route === "shared_drive_to_sharepoint_library" || !error) return;
-  // Match v1.75.0's daily-upload heuristic, not every API rate limit or storage/file cap:
-  // https://github.com/rclone/rclone/blob/v1.75.0/backend/drive/drive.go#L945-L982
-  // FatalError preserves the Google error text; RC Job.finish serializes err.Error().
-  // "Received upload limit error" is a log prefix, NOT a new RC fatal-error message.
-  // https://github.com/rclone/rclone/blob/v1.75.0/fs/fserrors/error.go#L98-L130
-  // https://github.com/rclone/rclone/blob/v1.75.0/fs/rc/jobs/job.go#L55-L74
-  if (
-    !/\bquotaExceeded\b/.test(error) &&
-    !(
-      /\b(?:userRateLimitExceeded|rateLimitExceeded)\b/.test(error) &&
-      error.includes("User rate limit exceeded.")
-    )
-  )
-    return;
-  const hitAt = ctx.now();
-  return {
-    code: "upload_quota_exceeded",
-    hitAt: hitAt.toISOString(),
-    actingGoogleAccount:
-      ctx.actingGoogleAccount ?? (ctx.config.impersonate ? (ctx.config.subject ?? null) : null),
-    // Google documents a daily allowance, not a reset clock; this is not a retry fence.
-    // https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints
-    earliestResumeAt: new Date(hitAt.getTime() + 24 * 60 * 60 * 1000).toISOString(),
-    resumeTimeIsEstimate: true,
-  };
-}
-
 async function* copyPass(
   ctx: FileContext,
   mapping: FileMappingConfig,
@@ -1099,7 +1050,9 @@ async function* copyPass(
         transferringTruncated: transferringTotal > transferring.length,
       };
       const uploadQuota =
-        status.state === "failed" ? uploadQuotaStop(ctx, status.error) : undefined;
+        status.state === "failed"
+          ? fileProviderPair(ctx.config).destination.quotaStop?.(ctx, status.error)
+          : undefined;
       const evidenceChanged =
         pass.status !== status.state ||
         pass.error !== status.error ||
@@ -1136,7 +1089,7 @@ async function* copyPass(
       reference = undefined;
     }
     const message = interrupted ? null : error instanceof Error ? error.message : String(error);
-    const uploadQuota = uploadQuotaStop(ctx, message);
+    const uploadQuota = fileProviderPair(ctx.config).destination.quotaStop?.(ctx, message);
     pass = {
       ...pass,
       status: interrupted ? "interrupted" : "failed",
@@ -1182,7 +1135,11 @@ async function membershipUnit(
         member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
     )
   )
-    expected.push({ email: drive.creatorEmail, type: "user", role: "organizer" });
+    expected.push({
+      email: drive.creatorEmail,
+      type: "user",
+      role: fileProviderPair(ctx.config).destination.creatorRole,
+    });
   const actual = await ctx.provider.listDriveMembers(drive.driveId);
   if (
     JSON.stringify(membershipIdentities(expected)) === JSON.stringify(membershipIdentities(actual))
@@ -1237,6 +1194,7 @@ function goLiveBaseline(
  */
 async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
   let done = 0;
+  const destinationAdapter = fileProviderPair(ctx.config).destination;
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
     if (ctx.stage === "final" && settleState(ctx, mapping)?.outcome !== "settled")
@@ -1252,7 +1210,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
       throw new FilePlanRevisionRequiredError();
     const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
     const hash = ctx.config.options?.verificationMode === "hash";
-    const primaryHash = mapping.sourceType === "google_shared_drive" ? "quickxor" : "sha256";
+    const primaryHash = destinationAdapter.hashType;
     const list = (
       side: FilePassRoot,
       hashType: "quickxor" | "sha256" | "md5",
@@ -1383,9 +1341,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         const hashMismatch =
           hash && !!sourceHash && !!destinationHash && sourceHash !== destinationHash;
         const rewritten =
-          mapping.sourceType === "google_shared_drive" &&
-          SHAREPOINT_REWRITTEN_TYPES.test(source.path) &&
-          (sizeMismatch || hashMismatch);
+          destinationAdapter.rewritesPath(source.path) && (sizeMismatch || hashMismatch);
         if (rewritten) codes.push("destination_rewrote_file");
         else {
           if (sizeMismatch) codes.push("size_mismatch");
@@ -1535,70 +1491,10 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
 }
 
 async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
+  const pair = fileProviderPair(ctx.config);
+  for (const adapter of [pair.source, pair.destination])
+    if (adapter.preflight && !(yield* adapter.preflight(ctx))) return;
   const provider = ctx.provider;
-  let about: GoogleAbout | undefined;
-  try {
-    about = await provider.googleAbout(ctx.signal);
-  } catch {
-    ctx.signal?.throwIfAborted();
-    // An inaccessible identity cannot be bound into the plan.
-  }
-  const actualSubject = about?.user.emailAddress ?? null;
-  if (ctx.config.impersonate) {
-    const pass = actualSubject === ctx.config.subject;
-    yield {
-      id: "google.delegation",
-      title: "Google acts as the configured subject",
-      status: pass ? "pass" : "fail",
-      ...(pass ? {} : { code: "preflight_failed" }),
-      evidence: {
-        subject: ctx.config.subject,
-        actualSubject,
-        ...(!pass
-          ? {
-              fix: "Authorize domain-wide delegation for the service account's numeric client id with only https://www.googleapis.com/auth/drive, and use an ordinary non-admin subject.",
-            }
-          : {}),
-      },
-    };
-    if (!pass) return;
-  } else {
-    const pass = Boolean(actualSubject);
-    yield {
-      id: "google.actingAccount",
-      title: "Google identifies the acting service account",
-      status: pass ? "pass" : "fail",
-      ...(pass ? {} : { code: "preflight_failed" }),
-      evidence: { actualSubject },
-    };
-    if (!pass) return;
-  }
-  if (ctx.config.mappings.some((m) => m.createDrive)) {
-    const canCreateDrives = about?.canCreateDrives ?? false;
-    yield {
-      id: "google.canCreateDrives",
-      title: "Acting account may create Shared Drives",
-      status: canCreateDrives ? "pass" : "fail",
-      ...(canCreateDrives ? {} : { code: "preflight_failed" }),
-      evidence: { canCreateDrives },
-    };
-    if (!canCreateDrives) return;
-  }
-  const unreadable = await unreadableSourceDrives(provider, ctx.config.mappings, ctx.signal);
-  if (unreadable.length) {
-    yield {
-      id: "google.source_drives",
-      title: "Acting account can read every source Shared Drive",
-      status: "fail",
-      code: "preflight_failed",
-      evidence: {
-        unreadableSourceDrives: unreadable,
-        subject: ctx.config.subject ?? null,
-        fix: "Add the acting account as a member of every named source Shared Drive.",
-      },
-    };
-    return;
-  }
   for (const mapping of ctx.config.mappings) {
     ctx.signal?.throwIfAborted();
     const source = await provider.resolveSourceRoot({ ...mapping, ...abortable(ctx) });
@@ -1711,7 +1607,15 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         grants: ctx.resume.memberGrants ?? [],
       }),
     };
-  yield { title: "Route", format: "text", body: JSON.stringify({ route: ctx.config.route }) };
+  const pair = fileProviderPair(ctx.config);
+  yield {
+    title: "Provider pair",
+    format: "text",
+    body: JSON.stringify({
+      sourceProvider: pair.source.id,
+      destinationProvider: pair.destination.id,
+    }),
+  };
   yield {
     title: "Acting Google account",
     format: "text",

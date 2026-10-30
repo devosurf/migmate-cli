@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { TESTED_TRANSFER_VERSIONS, TRANSFER_VERSION } from "../../versions.ts";
-import { ProviderFault } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import type {
   CopyPassHandle,
   CopyPassReference,
@@ -46,10 +46,7 @@ export interface TransferSupervisor extends FilePassProvider {
   transferWorkerVersion: ProviderPort["transferWorkerVersion"];
   call<T>(socketPath: string, method: string, input?: Record<string, unknown>): Promise<T>;
   openRead(socketPath: string, remotePath: string): AsyncIterable<Uint8Array>;
-  openSource(
-    socketPath: string,
-    input: { remote: string; driveId: string; path: string },
-  ): AsyncIterable<Uint8Array>;
+  openRoot(socketPath: string, input: { fs: string; path: string }): AsyncIterable<Uint8Array>;
   close(): Promise<void>;
 }
 
@@ -394,14 +391,6 @@ function objectPath(path: string): string {
 
 function remoteName(name: string): void {
   if (!REMOTE_NAME.test(name)) throw fail("preflight_failed", "named_remote_required");
-}
-
-function quoteOption(value: string): string {
-  // The serve route's bracket parser runs after URL decoding, so bracket values
-  // cannot be made safe merely by percent encoding. Graph IDs do not require them.
-  if (!value || /[\[\]\u0000-\u001f\u007f/\\]/u.test(value))
-    throw fail("preflight_failed", "source_identity_invalid");
-  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function literalFilterPath(path: string): string {
@@ -1008,7 +997,7 @@ export function createTransferSupervisor(options: {
         }
         const difference = file.modified - previous.modified;
         const sizeDiffers =
-          input.destination.kind !== "sharepoint" &&
+          !input.destination.ignoreSizeAndChecksum &&
           file.size >= 0 &&
           previous.size >= 0 &&
           file.size !== previous.size;
@@ -1179,7 +1168,7 @@ export function createTransferSupervisor(options: {
             Transfers: input.transfers,
             Metadata: true,
             ...(input.mode === "mirror" ? { MaxDelete: input.deleteLimit } : {}),
-            ...(input.destination.kind === "sharepoint"
+            ...(input.destination.ignoreSizeAndChecksum
               ? { IgnoreSize: true, IgnoreChecksum: true }
               : {}),
           },
@@ -1286,14 +1275,8 @@ export function createTransferSupervisor(options: {
       remoteName(remote);
       yield* stream(owned(socketPath), `${remote}:`, remotePath.slice(colon + 1));
     },
-    async *openSource(socketPath, input) {
-      remoteName(input.remote);
-      // rclone's onedrive backend applies root_folder_id to listings but not to
-      // object lookup, which resolves from the drive root: an id-rooted fs
-      // answers 404 for its own children and serves a same-named object at the
-      // root instead. The drive is still pinned by id, never by remote default.
-      const fs = `${input.remote},drive_id=${quoteOption(input.driveId)},encoding=Slash:`;
-      yield* stream(owned(socketPath), fs, input.path);
+    async *openRoot(socketPath, input) {
+      yield* stream(owned(socketPath), input.fs, input.path);
     },
     async close() {
       closed = true;

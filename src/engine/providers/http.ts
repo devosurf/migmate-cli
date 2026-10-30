@@ -1,7 +1,8 @@
 import { isIP } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ReadableStreamReadResult } from "node:stream/web";
-import { ProviderFault, type CredentialSession } from "./credentials.ts";
+import type { CredentialSession } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 
 export function retryableStatus(status: number | undefined): boolean {
   return (

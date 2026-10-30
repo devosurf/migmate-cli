@@ -1,0 +1,765 @@
+{
+  "writtenBy": "a315893",
+  "config": "route = \"sharepoint_library_to_shared_drive\"\n\n[options]\nmemberGrants = \"after_verification\"\n",
+  "status": {
+    "jobId": "fe5a301e-fef9-489b-8ef2-56a04efd9d8a",
+    "planDigest": "e905fa2f82b6d1c3d77c1139f4653cba72615a9c12910e7b8ad3673eae6c70ce",
+    "verificationDigest": "c40e8b263886875c3e326bd05e2f7f490cb538423ff4989d222bafda5d1af72e",
+    "currentApproval": {
+      "approvalDigest": "ac6e6761e2ff976cae1c30d104253f76367537f8a4720ccb6198e20934242139",
+      "approver": "historical-operator",
+      "at": "2026-10-29T12:00:00.000Z",
+      "identityAssurance": "declared_unverified",
+      "mode": "unattended",
+      "planDigest": "e905fa2f82b6d1c3d77c1139f4653cba72615a9c12910e7b8ad3673eae6c70ce",
+      "revision": 1
+    },
+    "closeAuthorization": {
+      "approver": "historical-operator",
+      "at": "2026-10-29T12:00:00.000Z",
+      "evidenceDigest": "7ee756054564663d2debf4b92fd33f1e0691de54683cfdfcefb4cc72c7815826",
+      "identityAssurance": "declared_unverified",
+      "mode": "unattended"
+    },
+    "goLiveAcknowledgments": [
+      {
+        "approver": "historical-operator",
+        "at": "2026-10-29T12:00:00.000Z",
+        "authorityDigest": "7ee756054564663d2debf4b92fd33f1e0691de54683cfdfcefb4cc72c7815826",
+        "checks": [
+          {
+            "check": {
+              "at": "2026-10-29T12:00:00.000Z",
+              "check": "drive_membership_mismatch",
+              "evidence": {
+                "actual": [
+                  {
+                    "email": "operator@example.com",
+                    "role": "organizer",
+                    "type": "user"
+                  },
+                  {
+                    "email": "unexpected@example.com",
+                    "role": "writer",
+                    "type": "user"
+                  },
+                  {
+                    "email": "members@example.com",
+                    "role": "writer",
+                    "type": "group"
+                  }
+                ],
+                "expected": [
+                  {
+                    "email": "members@example.com",
+                    "role": "writer",
+                    "type": "group"
+                  },
+                  {
+                    "email": "operator@example.com",
+                    "role": "organizer",
+                    "type": "user"
+                  }
+                ]
+              },
+              "status": "failed"
+            },
+            "consequence": "Membership differs from the approved plan. Acknowledgment accepts the recorded missing, extra or differently privileged access; it does not repair permissions.",
+            "driveId": "drive-1",
+            "mappingId": "mapping",
+            "revision": 1,
+            "startedAt": "2026-10-29T12:00:00.000Z",
+            "verificationAt": "2026-10-29T12:00:00.000Z"
+          }
+        ],
+        "evidenceDigest": "2c608750c5e5da9e93f81b414b98d9c30505a9ce4978b785c78acf16ed750440",
+        "identityAssurance": "declared_unverified",
+        "mode": "unattended",
+        "rationale": "Historical membership difference explicitly accepted"
+      }
+    ],
+    "closeReview": {
+      "evidenceDigest": "7ee756054564663d2debf4b92fd33f1e0691de54683cfdfcefb4cc72c7815826",
+      "authorized": true,
+      "consequences": [
+        "Grant the approved destination members access. Transfers become permanently fenced.",
+        "mapping: Historical drive \u2014 members@example.com (group), role writer, timing after_verification.",
+        "Every affected destination must pass drift checking before any new fence or grant. Post-grant checks must pass or be explicitly acknowledged, and the final report must succeed. Access is never revoked automatically."
+      ]
+    },
+    "goLiveReview": null,
+    "createdDrives": [
+      {
+        "creatorEmail": "operator@example.com",
+        "driveId": "drive-1",
+        "goLive": {
+          "check": {
+            "at": "2026-10-29T12:00:00.000Z",
+            "check": "drive_membership_mismatch",
+            "evidence": {
+              "actual": [
+                {
+                  "email": "operator@example.com",
+                  "role": "organizer",
+                  "type": "user"
+                },
+                {
+                  "email": "unexpected@example.com",
+                  "role": "writer",
+                  "type": "user"
+                },
+                {
+                  "email": "members@example.com",
+                  "role": "writer",
+                  "type": "group"
+                }
+              ],
+              "expected": [
+                {
+                  "email": "members@example.com",
+                  "role": "writer",
+                  "type": "group"
+                },
+                {
+                  "email": "operator@example.com",
+                  "role": "organizer",
+                  "type": "user"
+                }
+              ]
+            },
+            "status": "failed"
+          },
+          "revision": 1,
+          "startedAt": "2026-10-29T12:00:00.000Z",
+          "verificationAt": "2026-10-29T12:00:00.000Z"
+        },
+        "intentAt": "2026-10-29T12:00:00.000Z",
+        "mappingId": "mapping",
+        "name": "Historical drive",
+        "preGrantCheck": {
+          "check": {
+            "at": "2026-10-29T12:00:00.000Z",
+            "check": "destination",
+            "evidence": {
+              "expectedDestinationDigest": "b9f1994f07e56fd7ff27c873eaa7d59203d57353dc874000c1fbf843808ef31c",
+              "observedDestinationDigest": "b9f1994f07e56fd7ff27c873eaa7d59203d57353dc874000c1fbf843808ef31c"
+            },
+            "status": "passed"
+          },
+          "revision": 1,
+          "verificationAt": "2026-10-29T12:00:00.000Z"
+        },
+        "provenance": {
+          "kind": "create_response"
+        },
+        "requestId": "907c00861d95513afc94fb55d43f0272b080b6a78f319e2d9226ee9ad466b0a1",
+        "verifiedDestination": {
+          "digest": "b9f1994f07e56fd7ff27c873eaa7d59203d57353dc874000c1fbf843808ef31c",
+          "hashType": "sha256",
+          "md5": false,
+          "revision": 1
+        }
+      }
+    ],
+    "incompleteClose": {
+      "accessMayExist": true,
+      "transfersFenced": true,
+      "checksPassed": false,
+      "reporting": "unfinished",
+      "nextAction": "close",
+      "checksSettled": true
+    }
+  },
+  "tables": {
+    "job": [
+      {
+        "id": "fe5a301e-fef9-489b-8ef2-56a04efd9d8a",
+        "type": "file_migration",
+        "state": "verified",
+        "schema_version": 6,
+        "migmate_version": "0.3.5",
+        "label": null,
+        "created_at": "2026-10-29T12:00:00.000Z",
+        "plan_revision": 1,
+        "verification_revision": 2,
+        "last_checkpoint": "mapping",
+        "host_id": "1d62bdf7-b487-49f4-8096-b11130e81cbc",
+        "execution_completed": 1
+      }
+    ],
+    "plan_revision": [
+      {
+        "rev": 1,
+        "plan_digest": "e905fa2f82b6d1c3d77c1139f4653cba72615a9c12910e7b8ad3673eae6c70ce",
+        "inputs_digest": "676c07f5f1253908e3e158c6dbc7b7e28402f35d1b058fe2c2c2280852d8c6c7",
+        "created_at": "2026-10-29T12:00:00.000Z",
+        "source_inventory_at": "",
+        "evidence": "{\"actingGoogleAccount\":\"operator@example.com\",\"binding\":{\"applicationIdentity\":\"scripted-application\",\"binaryPath\":\"\",\"binarySha256\":\"\",\"binaryVersion\":\"\"},\"reportSections\":[{\"body\":\"unstaged\",\"format\":\"text\",\"title\":\"Migration stage\"},{\"body\":\"Approval binds mapping roots, drives, members and options, not a per-file inventory.\\nListing verification compares paths and sizes, folders included; it compares no content.\\nVersion history, list-item fields, retention labels and permissions are not copied. OneNote notebooks are copied as their section files.\",\"format\":\"text\",\"title\":\"Approval and verification\"},{\"body\":\"{\\\"scope\\\":\\\"full\\\",\\\"mappings\\\":[]}\",\"format\":\"text\",\"title\":\"Verification scope\"},{\"body\":\"[{\\\"mappingId\\\":\\\"mapping\\\",\\\"members\\\":[{\\\"email\\\":\\\"members@example.com\\\",\\\"role\\\":\\\"writer\\\",\\\"type\\\":\\\"group\\\"}],\\\"name\\\":\\\"Historical drive\\\"}]\",\"format\":\"text\",\"title\":\"Shared Drives to create\"},{\"body\":\"{\\\"route\\\":\\\"sharepoint_library_to_shared_drive\\\"}\",\"format\":\"text\",\"title\":\"Route\"},{\"body\":\"Acting account: operator@example.com (service account; impersonation off).\",\"format\":\"text\",\"title\":\"Acting Google account\"},{\"body\":\"{\\\"verificationMode\\\":\\\"listing\\\"}\",\"format\":\"text\",\"title\":\"Verification mode\"},{\"body\":\"{\\\"mirror\\\":false,\\\"deleteLimit\\\":null}\",\"format\":\"text\",\"title\":\"Mirror\"},{\"body\":\"{\\\"memberGrants\\\":\\\"after_verification\\\",\\\"authorization\\\":\\\"Close authorizes go-live after verification and accepted findings; transfers are permanently fenced before grants.\\\",\\\"mirrorWarnings\\\":[],\\\"isolation\\\":\\\"External grants, administrators and group membership are outside Migmate's control; restrict other access before claiming staged isolation.\\\"}\",\"format\":\"text\",\"title\":\"Member grants\"},{\"body\":\"{\\\"accessMayExist\\\":false,\\\"transfersFenced\\\":false,\\\"checksPassed\\\":false,\\\"checksSettled\\\":false,\\\"preGrantChecks\\\":[],\\\"acknowledgments\\\":[],\\\"status\\\":\\\"Go-live has not started. Migmate has granted no member access.\\\",\\\"resolution\\\":\\\"Before go-live, failed or unavailable destination checks require repair and reverification; they cannot be acknowledged. After access starts, retry or explicitly acknowledge reviewed failed checks, then retry close; do not run another copy or mirror pass. Acknowledgment preserves failures, and unavailable checks remain unverified.\\\",\\\"drives\\\":[],\\\"driftScope\\\":\\\"Destination file paths, sizes, stored hashes and identities plus folder paths are compared with verification. This is a point-in-time listing check, not downloaded content, inherited permissions, effective group membership, or a future-write guarantee.\\\"}\",\"format\":\"text\",\"title\":\"Go-live\"},{\"body\":\"{\\\"mappingsInFlight\\\":2,\\\"transfersPerMapping\\\":4}\",\"format\":\"text\",\"title\":\"Copy concurrency\"},{\"body\":\"Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.\\nDestination-only content and source-deleted prior copies are retained, never deleted.\\nrclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories, which keep modification times only.\\nCopy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.\\nVerification is a timestamped point-in-time statement, not a source freeze or future-drift guarantee. Settled confirmation is recorded separately.\",\"format\":\"text\",\"title\":\"File migration fidelity and retention\"},{\"body\":\"Transfer-binary behaviour is pinned to one exact version, recorded with its path and digest in the preflight evidence; any other version refuses.\\nThe source grant is proven sufficient for the Graph calls this release makes, not promised for wider use: a call needing more permission refuses rather than degrading to a partial result.\",\"format\":\"text\",\"title\":\"Measured release limits\"},{\"body\":\"{\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceItemId\\\":\\\"source-root\\\",\\\"revision\\\":1,\\\"passes\\\":[{\\\"endedAt\\\":null,\\\"error\\\":null,\\\"executeId\\\":null,\\\"group\\\":null,\\\"jobid\\\":null,\\\"lastStats\\\":null,\\\"mappingId\\\":\\\"mapping\\\",\\\"mode\\\":\\\"copy\\\",\\\"passNumber\\\":1,\\\"revision\\\":1,\\\"startedAt\\\":null,\\\"status\\\":\\\"pending\\\"}]}\",\"format\":\"text\",\"title\":\"Mapping mapping\"}]}",
+        "payload": "{\"createdAt\":\"2026-10-29T12:00:00.000Z\",\"disclosures\":[\"unstaged\",\"Approval binds mapping roots, drives, members and options, not a per-file inventory.\",\"Listing verification compares paths and sizes, folders included; it compares no content.\",\"Version history, list-item fields, retention labels and permissions are not copied. OneNote notebooks are copied as their section files.\",\"Acting account: operator@example.com (service account; impersonation off).\",\"Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.\",\"Destination-only content and source-deleted prior copies are retained, never deleted.\",\"rclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories, which keep modification times only.\",\"Copy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.\",\"Verification is a timestamped point-in-time statement, not a source freeze or future-drift guarantee. Settled confirmation is recorded separately.\",\"Transfer-binary behaviour is pinned to one exact version, recorded with its path and digest in the preflight evidence; any other version refuses.\",\"The source grant is proven sufficient for the Graph calls this release makes, not promised for wider use: a call needing more permission refuses rather than degrading to a partial result.\"],\"evidence\":{\"actingGoogleAccount\":\"operator@example.com\",\"binding\":{\"applicationIdentity\":\"scripted-application\",\"binaryPath\":\"\",\"binarySha256\":\"\",\"binaryVersion\":\"\"},\"reportSections\":[{\"body\":\"unstaged\",\"format\":\"text\",\"title\":\"Migration stage\"},{\"body\":\"Approval binds mapping roots, drives, members and options, not a per-file inventory.\\nListing verification compares paths and sizes, folders included; it compares no content.\\nVersion history, list-item fields, retention labels and permissions are not copied. OneNote notebooks are copied as their section files.\",\"format\":\"text\",\"title\":\"Approval and verification\"},{\"body\":\"{\\\"scope\\\":\\\"full\\\",\\\"mappings\\\":[]}\",\"format\":\"text\",\"title\":\"Verification scope\"},{\"body\":\"[{\\\"mappingId\\\":\\\"mapping\\\",\\\"members\\\":[{\\\"email\\\":\\\"members@example.com\\\",\\\"role\\\":\\\"writer\\\",\\\"type\\\":\\\"group\\\"}],\\\"name\\\":\\\"Historical drive\\\"}]\",\"format\":\"text\",\"title\":\"Shared Drives to create\"},{\"body\":\"{\\\"route\\\":\\\"sharepoint_library_to_shared_drive\\\"}\",\"format\":\"text\",\"title\":\"Route\"},{\"body\":\"Acting account: operator@example.com (service account; impersonation off).\",\"format\":\"text\",\"title\":\"Acting Google account\"},{\"body\":\"{\\\"verificationMode\\\":\\\"listing\\\"}\",\"format\":\"text\",\"title\":\"Verification mode\"},{\"body\":\"{\\\"mirror\\\":false,\\\"deleteLimit\\\":null}\",\"format\":\"text\",\"title\":\"Mirror\"},{\"body\":\"{\\\"memberGrants\\\":\\\"after_verification\\\",\\\"authorization\\\":\\\"Close authorizes go-live after verification and accepted findings; transfers are permanently fenced before grants.\\\",\\\"mirrorWarnings\\\":[],\\\"isolation\\\":\\\"External grants, administrators and group membership are outside Migmate's control; restrict other access before claiming staged isolation.\\\"}\",\"format\":\"text\",\"title\":\"Member grants\"},{\"body\":\"{\\\"accessMayExist\\\":false,\\\"transfersFenced\\\":false,\\\"checksPassed\\\":false,\\\"checksSettled\\\":false,\\\"preGrantChecks\\\":[],\\\"acknowledgments\\\":[],\\\"status\\\":\\\"Go-live has not started. Migmate has granted no member access.\\\",\\\"resolution\\\":\\\"Before go-live, failed or unavailable destination checks require repair and reverification; they cannot be acknowledged. After access starts, retry or explicitly acknowledge reviewed failed checks, then retry close; do not run another copy or mirror pass. Acknowledgment preserves failures, and unavailable checks remain unverified.\\\",\\\"drives\\\":[],\\\"driftScope\\\":\\\"Destination file paths, sizes, stored hashes and identities plus folder paths are compared with verification. This is a point-in-time listing check, not downloaded content, inherited permissions, effective group membership, or a future-write guarantee.\\\"}\",\"format\":\"text\",\"title\":\"Go-live\"},{\"body\":\"{\\\"mappingsInFlight\\\":2,\\\"transfersPerMapping\\\":4}\",\"format\":\"text\",\"title\":\"Copy concurrency\"},{\"body\":\"Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.\\nDestination-only content and source-deleted prior copies are retained, never deleted.\\nrclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories, which keep modification times only.\\nCopy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.\\nVerification is a timestamped point-in-time statement, not a source freeze or future-drift guarantee. Settled confirmation is recorded separately.\",\"format\":\"text\",\"title\":\"File migration fidelity and retention\"},{\"body\":\"Transfer-binary behaviour is pinned to one exact version, recorded with its path and digest in the preflight evidence; any other version refuses.\\nThe source grant is proven sufficient for the Graph calls this release makes, not promised for wider use: a call needing more permission refuses rather than degrading to a partial result.\",\"format\":\"text\",\"title\":\"Measured release limits\"},{\"body\":\"{\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceItemId\\\":\\\"source-root\\\",\\\"revision\\\":1,\\\"passes\\\":[{\\\"endedAt\\\":null,\\\"error\\\":null,\\\"executeId\\\":null,\\\"group\\\":null,\\\"jobid\\\":null,\\\"lastStats\\\":null,\\\"mappingId\\\":\\\"mapping\\\",\\\"mode\\\":\\\"copy\\\",\\\"passNumber\\\":1,\\\"revision\\\":1,\\\"startedAt\\\":null,\\\"status\\\":\\\"pending\\\"}]}\",\"format\":\"text\",\"title\":\"Mapping mapping\"}]},\"inputs\":{\"archive\":\"null\",\"configuration\":\"{\\\"manifestDigest\\\":\\\"84c13681c49ba3d62c7a0720f1aa22d4274d7e9d94b561f3862f1f2dc585dda2\\\",\\\"mappings\\\":[{\\\"createDrive\\\":{\\\"members\\\":[{\\\"email\\\":\\\"members@example.com\\\",\\\"role\\\":\\\"writer\\\",\\\"type\\\":\\\"group\\\"}],\\\"name\\\":\\\"Historical drive\\\"},\\\"id\\\":\\\"mapping\\\",\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceFolderPath\\\":\\\"\\\",\\\"sourceItemId\\\":\\\"source-root\\\"}],\\\"options\\\":{\\\"memberGrants\\\":\\\"after_verification\\\"},\\\"route\\\":\\\"sharepoint_library_to_shared_drive\\\"}\",\"identity\":\"{\\\"applicationIdentity\\\":\\\"scripted-application\\\",\\\"binarySha256\\\":\\\"\\\",\\\"binaryVersion\\\":\\\"\\\"}\",\"scope\":\"[\\\"{\\\\\\\"fileScope\\\\\\\":{\\\\\\\"mapOnly\\\\\\\":true},\\\\\\\"mappingId\\\\\\\":\\\\\\\"mapping\\\\\\\"}\\\"]\"},\"inputsDigest\":\"676c07f5f1253908e3e158c6dbc7b7e28402f35d1b058fe2c2c2280852d8c6c7\",\"manifestDigest\":\"84c13681c49ba3d62c7a0720f1aa22d4274d7e9d94b561f3862f1f2dc585dda2\",\"planDigest\":\"e905fa2f82b6d1c3d77c1139f4653cba72615a9c12910e7b8ad3673eae6c70ce\",\"revision\":1,\"rowCount\":1,\"sections\":[{\"body\":\"unstaged\",\"id\":\"section-0\",\"title\":\"Migration stage\"},{\"body\":\"Approval binds mapping roots, drives, members and options, not a per-file inventory.\\nListing verification compares paths and sizes, folders included; it compares no content.\\nVersion history, list-item fields, retention labels and permissions are not copied. OneNote notebooks are copied as their section files.\",\"id\":\"section-1\",\"title\":\"Approval and verification\"},{\"body\":\"{\\\"scope\\\":\\\"full\\\",\\\"mappings\\\":[]}\",\"id\":\"section-2\",\"title\":\"Verification scope\"},{\"body\":\"[{\\\"mappingId\\\":\\\"mapping\\\",\\\"members\\\":[{\\\"email\\\":\\\"members@example.com\\\",\\\"role\\\":\\\"writer\\\",\\\"type\\\":\\\"group\\\"}],\\\"name\\\":\\\"Historical drive\\\"}]\",\"id\":\"section-3\",\"title\":\"Shared Drives to create\"},{\"body\":\"{\\\"route\\\":\\\"sharepoint_library_to_shared_drive\\\"}\",\"id\":\"section-4\",\"title\":\"Route\"},{\"body\":\"Acting account: operator@example.com (service account; impersonation off).\",\"id\":\"section-5\",\"title\":\"Acting Google account\"},{\"body\":\"{\\\"verificationMode\\\":\\\"listing\\\"}\",\"id\":\"section-6\",\"title\":\"Verification mode\"},{\"body\":\"{\\\"mirror\\\":false,\\\"deleteLimit\\\":null}\",\"id\":\"section-7\",\"title\":\"Mirror\"},{\"body\":\"{\\\"memberGrants\\\":\\\"after_verification\\\",\\\"authorization\\\":\\\"Close authorizes go-live after verification and accepted findings; transfers are permanently fenced before grants.\\\",\\\"mirrorWarnings\\\":[],\\\"isolation\\\":\\\"External grants, administrators and group membership are outside Migmate's control; restrict other access before claiming staged isolation.\\\"}\",\"id\":\"section-8\",\"title\":\"Member grants\"},{\"body\":\"{\\\"accessMayExist\\\":false,\\\"transfersFenced\\\":false,\\\"checksPassed\\\":false,\\\"checksSettled\\\":false,\\\"preGrantChecks\\\":[],\\\"acknowledgments\\\":[],\\\"status\\\":\\\"Go-live has not started. Migmate has granted no member access.\\\",\\\"resolution\\\":\\\"Before go-live, failed or unavailable destination checks require repair and reverification; they cannot be acknowledged. After access starts, retry or explicitly acknowledge reviewed failed checks, then retry close; do not run another copy or mirror pass. Acknowledgment preserves failures, and unavailable checks remain unverified.\\\",\\\"drives\\\":[],\\\"driftScope\\\":\\\"Destination file paths, sizes, stored hashes and identities plus folder paths are compared with verification. This is a point-in-time listing check, not downloaded content, inherited permissions, effective group membership, or a future-write guarantee.\\\"}\",\"id\":\"section-9\",\"title\":\"Go-live\"},{\"body\":\"{\\\"mappingsInFlight\\\":2,\\\"transfersPerMapping\\\":4}\",\"id\":\"section-10\",\"title\":\"Copy concurrency\"},{\"body\":\"Manifest-created Shared Drives receive only the listed member grants; existing destinations remain administered outside Migmate.\\nDestination-only content and source-deleted prior copies are retained, never deleted.\\nrclone copies mappings concurrently within the approved limit in one managed worker, preserves supported created and modified times and file types, and creates empty source directories, which keep modification times only.\\nCopy passes can replace same-path content; private markers, reserved ids, move-by-id and compare-then-write protection are not used for file migrations.\\nVerification is a timestamped point-in-time statement, not a source freeze or future-drift guarantee. Settled confirmation is recorded separately.\",\"id\":\"section-11\",\"title\":\"File migration fidelity and retention\"},{\"body\":\"Transfer-binary behaviour is pinned to one exact version, recorded with its path and digest in the preflight evidence; any other version refuses.\\nThe source grant is proven sufficient for the Graph calls this release makes, not promised for wider use: a call needing more permission refuses rather than degrading to a partial result.\",\"id\":\"section-12\",\"title\":\"Measured release limits\"},{\"body\":\"{\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceItemId\\\":\\\"source-root\\\",\\\"revision\\\":1,\\\"passes\\\":[{\\\"endedAt\\\":null,\\\"error\\\":null,\\\"executeId\\\":null,\\\"group\\\":null,\\\"jobid\\\":null,\\\"lastStats\\\":null,\\\"mappingId\\\":\\\"mapping\\\",\\\"mode\\\":\\\"copy\\\",\\\"passNumber\\\":1,\\\"revision\\\":1,\\\"startedAt\\\":null,\\\"status\\\":\\\"pending\\\"}]}\",\"id\":\"section-13\",\"title\":\"Mapping mapping\"}]}"
+      }
+    ],
+    "plan_input": [
+      {
+        "rev": 1,
+        "key": "configuration",
+        "value": "{\"manifestDigest\":\"84c13681c49ba3d62c7a0720f1aa22d4274d7e9d94b561f3862f1f2dc585dda2\",\"mappings\":[{\"createDrive\":{\"members\":[{\"email\":\"members@example.com\",\"role\":\"writer\",\"type\":\"group\"}],\"name\":\"Historical drive\"},\"id\":\"mapping\",\"sourceDriveId\":\"source-drive\",\"sourceFolderPath\":\"\",\"sourceItemId\":\"source-root\"}],\"options\":{\"memberGrants\":\"after_verification\"},\"route\":\"sharepoint_library_to_shared_drive\"}"
+      },
+      {
+        "rev": 1,
+        "key": "identity",
+        "value": "{\"applicationIdentity\":\"scripted-application\",\"binarySha256\":\"\",\"binaryVersion\":\"\"}"
+      },
+      {
+        "rev": 1,
+        "key": "scope",
+        "value": "[\"{\\\"fileScope\\\":{\\\"mapOnly\\\":true},\\\"mappingId\\\":\\\"mapping\\\"}\"]"
+      },
+      {
+        "rev": 1,
+        "key": "archive",
+        "value": "null"
+      }
+    ],
+    "approval": [
+      {
+        "id": 1,
+        "rev": 1,
+        "plan_digest": "e905fa2f82b6d1c3d77c1139f4653cba72615a9c12910e7b8ad3673eae6c70ce",
+        "approver": "historical-operator",
+        "mode": "unattended",
+        "at": "2026-10-29T12:00:00.000Z",
+        "payload": "{\"approvalDigest\":\"ac6e6761e2ff976cae1c30d104253f76367537f8a4720ccb6198e20934242139\",\"approver\":\"historical-operator\",\"at\":\"2026-10-29T12:00:00.000Z\",\"identityAssurance\":\"declared_unverified\",\"mode\":\"unattended\",\"planDigest\":\"e905fa2f82b6d1c3d77c1139f4653cba72615a9c12910e7b8ad3673eae6c70ce\",\"revision\":1}"
+      }
+    ],
+    "item": [
+      {
+        "id": "[\"mapping\",\"source-root\",\"plan\"]",
+        "rev": 1,
+        "phase": "plan",
+        "code": "unchanged",
+        "kind": "policy_outcome",
+        "accepted": 0,
+        "mapping_id": "mapping",
+        "source_drive_id": "source-drive",
+        "source_item_id": "source-root",
+        "relative_path": ".",
+        "item_type": "folder",
+        "size": null,
+        "source_etag": null,
+        "source_fingerprint": null,
+        "dest_drive_id": null,
+        "dest_file_id": null,
+        "dest_fingerprint": null,
+        "provenance_state": "none",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":null,\"destinationFileId\":null,\"destinationFingerprint\":null,\"fileScope\":{\"mapOnly\":true},\"id\":\"[\\\"mapping\\\",\\\"source-root\\\",\\\"plan\\\"]\",\"itemType\":\"folder\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"plan\",\"provenanceState\":\"none\",\"relativePath\":\".\",\"rev\":1,\"size\":null,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"1970-01-01T00:00:00.000Z\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"source-root\",\"identity\":\"source-root\",\"kind\":\"folder\",\"mimeType\":null,\"modifiedAt\":\"1970-01-01T00:00:00.000Z\",\"name\":\"Source\",\"packageSections\":null,\"parentId\":null,\"size\":null,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"source-root\"}"
+      },
+      {
+        "id": "[\"mapping\",\"source-root\",\"verify\",\"coverage\"]",
+        "rev": 1,
+        "phase": "verify",
+        "code": "unchanged",
+        "kind": "policy_outcome",
+        "accepted": 0,
+        "mapping_id": "mapping",
+        "source_drive_id": "source-drive",
+        "source_item_id": "source-root",
+        "relative_path": ".",
+        "item_type": "folder",
+        "size": null,
+        "source_etag": null,
+        "source_fingerprint": null,
+        "dest_drive_id": null,
+        "dest_file_id": null,
+        "dest_fingerprint": null,
+        "provenance_state": "none",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":null,\"destinationFileId\":null,\"destinationFingerprint\":null,\"fileScope\":{\"mapOnly\":true,\"verification\":{\"coveredPaths\":[\"file.txt\"],\"scope\":\"full\"}},\"id\":\"[\\\"mapping\\\",\\\"source-root\\\",\\\"verify\\\",\\\"coverage\\\"]\",\"itemType\":\"folder\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"verify\",\"provenanceState\":\"none\",\"relativePath\":\".\",\"rev\":1,\"size\":null,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"1970-01-01T00:00:00.000Z\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"source-root\",\"identity\":\"source-root\",\"kind\":\"folder\",\"mimeType\":null,\"modifiedAt\":\"1970-01-01T00:00:00.000Z\",\"name\":\"Source\",\"packageSections\":null,\"parentId\":null,\"size\":null,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"source-root\"}"
+      },
+      {
+        "id": "[\"mapping\",\"file\",\"verify\"]",
+        "rev": 1,
+        "phase": "verify",
+        "code": "unchanged",
+        "kind": "policy_outcome",
+        "accepted": 0,
+        "mapping_id": "mapping",
+        "source_drive_id": "source-drive",
+        "source_item_id": "file",
+        "relative_path": "file.txt",
+        "item_type": "file",
+        "size": 20,
+        "source_etag": null,
+        "source_fingerprint": null,
+        "dest_drive_id": "drive-1",
+        "dest_file_id": "file-1",
+        "dest_fingerprint": "b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31",
+        "provenance_state": "verified",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":\"drive-1\",\"destinationFileId\":\"file-1\",\"destinationFingerprint\":\"b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31\",\"id\":\"[\\\"mapping\\\",\\\"file\\\",\\\"verify\\\"]\",\"itemType\":\"file\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"verify\",\"provenanceState\":\"verified\",\"relativePath\":\"file.txt\",\"rev\":1,\"size\":20,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"file\",\"identity\":\"source-drive:file\",\"kind\":\"file\",\"mimeType\":null,\"modifiedAt\":\"\",\"name\":\"file.txt\",\"packageSections\":null,\"parentId\":null,\"size\":20,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"file\"}"
+      }
+    ],
+    "verification_revision": [
+      {
+        "rev": 1,
+        "plan_rev": 1,
+        "verification_digest": "2b0ec6d4293320c9ad009f827f9425b1b39314d81ee9d67932806eb40624e4af",
+        "clean": 1,
+        "findings": "[]",
+        "payload": "{\"acceptedCodes\":[],\"at\":\"2026-10-29T12:00:00.000Z\",\"clean\":true,\"evidenceDigest\":\"3d9152c18d65ca0be9bc7d5d18216399a1091c0a7bf0818d8839aa1aea83cd55\",\"findings\":[],\"planRev\":1,\"revision\":1,\"verificationDigest\":\"2b0ec6d4293320c9ad009f827f9425b1b39314d81ee9d67932806eb40624e4af\"}",
+        "at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "rev": 2,
+        "plan_rev": 1,
+        "verification_digest": "c40e8b263886875c3e326bd05e2f7f490cb538423ff4989d222bafda5d1af72e",
+        "clean": 1,
+        "findings": "[]",
+        "payload": "{\"acceptedCodes\":[],\"at\":\"2026-10-29T12:00:00.000Z\",\"clean\":true,\"evidenceDigest\":\"3d9152c18d65ca0be9bc7d5d18216399a1091c0a7bf0818d8839aa1aea83cd55\",\"findings\":[],\"planRev\":1,\"revision\":2,\"verificationDigest\":\"c40e8b263886875c3e326bd05e2f7f490cb538423ff4989d222bafda5d1af72e\"}",
+        "at": "2026-10-29T12:00:00.000Z"
+      }
+    ],
+    "check_result": [
+      {
+        "id": 1,
+        "verb": "doctor",
+        "check_id": "google.actingAccount",
+        "title": "Google identifies the acting service account",
+        "status": "pass",
+        "code": null,
+        "evidence": "{\"actualSubject\":\"operator@example.com\"}",
+        "at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "id": 2,
+        "verb": "doctor",
+        "check_id": "google.canCreateDrives",
+        "title": "Acting account may create Shared Drives",
+        "status": "pass",
+        "code": null,
+        "evidence": "{\"canCreateDrives\":true}",
+        "at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "id": 3,
+        "verb": "doctor",
+        "check_id": "mapping:mapping",
+        "title": "Exact mapping roots resolve as ordinary folders",
+        "status": "pass",
+        "code": null,
+        "evidence": "{\"destinationPresent\":false,\"sourceDriveId\":\"source-drive\",\"sourceItemId\":\"source-root\",\"sourcePresent\":true}",
+        "at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "id": 4,
+        "verb": "doctor",
+        "check_id": "provider.transfer_worker",
+        "title": "Private authenticated transfer worker",
+        "status": "pass",
+        "code": null,
+        "evidence": "{\"authenticatedLiveness\":true,\"missingAuthenticationRefused\":true,\"runDirectoryPermissions\":\"0700\",\"socketOnly\":true,\"version\":\"fake-worker-1.0.0\"}",
+        "at": "2026-10-29T12:00:00.000Z"
+      }
+    ],
+    "commit_log": [
+      {
+        "rev": 1,
+        "phase": "plan",
+        "unit_key": "[\"mapping\",\"source-root\",\"plan\",\"plan\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": ".",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"provision\",\"mapping\",\"intent\"]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"provision\",\"mapping\",\"created\"]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"mapping\",\"mapping\",1,0]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"mapping\",\"mapping\",1,1]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"mapping\",\"mapping\",1,2]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"mapping\",\"mapping\",1,3]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "verify",
+        "unit_key": "[\"mapping\",\"source-root\",\"verify\",\"verification-coverage\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "verification_run": 1,
+        "migmate_version": "0.3.5",
+        "checkpoint": ".",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "verify",
+        "unit_key": "[\"mapping\",\"file\",\"verify\",\"verification\",\"7f9795f4571964d6ac32d612002629b263016f5f75187a19e8f8977668162452\"]",
+        "verification_run": 1,
+        "migmate_version": "0.3.5",
+        "checkpoint": "file.txt",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "verify",
+        "unit_key": "[\"verified-destination\",\"mapping\"]",
+        "verification_run": 1,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "verify",
+        "unit_key": "[\"mapping\",\"source-root\",\"verify\",\"verification-coverage\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "verification_run": 2,
+        "migmate_version": "0.3.5",
+        "checkpoint": ".",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "verify",
+        "unit_key": "[\"mapping\",\"file\",\"verify\",\"verification\",\"7f9795f4571964d6ac32d612002629b263016f5f75187a19e8f8977668162452\"]",
+        "verification_run": 2,
+        "migmate_version": "0.3.5",
+        "checkpoint": "file.txt",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "verify",
+        "unit_key": "[\"verified-destination\",\"mapping\"]",
+        "verification_run": 2,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"pre-grant-check\",\"drive-1\",\"4ae3b20d2b2bce408bccc7531391cf1a6989d3489f5776253b7389864d2f2fb2\"]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"go-live-fence\",\"drive-1\"]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"provision\",\"mapping\",\"member:d97472433904cb2829e357bf1b7c9b67095e6d0614db574e1a009833281c1a0c\"]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      },
+      {
+        "rev": 1,
+        "phase": "execute",
+        "unit_key": "[\"go-live-check\",\"drive-1\",\"709b2306937a15b6e1d4b783bce3dbd07a28f8be51b23ddec9455af439b11b49\"]",
+        "verification_run": 0,
+        "migmate_version": "0.3.5",
+        "checkpoint": "mapping",
+        "at": "2026-10-29T12:00:00.000Z",
+        "resources": "[]"
+      }
+    ],
+    "watermark": [
+      {
+        "rev": 1,
+        "unit_key": "[\"mapping\",\"source-root\",\"plan\",\"plan\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "value": ".",
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "rev": 1,
+        "unit_key": "[\"mapping\",\"source-root\",\"verify\",\"verification-coverage\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "value": ".",
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "rev": 1,
+        "unit_key": "[\"mapping\",\"file\",\"verify\",\"verification\",\"7f9795f4571964d6ac32d612002629b263016f5f75187a19e8f8977668162452\"]",
+        "value": "file.txt",
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      }
+    ],
+    "projection_verb_state": [
+      {
+        "verb": "init",
+        "state": "done",
+        "checkpoint": null,
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "verb": "plan",
+        "state": "done",
+        "checkpoint": ".",
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "verb": "doctor",
+        "state": "done",
+        "checkpoint": null,
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "verb": "approve",
+        "state": "done",
+        "checkpoint": null,
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "verb": "execute",
+        "state": "pending",
+        "checkpoint": "mapping",
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "verb": "verify",
+        "state": "done",
+        "checkpoint": "mapping",
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "verb": "report",
+        "state": "done",
+        "checkpoint": null,
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      },
+      {
+        "verb": "close",
+        "state": "done",
+        "checkpoint": null,
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      }
+    ],
+    "projection_facet": [
+      {
+        "phase": "plan",
+        "rev": 1,
+        "code": "unchanged",
+        "kind": "policy_outcome",
+        "count": 1
+      },
+      {
+        "phase": "verify",
+        "rev": 1,
+        "code": "unchanged",
+        "kind": "policy_outcome",
+        "count": 2
+      }
+    ],
+    "projection_progress": [
+      {
+        "unit": "items",
+        "done": 2,
+        "total": null,
+        "updated_at": "2026-10-29T12:00:00.000Z"
+      }
+    ],
+    "file_state_history": [
+      {
+        "sequence": 1,
+        "rev": 1,
+        "phase": "plan",
+        "verification_run": 0,
+        "unit_key": "[\"mapping\",\"source-root\",\"plan\",\"plan\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":null,\"destinationFileId\":null,\"destinationFingerprint\":null,\"fileScope\":{\"mapOnly\":true},\"id\":\"[\\\"mapping\\\",\\\"source-root\\\",\\\"plan\\\"]\",\"itemType\":\"folder\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"plan\",\"provenanceState\":\"none\",\"relativePath\":\".\",\"rev\":1,\"size\":null,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"1970-01-01T00:00:00.000Z\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"source-root\",\"identity\":\"source-root\",\"kind\":\"folder\",\"mimeType\":null,\"modifiedAt\":\"1970-01-01T00:00:00.000Z\",\"name\":\"Source\",\"packageSections\":null,\"parentId\":null,\"size\":null,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"source-root\"}"
+      },
+      {
+        "sequence": 2,
+        "rev": 1,
+        "phase": "verify",
+        "verification_run": 1,
+        "unit_key": "[\"mapping\",\"source-root\",\"verify\",\"verification-coverage\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":null,\"destinationFileId\":null,\"destinationFingerprint\":null,\"fileScope\":{\"mapOnly\":true,\"verification\":{\"coveredPaths\":[\"file.txt\"],\"scope\":\"full\"}},\"id\":\"[\\\"mapping\\\",\\\"source-root\\\",\\\"verify\\\",\\\"coverage\\\"]\",\"itemType\":\"folder\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"verify\",\"provenanceState\":\"none\",\"relativePath\":\".\",\"rev\":1,\"size\":null,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"1970-01-01T00:00:00.000Z\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"source-root\",\"identity\":\"source-root\",\"kind\":\"folder\",\"mimeType\":null,\"modifiedAt\":\"1970-01-01T00:00:00.000Z\",\"name\":\"Source\",\"packageSections\":null,\"parentId\":null,\"size\":null,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"source-root\"}"
+      },
+      {
+        "sequence": 3,
+        "rev": 1,
+        "phase": "verify",
+        "verification_run": 1,
+        "unit_key": "[\"mapping\",\"file\",\"verify\",\"verification\",\"7f9795f4571964d6ac32d612002629b263016f5f75187a19e8f8977668162452\"]",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":\"drive-1\",\"destinationFileId\":\"file-1\",\"destinationFingerprint\":\"b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31\",\"id\":\"[\\\"mapping\\\",\\\"file\\\",\\\"verify\\\"]\",\"itemType\":\"file\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"verify\",\"provenanceState\":\"verified\",\"relativePath\":\"file.txt\",\"rev\":1,\"size\":20,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"file\",\"identity\":\"source-drive:file\",\"kind\":\"file\",\"mimeType\":null,\"modifiedAt\":\"\",\"name\":\"file.txt\",\"packageSections\":null,\"parentId\":null,\"size\":20,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"file\"}"
+      },
+      {
+        "sequence": 4,
+        "rev": 1,
+        "phase": "verify",
+        "verification_run": 2,
+        "unit_key": "[\"mapping\",\"source-root\",\"verify\",\"verification-coverage\",\"43b75abb48be40f11ec5dace0794719a972ee1f62ece8ae2dba0517a72e37551\"]",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":null,\"destinationFileId\":null,\"destinationFingerprint\":null,\"fileScope\":{\"mapOnly\":true,\"verification\":{\"coveredPaths\":[\"file.txt\"],\"scope\":\"full\"}},\"id\":\"[\\\"mapping\\\",\\\"source-root\\\",\\\"verify\\\",\\\"coverage\\\"]\",\"itemType\":\"folder\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"verify\",\"provenanceState\":\"none\",\"relativePath\":\".\",\"rev\":1,\"size\":null,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"1970-01-01T00:00:00.000Z\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"source-root\",\"identity\":\"source-root\",\"kind\":\"folder\",\"mimeType\":null,\"modifiedAt\":\"1970-01-01T00:00:00.000Z\",\"name\":\"Source\",\"packageSections\":null,\"parentId\":null,\"size\":null,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"source-root\"}"
+      },
+      {
+        "sequence": 5,
+        "rev": 1,
+        "phase": "verify",
+        "verification_run": 2,
+        "unit_key": "[\"mapping\",\"file\",\"verify\",\"verification\",\"7f9795f4571964d6ac32d612002629b263016f5f75187a19e8f8977668162452\"]",
+        "payload": "{\"code\":\"unchanged\",\"destinationDriveId\":\"drive-1\",\"destinationFileId\":\"file-1\",\"destinationFingerprint\":\"b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31\",\"id\":\"[\\\"mapping\\\",\\\"file\\\",\\\"verify\\\"]\",\"itemType\":\"file\",\"jobType\":\"file_migration\",\"kind\":\"policy_outcome\",\"mappingId\":\"mapping\",\"nextStep\":null,\"omissionReason\":null,\"phase\":\"verify\",\"provenanceState\":\"verified\",\"relativePath\":\"file.txt\",\"rev\":1,\"size\":20,\"sourceDriveId\":\"source-drive\",\"sourceEtag\":null,\"sourceEvidence\":{\"createdAt\":\"\",\"downloadable\":true,\"driveId\":\"source-drive\",\"etag\":null,\"id\":\"file\",\"identity\":\"source-drive:file\",\"kind\":\"file\",\"mimeType\":null,\"modifiedAt\":\"\",\"name\":\"file.txt\",\"packageSections\":null,\"parentId\":null,\"size\":20,\"webUrl\":null},\"sourceFingerprint\":null,\"sourceItemId\":\"file\"}"
+      }
+    ],
+    "verification_run": [
+      {
+        "plan_rev": 1,
+        "run": 2,
+        "started_at": "2026-10-29T12:00:00.000Z"
+      }
+    ],
+    "verification_history": [
+      {
+        "run": 1,
+        "plan_rev": 1,
+        "category": "item",
+        "row_key": "[\"mapping\",\"file\",\"verify\"]",
+        "payload": "{\"accepted\":0,\"code\":\"unchanged\",\"dest_drive_id\":\"drive-1\",\"dest_file_id\":\"file-1\",\"dest_fingerprint\":\"b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31\",\"id\":\"[\\\"mapping\\\",\\\"file\\\",\\\"verify\\\"]\",\"item_type\":\"file\",\"kind\":\"policy_outcome\",\"mapping_id\":\"mapping\",\"payload\":\"{\\\"code\\\":\\\"unchanged\\\",\\\"destinationDriveId\\\":\\\"drive-1\\\",\\\"destinationFileId\\\":\\\"file-1\\\",\\\"destinationFingerprint\\\":\\\"b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31\\\",\\\"id\\\":\\\"[\\\\\\\"mapping\\\\\\\",\\\\\\\"file\\\\\\\",\\\\\\\"verify\\\\\\\"]\\\",\\\"itemType\\\":\\\"file\\\",\\\"jobType\\\":\\\"file_migration\\\",\\\"kind\\\":\\\"policy_outcome\\\",\\\"mappingId\\\":\\\"mapping\\\",\\\"nextStep\\\":null,\\\"omissionReason\\\":null,\\\"phase\\\":\\\"verify\\\",\\\"provenanceState\\\":\\\"verified\\\",\\\"relativePath\\\":\\\"file.txt\\\",\\\"rev\\\":1,\\\"size\\\":20,\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceEtag\\\":null,\\\"sourceEvidence\\\":{\\\"createdAt\\\":\\\"\\\",\\\"downloadable\\\":true,\\\"driveId\\\":\\\"source-drive\\\",\\\"etag\\\":null,\\\"id\\\":\\\"file\\\",\\\"identity\\\":\\\"source-drive:file\\\",\\\"kind\\\":\\\"file\\\",\\\"mimeType\\\":null,\\\"modifiedAt\\\":\\\"\\\",\\\"name\\\":\\\"file.txt\\\",\\\"packageSections\\\":null,\\\"parentId\\\":null,\\\"size\\\":20,\\\"webUrl\\\":null},\\\"sourceFingerprint\\\":null,\\\"sourceItemId\\\":\\\"file\\\"}\",\"phase\":\"verify\",\"provenance_state\":\"verified\",\"relative_path\":\"file.txt\",\"rev\":1,\"size\":20,\"source_drive_id\":\"source-drive\",\"source_etag\":null,\"source_fingerprint\":null,\"source_item_id\":\"file\"}"
+      },
+      {
+        "run": 1,
+        "plan_rev": 1,
+        "category": "item",
+        "row_key": "[\"mapping\",\"source-root\",\"verify\",\"coverage\"]",
+        "payload": "{\"accepted\":0,\"code\":\"unchanged\",\"dest_drive_id\":null,\"dest_file_id\":null,\"dest_fingerprint\":null,\"id\":\"[\\\"mapping\\\",\\\"source-root\\\",\\\"verify\\\",\\\"coverage\\\"]\",\"item_type\":\"folder\",\"kind\":\"policy_outcome\",\"mapping_id\":\"mapping\",\"payload\":\"{\\\"code\\\":\\\"unchanged\\\",\\\"destinationDriveId\\\":null,\\\"destinationFileId\\\":null,\\\"destinationFingerprint\\\":null,\\\"fileScope\\\":{\\\"mapOnly\\\":true,\\\"verification\\\":{\\\"coveredPaths\\\":[\\\"file.txt\\\"],\\\"scope\\\":\\\"full\\\"}},\\\"id\\\":\\\"[\\\\\\\"mapping\\\\\\\",\\\\\\\"source-root\\\\\\\",\\\\\\\"verify\\\\\\\",\\\\\\\"coverage\\\\\\\"]\\\",\\\"itemType\\\":\\\"folder\\\",\\\"jobType\\\":\\\"file_migration\\\",\\\"kind\\\":\\\"policy_outcome\\\",\\\"mappingId\\\":\\\"mapping\\\",\\\"nextStep\\\":null,\\\"omissionReason\\\":null,\\\"phase\\\":\\\"verify\\\",\\\"provenanceState\\\":\\\"none\\\",\\\"relativePath\\\":\\\".\\\",\\\"rev\\\":1,\\\"size\\\":null,\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceEtag\\\":null,\\\"sourceEvidence\\\":{\\\"createdAt\\\":\\\"1970-01-01T00:00:00.000Z\\\",\\\"downloadable\\\":true,\\\"driveId\\\":\\\"source-drive\\\",\\\"etag\\\":null,\\\"id\\\":\\\"source-root\\\",\\\"identity\\\":\\\"source-root\\\",\\\"kind\\\":\\\"folder\\\",\\\"mimeType\\\":null,\\\"modifiedAt\\\":\\\"1970-01-01T00:00:00.000Z\\\",\\\"name\\\":\\\"Source\\\",\\\"packageSections\\\":null,\\\"parentId\\\":null,\\\"size\\\":null,\\\"webUrl\\\":null},\\\"sourceFingerprint\\\":null,\\\"sourceItemId\\\":\\\"source-root\\\"}\",\"phase\":\"verify\",\"provenance_state\":\"none\",\"relative_path\":\".\",\"rev\":1,\"size\":null,\"source_drive_id\":\"source-drive\",\"source_etag\":null,\"source_fingerprint\":null,\"source_item_id\":\"source-root\"}"
+      },
+      {
+        "run": 2,
+        "plan_rev": 1,
+        "category": "item",
+        "row_key": "[\"mapping\",\"file\",\"verify\"]",
+        "payload": "{\"accepted\":0,\"code\":\"unchanged\",\"dest_drive_id\":\"drive-1\",\"dest_file_id\":\"file-1\",\"dest_fingerprint\":\"b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31\",\"id\":\"[\\\"mapping\\\",\\\"file\\\",\\\"verify\\\"]\",\"item_type\":\"file\",\"kind\":\"policy_outcome\",\"mapping_id\":\"mapping\",\"payload\":\"{\\\"code\\\":\\\"unchanged\\\",\\\"destinationDriveId\\\":\\\"drive-1\\\",\\\"destinationFileId\\\":\\\"file-1\\\",\\\"destinationFingerprint\\\":\\\"b0d59739423f3f88920e5378845817bbccf36692ad9f3407193965a4965e3d31\\\",\\\"id\\\":\\\"[\\\\\\\"mapping\\\\\\\",\\\\\\\"file\\\\\\\",\\\\\\\"verify\\\\\\\"]\\\",\\\"itemType\\\":\\\"file\\\",\\\"jobType\\\":\\\"file_migration\\\",\\\"kind\\\":\\\"policy_outcome\\\",\\\"mappingId\\\":\\\"mapping\\\",\\\"nextStep\\\":null,\\\"omissionReason\\\":null,\\\"phase\\\":\\\"verify\\\",\\\"provenanceState\\\":\\\"verified\\\",\\\"relativePath\\\":\\\"file.txt\\\",\\\"rev\\\":1,\\\"size\\\":20,\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceEtag\\\":null,\\\"sourceEvidence\\\":{\\\"createdAt\\\":\\\"\\\",\\\"downloadable\\\":true,\\\"driveId\\\":\\\"source-drive\\\",\\\"etag\\\":null,\\\"id\\\":\\\"file\\\",\\\"identity\\\":\\\"source-drive:file\\\",\\\"kind\\\":\\\"file\\\",\\\"mimeType\\\":null,\\\"modifiedAt\\\":\\\"\\\",\\\"name\\\":\\\"file.txt\\\",\\\"packageSections\\\":null,\\\"parentId\\\":null,\\\"size\\\":20,\\\"webUrl\\\":null},\\\"sourceFingerprint\\\":null,\\\"sourceItemId\\\":\\\"file\\\"}\",\"phase\":\"verify\",\"provenance_state\":\"verified\",\"relative_path\":\"file.txt\",\"rev\":1,\"size\":20,\"source_drive_id\":\"source-drive\",\"source_etag\":null,\"source_fingerprint\":null,\"source_item_id\":\"file\"}"
+      },
+      {
+        "run": 2,
+        "plan_rev": 1,
+        "category": "item",
+        "row_key": "[\"mapping\",\"source-root\",\"verify\",\"coverage\"]",
+        "payload": "{\"accepted\":0,\"code\":\"unchanged\",\"dest_drive_id\":null,\"dest_file_id\":null,\"dest_fingerprint\":null,\"id\":\"[\\\"mapping\\\",\\\"source-root\\\",\\\"verify\\\",\\\"coverage\\\"]\",\"item_type\":\"folder\",\"kind\":\"policy_outcome\",\"mapping_id\":\"mapping\",\"payload\":\"{\\\"code\\\":\\\"unchanged\\\",\\\"destinationDriveId\\\":null,\\\"destinationFileId\\\":null,\\\"destinationFingerprint\\\":null,\\\"fileScope\\\":{\\\"mapOnly\\\":true,\\\"verification\\\":{\\\"coveredPaths\\\":[\\\"file.txt\\\"],\\\"scope\\\":\\\"full\\\"}},\\\"id\\\":\\\"[\\\\\\\"mapping\\\\\\\",\\\\\\\"source-root\\\\\\\",\\\\\\\"verify\\\\\\\",\\\\\\\"coverage\\\\\\\"]\\\",\\\"itemType\\\":\\\"folder\\\",\\\"jobType\\\":\\\"file_migration\\\",\\\"kind\\\":\\\"policy_outcome\\\",\\\"mappingId\\\":\\\"mapping\\\",\\\"nextStep\\\":null,\\\"omissionReason\\\":null,\\\"phase\\\":\\\"verify\\\",\\\"provenanceState\\\":\\\"none\\\",\\\"relativePath\\\":\\\".\\\",\\\"rev\\\":1,\\\"size\\\":null,\\\"sourceDriveId\\\":\\\"source-drive\\\",\\\"sourceEtag\\\":null,\\\"sourceEvidence\\\":{\\\"createdAt\\\":\\\"1970-01-01T00:00:00.000Z\\\",\\\"downloadable\\\":true,\\\"driveId\\\":\\\"source-drive\\\",\\\"etag\\\":null,\\\"id\\\":\\\"source-root\\\",\\\"identity\\\":\\\"source-root\\\",\\\"kind\\\":\\\"folder\\\",\\\"mimeType\\\":null,\\\"modifiedAt\\\":\\\"1970-01-01T00:00:00.000Z\\\",\\\"name\\\":\\\"Source\\\",\\\"packageSections\\\":null,\\\"parentId\\\":null,\\\"size\\\":null,\\\"webUrl\\\":null},\\\"sourceFingerprint\\\":null,\\\"sourceItemId\\\":\\\"source-root\\\"}\",\"phase\":\"verify\",\"provenance_state\":\"none\",\"relative_path\":\".\",\"rev\":1,\"size\":null,\"source_drive_id\":\"source-drive\",\"source_etag\":null,\"source_fingerprint\":null,\"source_item_id\":\"source-root\"}"
+      }
+    ],
+    "revision_sequence": [
+      {
+        "name": "plan",
+        "value": 1
+      },
+      {
+        "name": "verification",
+        "value": 2
+      }
+    ],
+    "mapping_pass": [
+      {
+        "rev": 1,
+        "mapping_id": "mapping",
+        "pass_number": 1,
+        "status": "completed",
+        "payload": "{\"endedAt\":\"2026-10-29T12:00:00.000Z\",\"error\":null,\"executeId\":\"555150dd-c836-4691-8195-05e1ce5a57bd\",\"group\":\"fake-555150dd-c836-4691-8195-05e1ce5a57bd-1\",\"jobid\":1,\"lastStats\":{\"bytes\":20,\"errors\":0,\"files\":1,\"speed\":0,\"transferring\":[],\"transferringTotal\":0,\"transferringTruncated\":false},\"mappingId\":\"mapping\",\"mode\":\"copy\",\"passNumber\":1,\"revision\":1,\"startedAt\":\"2026-10-29T12:00:00.000Z\",\"status\":\"completed\"}"
+      }
+    ],
+    "mapping": [
+      {
+        "id": "mapping",
+        "payload": "{\"createDrive\":{\"members\":[{\"email\":\"members@example.com\",\"role\":\"writer\",\"type\":\"group\"}],\"name\":\"Historical drive\"},\"id\":\"mapping\",\"sourceDriveId\":\"source-drive\",\"sourceFolderPath\":\"\",\"sourceItemId\":\"source-root\"}"
+      }
+    ],
+    "mapping_manifest": [
+      {
+        "singleton": 1,
+        "digest": "84c13681c49ba3d62c7a0720f1aa22d4274d7e9d94b561f3862f1f2dc585dda2"
+      }
+    ],
+    "created_drive": [
+      {
+        "mapping_id": "mapping",
+        "payload": "{\"creatorEmail\":\"operator@example.com\",\"driveId\":\"drive-1\",\"goLive\":{\"check\":{\"at\":\"2026-10-29T12:00:00.000Z\",\"check\":\"drive_membership_mismatch\",\"evidence\":{\"actual\":[{\"email\":\"operator@example.com\",\"role\":\"organizer\",\"type\":\"user\"},{\"email\":\"unexpected@example.com\",\"role\":\"writer\",\"type\":\"user\"},{\"email\":\"members@example.com\",\"role\":\"writer\",\"type\":\"group\"}],\"expected\":[{\"email\":\"members@example.com\",\"role\":\"writer\",\"type\":\"group\"},{\"email\":\"operator@example.com\",\"role\":\"organizer\",\"type\":\"user\"}]},\"status\":\"failed\"},\"revision\":1,\"startedAt\":\"2026-10-29T12:00:00.000Z\",\"verificationAt\":\"2026-10-29T12:00:00.000Z\"},\"intentAt\":\"2026-10-29T12:00:00.000Z\",\"mappingId\":\"mapping\",\"name\":\"Historical drive\",\"preGrantCheck\":{\"check\":{\"at\":\"2026-10-29T12:00:00.000Z\",\"check\":\"destination\",\"evidence\":{\"expectedDestinationDigest\":\"b9f1994f07e56fd7ff27c873eaa7d59203d57353dc874000c1fbf843808ef31c\",\"observedDestinationDigest\":\"b9f1994f07e56fd7ff27c873eaa7d59203d57353dc874000c1fbf843808ef31c\"},\"status\":\"passed\"},\"revision\":1,\"verificationAt\":\"2026-10-29T12:00:00.000Z\"},\"provenance\":{\"kind\":\"create_response\"},\"requestId\":\"907c00861d95513afc94fb55d43f0272b080b6a78f319e2d9226ee9ad466b0a1\",\"verifiedDestination\":{\"digest\":\"b9f1994f07e56fd7ff27c873eaa7d59203d57353dc874000c1fbf843808ef31c\",\"hashType\":\"sha256\",\"md5\":false,\"revision\":1}}"
+      }
+    ],
+    "member_grant": [
+      {
+        "mapping_id": "mapping",
+        "email": "members@example.com",
+        "payload": "{\"at\":\"2026-10-29T12:00:00.001Z\",\"driveId\":\"drive-1\",\"mappingId\":\"mapping\",\"member\":{\"email\":\"members@example.com\",\"role\":\"writer\",\"type\":\"group\"}}"
+      }
+    ],
+    "decision_evidence": [
+      {
+        "key": "close:7ee756054564663d2debf4b92fd33f1e0691de54683cfdfcefb4cc72c7815826",
+        "payload": "{\"approver\":\"historical-operator\",\"at\":\"2026-10-29T12:00:00.000Z\",\"evidenceDigest\":\"7ee756054564663d2debf4b92fd33f1e0691de54683cfdfcefb4cc72c7815826\",\"identityAssurance\":\"declared_unverified\",\"mode\":\"unattended\"}"
+      },
+      {
+        "key": "close",
+        "payload": "{\"approver\":\"historical-operator\",\"at\":\"2026-10-29T12:00:00.000Z\",\"evidenceDigest\":\"7ee756054564663d2debf4b92fd33f1e0691de54683cfdfcefb4cc72c7815826\",\"identityAssurance\":\"declared_unverified\",\"mode\":\"unattended\"}"
+      },
+      {
+        "key": "go_live_ack:2c608750c5e5da9e93f81b414b98d9c30505a9ce4978b785c78acf16ed750440",
+        "payload": "{\"approver\":\"historical-operator\",\"at\":\"2026-10-29T12:00:00.000Z\",\"authorityDigest\":\"7ee756054564663d2debf4b92fd33f1e0691de54683cfdfcefb4cc72c7815826\",\"checks\":[{\"check\":{\"at\":\"2026-10-29T12:00:00.000Z\",\"check\":\"drive_membership_mismatch\",\"evidence\":{\"actual\":[{\"email\":\"operator@example.com\",\"role\":\"organizer\",\"type\":\"user\"},{\"email\":\"unexpected@example.com\",\"role\":\"writer\",\"type\":\"user\"},{\"email\":\"members@example.com\",\"role\":\"writer\",\"type\":\"group\"}],\"expected\":[{\"email\":\"members@example.com\",\"role\":\"writer\",\"type\":\"group\"},{\"email\":\"operator@example.com\",\"role\":\"organizer\",\"type\":\"user\"}]},\"status\":\"failed\"},\"consequence\":\"Membership differs from the approved plan. Acknowledgment accepts the recorded missing, extra or differently privileged access; it does not repair permissions.\",\"driveId\":\"drive-1\",\"mappingId\":\"mapping\",\"revision\":1,\"startedAt\":\"2026-10-29T12:00:00.000Z\",\"verificationAt\":\"2026-10-29T12:00:00.000Z\"}],\"evidenceDigest\":\"2c608750c5e5da9e93f81b414b98d9c30505a9ce4978b785c78acf16ed750440\",\"identityAssurance\":\"declared_unverified\",\"mode\":\"unattended\",\"rationale\":\"Historical membership difference explicitly accepted\"}"
+      }
+    ]
+  }
+}

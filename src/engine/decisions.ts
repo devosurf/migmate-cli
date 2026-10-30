@@ -2,10 +2,11 @@ import type { FileMappingConfig, FileMigrationConfig } from "./drivers/file-migr
 import type { ApprovalAuthority } from "./types.ts";
 import type { PlanRevisionRecord } from "./store/store.ts";
 import { canonicalJson } from "./store/digest.ts";
+import { mappingSourceProvider } from "./providers/adapters/capabilities.ts";
 
 function roots(mapping: FileMappingConfig): string {
   return canonicalJson({
-    sourceType: mapping.sourceType ?? "sharepoint",
+    sourceType: mappingSourceProvider(mapping).id,
     sourceDriveId: mapping.sourceDriveId,
     sourceItemId: mapping.sourceItemId,
     sourceFolderPath: mapping.sourceFolderPath,

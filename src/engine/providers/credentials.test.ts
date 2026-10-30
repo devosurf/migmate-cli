@@ -4,13 +4,22 @@ import { appendFile, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createCredentialSession, ProviderFault } from "./credentials.ts";
+import { createCredentialSession } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import { createProductionProvider } from "./production.ts";
 
 const tenantId = "11111111-1111-1111-1111-111111111111";
 const clientId = "22222222-2222-2222-2222-222222222222";
 // An Entra client secret is not base64url: it carries `~`, `.`, and `-`.
 const entraSecret = "Abc8Q~tE1.vN-jK_pLq7zXyW4rS2mD6bH0uT9cVe";
+const forwardProviders = {
+  sourceProvider: "sharepoint",
+  destinationProvider: "google_shared_drive",
+};
+const reverseProviders = {
+  sourceProvider: "google_shared_drive",
+  destinationProvider: "sharepoint",
+};
 const mapping = {
   id: "general",
   sourceDriveId: "b!source-drive",
@@ -52,6 +61,7 @@ async function operatorFiles(
   return {
     jobDirectory,
     config: {
+      ...forwardProviders,
       mappings: [mapping],
       rclone: {
         config: { resolver: "file", path: configPath, mode: "0600" },
@@ -164,6 +174,7 @@ test("onboards rclone remotes that name no seed root", async (t) => {
   const reverse = await createCredentialSession({
     jobType: "file_migration",
     config: {
+      ...reverseProviders,
       mappings: [{ ...mapping, sourceType: "google_shared_drive" }],
       rclone: {
         config: config.rclone.config,
@@ -215,7 +226,7 @@ test("loads file credentials before mappings are supplied by a manifest", async 
   }
 });
 
-test("uses the configured route for credential privileges before mappings exist", async (t) => {
+test("uses the configured providers for credential privileges before mappings exist", async (t) => {
   let now = Date.now();
   t.mock.method(Date, "now", () => now);
   const { config, jobDirectory } = await operatorFiles(
@@ -235,28 +246,26 @@ test("uses the configured route for credential privileges before mappings exist"
   });
   const session = await createCredentialSession({
     jobType: "file_migration",
-    config: { route: "shared_drive_to_sharepoint_library", rclone },
+    config: { ...reverseProviders, rclone },
     jobDirectory,
   });
   t.after(() => session.dispose());
   assert.equal(await session.graphDestinationToken(), token.access_token);
   await assert.rejects(session.graphToken(), { code: "credential_graph_unavailable" });
-  for (const route of [undefined, "sharepoint_library_to_shared_drive"]) {
-    for (const remotes of [rclone, { ...config.rclone, sourceRemote: undefined }]) {
-      await assert.rejects(
-        createCredentialSession({
-          jobType: "file_migration",
-          config: { route, mappings: [], rclone: remotes },
-          jobDirectory,
-        }),
-        { code: "credential_config_invalid" },
-      );
-    }
+  for (const remotes of [rclone, { ...config.rclone, sourceRemote: undefined }]) {
+    await assert.rejects(
+      createCredentialSession({
+        jobType: "file_migration",
+        config: { ...forwardProviders, mappings: [], rclone: remotes },
+        jobDirectory,
+      }),
+      { code: "credential_config_invalid" },
+    );
   }
   await assert.rejects(
     createCredentialSession({
       jobType: "file_migration",
-      config: { route: "shared_drive_to_sharepoint_library", rclone: config.rclone },
+      config: { ...reverseProviders, rclone: config.rclone },
       jobDirectory,
     }),
     { code: "credential_config_invalid" },
@@ -385,6 +394,7 @@ test("SharePoint destination credentials accept only Sites.ReadWrite.All, never 
     );
     const reverse = {
       ...config,
+      ...reverseProviders,
       mappings: [{ ...mapping, sourceType: "google_shared_drive" }],
       rclone: {
         config: config.rclone.config,
@@ -409,7 +419,7 @@ test("SharePoint destination credentials accept only Sites.ReadWrite.All, never 
   }
 });
 
-test("only jobs with Google-source mappings may hold the SharePoint write credential", async (t) => {
+test("only jobs targeting SharePoint may hold its separate write credential", async (t) => {
   const { config, jobDirectory } = await operatorFiles(t, source.join("\n"));
   await appendFile(
     config.rclone.config.path,
@@ -425,20 +435,20 @@ test("only jobs with Google-source mappings may hold the SharePoint write creden
     }),
     { code: "credential_config_invalid" },
   );
-  const mixed = await createCredentialSession({
+  const reverse = await createCredentialSession({
     jobType: "file_migration",
     config: {
       ...config,
+      ...reverseProviders,
       rclone,
       mappings: [
-        mapping,
         { ...mapping, id: "reverse", sourceType: "google_shared_drive", sourceDriveId: "0Asource" },
       ],
     },
     jobDirectory,
   });
-  t.after(() => mixed.dispose());
-  assert.equal(mixed.sharepointDestinationRemote, "sharepoint-destination");
+  t.after(() => reverse.dispose());
+  assert.equal(reverse.sharepointDestinationRemote, "sharepoint-destination");
 });
 
 test("Sites.Read.All alone passes the production credential preflight", async (t) => {

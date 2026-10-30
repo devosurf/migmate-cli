@@ -2,7 +2,7 @@ import { lstat } from "node:fs/promises";
 import { request } from "node:http";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { ProviderFault } from "../../src/engine/providers/credentials.ts";
+import { ProviderFault } from "../../src/engine/providers/fault.ts";
 import {
   createTransferSupervisor,
   type BinaryProof,

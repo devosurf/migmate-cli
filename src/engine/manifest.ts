@@ -1,18 +1,20 @@
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 import { digestJson } from "./store/digest.ts";
 import type { DriveMember, ProviderPort } from "./providers/port.ts";
-import { ProviderFault } from "./providers/credentials.ts";
+import { ProviderFault } from "./providers/fault.ts";
+import {
+  fileProviderPair,
+  mappingSourceProvider,
+  type FileProviderId,
+} from "./providers/adapters/capabilities.ts";
 
+export type ManifestRoot = { type: FileProviderId; driveId: string } & (
+  { folderPath: string } | { folderId: string }
+);
 export interface ManifestMapping {
   id: string;
-  source:
-    | { type: "sharepoint"; driveId: string; folderPath: string }
-    | { type: "google_shared_drive"; driveId: string; folderId: string };
-  destination:
-    | ({ type: "google_shared_drive" } & (
-        { driveId: string; folderId: string } | { create: string }
-      ))
-    | { type: "sharepoint"; driveId: string; folderPath: string };
+  source: ManifestRoot;
+  destination: ManifestRoot | { type: FileProviderId; create: string };
   members?: DriveMember[];
 }
 export interface LoadedManifest {
@@ -100,14 +102,16 @@ function csv(text: string): unknown {
       return {
         id: r[0],
         source:
-          r[1] === "google_shared_drive"
+          fileProviderPair({ sourceProvider: r[1], destinationProvider: r[4] }).source.rootField ===
+          "folderId"
             ? { type: r[1], driveId: r[2], folderId: r[9], ...(r[3] ? { folderPath: r[3] } : {}) }
             : { type: r[1], driveId: r[2], folderPath: r[3], ...(r[9] ? { folderId: r[9] } : {}) },
         destination: {
           type: r[4],
           ...(r[7] ? { create: r[7] } : {}),
           ...(r[5] || !r[7] ? { driveId: r[5] } : {}),
-          ...(r[4] === "sharepoint"
+          ...(fileProviderPair({ sourceProvider: r[1], destinationProvider: r[4] }).destination
+            .rootField === "folderPath"
             ? { folderPath: r[10], ...(r[6] ? { folderId: r[6] } : {}) }
             : {
                 ...(r[6] || !r[7] ? { folderId: r[6] } : {}),
@@ -127,7 +131,7 @@ export function parseManifest(
   try {
     raw = format === "csv" ? csv(content) : JSON.parse(content);
   } catch (error) {
-    if (error instanceof ManifestError) throw error;
+    if (error instanceof ManifestError || error instanceof ProviderFault) throw error;
     throw new ManifestError(0, "json");
   }
   function object(
@@ -158,30 +162,6 @@ export function parseManifest(
     const id = text(m.id, row, "id");
     if (ids.has(id)) throw new ManifestError(row, "id", "Duplicate mapping id");
     ids.add(id);
-    const members: DriveMember[] = [];
-    if (m.members !== undefined) {
-      if (!Array.isArray(m.members)) throw new ManifestError(row, "members");
-      for (const [index, rawMember] of m.members.entries()) {
-        const field = `members.${index}`;
-        const member = object(rawMember, row, field, ["email", "type", "role"]);
-        if (member.type !== "user" && member.type !== "group")
-          throw new ManifestError(row, `${field}.type`);
-        if (
-          !["organizer", "fileOrganizer", "writer", "commenter", "reader"].includes(
-            String(member.role),
-          )
-        )
-          throw new ManifestError(row, `${field}.role`);
-        if (!/^[^\s@]+@[^\s@]+$/u.test(text(member.email, row, `${field}.email`)))
-          throw new ManifestError(row, `${field}.email`);
-        const email = String(member.email).toLowerCase();
-        if (members.some((m) => m.email === email))
-          throw new ManifestError(row, `${field}.email`, "Duplicate member");
-        members.push({ email, type: member.type, role: member.role as DriveMember["role"] });
-      }
-      if (!(m.destination && typeof m.destination === "object" && "create" in m.destination))
-        throw new ManifestError(row, "members", "Members require a drive to create");
-    }
     const s = object(m.source, row, "source", ["type", "driveId", "folderPath", "folderId"]);
     const d = object(m.destination, row, "destination", [
       "type",
@@ -190,10 +170,34 @@ export function parseManifest(
       "folderPath",
       "create",
     ]);
-    if (s.type !== "sharepoint" && s.type !== "google_shared_drive")
-      throw new ManifestError(row, "source.type");
-    if (d.type !== (s.type === "sharepoint" ? "google_shared_drive" : "sharepoint"))
-      throw new ManifestError(row, "destination.type");
+    if (s.type === undefined) throw new ManifestError(row, "source.type");
+    if (d.type === undefined) throw new ManifestError(row, "destination.type");
+    const pair = fileProviderPair({ sourceProvider: s.type, destinationProvider: d.type });
+    const members: DriveMember[] = [];
+    if (m.members !== undefined) {
+      if (!Array.isArray(m.members)) throw new ManifestError(row, "members");
+      for (const [index, rawMember] of m.members.entries()) {
+        const field = `members.${index}`;
+        const member = object(rawMember, row, field, ["email", "type", "role"]);
+        if (member.type !== "user" && member.type !== "group")
+          throw new ManifestError(row, `${field}.type`);
+        const role = pair.destination.memberRole(member.role);
+        if (!role)
+          throw new ManifestError(
+            row,
+            `${field}.role`,
+            "The destination cannot represent this role",
+          );
+        if (!/^[^\s@]+@[^\s@]+$/u.test(text(member.email, row, `${field}.email`)))
+          throw new ManifestError(row, `${field}.email`);
+        const email = String(member.email).toLowerCase();
+        if (members.some((m) => m.email === email))
+          throw new ManifestError(row, `${field}.email`, "Duplicate member");
+        members.push({ email, type: member.type, role });
+      }
+      if (!(m.destination && typeof m.destination === "object" && "create" in m.destination))
+        throw new ManifestError(row, "members", "Members require a drive to create");
+    }
     function stable(value: unknown, field: string): string {
       if (
         typeof value !== "string" ||
@@ -214,49 +218,57 @@ export function parseManifest(
         throw new ManifestError(row, field);
       return result;
     }
-    if (s.type === "google_shared_drive") {
-      if (s.folderPath !== undefined) throw new ManifestError(row, "source.folderPath");
-      if (d.create !== undefined) throw new ManifestError(row, "destination.create");
-      if (d.folderId !== undefined) throw new ManifestError(row, "destination.folderId");
+    const source: ManifestRoot =
+      pair.source.rootField === "folderId"
+        ? {
+            type: pair.source.id,
+            driveId: stable(s.driveId, "source.driveId"),
+            folderId: stable(s.folderId, "source.folderId"),
+          }
+        : {
+            type: pair.source.id,
+            driveId: stable(s.driveId, "source.driveId"),
+            folderPath: path(s.folderPath, "source.folderPath"),
+          };
+    const invalidSourceField = pair.source.rootField === "folderId" ? "folderPath" : "folderId";
+    if (s[invalidSourceField] !== undefined)
+      throw new ManifestError(row, `source.${invalidSourceField}`);
+    const invalidDestinationField =
+      pair.destination.rootField === "folderId" ? "folderPath" : "folderId";
+    if (d[invalidDestinationField] !== undefined)
+      throw new ManifestError(row, `destination.${invalidDestinationField}`);
+    if (d.create !== undefined) {
+      if (pair.destination.rootField !== "folderId")
+        throw new ManifestError(row, "destination.create");
+      if (d.driveId !== undefined || d.folderId !== undefined || d.folderPath !== undefined)
+        throw new ManifestError(
+          row,
+          "destination.create",
+          "Choose an existing destination or create",
+        );
       return {
         id,
-        source: {
-          type: s.type,
-          driveId: stable(s.driveId, "source.driveId"),
-          folderId: stable(s.folderId, "source.folderId"),
-        },
+        source,
         destination: {
-          type: "sharepoint",
-          driveId: stable(d.driveId, "destination.driveId"),
-          folderPath: path(d.folderPath, "destination.folderPath"),
+          type: pair.destination.id,
+          create: text(d.create, row, "destination.create"),
         },
+        members,
       };
     }
-    if (s.folderId !== undefined) throw new ManifestError(row, "source.folderId");
-    if (d.folderPath !== undefined) throw new ManifestError(row, "destination.folderPath");
-    if (d.create !== undefined && (d.driveId !== undefined || d.folderId !== undefined))
-      throw new ManifestError(
-        row,
-        "destination.create",
-        "Choose an existing destination or create",
-      );
-    return {
-      id,
-      source: {
-        type: "sharepoint",
-        driveId: stable(s.driveId, "source.driveId"),
-        folderPath: path(s.folderPath, "source.folderPath"),
-      },
-      destination:
-        d.create !== undefined
-          ? { type: "google_shared_drive", create: text(d.create, row, "destination.create") }
-          : {
-              type: "google_shared_drive",
-              driveId: stable(d.driveId, "destination.driveId"),
-              folderId: stable(d.folderId, "destination.folderId"),
-            },
-      ...(d.create !== undefined ? { members } : {}),
-    };
+    const destination: ManifestRoot =
+      pair.destination.rootField === "folderId"
+        ? {
+            type: pair.destination.id,
+            driveId: stable(d.driveId, "destination.driveId"),
+            folderId: stable(d.folderId, "destination.folderId"),
+          }
+        : {
+            type: pair.destination.id,
+            driveId: stable(d.driveId, "destination.driveId"),
+            folderPath: path(d.folderPath, "destination.folderPath"),
+          };
+    return { id, source, destination };
   });
   const sorted = [...mappings].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return { mappings, digest: digestJson({ version: 1, mappings: sorted }) };
@@ -276,25 +288,17 @@ export function validateMirrorDestinations(
       );
 }
 
-/** Each file route reads one source type: a job's route fixes the direction of every mapping. */
-export const FILE_ROUTE_SOURCES: Record<string, "sharepoint" | "google_shared_drive"> = {
-  sharepoint_library_to_shared_drive: "sharepoint",
-  shared_drive_to_sharepoint_library: "google_shared_drive",
-};
-
+/** A job fixes one source provider for every mapping. */
 export function validateMappingDirections(
-  mappings: { sourceDriveId: string; sourceType?: "sharepoint" | "google_shared_drive" }[],
-  route: string,
+  mappings: { sourceDriveId: string; sourceType?: FileProviderId }[],
+  sourceProvider: FileProviderId,
 ): void {
-  // An unknown route refuses at the route gate, before any mapping is read.
-  if (!Object.hasOwn(FILE_ROUTE_SOURCES, route)) return;
-  const expected = FILE_ROUTE_SOURCES[route];
   for (const [index, mapping] of mappings.entries())
-    if ((mapping.sourceType ?? "sharepoint") !== expected)
+    if (mappingSourceProvider(mapping).id !== sourceProvider)
       throw new ManifestError(
         index + 1,
         "source.type",
-        "Mapping direction does not match the job route",
+        "Mapping direction does not match the job provider pair",
       );
 }
 

@@ -1167,6 +1167,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       },
       destination: {
         fs: input.destFolderId,
+        ignoreSizeAndChecksum: input.sourceType === "google_shared_drive",
         kind:
           input.sourceType === "google_shared_drive"
             ? ("sharepoint" as const)

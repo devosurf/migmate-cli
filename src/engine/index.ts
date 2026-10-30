@@ -20,7 +20,6 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { Engine, EngineOptions, JobReader, JobWriter, ReclaimDecision } from "./engine.ts";
 import { mappingsCsv, exceptionsCsv } from "./report-csv.ts";
 import {
-  FILE_ROUTE_SOURCES,
   ManifestError,
   parseManifest,
   validateMappingDirections,
@@ -87,16 +86,20 @@ import {
 } from "./store/lease.ts";
 import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
-import { ProviderFault } from "./providers/credentials.ts";
+import { ProviderFault } from "./providers/fault.ts";
 import {
   fileMigrationDriver,
   goLive,
   GoLiveCheckError,
   memberGrantTiming,
-  unreadableSourceDrives,
   type FileMappingConfig,
   type FileMigrationConfig,
 } from "./drivers/file-migration.ts";
+import {
+  fileProviderPair,
+  historicalProviderPair,
+  type FileProviderId,
+} from "./providers/adapters/capabilities.ts";
 import { teamsArchiveDriver } from "./drivers/teams-archive.ts";
 import { parseArchiveConfig } from "./archive/config.ts";
 import type { ArchiveConfig } from "./providers/archive.ts";
@@ -184,10 +187,12 @@ export interface ProvidedEngineOptions extends EngineOptions {
 type FileReference = { resolver: "file"; path: string; mode: "0600" };
 type Mapping = FileMappingConfig & { sourceSiteId?: string };
 interface CommonConfig {
-  route: string;
+  route?: string;
   transferBinary?: { path: string; sha256: string; provenance: string };
 }
 type FileConfig = CommonConfig & {
+  sourceProvider: FileProviderId;
+  destinationProvider: FileProviderId;
   mappings: Mapping[];
   impersonate?: boolean;
   subject?: string;
@@ -263,11 +268,29 @@ function fileReference(value: unknown, field: string, jobDir: string): FileRefer
 }
 function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
   const input = object(raw, "config");
+  if (type === "file_migration" && Object.hasOwn(input, "route"))
+    throw new EngineRefusalError({
+      code: "configuration_invalid",
+      message: "The route option was removed. Name sourceProvider and destinationProvider instead.",
+      detail: {
+        field: "route",
+        replacement: { sourceProvider: "sharepoint", destinationProvider: "google_shared_drive" },
+      },
+    });
   const commonKeys = ["route", "transferBinary"];
   keys(
     input,
     type === "file_migration"
-      ? [...commonKeys, "mappings", "options", "rclone", "impersonate", "subject"]
+      ? [
+          ...commonKeys,
+          "sourceProvider",
+          "destinationProvider",
+          "mappings",
+          "options",
+          "rclone",
+          "impersonate",
+          "subject",
+        ]
       : [
           ...commonKeys,
           "scopes",
@@ -284,14 +307,12 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         ],
     "config",
   );
-  const common: CommonConfig = {
-    route:
-      input.route === undefined
-        ? type === "file_migration"
-          ? "sharepoint_library_to_shared_drive"
-          : "teams_global_archive"
-        : text(input.route, "route"),
-  };
+  const common: CommonConfig =
+    type === "file_migration"
+      ? {}
+      : {
+          route: input.route === undefined ? "teams_global_archive" : text(input.route, "route"),
+        };
   if (input.transferBinary !== undefined) {
     const b = object(input.transferBinary, "transferBinary");
     keys(b, ["path", "sha256", "provenance"], "transferBinary");
@@ -310,6 +331,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     common.transferBinary = { path, sha256, provenance };
   }
   if (type === "file_migration") {
+    const pair = fileProviderPair(input);
     if (input.mappings !== undefined && !Array.isArray(input.mappings)) configError("mappings");
     const mappings = (input.mappings ?? ([] as unknown[])) as unknown[];
     const parsedMappings = mappings
@@ -358,6 +380,8 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     if (options.verificationMode !== undefined && options.verificationMode !== "hash")
       configError("options.verificationMode");
     const config: FileConfig = {
+      sourceProvider: pair.source.id,
+      destinationProvider: pair.destination.id,
       ...common,
       mappings: parsedMappings,
       options:
@@ -608,11 +632,18 @@ function pathsFor(deps: EngineDeps, ref: JobRef): JobPaths {
 }
 /** Keys earlier builds persisted into every job folder's config; ADR-0009 retired them. */
 const RETIRED_CONFIG_KEYS = ["guarantees", "qualification"];
-function persisted(value: unknown): unknown {
+function persisted(value: unknown, type: JobType): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-  return Object.fromEntries(
+  const input = Object.fromEntries(
     Object.entries(value).filter(([key]) => !RETIRED_CONFIG_KEYS.includes(key)),
   );
+  if (type === "file_migration" && Object.hasOwn(input, "route")) {
+    const pair = historicalProviderPair(input.route);
+    if (!pair) throw new ProviderFault("unsupported_route", "The stored route is not supported.");
+    delete input.route;
+    return { ...input, ...pair };
+  }
+  return input;
 }
 function readConfig(paths: JobPaths, type: JobType, store?: Store): JobConfig {
   if (!existsSync(paths.configPath)) configError("config_missing");
@@ -622,13 +653,13 @@ function readConfig(paths: JobPaths, type: JobType, store?: Store): JobConfig {
   } catch {
     configError("job.toml");
   }
-  const config = parseConfig(persisted(parsed), type, paths);
+  const config = parseConfig(persisted(parsed, type), type, paths);
   const loaded = store?.readMappings();
   if ("mappings" in config && loaded) {
     for (const [index, mapping] of loaded.mappings.entries())
       if (Object.hasOwn(mapping, "exclusions")) configError(`mappings[${index}].exclusions`);
     validateMirrorDestinations(loaded.mappings, config.options.mirror);
-    validateMappingDirections(loaded.mappings, config.route);
+    validateMappingDirections(loaded.mappings, config.sourceProvider);
     return { ...config, mappings: loaded.mappings, manifestDigest: loaded.digest };
   }
   return config;
@@ -663,7 +694,7 @@ function migrateConfig(paths: JobPaths, type: JobType): void {
     } catch {
       configError("legacy_config");
     }
-    atomicFile(paths.configPath, stringifyToml(parseConfig(persisted(parsed), type, paths)));
+    atomicFile(paths.configPath, stringifyToml(parseConfig(persisted(parsed, type), type, paths)));
   }
   rmSync(legacy);
   syncDirectory(paths.dir);
@@ -1189,35 +1220,45 @@ function contentDigest(rows: unknown[]): string {
     hash.update(row).update("\n");
   return hash.digest("hex");
 }
-/** The authority-bearing configuration, excluding credentials and runtime progress. */
-function configurationAuthority(config: JobConfig): string {
-  const settings =
-    "mappings" in config
-      ? {
-          mappings: config.mappings,
-          options: config.options,
-          ...(config.manifestDigest ? { manifestDigest: config.manifestDigest } : {}),
-          route: config.route,
-        }
-      : {
-          scopes: config.scopes,
-          cloud: config.cloud,
-          window: config.window,
-          timezone: config.timezone,
-          retainedHistory: config.retainedHistory,
-          transcripts: config.transcripts,
-          attachmentBytes: config.attachmentBytes,
-          lineage: config.lineage,
-          ...(config.destination ? { destination: config.destination } : {}),
-          route: config.route,
-        };
-  return canonicalJson(settings);
+/** Reproduce a frozen plan's encoding while still binding the current semantic settings. */
+function configurationAuthority(config: JobConfig, frozenConfiguration?: string): string {
+  if ("mappings" in config) {
+    const route: unknown = frozenConfiguration
+      ? JSON.parse(frozenConfiguration).route
+      : config.route;
+    const legacyPair = historicalProviderPair(route);
+    const pair = fileProviderPair(config);
+    const sameLegacyPair =
+      legacyPair?.sourceProvider === pair.source.id &&
+      legacyPair.destinationProvider === pair.destination.id;
+    return canonicalJson({
+      mappings: config.mappings,
+      options: config.options,
+      ...(config.manifestDigest ? { manifestDigest: config.manifestDigest } : {}),
+      ...(sameLegacyPair
+        ? { route }
+        : { sourceProvider: pair.source.id, destinationProvider: pair.destination.id }),
+    });
+  }
+  return canonicalJson({
+    scopes: config.scopes,
+    cloud: config.cloud,
+    window: config.window,
+    timezone: config.timezone,
+    retainedHistory: config.retainedHistory,
+    transcripts: config.transcripts,
+    attachmentBytes: config.attachmentBytes,
+    lineage: config.lineage,
+    ...(config.destination ? { destination: config.destination } : {}),
+    route: config.route,
+  });
 }
 function inputFields(
   config: JobConfig,
   evidence: BoundEvidence,
   rows: CommitRow[],
   archivePlan: unknown,
+  frozenConfiguration?: string,
 ): Record<string, string> {
   const scopes = rows
     .filter((r) => r.jobType === "file_migration" && r.phase === "plan" && r.fileScope)
@@ -1231,7 +1272,7 @@ function inputFields(
     .sort();
   const { binaryPath: _path, ...binding } = evidence;
   return {
-    configuration: configurationAuthority(config),
+    configuration: configurationAuthority(config, frozenConfiguration),
     identity: canonicalJson(binding),
     scope: canonicalJson(scopes),
     archive: canonicalJson(semantic(archivePlan ?? null)),
@@ -1261,7 +1302,7 @@ function closeReview(store: Store, config: JobConfig) {
     approvalDigest: approval.approvalDigest,
     verificationDigest: verification.verificationDigest,
     acceptedExceptions: store.readAcceptances(verification.verificationDigest),
-    configuration: configurationAuthority(bindingConfig),
+    configuration: configurationAuthority(bindingConfig, plan.inputs.configuration),
   });
   const deferred =
     "mappings" in config && memberGrantTiming(approvedOptions(plan)) === "after_verification";
@@ -1640,11 +1681,8 @@ function makeWriter(
   ): Promise<Outcome<PreflightReport>> {
     const local = localFilesystem(paths.dir);
     if (!local.ok) return local;
-    if (
-      !(job().type === "file_migration"
-        ? Object.hasOwn(FILE_ROUTE_SOURCES, config.route)
-        : config.route === "teams_global_archive")
-    )
+    if ("mappings" in config) fileProviderPair(config);
+    else if (config.route !== "teams_global_archive")
       return refuse("unsupported_route", "The requested route is not implemented.");
     const checks: CheckResult[] = [];
     const recordCheck = (check: CheckResult) => {
@@ -2219,17 +2257,17 @@ function makeWriter(
         const pending = manifest.mappings.map((m) => ({
           id: m.id,
           sourceDriveId: m.source.driveId,
-          ...(m.source.type === "sharepoint"
+          ...("folderPath" in m.source
             ? { sourceFolderPath: m.source.folderPath }
-            : { sourceType: "google_shared_drive" as const, sourceItemId: m.source.folderId }),
+            : { sourceType: m.source.type, sourceItemId: m.source.folderId }),
           ...("create" in m.destination
             ? { createDrive: { name: m.destination.create, members: m.members ?? [] } }
-            : m.destination.type === "sharepoint"
+            : "folderPath" in m.destination
               ? { destDriveId: m.destination.driveId, destFolderPath: m.destination.folderPath }
               : { destDriveId: m.destination.driveId, destFolderId: m.destination.folderId }),
         }));
         validateMirrorDestinations(pending, base.options.mirror);
-        validateMappingDirections(pending, base.route);
+        validateMappingDirections(pending, base.sourceProvider);
         const p =
           deps.provider ??
           createProductionProvider({
@@ -2239,7 +2277,8 @@ function makeWriter(
           });
         providers.add(p);
         // Name every source drive the acting account cannot read, not just the first bad row.
-        const unreadable = await unreadableSourceDrives(p, pending);
+        const unreadable =
+          (await fileProviderPair(base).source.unreadableSources?.(p, pending)) ?? [];
         if (unreadable.length)
           return refuse(
             "preflight_failed",
@@ -2251,7 +2290,7 @@ function makeWriter(
           const mapping = pending[index]!,
             source = manifest.mappings[index]!.source;
           const root =
-            source.type === "sharepoint"
+            "folderPath" in source
               ? await p.resolveSourceFolder({
                   driveId: source.driveId,
                   folderPath: source.folderPath,
@@ -2263,11 +2302,11 @@ function makeWriter(
           if (!root || root.kind !== "folder" || root.driveId !== source.driveId)
             throw new ManifestError(
               index + 1,
-              source.type === "sharepoint" ? "source.folderPath" : "source.folderId",
+              `source.${fileProviderPair(base).source.rootField}`,
               "Source folder does not resolve",
             );
           const destination = manifest.mappings[index]!.destination;
-          if (destination.type === "sharepoint") {
+          if ("folderPath" in destination) {
             const folder = await p.resolveDestinationPath({
               driveId: destination.driveId,
               folderPath: destination.folderPath,
@@ -2629,6 +2668,7 @@ function makeWriter(
           evidence,
           store.readAllRows(plan.revision, "plan"),
           resume.archivePlan,
+          plan.inputs.configuration,
         );
         if (digestJson(currentInputs) !== plan.inputsDigest)
           return refuse(
@@ -2935,6 +2975,7 @@ function makeWriter(
                 readBoundEvidence(plan.evidence),
                 store.readAllRows(revision, "plan"),
                 undefined,
+                plan.inputs.configuration,
               ),
             ) !== plan.inputsDigest
           )
@@ -3037,7 +3078,13 @@ function makeWriter(
               const bound = readBoundEvidence(plan.evidence);
               if (
                 digestJson(
-                  inputFields(config, evidence, store.readAllRows(revision, "plan"), undefined),
+                  inputFields(
+                    config,
+                    evidence,
+                    store.readAllRows(revision, "plan"),
+                    undefined,
+                    plan.inputs.configuration,
+                  ),
                 ) !== plan.inputsDigest
               )
                 return refuse(

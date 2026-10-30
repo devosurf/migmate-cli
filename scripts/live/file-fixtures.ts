@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import {
   readCredentialFile,
   type CredentialSession,
-  type FileCredentialReference,
 } from "../../src/engine/providers/credentials.ts";
+import type { FileCredentialReference } from "../../src/engine/providers/adapters/credentials/shared.ts";
 import {
   fetchProvider,
   googleUrl,

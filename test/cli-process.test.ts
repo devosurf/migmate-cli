@@ -8,7 +8,13 @@ import { fileURLToPath } from "node:url";
 import { it, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { stringify as stringifyToml } from "smol-toml";
-import { CLI_JOB_CONFIG, CLI_ARCHIVE_CONFIG, FIXTURE_TIME } from "./cli-fixture.ts";
+import {
+  CLI_JOB_CONFIG,
+  CLI_REVERSE_JOB_CONFIG,
+  CLI_REVERSE_MANIFEST,
+  CLI_ARCHIVE_CONFIG,
+  FIXTURE_TIME,
+} from "./cli-fixture.ts";
 import type { JobEvent, JobStatus, JobType, PlanRevision, RowPage } from "../src/engine/index.ts";
 
 interface WireEvent extends JobEvent {
@@ -46,15 +52,17 @@ function assertPiped(child: ChildProcess): asserts child is ChildProcessWithoutN
   assert.ok(child.stdout);
   assert.ok(child.stderr);
 }
-function setup(t: TestContext, type: JobType = "file_migration", signal = t.signal) {
+function setup(
+  t: TestContext,
+  type: JobType = "file_migration",
+  signal = t.signal,
+  fileConfig: typeof CLI_JOB_CONFIG | typeof CLI_REVERSE_JOB_CONFIG = CLI_JOB_CONFIG,
+) {
   const root = mkdtempSync(join(tmpdir(), "migmate-cli-process-"));
   const home = join(root, "home");
   const destination = join(root, "destination.json");
   const config = join(root, "input.toml");
-  writeFileSync(
-    config,
-    stringifyToml(type === "teams_archive" ? CLI_ARCHIVE_CONFIG : CLI_JOB_CONFIG),
-  );
+  writeFileSync(config, stringifyToml(type === "teams_archive" ? CLI_ARCHIVE_CONFIG : fileConfig));
   let now = Date.parse(FIXTURE_TIME);
   const destinationRecords = (): DestinationRecord[] =>
     existsSync(destination) ? JSON.parse(readFileSync(destination, "utf8")) : [];
@@ -213,6 +221,11 @@ function setup(t: TestContext, type: JobType = "file_migration", signal = t.sign
     const init = await command<{ id: string }>(["init", "--type", type, "--config", config]);
     assert.equal(init.ok, true);
     const id = init.value.id;
+    if (type === "file_migration" && fileConfig.sourceProvider === "google_shared_drive") {
+      const manifest = join(root, "reverse.json");
+      writeFileSync(manifest, JSON.stringify(CLI_REVERSE_MANIFEST));
+      await command(["manifest", "load", "--job", id, "--file", manifest]);
+    }
     const plan = await command<PlanRevision>(["plan", "--job", id]);
     const approval = await command<{ planDigest: string }>([
       "approve",
@@ -273,6 +286,32 @@ function setup(t: TestContext, type: JobType = "file_migration", signal = t.sign
     approve,
     reclaimKilledWriter,
   };
+}
+
+for (const [direction, config] of [
+  ["forward", CLI_JOB_CONFIG],
+  ["reverse", CLI_REVERSE_JOB_CONFIG],
+] as const) {
+  it(`runs the real CLI from plan through close with ${direction} providers`, async (t) => {
+    const h = setup(t, "file_migration", t.signal, config);
+    const id = await h.approve();
+    await h.command(["execute", "--job", id]);
+    await h.command(["verify", "--job", id]);
+    const ready = await h.command<JobStatus>(["status", "--job", id]);
+    assert.ok(ready.value.closeReview);
+    await h.command([
+      "close",
+      "--job",
+      id,
+      "--close-digest",
+      ready.value.closeReview.evidenceDigest,
+      "--approver",
+      "ci:process-contract",
+    ]);
+    const closed = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(closed.value.state, "closed");
+    assert.equal(h.destinationRecords().filter((item) => item.kind === "file").length, 8);
+  });
 }
 
 for (const type of ["file_migration", "teams_archive"] as const) {

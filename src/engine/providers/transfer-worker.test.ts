@@ -5,7 +5,7 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { ProviderFault } from "./credentials.ts";
+import { ProviderFault } from "./fault.ts";
 import { createTransferSupervisor } from "./transfer-worker.ts";
 import { withSocketPath } from "./socket-path.ts";
 import { openEngine } from "../index.ts";

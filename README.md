@@ -226,6 +226,28 @@ service-account key and deleting the delegation entry as open operator tasks;
 Migmate does not perform those administrative deletions. A manifest that creates
 Shared Drives also requires `about.canCreateDrives = true` in preflight.
 
+### File provider selection
+
+Set both providers at the top level of the operator TOML, before any table header:
+
+```toml
+sourceProvider = "sharepoint"
+destinationProvider = "google_shared_drive"
+```
+
+For the reverse direction, use `sourceProvider = "google_shared_drive"` and
+`destinationProvider = "sharepoint"`. These are the only supported file-provider
+pairs; Dropbox, same-provider copies and every other pair refuse `unsupported_route`.
+An empty config defaults to the forward pair; saved file configs name both providers.
+New file configs containing `route` refuse `configuration_invalid`: replace that
+field with `sourceProvider` and `destinationProvider` as shown above, rather than
+renaming its old value. Historical persisted `job.toml` route values are decoded
+without rewriting them; historical status and reports remain readable. Their recorded
+close authorizations and go-live acknowledgments retain the frozen plan's original
+digest encoding. Equivalent provider-pair spelling preserves those bindings; changing
+the current authority-bearing settings does not.
+Teams archives retain `route = "teams_global_archive"`.
+
 ### Mapping manifests
 
 Load a batch with `migmate manifest load --job "$ID" --file mappings.json --output json`.
@@ -280,9 +302,13 @@ For a new Shared Drive, replace `destination` with
 
 The drive root becomes the destination folder. Existing destinations and drives
 to create may coexist in one manifest. Members apply only to drives the job
-creates; types are `user` or `group`, and roles are `organizer`, `fileOrganizer`,
-`writer`, `commenter`, or `reader`. `anyone` and `domain` refuse at load, naming
-the row and `members.N.type`. Emails are case-insensitive and duplicates refuse.
+creates; types are `user` or `group`. Shared roles are `reader`, `writer`, and
+`manager`; Google maps `manager` to `organizer` and leaves `reader`/`writer` unchanged.
+Google-native `organizer`, `fileOrganizer`, and `commenter` are also valid.
+SharePoint maps shared roles to `read`, `write`, and `owner`, respectively, but
+SharePoint container creation and membership are not shipped: reverse jobs require
+existing destinations and cannot declare members. `anyone` and `domain` refuse at
+load, naming the row and `members.N.type`. Emails are case-insensitive and duplicates refuse.
 
 **Member grant timing.**
 
@@ -471,9 +497,9 @@ item rows.
 
 ### Google Shared Drives to SharePoint
 
-A job whose top-level TOML sets `route = "shared_drive_to_sharepoint_library"` copies
-Google Shared Drive folders into existing SharePoint document libraries or folders.
-The route (default `sharepoint_library_to_shared_drive`) fixes one direction for the
+A job whose top-level TOML sets `sourceProvider = "google_shared_drive"` and
+`destinationProvider = "sharepoint"` copies Google Shared Drive folders into existing
+SharePoint document libraries or folders. The provider pair fixes one direction for the
 whole job and is frozen into the plan and report: `manifest load` refuses any row in the
 other direction, including every row of a mixed manifest, with its row and `source.type`.
 Each reverse mapping looks like:

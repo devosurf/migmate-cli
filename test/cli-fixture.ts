@@ -21,6 +21,8 @@ import type {
 } from "../src/engine/providers/port.ts";
 
 export const CLI_JOB_CONFIG = {
+  sourceProvider: "sharepoint",
+  destinationProvider: "google_shared_drive",
   mappings: [
     {
       id: "map-1",
@@ -28,6 +30,20 @@ export const CLI_JOB_CONFIG = {
       sourceItemId: "src-root",
       destDriveId: "dst-drive",
       destFolderId: "dst-root",
+    },
+  ],
+};
+export const CLI_REVERSE_JOB_CONFIG = {
+  sourceProvider: "google_shared_drive",
+  destinationProvider: "sharepoint",
+};
+export const CLI_REVERSE_MANIFEST = {
+  version: 1,
+  mappings: [
+    {
+      id: "map-1",
+      source: { type: "google_shared_drive", driveId: "src-drive", folderId: "src-root" },
+      destination: { type: "sharepoint", driveId: "dst-drive", folderPath: "" },
     },
   ],
 };
