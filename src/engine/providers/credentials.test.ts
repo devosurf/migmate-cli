@@ -402,7 +402,8 @@ test("SharePoint destination credentials accept only Sites.ReadWrite.All, never 
         sharepointDestinationRemote: "sharepoint-source",
       },
     };
-    t.mock.method(globalThis, "fetch", async () => Response.json(graphToken(roles)));
+    const token = graphToken(roles);
+    t.mock.method(globalThis, "fetch", async () => Response.json(token));
     const session = await createCredentialSession({
       jobType: "file_migration",
       config: reverse,
@@ -410,7 +411,7 @@ test("SharePoint destination credentials accept only Sites.ReadWrite.All, never 
     });
     t.after(() => session.dispose());
     if (roles.length === 1 && roles[0] === "Sites.ReadWrite.All") {
-      assert.equal(await session.graphDestinationToken(), graphToken(roles).access_token);
+      assert.equal(await session.graphDestinationToken(), token.access_token);
       await assert.rejects(session.graphToken(), { code: "credential_graph_unavailable" });
     } else
       await assert.rejects(session.graphDestinationToken(), {
