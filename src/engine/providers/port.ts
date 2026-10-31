@@ -120,15 +120,15 @@ export interface FileListingComparisonEntry {
   size: number;
 }
 
-/** Execution-time action classes, sorted by path; not proof of content equality. */
+/** Caller-owned disposable iterables, sorted by path; not proof of content equality. */
 export interface FileListingComparison {
-  new: FileListingComparisonEntry[];
-  changed: FileListingComparisonEntry[];
-  unchanged: FileListingComparisonEntry[];
-  deleted: FileListingComparisonEntry[];
-  retained: FileListingComparisonEntry[];
+  new: Iterable<FileListingComparisonEntry>;
+  changed: Iterable<FileListingComparisonEntry>;
+  unchanged: Iterable<FileListingComparisonEntry>;
+  deleted: Iterable<FileListingComparisonEntry>;
+  retained: Iterable<FileListingComparisonEntry>;
   /** Equal common hash with a differing timestamp: no content transfer. */
-  timestampOnly: FileListingComparisonEntry[];
+  timestampOnly: Iterable<FileListingComparisonEntry>;
   modifyWindowNs: string;
 }
 
@@ -152,12 +152,12 @@ export interface FilePassProvider {
   copyPassStatus(input: CopyPassReference): Promise<CopyPassStatus>;
   copyPassStats(input: CopyPassReference): Promise<CopyPassStats>;
   stopCopyPass(input: CopyPassReference): Promise<void>;
-  /** Sorted recursive relative folder paths, excluding the root. */
+  /** Caller-owned disposable iterable of sorted recursive folder paths, excluding the root. */
   listFolders(input: {
     socketPath: string;
     root: FilePassRoot;
     signal?: AbortSignal;
-  }): Promise<string[]>;
+  }): Promise<Iterable<string>>;
   listFileHashes(input: {
     socketPath: string;
     root: FilePassRoot;
@@ -166,7 +166,7 @@ export interface FilePassProvider {
     /** Exact relative files to list and hash; an empty selection reads no files. */
     paths?: string[];
     signal?: AbortSignal;
-  }): Promise<FileHashEntry[]>;
+  }): Promise<Iterable<FileHashEntry>>;
 }
 
 export interface RetryAfterError extends Error {

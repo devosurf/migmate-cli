@@ -12,20 +12,21 @@ import type {
   CopyPassHandle,
   CopyPassReference,
   FilePassProvider,
-  FileListingComparison,
+  FileHashEntry,
   ProviderPort,
   TransferWorkerHandle,
   TransferWorkerProbe,
 } from "./port.ts";
 import { withSocketPath } from "./socket-path.ts";
+import { DiskListing, ListingScratch } from "./listing.ts";
+import { parseListingJson } from "./listing-json.ts";
+import { compareListings, type ListedFile, type ListedHash } from "./listing-comparison.ts";
 
 const VERSION_FLOOR = [1, 69, 0] as const;
 const READY_TIMEOUT = 15_000;
 const REQUEST_TIMEOUT = 30_000;
 const STOP_TIMEOUT = 3_000;
 const MAX_JSON_BYTES = 16 * 1024 * 1024;
-/** Listings grow with the library (~260 bytes per file); V8 strings stop near 512 MiB. */
-const LISTING_MAX_BYTES = 256 * 1024 * 1024;
 const REMOTE_NAME = /^[\p{L}\p{N}_.+@]+(?:[ -]+[\p{L}\p{N}_.+@-]+)*$/u;
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -415,12 +416,6 @@ function durationNs(value: unknown): bigint {
   return BigInt(value);
 }
 
-interface ListedFile {
-  path: string;
-  size: number;
-  modified: bigint;
-}
-
 export function createTransferSupervisor(options: {
   configPath: string | null;
   jobDirectory: string;
@@ -430,6 +425,26 @@ export function createTransferSupervisor(options: {
 }): TransferSupervisor {
   const workers = new Map<string, Worker>();
   const starting = new Set<Promise<TransferWorkerHandle>>();
+  const listings = new Set<Disposable>();
+  const closing = new AbortController();
+  const scratch = new ListingScratch(join(options.jobDirectory, "listing-scratch-standalone"));
+
+  function track<T extends Disposable>(listing: T): T {
+    if (closed) {
+      listing[Symbol.dispose]();
+      throw fail("provider_failed", "supervisor_closed");
+    }
+    listings.add(listing);
+    const dispose = listing[Symbol.dispose].bind(listing);
+    listing[Symbol.dispose] = () => {
+      try {
+        dispose();
+      } finally {
+        listings.delete(listing);
+      }
+    };
+    return listing;
+  }
   let proof: BinaryProof | null = null;
   let proving: Promise<BinaryProof> | null = null;
   let closed = false;
@@ -603,13 +618,44 @@ export function createTransferSupervisor(options: {
    * own I/O timeouts and retries still do. rclone runs a synchronous call in the request's
    * context and keeps one copy of its result, so aborting the signal stops the work.
    */
-  function longCall(
+  async function longCall(
     worker: Worker,
-    method: string,
+    method: "operations/list" | "operations/hashsum",
     input: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-  ): Promise<unknown> {
-    return authenticated(worker, method, input, 0, LISTING_MAX_BYTES, signal);
+    accept: (value: unknown) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const cancellation =
+      signal === undefined ? closing.signal : AbortSignal.any([signal, closing.signal]);
+    cancellation.throwIfAborted();
+    if (!worker.child.alive) throw fail("provider_failed", "worker_exited");
+    if (worker.stopping !== null) throw fail("provider_failed", "worker_stopping");
+    await verifySocket(worker);
+    const res = await response(
+      worker.socketPath,
+      `/${method}`,
+      "POST",
+      JSON.stringify(input),
+      basic(worker),
+      0,
+      cancellation,
+    );
+    const abort = () => res.destroy();
+    cancellation.addEventListener("abort", abort, { once: true });
+    try {
+      cancellation.throwIfAborted();
+      if (res.statusCode !== 200)
+        throw fail("provider_failed", "worker_request_failed", { status: res.statusCode ?? 0 });
+      await parseListingJson(res, method === "operations/list" ? "list" : "hashsum", accept);
+      cancellation.throwIfAborted();
+    } catch (error) {
+      if (cancellation.aborted) throw cancellation.reason;
+      if (error instanceof ProviderFault) throw error;
+      throw fail("provider_failed", "worker_response_invalid");
+    } finally {
+      cancellation.removeEventListener("abort", abort);
+      res.destroy();
+    }
   }
 
   function passWorker({ socketPath, pass }: CopyPassReference): Worker {
@@ -915,7 +961,7 @@ export function createTransferSupervisor(options: {
     }
   }
 
-  return {
+  const supervisor: TransferSupervisor = {
     proveBinary,
     async compareFileListings(input) {
       const worker = owned(input.socketPath);
@@ -949,8 +995,10 @@ export function createTransferSupervisor(options: {
         durationNs(destinationInfo.Precision),
         durationNs(main.ModifyWindow),
       ].reduce((largest, value) => (value > largest ? value : largest));
-      const list = async (fs: string): Promise<ListedFile[]> => {
-        const result = await longCall(
+      using temporary = new DisposableStack();
+      const list = async (fs: string): Promise<DiskListing<ListedFile>> => {
+        const result = temporary.use(track(new DiskListing<ListedFile>()));
+        await longCall(
           worker,
           "operations/list",
           {
@@ -958,61 +1006,28 @@ export function createTransferSupervisor(options: {
             remote: "",
             opt: { recurse: true, filesOnly: true, noMimeType: true },
           },
+          (file) => {
+            if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
+              throw fail("provider_failed", "worker_response_invalid");
+            result.add({ path: file.Path, size: file.Size, modified: modTimeNs(file.ModTime) });
+          },
           input.signal,
         );
-        if (!record(result) || !Array.isArray(result.list))
-          throw fail("provider_failed", "worker_response_invalid");
-        return result.list.map((file: unknown) => {
-          if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
-            throw fail("provider_failed", "worker_response_invalid");
-          return { path: file.Path, size: file.Size, modified: modTimeNs(file.ModTime) };
-        });
+        return result;
       };
-      const [source, destination] = await Promise.all([
-        list(input.source.fs),
-        list(input.destination.fs),
-      ]);
-      const key = (path: string) => {
-        const normalized = main.NoUnicodeNormalization === true ? path : path.normalize("NFC");
-        return main.IgnoreCaseSync === true ? normalized.toLowerCase() : normalized;
-      };
-      const remaining = new Map(destination.map((file) => [key(file.path), file]));
-      const comparison: FileListingComparison = {
-        new: [],
-        changed: [],
-        unchanged: [],
-        deleted: [],
-        retained: [],
-        timestampOnly: [],
-        modifyWindowNs: window.toString(),
-      };
-      const hashCandidates: { source: ListedFile; destination: ListedFile }[] = [];
-      for (const file of source) {
-        const entry = { path: file.path, size: file.size };
-        const previous = remaining.get(key(file.path));
-        remaining.delete(key(file.path));
-        if (!previous) {
-          comparison.new.push(entry);
-          continue;
-        }
-        const difference = file.modified - previous.modified;
-        const sizeDiffers =
-          !input.destination.ignoreSizeAndChecksum &&
-          file.size >= 0 &&
-          previous.size >= 0 &&
-          file.size !== previous.size;
-        if (sizeDiffers) comparison.changed.push(entry);
-        else if (difference < window && difference > -window) comparison.unchanged.push(entry);
-        else if (commonHash) hashCandidates.push({ source: file, destination: previous });
-        else comparison.changed.push(entry);
-      }
-      if (commonHash && hashCandidates.length > 0) {
-        const hashes = async (fs: string, paths: string[]) => {
-          const result = await longCall(
+      const source = await list(input.source.fs);
+      const destination = await list(input.destination.fs);
+      const hashes = async (
+        side: "source" | "destination",
+        paths: string[],
+      ): Promise<DiskListing<ListedHash>> => {
+        const result = track(new DiskListing<ListedHash>());
+        try {
+          await longCall(
             worker,
             "operations/list",
             {
-              fs,
+              fs: input[side].fs,
               remote: "",
               opt: {
                 recurse: true,
@@ -1024,60 +1039,55 @@ export function createTransferSupervisor(options: {
               },
               _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) },
             },
+            (file) => {
+              if (!record(file) || typeof file.Path !== "string" || !record(file.Hashes))
+                throw fail("provider_failed", "worker_response_invalid");
+              const hash = file.Hashes[commonHash!];
+              if (typeof hash === "string" && hash !== "") result.add({ path: file.Path, hash });
+            },
             input.signal,
           );
-          if (!record(result) || !Array.isArray(result.list))
-            throw fail("provider_failed", "worker_response_invalid");
-          const byPath = new Map<string, string>();
-          for (const file of result.list) {
-            if (!record(file) || typeof file.Path !== "string" || !record(file.Hashes))
-              throw fail("provider_failed", "worker_response_invalid");
-            const hash = file.Hashes[commonHash];
-            if (typeof hash === "string" && hash !== "") byPath.set(file.Path, hash);
-          }
-          return byPath;
-        };
-        const [sourceHashes, destinationHashes] = await Promise.all([
-          hashes(
-            input.source.fs,
-            hashCandidates.map((pair) => pair.source.path),
-          ),
-          hashes(
-            input.destination.fs,
-            hashCandidates.map((pair) => pair.destination.path),
-          ),
-        ]);
-        for (const pair of hashCandidates) {
-          const hash = sourceHashes.get(pair.source.path);
-          // IgnoreChecksum controls post-copy validation, not rclone's Equal hash
-          // branch. SharePoint still uses that branch if a common hash exists.
-          const timestampOnly =
-            hash !== undefined && hash === destinationHashes.get(pair.destination.path);
-          comparison[timestampOnly ? "timestampOnly" : "changed"].push({
-            path: pair.source.path,
-            size: pair.source.size,
-          });
+          return result;
+        } catch (error) {
+          result[Symbol.dispose]();
+          throw error;
         }
-      }
-      for (const file of remaining.values()) {
-        comparison[input.mode === "mirror" ? "deleted" : "retained"].push({
-          path: file.path,
-          size: file.size,
-        });
-      }
-      for (const entries of [
+      };
+      const comparison = await compareListings({
+        source,
+        destination,
+        mode: input.mode,
+        ignoreSize: input.destination.ignoreSizeAndChecksum === true,
+        noUnicodeNormalization: main.NoUnicodeNormalization === true,
+        ignoreCase: main.IgnoreCaseSync === true,
+        window,
+        ...(commonHash ? { readHashes: hashes } : {}),
+        signal:
+          input.signal === undefined
+            ? closing.signal
+            : AbortSignal.any([input.signal, closing.signal]),
+      });
+      using output = new DisposableStack();
+      const categories = [
         comparison.new,
         comparison.changed,
         comparison.unchanged,
         comparison.deleted,
         comparison.retained,
         comparison.timestampOnly,
-      ])
-        entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      ];
+      for (const category of categories) {
+        if (category instanceof DiskListing) output.use(category);
+      }
+      for (const category of categories) {
+        if (category instanceof DiskListing) track(category);
+      }
+      output.move();
       return comparison;
     },
     async listFolders({ socketPath, root, signal }) {
-      const listing = await longCall(
+      using unsorted = track(new DiskListing<string>((path) => path));
+      await longCall(
         owned(socketPath),
         "operations/list",
         {
@@ -1085,67 +1095,94 @@ export function createTransferSupervisor(options: {
           remote: "",
           opt: { recurse: true, dirsOnly: true, noModTime: true, noMimeType: true },
         },
-        signal,
-      );
-      if (!record(listing) || !Array.isArray(listing.list))
-        throw fail("provider_failed", "worker_response_invalid");
-      return listing.list
-        .map((folder: unknown) => {
+        (folder) => {
           if (!record(folder) || typeof folder.Path !== "string" || folder.IsDir !== true)
             throw fail("provider_failed", "worker_response_invalid");
-          return folder.Path;
-        })
-        .filter((path: string) => path !== "" && path !== ".")
-        .sort();
-    },
-    async listFileHashes({ socketPath, root, hashType, download, paths, signal }) {
-      const worker = owned(socketPath);
-      if (paths?.length === 0) return [];
-      const filter =
-        paths === undefined
-          ? {}
-          : { _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) } };
-      const listing = await longCall(
-        worker,
-        "operations/list",
-        {
-          fs: root.fs,
-          remote: "",
-          opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true },
-          ...filter,
+          if (folder.Path !== "" && folder.Path !== ".") unsorted.add(folder.Path);
         },
         signal,
       );
-      const hashes = await longCall(
-        worker,
-        "operations/hashsum",
-        { fs: root.fs, hashType, download, base64: false, ...filter },
-        signal,
-      );
-      if (
-        !record(listing) ||
-        !Array.isArray(listing.list) ||
-        !record(hashes) ||
-        !Array.isArray(hashes.hashsum)
-      )
-        throw fail("provider_failed", "worker_response_invalid");
-      const byPath = new Map<string, string | null>();
-      for (const line of hashes.hashsum) {
-        if (typeof line !== "string") throw fail("provider_failed", "worker_response_invalid");
-        const match = /^ *(\S*) {2}([\s\S]*)$/.exec(line);
-        if (!match) throw fail("provider_failed", "worker_response_invalid");
-        byPath.set(match[2]!, /^[a-fA-F0-9]+$/.test(match[1]!) ? match[1]!.toLowerCase() : null);
+      const result = track(new DiskListing<string>((path) => path));
+      try {
+        for (const path of unsorted.sorted((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
+          result.add(path);
+        return result;
+      } catch (error) {
+        result[Symbol.dispose]();
+        throw error;
       }
-      return listing.list.map((file: unknown) => {
-        if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
-          throw fail("provider_failed", "worker_response_invalid");
-        return {
-          path: file.Path,
-          size: file.Size,
-          hash: byPath.get(file.Path) ?? null,
-          ...(typeof file.ID === "string" && file.ID.length > 0 ? { id: file.ID } : {}),
-        };
-      });
+    },
+    async listFileHashes({ socketPath, root, hashType, download, paths, signal }) {
+      const worker = owned(socketPath);
+      const result = track(new DiskListing<FileHashEntry>());
+      try {
+        if (paths?.length === 0) return result;
+        using files = track(new DiskListing<Omit<FileHashEntry, "hash">>());
+        using hashes = track(new DiskListing<{ path: string; hash: string | null }>());
+        // Caller selections can themselves be large. Bound request filters while
+        // retaining the unfiltered single-pass path for a whole inventory.
+        const pages = paths === undefined ? 1 : Math.ceil(paths.length / 256);
+        for (let page = 0; page < pages; page++) {
+          const filter =
+            paths === undefined
+              ? {}
+              : {
+                  _filter: {
+                    IncludeRule: paths
+                      .slice(page * 256, (page + 1) * 256)
+                      .map((path) => `/${literalFilterPath(path)}`),
+                  },
+                };
+          await longCall(
+            worker,
+            "operations/list",
+            {
+              fs: root.fs,
+              remote: "",
+              opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true },
+              ...filter,
+            },
+            (file) => {
+              if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
+                throw fail("provider_failed", "worker_response_invalid");
+              files.add({
+                path: file.Path,
+                size: file.Size,
+                ...(typeof file.ID === "string" && file.ID.length > 0 ? { id: file.ID } : {}),
+              });
+            },
+            signal,
+          );
+          await longCall(
+            worker,
+            "operations/hashsum",
+            {
+              fs: root.fs,
+              hashType,
+              download,
+              base64: false,
+              ...filter,
+            },
+            (line) => {
+              if (typeof line !== "string")
+                throw fail("provider_failed", "worker_response_invalid");
+              const match = /^ *(\S*) {2}([\s\S]*)$/.exec(line);
+              if (!match) throw fail("provider_failed", "worker_response_invalid");
+              hashes.add({
+                path: match[2]!,
+                hash: /^[a-fA-F0-9]+$/.test(match[1]!) ? match[1]!.toLowerCase() : null,
+              });
+            },
+            signal,
+          );
+        }
+        for (const file of files)
+          result.add({ ...file, hash: hashes.get(file.path)?.hash ?? null });
+        return result;
+      } catch (error) {
+        result[Symbol.dispose]();
+        throw error;
+      }
     },
     async startCopyPass(input) {
       if (
@@ -1280,6 +1317,9 @@ export function createTransferSupervisor(options: {
     },
     async close() {
       closed = true;
+      closing.abort(fail("provider_failed", "supervisor_closed"));
+      for (const listing of listings) listing[Symbol.dispose]();
+      scratch[Symbol.dispose]();
       await Promise.allSettled(starting);
       const results = await Promise.allSettled(
         [...workers.values()].map((worker) => shutdown(worker, true)),
@@ -1287,5 +1327,11 @@ export function createTransferSupervisor(options: {
       if (results.some((result) => result.status === "rejected"))
         throw fail("recovery_required", "worker_cleanup_failed");
     },
+  };
+  return {
+    ...supervisor,
+    compareFileListings: (input) => scratch.inherit(() => supervisor.compareFileListings(input)),
+    listFolders: (input) => scratch.inherit(() => supervisor.listFolders(input)),
+    listFileHashes: (input) => scratch.inherit(() => supervisor.listFileHashes(input)),
   };
 }

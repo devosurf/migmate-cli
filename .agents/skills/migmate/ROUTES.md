@@ -95,6 +95,10 @@ Both existing file routes always approve the map: roots, drives to create, membe
 
 Version history, list-item fields, retention labels and permissions are omitted and disclosed once in plan/report. OneNote copies as section files. Removed proof, exclusions, omission/OneNote policy, partial-verification and size-only options refuse. Old inventory-planned jobs refuse mutation; historical status, evidence and reports remain readable. Start a new job rather than rewriting old evidence.
 
+**Large jobs:** the synthetic single-host gate covers five million files across mappings with a 192 MiB Migmate heap. Listings spill to temporary disk and evidence/reports still grow with job size. Check free disk and each destination's container limits; this does not qualify live-provider throughput or rclone's own memory. Read [release limits](../../../../docs/release-limits.md#listing-execution-and-historical-evidence) before sizing a large job.
+
+**State compatibility:** opening an existing job upgrades it to schema 8 without rewriting historical evidence. Schema 6 first receives schema 7's control-request storage; schema 7 then receives the paged-evidence reader fence. Earlier builds refuse that store rather than misreading paged coverage. Preserve a backup before upgrade when rollback matters.
+
 ## Copy execution
 
 Read the plan's **Copy concurrency** before approval. Job `[options]` settings `mappingsInFlight` (default `2`) and `transfersPerMapping` (default `4`) accept positive safe integers; the conservative defaults allow eight file transfers across two mappings. Use `mappingsInFlight = 1` for serial mappings. Passes share one managed worker and one serial checkpoint writer; a freed slot starts the next queued mapping. rclone's pacer absorbs throttling within a pass. Ordinary failed passes count against the run's retry budget without stopping other mappings.

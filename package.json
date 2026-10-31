@@ -30,6 +30,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-skip-pattern=\"loads and plans 1000 mappings\" \"test/**/!(report-scale).test.ts\" \"src/**/*.test.ts\" && node --test --test-name-pattern=\"loads and plans 1000 mappings\" test/file-migration-driver.test.ts && node --test test/report-scale.test.ts",
+    "test:scale": "node --max-old-space-size=192 test/job-scale-fixture.ts 5000000",
     "build": "node scripts/build-package.ts",
     "check:vendor": "node scripts/check-vendor.ts",
     "check:worker": "node scripts/check-worker.ts",

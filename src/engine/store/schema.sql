@@ -1,5 +1,5 @@
 -- Migmate per-job durable state. One database per job folder, WAL mode.
--- Schema version 7. Forward-only migrations; a newer database refuses to open
+-- Schema version 8. Forward-only migrations; a newer database refuses to open
 -- under an older Migmate with `state_version_unsupported`.
 
 -- The job itself. Exactly one row.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -459,6 +459,14 @@ test("real local rclone worker counters reach the file driver's home ledger (not
   const status = value(await engine.reader(ref).status());
   assert.equal(executed.outcome, "completed", JSON.stringify(status.mappingPasses));
   assert.equal(status.uploadActivity?.accounts[0]?.observedBytesInWindow, 5);
+  const verified = value(await engine.withWriterResult(ref, (writer) => writer.verify()));
+  assert.equal(verified.clean, true);
+  assert.equal(
+    value(await engine.reader(ref).status()).uploadActivity?.accounts[0]?.observedBytesInWindow,
+    5,
+    "Disk-backed verification must not count listing bytes as uploads",
+  );
+  assert.deepEqual(await readdir(join(directory, "jobs", ref.id, "listing-scratch")), []);
   console.log(
     "Local rclone smoke: file-driver observedBytesInWindow=5; fake account, local filesystem only.",
   );

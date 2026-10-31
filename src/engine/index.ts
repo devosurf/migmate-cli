@@ -107,6 +107,7 @@ import {
 import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
 import { ProviderFault } from "./providers/fault.ts";
+import { reclaimListingScratch, type ListingScratch } from "./providers/listing.ts";
 import {
   fileMigrationDriver,
   goLive,
@@ -123,7 +124,7 @@ import {
 import { teamsArchiveDriver } from "./drivers/teams-archive.ts";
 import { parseArchiveConfig } from "./archive/config.ts";
 import type { ArchiveConfig } from "./providers/archive.ts";
-import type { CommitRow } from "./commit.ts";
+import type { CommitRow, CommitUnit } from "./commit.ts";
 import type { DriverContext, JobTypeDriver, ReportSection } from "./drivers/types.ts";
 import {
   ReportArray,
@@ -1081,6 +1082,7 @@ async function withWriter<T>(
     });
     if (!acquired.ok) return acquired;
     let active = true;
+    let scratch: ListingScratch | undefined;
     const session = makeWriter(
       deps,
       store,
@@ -1095,6 +1097,7 @@ async function withWriter<T>(
     let failed = false;
     let controlled: Refusal | null = null;
     try {
+      scratch = reclaimListingScratch(paths.dir);
       await reconcileWriterOpen(store.db, reconcileOnWriterOpen, {
         now: deps.now,
         hostId,
@@ -1127,8 +1130,9 @@ async function withWriter<T>(
             if (prefixes.some((prefix) => name.startsWith(prefix)))
               rmSync(join(staging, name), { recursive: true, force: true });
       }
+
       try {
-        value = await fn(session.writer);
+        value = await scratch.run(() => fn(session.writer));
       } catch (error) {
         operationError = error;
         failed = true;
@@ -1139,7 +1143,11 @@ async function withWriter<T>(
           controlled = await session.finishControl();
         } finally {
           try {
-            await session.dispose();
+            try {
+              await session.dispose();
+            } finally {
+              scratch?.[Symbol.dispose]();
+            }
           } finally {
             // Close the request inbox and release ownership under one write lock.
             // A racing requester reaches this owner or observes no holder.
@@ -2147,24 +2155,64 @@ function makeWriter(
             : phase === "execute"
               ? driver.execute(ctx)
               : driver.verify(ctx);
-        for await (const yielded of units) {
+        let pending: CommitUnit[] = [];
+        function flushVerification(): void {
+          if (!pending.length) return;
           guard(phase);
-          const unit = verificationRun === undefined ? yielded : { ...yielded, verificationRun };
-          if (unit.rev !== revision || unit.phase !== phase)
-            throw new Error("Driver yielded a commit outside its current phase");
-          if (store.commit(unit).applied) {
-            committed++;
-            store.publishProgress();
-            if (unit.mappingPass?.uploadQuota) {
-              uploadQuota ??= unit.mappingPass.uploadQuota;
-            } else if (unit.mappingPass?.status === "failed") {
-              budget.mappingFailure(unit.mappingPass.mappingId);
-              mappingFailed = true;
+          const batch = pending;
+          pending = [];
+          const applied = store.atomic(() => {
+            let count = 0;
+            for (const unit of batch) if (store.commit(unit).applied) count++;
+            return count;
+          });
+          committed += applied;
+          if (applied) store.publishProgress();
+        }
+        try {
+          for await (const yielded of units) {
+            guard(phase);
+            const unit = verificationRun === undefined ? yielded : { ...yielded, verificationRun };
+            if (unit.rev !== revision || unit.phase !== phase)
+              throw new Error("Driver yielded a commit outside its current phase");
+            // Verification observes remote state; these evidence-only units can
+            // share a durable transaction without holding it across an await.
+            // Effects and archive checkpoints retain their immediate boundary.
+            if (
+              phase === "verify" &&
+              "mappings" in config &&
+              !unit.assets?.length &&
+              !unit.archiveFiles?.length &&
+              (unit.rows.length > 0 || unit.findings.length > 0) &&
+              !unit.mappingPass &&
+              !unit.createdDrive &&
+              !unit.memberGrant
+            ) {
+              pending.push(unit);
+              if (pending.length === 256) flushVerification();
+            } else {
+              flushVerification();
+              if (store.commit(unit).applied) {
+                committed++;
+                store.publishProgress();
+                if (unit.mappingPass?.uploadQuota) {
+                  uploadQuota ??= unit.mappingPass.uploadQuota;
+                } else if (unit.mappingPass?.status === "failed") {
+                  budget.mappingFailure(unit.mappingPass.mappingId);
+                  mappingFailed = true;
+                }
+              }
+            }
+            lastUnit = unit.unitKey;
+            if (signal?.aborted && !unit.mappingPass) {
+              flushVerification();
+              return { committed, interrupted: true, blocked: false };
             }
           }
-          lastUnit = unit.unitKey;
-          if (signal?.aborted && !unit.mappingPass)
-            return { committed, interrupted: true, blocked: false };
+        } finally {
+          // Preserve already-yielded evidence on cancellation or a later read
+          // failure, just as the former per-unit transaction boundary did.
+          flushVerification();
         }
         if (signal?.aborted) return { committed, interrupted: true, blocked: false };
         store.appendEvent({ verb: phase, phase, kind: "phase_completed", payload: { committed } });
@@ -3016,7 +3064,7 @@ function makeWriter(
           const currentInputs = inputFields(
             config,
             evidence,
-            store.readAllRows(plan.revision, "plan"),
+            store.readPlanScopes(plan.revision),
             resume.archivePlan,
             plan.inputs.configuration,
           );
@@ -3070,7 +3118,7 @@ function makeWriter(
           const bound = readBoundEvidence(plan.evidence);
           if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
           if ("mappings" in config)
-            await checkApprovedMappingScope(p, config, store.readAllRows(plan.revision, "plan"));
+            await checkApprovedMappingScope(p, config, store.readPlanScopes(plan.revision));
           if (opts?.onAdmitted) signal.throwIfAborted();
           transition("execute", "execute");
           try {
@@ -3378,7 +3426,7 @@ function makeWriter(
               inputFields(
                 config,
                 readBoundEvidence(plan.evidence),
-                store.readAllRows(revision, "plan"),
+                store.readPlanScopes(revision),
                 undefined,
                 plan.inputs.configuration,
               ),
@@ -3486,7 +3534,7 @@ function makeWriter(
                   inputFields(
                     config,
                     evidence,
-                    store.readAllRows(revision, "plan"),
+                    store.readPlanScopes(revision),
                     undefined,
                     plan.inputs.configuration,
                   ),

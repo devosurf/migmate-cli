@@ -436,7 +436,7 @@ describe("map-only listing migration", () => {
         async (input: Parameters<FakeFileMigrationPort["listFileHashes"]>[0]) => {
           const entries = await list(input);
           return input.root.fs === "destination-root"
-            ? entries.map((entry) =>
+            ? Array.from(entries, (entry) =>
                 entry.path === "plain.bin" ? { ...entry, hash: null } : entry,
               )
             : entries;

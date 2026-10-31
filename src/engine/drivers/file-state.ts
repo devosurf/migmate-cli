@@ -79,6 +79,9 @@ export interface FileSettleState {
   observations: Array<{
     at: string;
     changedPaths: string[];
+    /** Published only after every page in this unique observation generation commits. */
+    changedPathPages?: number;
+    changedPathGeneration?: string;
     outcome: "changed" | "settled" | "exhausted";
   }>;
 }

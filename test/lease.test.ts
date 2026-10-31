@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -18,6 +19,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it, type TestContext } from "node:test";
 import { EngineRefusalError, openEngine } from "../src/engine/index.ts";
+import { DiskListing } from "../src/engine/providers/listing.ts";
 import { reconcileOnWriterOpen } from "../src/engine/state-chart.ts";
 import {
   acquire,
@@ -587,6 +589,146 @@ describe("writer ownership and reconciliation", () => {
 });
 
 describe("engine recovery seam", () => {
+  it("reclaims SIGKILL-abandoned listing scratch only after acquiring that job's writer", async (t) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-listing-")));
+    const home = join(root, "home");
+    const temporary = join(root, "temporary");
+    mkdirSync(temporary);
+    let now = NOW;
+    const engine = openEngine({ home, now: () => now });
+    const created = await engine.initJob({ type: "file_migration" });
+    assert.ok(created.ok);
+    const jobDirectory = join(home, "jobs", created.value.id);
+    const child = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import { readdirSync } from "node:fs";
+          import { join, dirname } from "node:path";
+          import { openEngine } from ${JSON.stringify(new URL("../src/engine/index.ts", import.meta.url).href)};
+          import { DiskListing } from ${JSON.stringify(new URL("../src/engine/providers/listing.ts", import.meta.url).href)};
+          const engine = openEngine({ home: process.argv[1], now: () => new Date(${JSON.stringify(NOW.toISOString())}) });
+          const result = await engine.withWriter({ id: process.argv[2] }, async () => {
+            const listing = new DiskListing();
+            listing.add({ path: "still-live" });
+            const root = process.argv[3];
+            const file = readdirSync(root, { recursive: true }).find(path => path.endsWith("/listing.sqlite"));
+            if (!file) throw new Error("No listing scratch created");
+            process.send({ directory: dirname(join(root, file)) });
+            process.on("message", () => process.send({ value: listing.get("still-live") }));
+            await Promise.withResolvers().promise;
+          });
+          throw new Error(JSON.stringify(result));
+        `,
+        home,
+        created.value.id,
+        root,
+      ],
+      { env: { ...process.env, TMPDIR: temporary }, stdio: ["ignore", "pipe", "pipe", "ipc"] },
+    );
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const exited = once(child, "exit");
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+      engine.close();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const [message] = await Promise.race([
+      once(child, "message"),
+      exited.then(() => {
+        throw new Error(`Scratch child exited: ${stderr}`);
+      }),
+    ]);
+    assert.ok(message && typeof message === "object" && "directory" in message);
+    assert.equal(typeof message.directory, "string");
+    const directory = String(message.directory);
+    assert.ok(existsSync(join(directory, "listing.sqlite")));
+    assert.ok((await engine.reader(created.value).status()).ok);
+    const contending = await engine.withWriter(created.value, async () =>
+      assert.fail("Live lease acquired"),
+    );
+    assert.equal(contending.ok, false);
+    if (!contending.ok) assert.equal(contending.refusal.code, "lease_held");
+    assert.ok(existsSync(join(directory, "listing.sqlite")));
+    const stillLive = once(child, "message");
+    child.send("read");
+    assert.deepEqual((await stillLive)[0], { value: { path: "still-live" } });
+    child.kill("SIGKILL");
+    await exited;
+    assert.ok(existsSync(directory), "SIGKILL must leave the scratch for recovery");
+    now = new Date(NOW.getTime() + 60_000);
+    assert.ok((await engine.reader(created.value).status()).ok);
+    assert.ok(existsSync(directory), "Readers must not reclaim abandoned writer scratch");
+    const recovered = await engine.withWriter(created.value, async () => {
+      assert.equal(
+        existsSync(directory),
+        false,
+        "The acquired writer must remove abandoned indexes",
+      );
+      using listing = new DiskListing<{ path: string }>();
+      listing.add({ path: "recovered" });
+      assert.deepEqual([...listing], [{ path: "recovered" }]);
+      assert.ok(
+        readdirSync(jobDirectory, { recursive: true, encoding: "utf8" }).some((path) =>
+          path.endsWith("/listing.sqlite"),
+        ),
+      );
+    });
+    assert.ok(recovered.ok);
+    assert.ok(
+      !readdirSync(jobDirectory, { recursive: true, encoding: "utf8" }).some((path) =>
+        path.endsWith("/listing.sqlite"),
+      ),
+    );
+  });
+
+  it("cleans all writer indexes on failure without touching another live job's indexes", async (t) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "lease-listing-")));
+    const engine = openEngine({ home: root });
+    t.after(() => {
+      engine.close();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const first = await engine.initJob({ type: "file_migration" });
+    const second = await engine.initJob({ type: "file_migration" });
+    assert.ok(first.ok && second.ok);
+    const firstDirectory = join(root, "jobs", first.value.id, "listing-scratch");
+    const secondDirectory = join(root, "jobs", second.value.id, "listing-scratch");
+    const failure = new Error("writer callback failed");
+    let abandoned: DiskListing<{ path: string }> | undefined;
+    const result = await engine.withWriter(first.value, async () => {
+      using live = new DiskListing<{ path: string }>();
+      live.add({ path: "first" });
+      const liveIndexes = readdirSync(firstDirectory, { recursive: true });
+      await assert.rejects(
+        engine.withWriter(second.value, async () => {
+          await Promise.resolve();
+          abandoned = new DiskListing<{ path: string }>();
+          abandoned.add({ path: "second" });
+          assert.ok(
+            readdirSync(secondDirectory, { recursive: true, encoding: "utf8" }).some((path) =>
+              path.endsWith("/listing.sqlite"),
+            ),
+          );
+          throw failure;
+        }),
+        (error) => error === failure,
+      );
+      assert.deepEqual(readdirSync(secondDirectory), []);
+      assert.deepEqual(readdirSync(firstDirectory, { recursive: true }), liveIndexes);
+      assert.deepEqual([...live], [{ path: "first" }]);
+      assert.throws(() => abandoned?.get("second"), /disposed/);
+    });
+    assert.ok(result.ok);
+    assert.deepEqual(readdirSync(firstDirectory), []);
+  });
+
   it("automatically opens an interrupted writer at the durable checkpoint", async (t) => {
     const root = mkdtempSync(join(tmpdir(), "lease-engine-")),
       home = join(root, "home");
