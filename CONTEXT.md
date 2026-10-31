@@ -56,6 +56,10 @@ _Avoid_: Version, pass, job
 One attempt to bring a file mapping's destination up to date with its source. A revision may include several passes.
 _Avoid_: Revision, job, migration
 
+**Stop**:
+An operator's request that work on a job halt at the next safe point, leaving the job resumable from where it halted. Only cancellation ends a job for good, and neither undoes anything already moved.
+_Avoid_: Pause, kill, abort
+
 **Prestage**:
 The initial bulk movement of a staged migration, before the source is frozen and the destination is opened to its intended users.
 _Avoid_: Initial sync, completed migration
