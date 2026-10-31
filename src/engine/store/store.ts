@@ -68,7 +68,7 @@ import { exceptionConsequence, isAcceptable } from "../codes.ts";
 import { approvalAuthority } from "../decisions.ts";
 import type { DriverContext } from "../drivers/types.ts";
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 const BUSY_TIMEOUT_MS = 5_000;
 const schemaSql = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
 const extensionMarker = "-- Full file intents/results are retained";
@@ -486,6 +486,12 @@ function migrateControlRequests(db: DatabaseSync): void {
   if (!columns.some((row) => row.name === "log_path"))
     db.exec("ALTER TABLE lease ADD COLUMN log_path TEXT");
   db.exec(schemaSql.slice(schemaSql.indexOf("-- Requests bind")));
+  db.prepare("UPDATE job SET schema_version = ?").run(7);
+}
+
+/** Fence readers that cannot reconstruct paged coverage/settling evidence.
+ * Historical payloads and digests remain byte-for-byte unchanged. */
+function migrateVersion7(db: DatabaseSync): void {
   db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
 }
 
@@ -2870,10 +2876,17 @@ export function openStore(
         else if (version === 2) migrateVersion2(db);
         else if (version === 3) migrateVersion3(db);
         else if (version === 4) migrateVersion4(db);
-        else if (version !== null && version !== 5 && version !== 6 && version !== SCHEMA_VERSION)
+        else if (
+          version !== null &&
+          version !== 5 &&
+          version !== 6 &&
+          version !== 7 &&
+          version !== SCHEMA_VERSION
+        )
           throw new Error("Job schema changed while opening");
         if (version !== null && version < 6) migrateDecisions(db);
         if (version !== null && version < 7) migrateControlRequests(db);
+        if (version !== null && version < 8) migrateVersion7(db);
       }
     });
     syncDirectory(root);

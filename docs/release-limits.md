@@ -325,8 +325,9 @@ File-job resume loads mapping metadata rather than every verified item.
 Reverification snapshots iterate stored rows, coverage and changed-path observations
 are stored in pages, and reports reconstruct the complete historical array shapes
 without assembling them in memory. Verification commits retain their individual
-idempotence keys within bounded transactions. Schema **7** fences older readers
-that cannot interpret paged evidence: opening an existing job upgrades its version
+idempotence keys within bounded transactions. Schema **8** fences older readers
+that cannot interpret paged evidence. Schema 6 first receives schema 7's control-request
+storage, then the schema 8 reader fence; opening an existing job upgrades its version
 without rewriting historical rows, approvals, frozen plans or digests. Older builds
 then refuse that store with `state_version_unsupported`; keep a backup if rollback
 is needed. Destination digest compatibility covers Unicode locale ties, duplicate

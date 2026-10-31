@@ -97,7 +97,7 @@ Version history, list-item fields, retention labels and permissions are omitted 
 
 **Large jobs:** the synthetic single-host gate covers five million files across mappings with a 192 MiB Migmate heap. Listings spill to temporary disk and evidence/reports still grow with job size. Check free disk and each destination's container limits; this does not qualify live-provider throughput or rclone's own memory. Read [release limits](../../../../docs/release-limits.md#listing-execution-and-historical-evidence) before sizing a large job.
 
-**State compatibility:** opening an existing job upgrades it to schema 7 without rewriting historical evidence. Earlier builds refuse that store rather than misreading paged coverage. Preserve a backup before upgrade when rollback matters.
+**State compatibility:** opening an existing job upgrades it to schema 8 without rewriting historical evidence. Schema 6 first receives schema 7's control-request storage; schema 7 then receives the paged-evidence reader fence. Earlier builds refuse that store rather than misreading paged coverage. Preserve a backup before upgrade when rollback matters.
 
 ## Copy execution
 

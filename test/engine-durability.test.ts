@@ -1117,39 +1117,57 @@ describe("engine durability seam", () => {
     assert.equal(status.state, "new");
   });
 
-  it("upgrades schema 6 to fence paged evidence readers without rewriting historical evidence", async (t) => {
-    const h = await harness(t);
-    const planDigest = await approve(h);
-    await execute(h);
-    const verified = await verify(h);
-    const path = join(h.home, "jobs", h.ref.id, "state.db");
-    const database = new DatabaseSync(path);
-    const historical = database.prepare("SELECT payload FROM item ORDER BY rev,phase,id").all();
-    const plans = database.prepare("SELECT * FROM plan_revision ORDER BY rev").all();
-    const approvals = database.prepare("SELECT * FROM approval ORDER BY id").all();
-    database.exec("UPDATE job SET schema_version=6");
-    database.close();
-    reopen(h);
-    const status = value(await h.engine.reader(h.ref).status());
-    assert.equal(
-      status.schemaVersion,
-      7,
-      "released schema-6 readers must refuse paged-evidence stores",
-    );
-    assert.equal(status.planDigest, planDigest);
-    assert.equal(status.verificationDigest, verified.verificationDigest);
-    const migrated = new DatabaseSync(path, { readOnly: true });
-    try {
-      assert.deepEqual(
-        migrated.prepare("SELECT payload FROM item ORDER BY rev,phase,id").all(),
-        historical,
+  for (const previousVersion of [6, 7]) {
+    it(`upgrades schema ${previousVersion} to 8 without rewriting historical evidence`, async (t) => {
+      const h = await harness(t);
+      const planDigest = await approve(h);
+      await execute(h);
+      const verified = await verify(h);
+      const path = join(h.home, "jobs", h.ref.id, "state.db");
+      const database = new DatabaseSync(path);
+      const historical = database.prepare("SELECT payload FROM item ORDER BY rev,phase,id").all();
+      const plans = database.prepare("SELECT * FROM plan_revision ORDER BY rev").all();
+      const approvals = database.prepare("SELECT * FROM approval ORDER BY id").all();
+      if (previousVersion === 6) {
+        database.exec("DROP TABLE control_request");
+        database.exec("ALTER TABLE lease DROP COLUMN detached");
+        database.exec("ALTER TABLE lease DROP COLUMN log_path");
+      } else {
+        database.exec(
+          `INSERT INTO control_request(kind,owner_uuid,host_id,pid,command_id,requested_at,answered_at,outcome)
+           VALUES('stop','historical-owner','historical-host',1,'historical-command','2026-09-01','2026-09-01','stopped')`,
+        );
+      }
+      const requests =
+        previousVersion === 7 ? database.prepare("SELECT * FROM control_request").all() : [];
+      database.prepare("UPDATE job SET schema_version=?").run(previousVersion);
+      database.close();
+      reopen(h);
+      const status = value(await h.engine.reader(h.ref).status());
+      assert.equal(
+        status.schemaVersion,
+        8,
+        "released schema-7 readers must refuse paged-evidence stores",
       );
-      assert.deepEqual(migrated.prepare("SELECT * FROM plan_revision ORDER BY rev").all(), plans);
-      assert.deepEqual(migrated.prepare("SELECT * FROM approval ORDER BY id").all(), approvals);
-    } finally {
-      migrated.close();
-    }
-  });
+      assert.equal(status.planDigest, planDigest);
+      assert.equal(status.verificationDigest, verified.verificationDigest);
+      const migrated = new DatabaseSync(path, { readOnly: true });
+      try {
+        assert.deepEqual(
+          migrated.prepare("SELECT payload FROM item ORDER BY rev,phase,id").all(),
+          historical,
+        );
+        assert.deepEqual(migrated.prepare("SELECT * FROM plan_revision ORDER BY rev").all(), plans);
+        assert.deepEqual(migrated.prepare("SELECT * FROM approval ORDER BY id").all(), approvals);
+        assert.deepEqual(migrated.prepare("SELECT * FROM control_request").all(), requests);
+        const columns = migrated.prepare("PRAGMA table_info(lease)").all();
+        assert.ok(columns.some((column) => column.name === "detached"));
+        assert.ok(columns.some((column) => column.name === "log_path"));
+      } finally {
+        migrated.close();
+      }
+    });
+  }
 
   it("opens an approved schema version 2 job and executes mapping passes without losing its approval", async (t) => {
     const h = await harness(t);
@@ -1207,7 +1225,7 @@ describe("engine durability seam", () => {
     }
     reopen(h);
     const status = value(await h.engine.reader(h.ref).status());
-    assert.equal(status.schemaVersion, 7);
+    assert.equal(status.schemaVersion, 8);
     assert.equal(status.planDigest, digest);
     assert.equal(status.ownership.detached, false);
     assert.equal(status.ownership.logPath, null);
