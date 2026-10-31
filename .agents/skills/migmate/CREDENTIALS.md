@@ -49,6 +49,8 @@ The job config names `sourceProvider = "dropbox"`,
 `destinationProvider = "google_shared_drive"` and, under `[rclone]`,
 `dropboxRemote = "dropbox-source"` plus `destinationRemote` and the existing typed
 `config` file reference. There is no Dropbox app secret to paste into job config.
+`creds init` validates and persists these pair-specific remote bindings; Dropbox
+does not also require a SharePoint `sourceRemote`.
 
 Have the administrator run `migmate creds init --job ID --config job.toml` in a
 terminal, open the displayed URL in their browser, approve the app, and paste the

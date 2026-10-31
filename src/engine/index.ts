@@ -117,6 +117,7 @@ import {
   type FileMigrationConfig,
 } from "./drivers/file-migration.ts";
 import {
+  credentialBindings,
   fileProviderPair,
   historicalProviderPair,
   type FileProviderId,
@@ -234,6 +235,7 @@ type FileConfig = CommonConfig & {
     sourceRemote?: string;
     destinationRemote: string;
     sharepointDestinationRemote?: string;
+    dropboxRemote?: string;
   };
 };
 type TeamsConfig = CommonConfig &
@@ -470,32 +472,32 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     }
     if (input.rclone !== undefined) {
       const r = object(input.rclone, "rclone");
-      keys(
-        r,
-        ["config", "sourceRemote", "destinationRemote", "sharepointDestinationRemote"],
-        "rclone",
-      );
-      const sourceRemote =
-        r.sourceRemote === undefined ? undefined : text(r.sourceRemote, "rclone.sourceRemote", 64);
-      const destinationRemote = text(r.destinationRemote, "rclone.destinationRemote", 64);
-      const sharepointDestinationRemote =
-        r.sharepointDestinationRemote === undefined
-          ? undefined
-          : text(r.sharepointDestinationRemote, "rclone.sharepointDestinationRemote", 64);
-      const names = [sourceRemote, destinationRemote, sharepointDestinationRemote].filter(
-        (name): name is string => name !== undefined,
-      );
+      keys(r, ["config", ...credentialBindings.map((binding) => binding.key)], "rclone");
+      const required = [
+        pair.source.credentials.remoteKey.source,
+        pair.destination.credentials.remoteKey.destination,
+      ];
+      const remotes: Record<string, string> = {};
+      for (const binding of credentialBindings) {
+        const needed = required.includes(binding.key);
+        const value = r[binding.key];
+        if (value === undefined) {
+          if (needed) configError(`rclone.${binding.key}`);
+          continue;
+        }
+        if (!needed && !binding.allowUnused) configError(`rclone.${binding.key}`);
+        remotes[binding.key] = text(value, `rclone.${binding.key}`, 64);
+      }
+      const names = Object.values(remotes);
       if (
         !names.every((s) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(s)) ||
-        new Set(names.map((name) => name.toLowerCase())).size !== names.length ||
-        (!sourceRemote && !sharepointDestinationRemote)
+        new Set(names.map((name) => name.toLowerCase())).size !== names.length
       )
         configError("rclone");
       config.rclone = {
         config: fileReference(r.config, "rclone.config", paths.dir),
-        ...(sourceRemote ? { sourceRemote } : {}),
-        ...(sharepointDestinationRemote ? { sharepointDestinationRemote } : {}),
-        destinationRemote,
+        ...remotes,
+        destinationRemote: remotes.destinationRemote!,
       };
     }
     validateMirrorDestinations(config.mappings, config.options.mirror);

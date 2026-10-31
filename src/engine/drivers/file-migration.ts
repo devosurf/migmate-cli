@@ -696,7 +696,11 @@ async function* sourceContentFindings(
   mapping: FileMappingConfig,
   root: SourceView,
   classify: NonNullable<FileProviderCapabilities["sourceEntryFindings"]>,
-): AsyncIterable<{ source: SourceView; codes: readonly string[] }> {
+): AsyncIterable<{
+  source: SourceView;
+  codes: readonly string[];
+  evidence?: Record<string, unknown>;
+}> {
   const pending = [{ id: root.id, path: "" }];
   while (pending.length) {
     const parent = pending.pop()!;
@@ -705,12 +709,32 @@ async function* sourceContentFindings(
       itemId: parent.id,
       ...abortable(ctx),
     });
+    const firstByName = new Map<string, SourceEntry>();
+    const collisions = new Map<string, string[]>();
+    for (const child of children) {
+      const first = firstByName.get(child.name);
+      if (!first) firstByName.set(child.name, child);
+      else if (first.id !== child.id) {
+        const ids = collisions.get(child.name);
+        if (ids) ids.push(child.id);
+        else collisions.set(child.name, [first.id, child.id]);
+      }
+    }
     for (const child of children) {
       const path = parent.path ? `${parent.path}/${child.name}` : child.name;
       if (child.kind === "folder") pending.push({ id: child.id, path });
-      const codes = classify(child);
+      const sourceIds = collisions.get(child.name);
+      const codes = sourceIds
+        ? ["destination_duplicate_name", ...classify(child)]
+        : classify(child);
       if (codes.length)
-        yield { source: { ...child, path, representable: true, outsideRoot: false }, codes };
+        yield {
+          source: { ...child, path, representable: true, outsideRoot: false },
+          codes,
+          ...(sourceIds
+            ? { evidence: { sourceIds, originalName: child.metadata?.originalName ?? child.name } }
+            : {}),
+        };
     }
   }
 }
@@ -1273,7 +1297,42 @@ async function* copyPass(
         );
     }
     const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
-    const destinationAdapter = fileProviderPair(ctx.config).destination;
+    const { source: sourceAdapter, destination: destinationAdapter } = fileProviderPair(ctx.config);
+    if (sourceAdapter.sourceEntryFindings) {
+      let blocked = false;
+      for await (const item of sourceContentFindings(
+        ctx,
+        mapping,
+        await sourceRoot(ctx, mapping),
+        sourceAdapter.sourceEntryFindings,
+      )) {
+        if (!item.codes.includes("destination_duplicate_name")) continue;
+        blocked = true;
+        const evidence = row(ctx, "execute", mapping, item.source, "destination_duplicate_name");
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        yield {
+          ...unit(),
+          rows: [evidence],
+          findings: [
+            finding(ctx, "execute", "destination_duplicate_name", item.source.id, {
+              path: item.source.path,
+              ...item.evidence,
+            }),
+          ],
+        };
+      }
+      if (blocked) {
+        pass = {
+          ...pass,
+          status: "failed",
+          endedAt: ctx.now().toISOString(),
+          error:
+            "Source objects resolve to the same exported path; fix the named source conflicts before retrying.",
+        };
+        yield unit();
+        return;
+      }
+    }
     if (destinationAdapter.destinationPathFindings) {
       const constraintRoot = { folderDepth: await destinationFolderDepth(ctx, mapping) };
       const folders = await ctx.provider.listFolders({
@@ -2126,7 +2185,9 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     const planned = plannedScope(ctx, mapping);
     const sourcePlanning = ctx.reportEvidence
       ? ctx.reportEvidence.sourcePlanning(mapping.id)
-      : planned?.jobType === "file_migration" ? planned.fileScope : undefined;
+      : planned?.jobType === "file_migration"
+        ? planned.fileScope
+        : undefined;
     yield {
       title: `Mapping ${mapping.id}`,
       format: "text",

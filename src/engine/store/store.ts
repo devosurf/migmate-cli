@@ -1419,13 +1419,19 @@ class StoreImpl implements Store {
         return readReportSettlement(db, revision, mappingId);
       },
       sourcePlanning(mappingId) {
-        const row = db.prepare(
-          "SELECT json_extract(payload,'$.fileScope.sourceObservation') AS observation, json_extract(payload,'$.fileScope.sourceDisclosures') AS disclosures FROM item WHERE rev=? AND mapping_id=? AND json_type(payload,'$.fileScope') IS NOT NULL ORDER BY CASE phase WHEN 'plan' THEN 0 ELSE 1 END LIMIT 1",
-        ).get(revision, mappingId);
+        const row = db
+          .prepare(
+            "SELECT json_extract(payload,'$.fileScope.sourceObservation') AS observation, json_extract(payload,'$.fileScope.sourceDisclosures') AS disclosures FROM item WHERE rev=? AND mapping_id=? AND json_type(payload,'$.fileScope') IS NOT NULL ORDER BY CASE phase WHEN 'plan' THEN 0 ELSE 1 END LIMIT 1",
+          )
+          .get(revision, mappingId);
         if (!row) return undefined;
         return {
-          ...(typeof row.observation === "string" ? { sourceObservation: JSON.parse(row.observation) } : {}),
-          ...(typeof row.disclosures === "string" ? { sourceDisclosures: JSON.parse(row.disclosures) } : {}),
+          ...(typeof row.observation === "string"
+            ? { sourceObservation: JSON.parse(row.observation) }
+            : {}),
+          ...(typeof row.disclosures === "string"
+            ? { sourceDisclosures: JSON.parse(row.disclosures) }
+            : {}),
         };
       },
       coverage: reportCoverage(db, revision),

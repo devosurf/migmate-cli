@@ -1,8 +1,12 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { copyFile, chmod } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createTransferSupervisor } from "../../src/engine/providers/transfer-worker.ts";
+import type { Readable } from "node:stream";
+import {
+  createTransferSupervisor,
+  type TransferSupervisor,
+} from "../../src/engine/providers/transfer-worker.ts";
 import { object } from "./file-fixtures.ts";
 import {
   LiveTestBlocked,
@@ -75,12 +79,24 @@ export function dropboxHashMatch(
 }
 
 /** Pinned backend qualification only; does not claim production-engine or legacy Paper coverage. */
-export async function runDropboxFileLiveTest(input: LiveTestInput): Promise<LiveTestResult> {
+export async function runDropboxFileLiveTest(
+  input: LiveTestInput,
+  dependencies: {
+    createSupervisor: (
+      options: Parameters<typeof createTransferSupervisor>[0],
+    ) => Pick<TransferSupervisor, "proveBinary" | "close">;
+    spawn: (
+      binary: string,
+      args: string[],
+      options: { env: NodeJS.ProcessEnv; signal: AbortSignal; stdio: ["ignore", "pipe", "ignore"] },
+    ) => Pick<ChildProcess, "once"> & { stdout: Readable };
+  } = { createSupervisor: createTransferSupervisor, spawn },
+): Promise<LiveTestResult> {
   const config = dropboxProbeConfig(input.config);
   const privateConfig = join(input.jobDirectory, "dropbox-rclone.conf");
   await copyFile(config.configPath, privateConfig);
   await chmod(privateConfig, 0o600);
-  const supervisor = createTransferSupervisor({
+  const supervisor = dependencies.createSupervisor({
     configPath: privateConfig,
     jobDirectory: input.jobDirectory,
   });
@@ -98,7 +114,7 @@ export async function runDropboxFileLiveTest(input: LiveTestInput): Promise<Live
     consume?: (bytes: Buffer) => void,
   ): Promise<string> {
     const { promise, resolve: accept, reject } = Promise.withResolvers<string>();
-    const child = spawn(
+    const child = dependencies.spawn(
       proof.path,
       [...args, "--config", privateConfig, "--ask-password=false", "--log-level", "ERROR"],
       {
@@ -117,6 +133,18 @@ export async function runDropboxFileLiveTest(input: LiveTestInput): Promise<Live
     );
     return promise;
   }
+  async function childEntry(
+    parent: string,
+    name: string,
+    gate: string,
+    signal = input.signal,
+  ): Promise<Record<string, unknown>> {
+    const listing: unknown = JSON.parse(await run(["lsjson", parent], signal));
+    if (!Array.isArray(listing)) throw new LiveTestBlocked(gate);
+    const matches = listing.map(object).filter((entry) => entry.Name === name);
+    if (matches.length !== 1) throw new LiveTestBlocked(gate);
+    return matches[0]!;
+  }
   const source = `${config.sourceRemote},impersonate_admin="${config.adminMemberId}",impersonate=,root_namespace=${config.namespaceId},shared_folders=false,shared_files=false,export_formats=html,skip_exports=false,show_all_exports=false:`;
   const destination = `${config.destinationRemote},team_drive=${config.destDriveId},root_folder_id=${config.destFolderId}:`;
   const root = `migmate-live-${randomUUID()}`;
@@ -127,16 +155,16 @@ export async function runDropboxFileLiveTest(input: LiveTestInput): Promise<Live
     const remotes = object(JSON.parse(await run(["config", "dump"])));
     expect("dropbox_backend", "dropbox", object(remotes[config.sourceRemote]).type);
     expect("drive_backend", "drive", object(remotes[config.destinationRemote]).type);
-    // show_all_exports exposes the original Paper object without downloading or mounting it.
-    const original = object(
-      JSON.parse(
-        await run([
-          "lsjson",
-          source.replace("show_all_exports=false", "show_all_exports=true") + config.paperPath,
-          "--stat",
-        ]),
-      ),
+    // Exact stat cannot resolve non-downloadable originals in v1.75.0.
+    // Listing their parent with show_all_exports exposes the original entry.
+    const paperParts = config.paperPath.split("/");
+    const paperName = paperParts.pop()!;
+    const original = await childEntry(
+      source.replace("show_all_exports=false", "show_all_exports=true") + paperParts.join("/"),
+      paperName,
+      "dropbox_probe_paper_original_ambiguous",
     );
+    expect("paper_original_file", false, original.IsDir);
     expect("paper_is_export", -1, original.Size);
     expect("paper_original_name", config.paperPath.split("/").at(-1), original.Name);
     const ordinary = object(JSON.parse(await run(["lsjson", source + config.filePath, "--stat"])));
@@ -151,8 +179,13 @@ export async function runDropboxFileLiveTest(input: LiveTestInput): Promise<Live
     expect("paper_html_export", true, exported.IsDir === false && exported.Size === -1);
     await run(["mkdir", destination + root]);
     created = true;
-    rootId = object(JSON.parse(await run(["lsjson", destination + root, "--stat"]))).ID;
-    if (typeof rootId !== "string" || !rootId)
+    const folder = await childEntry(
+      destination,
+      root,
+      "dropbox_probe_destination_identity_missing",
+    );
+    rootId = folder.ID;
+    if (folder.IsDir !== true || typeof rootId !== "string" || !rootId)
       throw new LiveTestBlocked("dropbox_probe_destination_identity_missing");
     const samples = [];
     for (const [kind, sourcePath, name] of [
@@ -196,10 +229,13 @@ export async function runDropboxFileLiveTest(input: LiveTestInput): Promise<Live
     try {
       if (created) {
         const signal = AbortSignal.timeout(60_000);
-        const current = object(
-          JSON.parse(await run(["lsjson", destination + root, "--stat"], signal)),
+        const current = await childEntry(
+          destination,
+          root,
+          "dropbox_probe_cleanup_identity_changed",
+          signal,
         );
-        if (!rootId || current.ID !== rootId)
+        if (!rootId || current.IsDir !== true || current.ID !== rootId)
           throw new LiveTestBlocked("dropbox_probe_cleanup_identity_changed");
         await run(["purge", destination + root], signal);
       }

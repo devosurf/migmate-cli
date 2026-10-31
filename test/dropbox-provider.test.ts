@@ -165,6 +165,14 @@ test("Dropbox listing keeps unsupported exports visible and labels exported HTML
         },
         {
           ".tag": "file",
+          id: "id:ordinary",
+          name: "Notes.html",
+          path_display: "/Notes.html",
+          is_downloadable: true,
+          size: 12,
+        },
+        {
+          ".tag": "file",
           id: "id:unsupported",
           name: "Drawing.cloud",
           path_display: "/Drawing.cloud",
@@ -195,10 +203,15 @@ test("Dropbox listing keeps unsupported exports visible and labels exported HTML
     entries.map((entry) => [entry.name, entry.kind, entry.metadata?.contentDisposition]),
     [
       ["Notes.html", "file", "paper_html"],
+      ["Notes.html", "file", undefined],
       ["Drawing.cloud", "undownloadable", "unsupported_export"],
       ["Unavailable.paper", "undownloadable", "unsupported_export"],
       ["Budget.web", "file", "web_pointer"],
     ],
+  );
+  assert.deepEqual(
+    entries.slice(0, 2).map((entry) => entry.id),
+    ["id:paper", "id:ordinary"],
   );
 });
 

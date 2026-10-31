@@ -557,6 +557,63 @@ describe("provider content findings and destination depth", () => {
     };
   }
 
+  it("blocks Paper export collisions before copy and identifies both equal-sized source objects", async (t) => {
+    const h = await harness(
+      t,
+      fileFixture([
+        {
+          id: "paper",
+          parentId: "source-root",
+          name: "Notes.html",
+          kind: "file",
+          content: "same",
+          metadata: { contentDisposition: "paper_html", originalName: "Notes.paper" },
+        },
+        {
+          id: "ordinary",
+          parentId: "source-root",
+          name: "Notes.html",
+          kind: "file",
+          content: "diff",
+          metadata: { originalName: "Notes.html" },
+        },
+      ]),
+      sourceConfig("dropbox"),
+    );
+    const copies = t.mock.method(h.port, "startCopyPass");
+    await approve(h);
+    await execute(h);
+    assert.equal(copies.mock.callCount(), 0);
+    assert.equal(value(await h.engine.reader(h.ref).status()).state, "blocked");
+    const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+    const json = JSON.parse(
+      await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+    );
+    const conflicts = json.findings.filter(
+      (item: { code: string }) => item.code === "destination_duplicate_name",
+    );
+    assert.equal(conflicts.length, 2);
+    for (const conflict of conflicts) {
+      assert.equal(conflict.evidence.path, "Notes.html");
+      assert.deepEqual(conflict.evidence.sourceIds, ["paper", "ordinary"]);
+    }
+    assert.deepEqual(
+      conflicts
+        .map((item: { evidence: { originalName: string } }) => item.evidence.originalName)
+        .sort(),
+      ["Notes.html", "Notes.paper"],
+    );
+    h.port.renameSourceItem("ordinary", "Distinct.html");
+    await approve(h);
+    await execute(h);
+    assert.equal(copies.mock.callCount(), 1);
+    assert.equal(
+      value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify())).clean,
+      true,
+    );
+    assert.equal(h.port.snapshotDestination().filter((item) => item.kind === "file").length, 2);
+  });
+
   it("discloses Paper conversion in a root-only plan and report; pointers remain nonblocking", async (t) => {
     const h = await harness(
       t,

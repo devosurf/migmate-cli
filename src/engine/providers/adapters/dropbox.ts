@@ -414,11 +414,14 @@ export class DropboxAdapter implements FileAdapter {
         paperAsFiles,
         selectedAdminId: this.#session.dropboxAdminId ?? null,
       },
-      notices: paperAsFiles === true
-        ? []
-        : [paperAsFiles === false
-          ? "Legacy Paper is enabled for the selected administrator. Legacy Paper documents live outside file namespaces and this route does not migrate them."
-          : "The selected administrator's paper_as_files feature could not be checked. Legacy Paper documents live outside file namespaces and this route does not migrate them."],
+      notices:
+        paperAsFiles === true
+          ? []
+          : [
+              paperAsFiles === false
+                ? "Legacy Paper is enabled for the selected administrator. Legacy Paper documents live outside file namespaces and this route does not migrate them."
+                : "The selected administrator's paper_as_files feature could not be checked. Legacy Paper documents live outside file namespaces and this route does not migrate them.",
+            ],
     };
   }
 

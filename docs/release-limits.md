@@ -24,6 +24,11 @@ root namespace keep reads out of the administrator's personal home.
 Paper exports as HTML with plan/report disclosure; visible Files API documents without
 a downloadable export produce blocking per-file `source_unsupported_export` findings,
 not legacy-Paper findings. `.web` pointers copy as-is with a disclosure.
+If an exported name collides with another source item (for example `Notes.paper`
+and `Notes.html` both becoming `Notes.html`), execution records blocking
+`destination_duplicate_name` findings identifying both source objects and refuses
+to start that mapping's copy pass. Rename or remove the conflicting source item
+before replanning; equal sizes do not establish that both objects were copied.
 Google's 100-folder-level limit applies to all sources and includes destination wrappers.
 Execution checks folder constraints before starting that mapping's copy pass; a conflict
 records its path and blocks the mapping without starting an unfiltered transfer.
@@ -42,6 +47,11 @@ Legacy document IDs have no documented shared-namespace attribution, and `true`
 does not prove pre-migration legacy documents are absent. Legacy document scope or a
 separate member/Paper discovery workflow remains an operator decision; no Paper parity
 is guaranteed. This evidence uses schema 7 established by #120, without a schema bump.
+The optional Dropbox live probe selects original Paper metadata uniquely from
+the source parent listing. It obtains the disposable Drive folder's ID from
+the configured destination parent listing and rechecks that identity before
+cleanup; missing, changed, or ambiguous entries refuse cleanup rather than
+deleting an unproven folder.
 
 Shared member roles are `reader`, `writer`, and `manager`. Google keeps the first
 two and maps `manager` to `organizer`; native `organizer`, `fileOrganizer`, and

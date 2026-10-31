@@ -3,6 +3,8 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { parse as parseToml } from "smol-toml";
+import { FakeFileMigrationPort } from "../engine/providers/fake.ts";
 import { onboardDropboxCredentials } from "./credentials.ts";
 import { run } from "./main.ts";
 import type { Io } from "./io.ts";
@@ -209,4 +211,79 @@ test("Dropbox creds init exposes permission refusal without persisting codes or 
     /code-canary|access-canary|refresh-canary/u,
   );
   assert.equal(await readFile(input.path, "utf8"), input.original);
+});
+
+test("Dropbox creds init persists both provider bindings and rereads them through the engine", async (t) => {
+  const input = await fixture(t);
+  const provider = new FakeFileMigrationPort({
+    sourceDriveId: "namespace",
+    sourceRootId: "/",
+    destinationDriveId: "drive",
+    destinationRootId: "root",
+    sourceItems: [],
+    destinationItems: [],
+    checks: [{ id: "fixture.credentials", title: "Provider seam", status: "pass", evidence: {} }],
+  });
+  const observed: unknown[] = [];
+  const preflight = provider.preflight.bind(provider);
+  t.mock.method(
+    provider,
+    "preflight",
+    async function* (request: Parameters<FakeFileMigrationPort["preflight"]>[0]) {
+      observed.push(request.config);
+      yield* preflight(request);
+    },
+  );
+  const engine = openEngine({ home: input.storeDirectory, provider });
+  t.after(() => engine.close());
+  const initialized = await engine.initJob({ type: "file_migration" });
+  assert.ok(initialized.ok);
+  const configPath = join(input.storeDirectory, "operator.json");
+  await writeFile(configPath, JSON.stringify(input.config));
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
+    requests++;
+    assert.equal(String(target), "https://api.dropboxapi.com/oauth2/token");
+    assert.ok(init?.body instanceof URLSearchParams);
+    assert.equal(init.body.get("code"), "code-canary");
+    return issuance();
+  });
+  const code = await run(
+    [
+      "creds",
+      "init",
+      "--home",
+      input.storeDirectory,
+      "--job",
+      initialized.value.id,
+      "--config",
+      configPath,
+      "--output",
+      "json",
+    ],
+    input.io,
+    engine,
+  );
+  assert.equal(code, 0, input.output().stdout);
+  assert.equal(requests, 1);
+  assert.equal(input.output().prompts, 1);
+  const persisted = await readFile(
+    join(input.storeDirectory, "jobs", initialized.value.id, "job.toml"),
+    "utf8",
+  );
+  assert.deepEqual(parseToml(persisted).rclone, input.config.rclone);
+  engine.close();
+  const reopened = openEngine({ home: input.storeDirectory, provider });
+  t.after(() => reopened.close());
+  const doctor = await reopened.withWriterResult(initialized.value, (writer) => writer.doctor());
+  assert.ok(doctor.ok);
+  assert.equal(observed.length, 2);
+  for (const config of observed) {
+    assert.ok(config && typeof config === "object" && "rclone" in config);
+    assert.deepEqual(config.rclone, input.config.rclone);
+  }
+  assert.doesNotMatch(
+    persisted + input.output().stdout + input.output().stderr,
+    /code-canary|access-canary|refresh-canary/u,
+  );
 });
