@@ -1155,7 +1155,9 @@ it(
     const first = h.start(["stop", "--job", id, "--output", "json"]);
     const db = new DatabaseSync(join(h.home, "jobs", id, "state.db"));
     try {
-      for (let attempt = 0; attempt < 100; attempt++) {
+      // A slow runner can take seconds to start the stop process; poll by deadline.
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
         if (db.prepare("SELECT id FROM control_request WHERE answered_at IS NULL").get()) break;
         await delay(10);
       }
