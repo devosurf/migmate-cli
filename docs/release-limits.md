@@ -340,6 +340,8 @@ After a process crash, the next writer reclaims abandoned scratch only after
 acquiring that job's lease; readers and refused competing writers never sweep it.
 A single JSON value or token is bounded at 16 Mi characters; the complete listing
 has no size cap.
+Listing and verification reads do not add upload activity: the ledger records
+copy-pass counter observations, not listed or covered byte totals.
 
 Report generation does not build whole-job row/finding arrays, execution resume
 state, settled-inventory section strings or complete artifact strings. It reads

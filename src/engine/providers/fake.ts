@@ -1183,7 +1183,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     };
   }
 
-  async listFolders(input: Parameters<ProviderPort["listFolders"]>[0]): Promise<string[]> {
+  async listFolders(input: Parameters<ProviderPort["listFolders"]>[0]): Promise<Iterable<string>> {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFolders", input.root.fs);
     return [...this.tree(input.root.fs)]
@@ -1192,7 +1192,9 @@ export class FakeFileMigrationPort implements ProviderPort {
       .sort();
   }
 
-  async listFileHashes(input: Parameters<ProviderPort["listFileHashes"]>[0]) {
+  async listFileHashes(
+    input: Parameters<ProviderPort["listFileHashes"]>[0],
+  ): Promise<Iterable<FileHashEntry>> {
     this.assertPassWorker(input.socketPath);
     this.throwEffect("listFileHashes", input.root.fs, "before");
     this.throwRetryAfter("listFileHashes", input.root.fs);

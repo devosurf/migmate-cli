@@ -55,18 +55,22 @@ it("compares Google source downloaded hashes with SharePoint fixture hashes", as
   });
   const worker = await provider.startTransferWorker({ runDirectory: "run" });
   try {
-    const source = await provider.listFileHashes({
-      socketPath: worker.socketPath,
-      root: { fs: "source", kind: "google_drive" },
-      hashType: "quickxor",
-      download: true,
-    });
-    const destination = await provider.listFileHashes({
-      socketPath: worker.socketPath,
-      root: { fs: "destination", kind: "sharepoint" },
-      hashType: "quickxor",
-      download: false,
-    });
+    const source = Array.from(
+      await provider.listFileHashes({
+        socketPath: worker.socketPath,
+        root: { fs: "source", kind: "google_drive" },
+        hashType: "quickxor",
+        download: true,
+      }),
+    );
+    const destination = Array.from(
+      await provider.listFileHashes({
+        socketPath: worker.socketPath,
+        root: { fs: "destination", kind: "sharepoint" },
+        hashType: "quickxor",
+        download: false,
+      }),
+    );
     assert.equal(source.length, 1);
     assert.equal(destination.length, 1);
     assert.ok(source[0]!.hash);

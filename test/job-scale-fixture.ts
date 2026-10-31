@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -228,6 +228,10 @@ try {
   assert.deepEqual([...observations.values()], [2, 2, 2]);
   const status = value(await engine.reader(ref).status());
   assert.ok(status.verificationDigest);
+  // Only the three four-byte seed files were copied. Synthetic listings and
+  // paged verification evidence must never become observed upload bytes.
+  assert.equal(status.uploadActivity?.accounts[0]?.observedBytesInWindow, 12);
+  assert.deepEqual(await readdir(join(home, "jobs", ref.id, "listing-scratch")), []);
   const db = new DatabaseSync(join(home, "jobs", ref.id, "state.db"));
   try {
     assert.equal(
@@ -269,7 +273,10 @@ try {
     ),
   );
   const closeTimeMs = performance.now() - closeStarted;
-  assert.equal(value(await engine.reader(ref).status()).state, "closed");
+  const closedStatus = value(await engine.reader(ref).status());
+  assert.equal(closedStatus.state, "closed");
+  assert.equal(closedStatus.uploadActivity?.accounts[0]?.observedBytesInWindow, 12);
+  assert.deepEqual(await readdir(join(home, "jobs", ref.id, "listing-scratch")), []);
   const artifacts = value(await engine.reader(ref).artifacts()).artifacts;
   assert.equal(artifacts.length, 5);
   let artifactBytes = 0;
