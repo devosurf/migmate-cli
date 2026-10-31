@@ -58,6 +58,7 @@ export interface FileAdapter
         | "readDestinationMarker"
         | "streamDestinationContent"
         | "discoverSharePoint"
+        | "sourcePlanningEvidence"
       >
     > {
   readSourceItem: NonNullable<ProviderPort["readSourceItem"]>;

@@ -3,11 +3,13 @@ import { ProviderFault } from "../../fault.ts";
 import type { FileProviderId } from "../capabilities.ts";
 import type { GoogleCredential } from "./google.ts";
 import type { GraphCredential } from "./sharepoint.ts";
+import type { DropboxCredential } from "./dropbox.ts";
 
 export interface CredentialMaterial {
   graph?: GraphCredential;
   graphDestination?: GraphCredential;
   google?: GoogleCredential;
+  dropbox?: DropboxCredential;
 }
 
 export interface CredentialLoadContext {
@@ -19,6 +21,8 @@ export interface CredentialLoadContext {
 export interface FileCredentialAdapter {
   /** Preserve the provider marker in credential mapping evidence when needed. */
   mappingSourceType?: FileProviderId;
+  /** Validate a persisted source root identity using this provider's immutable-ID syntax. */
+  sourceItemId(value: unknown): string;
   remoteKey: { source: string; destination: string };
   bindings: readonly {
     key: string;
@@ -178,6 +182,9 @@ export async function tokenResponse(
   } finally {
     body.delete("client_secret");
     body.delete("assertion");
+    body.delete("code");
+    body.delete("code_verifier");
+    body.delete("refresh_token");
   }
 }
 

@@ -24,8 +24,9 @@ sourceProvider = "sharepoint"
 destinationProvider = "google_shared_drive"
 ```
 
-For Google → SharePoint, swap the two values. Only these cross-provider directions
-are supported; Dropbox, same-provider copies and all other pairs refuse
+For Google → SharePoint, swap the two values. Dropbox → Google uses
+`sourceProvider = "dropbox"` and `destinationProvider = "google_shared_drive"`.
+Dropbox destinations, Dropbox → SharePoint and same-provider copies refuse
 `unsupported_route`. Empty config defaults to the forward pair; saved file configs
 name both providers. Explicit `route` in a new file config refuses
 `configuration_invalid`: replace `route` with `sourceProvider` and
@@ -39,6 +40,35 @@ and `manager` map to Google `reader`, `writer`, and `organizer`; Google-native
 is `reader` → `read`, `writer` → `write`, `manager` → `owner`, but SharePoint
 container creation and membership are unshipped. Use existing SharePoint roots
 without `create` or `members`; the role map does not enable those operations.
+
+### Dropbox sources
+
+Onboard the read-only team app through [CREDENTIALS.md](CREDENTIALS.md)'s PKCE flow.
+Name shared namespaces by `namespaceId` and a namespace-relative `folderPath` in the
+manifest, for example `{"type":"dropbox","namespaceId":"123456","folderPath":""}`.
+Deduplicate by namespace ID, not member mount name; member homes/app folders are excluded.
+The adapter uses Select-Admin plus an explicit root namespace; `shared_folders` refuses
+because it mounts content and changes the source.
+
+Disclose Paper → `.html` conversion, Markdown (`.md`) fallback when HTML is
+unavailable, and `.web` pointer-only copies. Both export formats are nonblocking.
+Present visible
+Files API unexportable documents as per-file `source_unsupported_export` blockers,
+not legacy-Paper detections. Use [FINDINGS.md](FINDINGS.md) for the nonblocking legacy
+notices: PLAN observes the selected admin's `paper_as_files`; false means outside-
+namespace legacy content is not migrated, true means no legacy notice, and unknown
+means could not check. No legacy acceptance is required. The plan freezes evidence
+either way and the report reflects it. Even true does not prove pre-migration legacy
+docs absent; plan/report never guarantee Paper parity.
+Shared Drive destination depth includes wrapper folders and blocks beyond 100 levels.
+The pre-copy folder check blocks the mapping before its worker starts; repair the source
+hierarchy or destination wrapper, then plan/approve again before retrying.
+Listing verification compares paths and sizes, downloading exports with unknown size;
+hash verification downloads source bytes for Drive SHA-256, falling back to MD5.
+Pinned rclone has no Dropbox ListR; recursive listings walk folders individually.
+Listings and export-collision checks use disposable disk-backed indexes; verification
+coverage is paged. Dropbox → Google uploaded bytes contribute to the Google
+destination's engine-home account ledger, not a Dropbox upload allowance.
 
 ## Mapping manifests
 

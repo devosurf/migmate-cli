@@ -52,6 +52,8 @@ export interface FileMarker extends ProvenanceRecord {
 
 export interface FileScope {
   mapOnly: true;
+  sourceDisclosures?: readonly string[];
+  sourceObservation?: Record<string, unknown>;
   verification?: {
     scope: "full";
     coveredPaths: string[];

@@ -7,6 +7,7 @@ import { createProductionProvider } from "../../src/engine/providers/production.
 import type { FileMappingConfig } from "../../src/engine/drivers/file-migration.ts";
 import { digestJson } from "../../src/engine/store/digest.ts";
 import type { SourceEntry } from "../../src/engine/providers/port.ts";
+import { DiskListing, indexListing } from "../../src/engine/providers/listing.ts";
 import {
   fileProbeIds,
   sourceCapabilityKinds,
@@ -273,20 +274,27 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
     capture("mapping_interrupt_and_resume", resumeStartedAt, resumeAssertions);
 
     const routeStartedAt = new Date().toISOString();
-    const scopes = new Map<string, SourceEntry[]>();
+    using inventories = new DisposableStack();
+    const scopes = new Map<string, DiskListing<SourceEntry>>();
     for (const itemId of [
       root.sourceItemId,
       ...Object.values(configured.capabilityRoots).map((sample) => sample.sourceItemId),
     ]) {
+      if (scopes.has(itemId)) continue;
       scopes.set(
         itemId,
-        await readback.listSourceChildren({
-          driveId: root.sourceDriveId,
-          itemId,
-        }),
+        inventories.use(
+          indexListing(
+            await readback.listSourceChildren({
+              driveId: root.sourceDriveId,
+              itemId,
+            }),
+            (entry) => entry.id,
+          ),
+        ),
       );
     }
-    const children = [...scopes.values()].flat();
+    let itemsScanned = 0;
     const kinds: Record<string, number> = {
       file: 0,
       folder: 0,
@@ -294,9 +302,12 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
       reference: 0,
       undownloadable: 0,
     };
-    for (const child of children) {
-      const kind = child.kind === "file" && !child.downloadable ? "undownloadable" : child.kind;
-      kinds[kind] = (kinds[kind] ?? 0) + 1;
+    for (const children of scopes.values()) {
+      for (const child of children) {
+        const kind = child.kind === "file" && !child.downloadable ? "undownloadable" : child.kind;
+        kinds[kind] = (kinds[kind] ?? 0) + 1;
+        itemsScanned++;
+      }
     }
     const routeAssertions: ProbeCapture["assertions"] = [];
     const proofs: Record<string, string> = {};
@@ -311,10 +322,10 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
       const fixture = configured.capabilityRoots[kind];
       if (fixture) {
         const sampleChildren = scopes.get(fixture.sourceItemId)!;
-        const sample = sampleChildren.find((child) => child.id === fixture.sampleItemId);
+        const sample = sampleChildren.get(fixture.sampleItemId);
         const observedKind =
           sample?.kind === "file" && !sample.downloadable ? "undownloadable" : sample?.kind;
-        if (!sample || observedKind !== kind || sampleChildren.length !== 1)
+        if (!sample || observedKind !== kind || sampleChildren.size !== 1)
           throw new LiveTestBlocked(`file_live_${kind}_fixture_unproven`);
         routeAssertions.push(liveAssertion("file_probe_", `${kind}_source_entry`, true, true));
         const destination = await fixtures.destinationObject(destinationRoot, `source-${kind}`);
@@ -427,7 +438,7 @@ export async function runFileLiveTest(input: LiveTestInput): Promise<LiveTestRes
       sourceKindCensus: {
         scope: "capability_source_root_children",
         roots: [...scopes.keys()].map((id) => digestJson(id)).sort(),
-        itemsScanned: children.length,
+        itemsScanned,
         kinds,
       },
       worker: worker.observations,

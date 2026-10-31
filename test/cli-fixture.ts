@@ -140,8 +140,11 @@ export class PersistentCliPort extends FakeFileMigrationPort {
   private released = false;
   private copyReady = false;
   private sourceRootReads = 0;
-  constructor(destinationPath: string, control?: { verb: string; ready: () => void }) {
-    const fixture = cliFixture();
+  constructor(
+    destinationPath: string,
+    control?: { verb: string; ready: () => void },
+    fixture = cliFixture(),
+  ) {
     // These effects live in the CLI process. An arbitrary fake PID can collide
     // with an unrelated live process and correctly prevent stale-lease recovery.
     fixture.worker = { ...fixture.worker, pid: process.pid };
@@ -266,5 +269,20 @@ export class PersistentCliPort extends FakeFileMigrationPort {
       closeSync(fd);
     }
     renameSync(staging, this.destinationPath);
+  }
+}
+
+export class DropboxCliPort extends PersistentCliPort {
+  constructor(destinationPath: string, control?: { verb: string; ready: () => void }) {
+    const fixture = cliFixture();
+    fixture.sourceDriveId = "123456";
+    super(destinationPath, control, fixture);
+  }
+
+  async sourcePlanningEvidence() {
+    return {
+      evidence: { paperAsFiles: true, selectedAdminId: "dbmid:admin" },
+      notices: [],
+    };
   }
 }

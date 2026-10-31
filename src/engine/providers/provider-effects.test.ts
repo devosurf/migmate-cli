@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createCredentialSession, type CredentialSession } from "./credentials.ts";
 import { ProviderFault } from "./fault.ts";
+import { disposeListing } from "./listing.ts";
 import {
   createGraphTransport,
   fetchProvider,
@@ -34,6 +35,9 @@ const session: CredentialSession = {
   },
   async googleToken() {
     return "secret-google-canary";
+  },
+  async dropboxToken() {
+    return "secret-dropbox-canary";
   },
   async identity() {
     return "stable-application";
@@ -354,7 +358,8 @@ test("SharePoint notebook sources retain their web URL and count sections across
     driveId: "source-drive",
     itemId: "source-root",
   });
-  assert.deepEqual(children, [source]);
+  t.after(() => disposeListing(children));
+  assert.deepEqual(Array.from(children), [source]);
 });
 
 test("non-notebook sources have no section count and Google sources have no web URL", async (t) => {
@@ -405,8 +410,14 @@ test("non-notebook sources have no section count and Google sources have no web 
     driveId: "source-drive",
     itemId: "source-root",
   });
+  t.after(() => disposeListing(sources));
   assert.deepEqual(
-    sources.map(({ id, kind, webUrl, packageSections }) => ({ id, kind, webUrl, packageSections })),
+    Array.from(sources, ({ id, kind, webUrl, packageSections }) => ({
+      id,
+      kind,
+      webUrl,
+      packageSections,
+    })),
     [
       { id: "folder", kind: "folder", webUrl: null, packageSections: null },
       { id: "other-package", kind: "package", webUrl: null, packageSections: null },
@@ -471,8 +482,9 @@ test("libraries of one site resolve and list their shared root item ID within ea
     });
     assert.equal(root?.identity, `${driveId}:site-root`);
     const children = await files.listSourceChildren({ driveId, itemId: "site-root" });
+    t.after(() => disposeListing(children));
     assert.deepEqual(
-      children.map(({ id, driveId: childDrive }) => [id, childDrive]),
+      Array.from(children, ({ id, driveId: childDrive }) => [id, childDrive]),
       [[`${driveId}-folder`, driveId]],
     );
   }
@@ -1057,6 +1069,7 @@ test("source bytes are read by the drive-root path that is bound to the item", a
   const stable = { driveId: "source-drive", itemId: "stable-source" };
   await effects
     .listSourceChildren({ driveId: "source-drive", itemId: "source-root" })
+    .then(disposeListing)
     .catch(() => undefined);
   await effects.readSourceItem(stable);
   assert.equal((await bytes(effects.openSourceContent(stable))).toString(), "bytes");

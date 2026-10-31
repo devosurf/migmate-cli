@@ -4,7 +4,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { CODE_BY_NAME } from "../codes.ts";
 import { canonicalJson } from "../store/digest.ts";
 import { validateMappingTrees } from "../manifest.ts";
-import { fileProviderPair, type FileProviderId } from "../providers/adapters/capabilities.ts";
+import {
+  fileProviderPair,
+  type FileProviderId,
+  type FileProviderCapabilities,
+} from "../providers/adapters/capabilities.ts";
 import { UploadLedgerError, type UploadAttempt } from "../store/uploads.ts";
 import type {
   CheckResult,
@@ -656,6 +660,99 @@ async function destinationRoot(
   return root;
 }
 
+/** Count the observed wrapper and ancestors, not just the source-relative path. */
+async function destinationFolderDepth(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+): Promise<number> {
+  let current = await destinationRoot(ctx, mapping);
+  let depth = 0;
+  const seen = new Set<string>();
+  while (current.parentId !== null) {
+    if (seen.has(current.id)) throw new Error("Destination folder ancestry contains a cycle");
+    seen.add(current.id);
+    depth++;
+    const parent = ctx.provider.readDestinationObject
+      ? await ctx.provider.readDestinationObject({
+          driveId: current.driveId,
+          objectId: current.parentId,
+          ...abortable(ctx),
+        })
+      : await ctx.provider.resolveDestinationFolder({
+          destDriveId: current.driveId,
+          destFolderId: current.parentId,
+          ...abortable(ctx),
+        });
+    if (!parent || parent.kind !== "folder" || parent.driveId !== current.driveId)
+      throw new Error("Destination folder ancestry could not be proven");
+    current = parent;
+  }
+  return depth;
+}
+
+/** Provider-native inventory finds exceptional content omitted by transfer listings. */
+async function* sourceContentFindings(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  root: SourceView,
+  classify: NonNullable<FileProviderCapabilities["sourceEntryFindings"]>,
+): AsyncIterable<{
+  source: SourceView;
+  codes: readonly string[];
+  evidence?: Record<string, unknown>;
+}> {
+  // Iteration sees newly appended folders without retaining the frontier in RAM.
+  // Keeping visited IDs on disk also prevents duplicate mounts or cycles.
+  using folders = new DiskListing<{ id: string; path: string }>((folder) => folder.id);
+  folders.add({ id: root.id, path: "" });
+  for (const parent of folders) {
+    ctx.signal?.throwIfAborted();
+    using children = indexListing(
+      await ctx.provider.listSourceChildren({
+        driveId: mapping.sourceDriveId,
+        itemId: parent.id,
+        ...abortable(ctx),
+      }),
+      (child) => child.id,
+    );
+    using names = new DiskListing<{ name: string; first: string; second?: string }>(
+      (entry) => entry.name,
+    );
+    for (const child of children.uniqueValues()) {
+      ctx.signal?.throwIfAborted();
+      const previous = names.get(child.name);
+      if (!previous) names.add({ name: child.name, first: child.id });
+      else if (previous.first !== child.id && previous.second === undefined) {
+        names.delete(child.name);
+        names.add({ ...previous, second: child.id });
+      }
+    }
+    for (const child of children.uniqueValues()) {
+      ctx.signal?.throwIfAborted();
+      const path = parent.path ? `${parent.path}/${child.name}` : child.name;
+      if (child.kind === "folder" && !folders.has(child.id)) folders.add({ id: child.id, path });
+      const collision = names.get(child.name);
+      // Every affected item identifies itself and one distinct conflicting item,
+      // never an unbounded array of all IDs sharing the same effective name.
+      const sourceIds =
+        collision?.second === undefined
+          ? undefined
+          : [collision.first, child.id === collision.first ? collision.second : child.id];
+      const codes = sourceIds
+        ? ["destination_duplicate_name", ...classify(child)]
+        : classify(child);
+      if (codes.length)
+        yield {
+          source: { ...child, path, representable: true, outsideRoot: false },
+          codes,
+          ...(sourceIds
+            ? { evidence: { sourceIds, originalName: child.metadata?.originalName ?? child.name } }
+            : {}),
+        };
+    }
+  }
+}
+
 /** An item known only from an rclone listing: its path, size and listed provider ID. */
 function listedItem(
   driveId: string,
@@ -874,6 +971,11 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     ctx.signal,
   );
   let done = 0;
+  const sourcePlanning = await ctx.provider.sourcePlanningEvidence?.(ctx.signal);
+  const sourceDisclosures = [
+    ...(fileProviderPair(ctx.config).source.sourceDisclosures ?? []),
+    ...(sourcePlanning?.notices ?? []),
+  ];
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
     const root = await sourceRoot(ctx, mapping);
@@ -881,7 +983,13 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     const evidence = row(ctx, "plan", mapping, root, "unchanged");
     evidence.destinationDriveId = mapping.destDriveId ?? null;
     evidence.destinationFileId = mapping.destFolderId ?? null;
-    evidence.fileScope = { mapOnly: true };
+    evidence.fileScope = {
+      mapOnly: true,
+      ...(sourceDisclosures.length ? { sourceDisclosures } : {}),
+      ...(sourcePlanning && Object.keys(sourcePlanning.evidence).length
+        ? { sourceObservation: sourcePlanning.evidence }
+        : {}),
+    };
     const unit = commit(ctx, "plan", evidence, [], "plan", ++done);
     unit.mappingPass = pendingPass(
       ctx.revision,
@@ -1203,6 +1311,94 @@ async function* copyPass(
         );
     }
     const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+    const { source: sourceAdapter, destination: destinationAdapter } = fileProviderPair(ctx.config);
+    if (sourceAdapter.sourceEntryFindings) {
+      let blocked = false;
+      for await (const item of sourceContentFindings(
+        ctx,
+        mapping,
+        await sourceRoot(ctx, mapping),
+        sourceAdapter.sourceEntryFindings,
+      )) {
+        if (!item.codes.includes("destination_duplicate_name")) continue;
+        blocked = true;
+        const evidence = row(ctx, "execute", mapping, item.source, "destination_duplicate_name");
+        evidence.destinationDriveId = mapping.destDriveId ?? null;
+        yield {
+          ...unit(),
+          rows: [evidence],
+          findings: [
+            finding(ctx, "execute", "destination_duplicate_name", item.source.id, {
+              path: item.source.path,
+              ...item.evidence,
+            }),
+          ],
+        };
+      }
+      if (blocked) {
+        pass = {
+          ...pass,
+          status: "failed",
+          endedAt: ctx.now().toISOString(),
+          error:
+            "Source objects resolve to the same exported path; fix the named source conflicts before retrying.",
+        };
+        yield unit();
+        return;
+      }
+    }
+    if (destinationAdapter.destinationPathFindings) {
+      const constraintRoot = { folderDepth: await destinationFolderDepth(ctx, mapping) };
+      const folders = await ctx.provider.listFolders({
+        socketPath: resolved.socketPath,
+        root: resolved.source,
+        ...abortable(ctx),
+      });
+      let blocked = false;
+      function* paths(): Iterable<string> {
+        yield ".";
+        yield* folders;
+      }
+      try {
+        for (const path of paths()) {
+          const conflicts = destinationAdapter.destinationPathFindings(
+            path,
+            "folder",
+            constraintRoot,
+          );
+          if (!conflicts.length) continue;
+          blocked = true;
+          const source = listedItem(mapping.sourceDriveId, `path:${path}`, path, "folder", null);
+          const evidence = row(ctx, "execute", mapping, source, conflicts[0]!.code);
+          evidence.destinationDriveId = mapping.destDriveId ?? null;
+          yield {
+            ...unit(),
+            rows: [evidence],
+            findings: conflicts.map((conflict) =>
+              finding(ctx, "execute", conflict.code, source.id, {
+                path,
+                itemType: "folder",
+                destinationRootDepth: constraintRoot.folderDepth,
+                message: conflict.message,
+              }),
+            ),
+          };
+        }
+      } finally {
+        disposeListing(folders);
+      }
+      if (blocked) {
+        pass = {
+          ...pass,
+          status: "failed",
+          endedAt: ctx.now().toISOString(),
+          error:
+            "Destination path constraints prevent this mapping from copying; fix the named source paths or mapping root before retrying.",
+        };
+        yield unit();
+        return;
+      }
+    }
     if (fileProviderPair(ctx.config).destination.ledgerAccountedUploads)
       upload = ctx.beginUpload?.(
         "file",
@@ -1382,7 +1578,7 @@ function goLiveBaseline(
  */
 async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
   let done = 0;
-  const destinationAdapter = fileProviderPair(ctx.config).destination;
+  const { source: sourceAdapter, destination: destinationAdapter } = fileProviderPair(ctx.config);
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
     if (ctx.stage === "final" && settleState(ctx, mapping)?.outcome !== "settled")
@@ -1478,7 +1674,84 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
       const coverage = new DiskListing<string>((path) => path);
       resources.push(coverage);
       for (const entry of sources) if (!coverage.has(entry.path)) coverage.add(entry.path);
-      for (const path of sourceFolders) coverage.add(path);
+      for (const path of sourceFolders) if (!coverage.has(path)) coverage.add(path);
+      const excludedPaths = new DiskListing<string>((path) => path);
+      resources.push(excludedPaths);
+      const sourceContentByPath = new DiskListing<SourceView>();
+      resources.push(sourceContentByPath);
+      if (sourceAdapter.sourceEntryFindings) {
+        for await (const item of sourceContentFindings(
+          ctx,
+          mapping,
+          root,
+          sourceAdapter.sourceEntryFindings,
+        )) {
+          if (!coverage.has(item.source.path)) coverage.add(item.source.path);
+          sourceContentByPath.add(item.source);
+          if (
+            item.codes.some((code) => CODE_BY_NAME[code]?.kind !== "policy_outcome") &&
+            !excludedPaths.has(item.source.path)
+          )
+            excludedPaths.add(item.source.path);
+          const evidence = row(ctx, "verify", mapping, item.source, item.codes[0]!);
+          evidence.id = JSON.stringify([mapping.id, item.source.id, "verify", "source-content"]);
+          evidence.destinationDriveId = mapping.destDriveId ?? null;
+          evidence.destinationFileId = destinations.get(item.source.path)?.id ?? null;
+          yield commit(
+            ctx,
+            "verify",
+            evidence,
+            item.codes.map((code) =>
+              finding(ctx, "verify", code, item.source.id, {
+                path: item.source.path,
+                ...item.evidence,
+              }),
+            ),
+            "source-content",
+            ++done,
+          );
+        }
+      }
+      if (destinationAdapter.destinationPathFindings) {
+        const constraintRoot = { folderDepth: await destinationFolderDepth(ctx, mapping) };
+        for (const kind of ["file", "folder"] as const) {
+          for (const entry of kind === "file" ? sources : sourceFolders) {
+            const path = typeof entry === "string" ? entry : entry.path;
+            if (excludedPaths.has(path)) continue;
+            const conflicts = destinationAdapter.destinationPathFindings(
+              path,
+              kind,
+              constraintRoot,
+            );
+            if (!conflicts.length) continue;
+            excludedPaths.add(path);
+            const view = listedItem(
+              mapping.sourceDriveId,
+              `path:${path}`,
+              path,
+              kind,
+              typeof entry === "string" ? null : entry.size,
+            );
+            const evidence = row(ctx, "verify", mapping, view, conflicts[0]!.code);
+            evidence.destinationDriveId = mapping.destDriveId ?? null;
+            yield commit(
+              ctx,
+              "verify",
+              evidence,
+              conflicts.map((conflict) =>
+                finding(ctx, "verify", conflict.code, view.id, {
+                  path,
+                  itemType: kind,
+                  destinationRootDepth: constraintRoot.folderDepth,
+                  message: conflict.message,
+                }),
+              ),
+              "destination-path",
+              ++done,
+            );
+          }
+        }
+      }
       let coveredPaths: string[] = [];
       let coveragePage = 0;
       for (const path of coverage.sorted((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -1528,6 +1801,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const source of sources) {
+        if (excludedPaths.has(source.path)) continue;
         const copied = destinations.get(source.path);
         // rclone's OneDrive IDs are `driveId#itemId`; durable rows keep the item ID.
         const listedId = source.id?.startsWith(`${mapping.sourceDriveId}#`)
@@ -1535,7 +1809,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           : source.id;
         const view = listedItem(
           mapping.sourceDriveId,
-          listedId ?? `path:${source.path}`,
+          listedId ?? sourceContentByPath.get(source.path)?.id ?? `path:${source.path}`,
           source.path,
           "file",
           source.size,
@@ -1548,8 +1822,28 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           : null;
         const codes: string[] = [];
         let servedSize = view.size;
+        // Matching downloaded bytes already prove an unknown export's stored size.
+        if (servedSize === null && hash && sourceHash && sourceHash === destinationHash && copied)
+          servedSize = copied.size >= 0 ? copied.size : null;
+        if (servedSize === null) {
+          try {
+            let size = 0;
+            for await (const chunk of ctx.provider.openSourceContent({
+              driveId: mapping.sourceDriveId,
+              itemId: view.id,
+            })) {
+              ctx.signal?.throwIfAborted();
+              size += chunk.byteLength;
+            }
+            servedSize = size;
+          } catch (error) {
+            if (!terminalUnavailable(error)) throw error;
+            codes.push("source_read_failed");
+          }
+        }
         if (
           hash &&
+          source.size >= 0 &&
           primaryHash === "sha256" &&
           sourceHash &&
           copied &&
@@ -1593,6 +1887,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           if (hash && !destinationHash) codes.push("destination_read_failed");
         }
         const evidence = row(ctx, "verify", mapping, view, codes[0] ?? "unchanged");
+        if (view.size === null) evidence.size = servedSize;
         evidence.destinationDriveId = mapping.destDriveId ?? null;
         evidence.destinationFileId = copied?.id ?? null;
         evidence.sourceFingerprint = sourceHash;
@@ -1628,7 +1923,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const path of sourceFolders) {
-        if (destinationFolders.has(path)) continue;
+        if (destinationFolders.has(path) || excludedPaths.has(path)) continue;
         const conflicting = destinations.get(path);
         const code = conflicting ? "destination_type_conflict" : "destination_missing";
         const view = listedItem(mapping.sourceDriveId, `folder:${path}`, path, "folder", null);
@@ -1660,7 +1955,12 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const retained of destinations) {
-        if (sources.has(retained.path) || sourceFolders.has(retained.path)) continue;
+        if (
+          sources.has(retained.path) ||
+          sourceFolders.has(retained.path) ||
+          sourceContentByPath.has(retained.path)
+        )
+          continue;
         const view = listedItem(
           mapping.sourceDriveId,
           `destination:${retained.path}`,
@@ -1697,7 +1997,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const path of destinationFolders) {
-        if (sourceFolders.has(path) || sources.has(path)) continue;
+        if (sourceFolders.has(path) || sources.has(path) || sourceContentByPath.has(path)) continue;
         const view = listedItem(
           mapping.sourceDriveId,
           `destination-folder:${path}`,
@@ -1785,6 +2085,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
           ]
         : []),
       "Version history, list-item fields, retention labels and permissions are not copied. OneNote notebooks are copied as their section files.",
+      ...(fileProviderPair(ctx.config).source.sourceDisclosures ?? []),
       ...(ctx.config.options?.mirror
         ? [
             "Before each mirror pass, rclone lists both sides and records every destination-only file and folder as to_be_deleted; deleteLimit bounds file deletions, with folder removals recorded separately.",
@@ -2007,6 +2308,12 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     ].join("\n"),
   };
   for (const mapping of ctx.config.mappings) {
+    const planned = plannedScope(ctx, mapping);
+    const sourcePlanning = ctx.reportEvidence
+      ? ctx.reportEvidence.sourcePlanning(mapping.id)
+      : planned?.jobType === "file_migration"
+        ? planned.fileScope
+        : undefined;
     yield {
       title: `Mapping ${mapping.id}`,
       format: "text",
@@ -2018,6 +2325,12 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
             destDriveId: mapping.destDriveId,
             destFolderId: mapping.destFolderId,
             revision: ctx.revision,
+            ...(sourcePlanning?.sourceObservation
+              ? { sourceObservation: sourcePlanning.sourceObservation }
+              : {}),
+            ...(sourcePlanning?.sourceDisclosures
+              ? { sourceDisclosures: sourcePlanning.sourceDisclosures }
+              : {}),
             passes: (ctx.resume.mappingPasses ?? []).filter(
               (pass) => pass.mappingId === mapping.id,
             ),

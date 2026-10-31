@@ -1418,6 +1418,22 @@ class StoreImpl implements Store {
       settled(mappingId) {
         return readReportSettlement(db, revision, mappingId);
       },
+      sourcePlanning(mappingId) {
+        const row = db
+          .prepare(
+            "SELECT json_extract(payload,'$.fileScope.sourceObservation') AS observation, json_extract(payload,'$.fileScope.sourceDisclosures') AS disclosures FROM item WHERE rev=? AND mapping_id=? AND json_type(payload,'$.fileScope') IS NOT NULL ORDER BY CASE phase WHEN 'plan' THEN 0 ELSE 1 END LIMIT 1",
+          )
+          .get(revision, mappingId);
+        if (!row) return undefined;
+        return {
+          ...(typeof row.observation === "string"
+            ? { sourceObservation: JSON.parse(row.observation) }
+            : {}),
+          ...(typeof row.disclosures === "string"
+            ? { sourceDisclosures: JSON.parse(row.disclosures) }
+            : {}),
+        };
+      },
       coverage: reportCoverage(db, revision),
     };
   }
@@ -2369,6 +2385,12 @@ class StoreImpl implements Store {
               jobType: "file_migration",
               mappingId: String(row.mapping_id),
               sourceItemId: String(row.source_item_id),
+              ...(evidence?.jobType === "file_migration" && evidence.fileScope?.sourceDisclosures
+                ? { sourceDisclosures: evidence.fileScope.sourceDisclosures }
+                : {}),
+              ...(evidence?.jobType === "file_migration" && evidence.fileScope?.sourceObservation
+                ? { sourceObservation: evidence.fileScope.sourceObservation }
+                : {}),
               sourceWebUrl:
                 evidence?.jobType === "file_migration"
                   ? (evidence.sourceEvidence?.webUrl ?? null)

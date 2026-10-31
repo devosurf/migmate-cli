@@ -81,10 +81,14 @@ function csv(text: string): unknown {
     else cell += c;
   }
   const header = rows.shift();
+  const namespaceHeader = columns.map((column) =>
+    column === "source.driveId" ? "source.namespaceId" : column,
+  );
   if (
     JSON.stringify(header) !== JSON.stringify(columns) &&
     JSON.stringify(header) !== JSON.stringify(columns.slice(0, 7)) &&
-    JSON.stringify(header) !== JSON.stringify(columns.slice(0, 9))
+    JSON.stringify(header) !== JSON.stringify(columns.slice(0, 9)) &&
+    JSON.stringify(header) !== JSON.stringify(namespaceHeader)
   )
     throw new ManifestError(0, "header");
   return {
@@ -105,7 +109,13 @@ function csv(text: string): unknown {
           fileProviderPair({ sourceProvider: r[1], destinationProvider: r[4] }).source.rootField ===
           "folderId"
             ? { type: r[1], driveId: r[2], folderId: r[9], ...(r[3] ? { folderPath: r[3] } : {}) }
-            : { type: r[1], driveId: r[2], folderPath: r[3], ...(r[9] ? { folderId: r[9] } : {}) },
+            : {
+                type: r[1],
+                [fileProviderPair({ sourceProvider: r[1], destinationProvider: r[4] }).source
+                  .containerField ?? "driveId"]: r[2],
+                folderPath: r[3],
+                ...(r[9] ? { folderId: r[9] } : {}),
+              },
         destination: {
           type: r[4],
           ...(r[7] ? { create: r[7] } : {}),
@@ -162,7 +172,13 @@ export function parseManifest(
     const id = text(m.id, row, "id");
     if (ids.has(id)) throw new ManifestError(row, "id", "Duplicate mapping id");
     ids.add(id);
-    const s = object(m.source, row, "source", ["type", "driveId", "folderPath", "folderId"]);
+    const s = object(m.source, row, "source", [
+      "type",
+      "driveId",
+      "namespaceId",
+      "folderPath",
+      "folderId",
+    ]);
     const d = object(m.destination, row, "destination", [
       "type",
       "driveId",
@@ -173,6 +189,9 @@ export function parseManifest(
     if (s.type === undefined) throw new ManifestError(row, "source.type");
     if (d.type === undefined) throw new ManifestError(row, "destination.type");
     const pair = fileProviderPair({ sourceProvider: s.type, destinationProvider: d.type });
+    const sourceContainerField = pair.source.containerField ?? "driveId";
+    if (s[sourceContainerField === "driveId" ? "namespaceId" : "driveId"] !== undefined)
+      throw new ManifestError(row, `source.${sourceContainerField}`);
     const members: DriveMember[] = [];
     if (m.members !== undefined) {
       if (!Array.isArray(m.members)) throw new ManifestError(row, "members");
@@ -222,12 +241,12 @@ export function parseManifest(
       pair.source.rootField === "folderId"
         ? {
             type: pair.source.id,
-            driveId: stable(s.driveId, "source.driveId"),
+            driveId: stable(s[sourceContainerField], `source.${sourceContainerField}`),
             folderId: stable(s.folderId, "source.folderId"),
           }
         : {
             type: pair.source.id,
-            driveId: stable(s.driveId, "source.driveId"),
+            driveId: stable(s[sourceContainerField], `source.${sourceContainerField}`),
             folderPath: path(s.folderPath, "source.folderPath"),
           };
     const invalidSourceField = pair.source.rootField === "folderId" ? "folderPath" : "folderId";

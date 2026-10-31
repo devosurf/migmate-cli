@@ -11,6 +11,7 @@ import {
   refused,
   seedRoots,
   setting,
+  stableId,
   text,
   tokenResponse,
 } from "./shared.ts";
@@ -185,6 +186,7 @@ export async function requestGoogleToken(
 
 export const googleCredentialAdapter: FileCredentialAdapter = {
   mappingSourceType: "google_shared_drive",
+  sourceItemId: stableId,
   // This existing credential key names the Google remote in either direction.
   remoteKey: { source: "destinationRemote", destination: "destinationRemote" },
   bindings: [

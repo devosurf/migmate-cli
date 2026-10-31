@@ -4,7 +4,7 @@ Finite, one-way movement or preservation of organizational content. The authorit
 
 Two job types:
 
-- **File migration** — SharePoint document library to a Google Shared Drive folder, and Google Shared Drive folder to an existing SharePoint document library or folder.
+- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder, and Google Shared Drive folder to an existing SharePoint document library or folder.
 - **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package, optionally retained as conversation ZIPs in a Google Shared Drive folder.
 
 `CONTEXT.md` is the glossary. It is the authority on what each term means; this README assumes it.
@@ -290,8 +290,9 @@ destinationProvider = "google_shared_drive"
 ```
 
 For the reverse direction, use `sourceProvider = "google_shared_drive"` and
-`destinationProvider = "sharepoint"`. These are the only supported file-provider
-pairs; Dropbox, same-provider copies and every other pair refuse `unsupported_route`.
+`destinationProvider = "sharepoint"`. Dropbox team content uses
+`sourceProvider = "dropbox"` and `destinationProvider = "google_shared_drive"`.
+Dropbox destinations, Dropbox → SharePoint, and same-provider copies refuse `unsupported_route`.
 An empty config defaults to the forward pair; saved file configs name both providers.
 New file configs containing `route` refuse `configuration_invalid`: replace that
 field with `sourceProvider` and `destinationProvider` as shown above, rather than
@@ -301,6 +302,66 @@ close authorizations and go-live acknowledgments retain the frozen plan's origin
 digest encoding. Equivalent provider-pair spelling preserves those bindings; changing
 the current authority-bearing settings does not.
 Teams archives retain `route = "teams_global_archive"`.
+
+### Dropbox shared namespaces
+
+Onboard a separate read-only Dropbox team app with `creds init`: approve its PKCE
+authorization URL as a team administrator and paste the authorization code. Offline
+refresh credentials remain behind the protected rclone configuration file reference.
+Granted scopes are recorded from the initial code exchange; refresh responses are
+not scope proof. Any write scope refuses `credential_permissions_invalid`.
+`shared_folders` refuses because rclone mounts folders, mutating the source.
+
+Use namespace IDs, never a member's mounted folder name:
+
+```json
+{
+  "version": 1,
+  "mappings": [
+    {
+      "id": "team-content",
+      "source": { "type": "dropbox", "namespaceId": "123456", "folderPath": "" },
+      "destination": { "type": "google_shared_drive", "create": "Migrated team content" }
+    }
+  ]
+}
+```
+
+Namespace enumeration deduplicates IDs; overlapping mappings refuse instead of copying
+the same mounted namespace twice. Member homes and app folders are out of scope.
+Select-Admin uses an administrator's **team-member ID**, and `root_namespace` pins
+the namespace rather than defaulting to that administrator's member home.
+
+Paper exports prefer `.html`, disclosed in the plan and report; pinned rclone falls
+back to Markdown (`.md`) when HTML is unavailable. Both conversions are nonblocking
+disclosures. Visible Files API documents without either downloadable format produce
+blocking per-file `source_unsupported_export` findings, not legacy-Paper findings.
+`.web` files copy unchanged as pointers,
+not the Google-hosted targets. Shared Drive paths over 100 folder levels, including
+destination wrapper folders, raise blocking findings for every source provider.
+A pre-copy folder check blocks the affected mapping before its worker starts; repair
+the source hierarchy or choose a shallower destination root before retrying.
+Listing verification compares paths and sizes; Paper export sizes require reading the
+export bytes. Opt-in hash verification downloads Dropbox bytes and compares Drive's
+SHA-256, falling back to MD5. Dropbox's block content hash is not ordinary SHA-256.
+Pinned rclone v1.75.0 has no Dropbox ListR: recursive listing walks folders individually,
+so neither planning nor aggregate size estimates promise cheap recursive enumeration.
+Native Dropbox inventories, export-name collision checks, and verification coverage
+use disk-backed indexes and bounded pages rather than retaining a whole listing.
+Dropbox → Google uploads contribute to the same engine-home Google account ledger
+as other Google-destination jobs; the Dropbox content hash does not measure uploads.
+
+Legacy Paper has no documented mapping from its document IDs to a shared namespace.
+During PLAN, Migmate observes the selected administrator's `paper_as_files` through
+`users/features/get_values` with `Dropbox-API-Select-User`. `false` produces a
+nonblocking notice that legacy Paper outside the selected namespaces is not migrated;
+`true` produces no legacy notice; an unknown result produces a nonblocking
+could-not-check notice. No legacy-Paper exception acceptance is required.
+The observation is frozen in the plan in every case, including `true`, and the report
+reflects that evidence rather than rechecking. This feature describes the user's
+creation model: `true` still does not prove pre-migration legacy documents are absent.
+This route never guarantees Paper parity; teams needing legacy content require an
+explicit legacy document scope or a separate member/Paper discovery workflow.
 
 ### Mapping manifests
 
@@ -1011,6 +1072,56 @@ Agents working in this repo have a guided skill at `.agents/skills/migmate/SKILL
 - `npm run check:package` — packs, installs globally into a temporary prefix, and smoke-tests the installed artifact. This is what CI's four cells run.
 - `npm run check:install` — packs, serves the artifact as a local GitHub-shaped release, and drives `scripts/install.sh` through a fresh install, `migmate upgrade`, pruning, a tampered checksum, and a private Node download from nodejs.org. CI's four cells run it after `check:package`.
 - `npm run test:live -- --config <file>` — optional and credentialed. File probes use disposable mapping roots through the production engine for multi-mapping rclone copies, hash verification, cooperative interruption/reopen/resume, completed-pass skips, and source capability samples. An interruption that finishes too quickly is not claimed as proven. A `shared_drive_to_sharepoint_library` job config instead runs one reverse probe: a disposable Google source copied into a disposable SharePoint folder, quickXorHash verification, then replaced Office and plain files that must raise `destination_rewrote_file` and `content_mismatch`. Archive probes remain separate. The wizards write its config, described by `scripts/live/config.schema.json`; it is not part of `npm test`, CI, or a release gate.
+
+**Optional Dropbox backend probe.** `npm run test:live -- --config <file>` also accepts the
+following maintainer configuration. This qualifies the managed **rclone v1.75.0**
+copy/export/hash behavior, not the production engine lifecycle or legacy Paper coverage.
+It has no tenant credentials by default and is never run by the offline suite.
+
+```json
+{
+  "schemaVersion": 1,
+  "jobType": "file_migration",
+  "acknowledgement": "I authorize disposable live test probes",
+  "jobConfig": {
+    "sourceProvider": "dropbox",
+    "destinationProvider": "google_shared_drive",
+    "rclone": {
+      "config": { "resolver": "file", "path": "/private/rclone.conf", "mode": "0600" },
+      "sourceRemote": "dropbox",
+      "destinationRemote": "drive"
+    }
+  },
+  "dropboxProbe": {
+    "adminMemberId": "dbmid:REPLACE_ADMIN_MEMBER_ID",
+    "namespaceId": "123456789",
+    "destDriveId": "REPLACE_SHARED_DRIVE_ID",
+    "destFolderId": "REPLACE_DISPOSABLE_PARENT_FOLDER_ID",
+    "filePath": "fixtures/ordinary.bin",
+    "paperPath": "fixtures/note.paper"
+  }
+}
+```
+
+Supply an owner-only, nonsymlink rclone config with a Dropbox team-app remote and a
+Drive remote authorized for the specified Shared Drive. Keep secrets out of this JSON.
+Use a read-only Dropbox grant with `team_data.member`, `files.metadata.read`,
+`files.content.read`, and any account discovery scope the backend requires.
+The probe forces `impersonate_admin` to the **team-member ID**, clears member
+impersonation, sets `root_namespace`, and disables `shared_folders`/`shared_files`;
+it never mounts shared folders or creates source fixtures. Both source paths must
+already exist, be namespace-relative, and remain unchanged during the run.
+The Paper sample must be a filesystem `.paper` export, not a legacy Paper URL.
+
+The probe copies into a unique child of `destFolderId`, exports Paper as `.html`,
+downloads each source representation to compute SHA-256 and MD5, and compares
+Drive's SHA-256 (or MD5 only when SHA-256 is unavailable), plus byte size.
+Dropbox's block content hash and rclone's no-common-hash size fallback are not
+accepted as byte proof. Cleanup removes only that generated destination child
+after checking its recorded identity; source content is never deleted.
+A failed cleanup is a failed run and requires inspecting disposable destination
+children. No live evidence is claimed until this optional probe succeeds with
+real credentials; successful samples do not establish whole-tenant coverage.
 
 The real-binary suites are skipped by ordinary `npm test`. To run the copy-pass suite alone, supply `MIGMATE_TEST_RCLONE_BINARY` (path), `MIGMATE_TEST_RCLONE_SHA256`, and `MIGMATE_TEST_RCLONE_PROVENANCE`, then run `node --test src/engine/providers/copy-pass.test.ts`; `npm run check:worker` resolves these from the vendored manifest automatically. The hash test also uses an encrypted local-folder remote to prove downloading a hash the remote cannot supply.
 

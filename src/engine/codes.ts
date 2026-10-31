@@ -69,6 +69,10 @@ export const CODES: readonly CodeEntry[] = [
   entry("content_mismatch", "finding", "verify", FILE),
   entry("destination_rewrote_file", "finding", "verify", FILE),
   entry("metadata_mismatch", "finding", "verify", FILE),
+  entry("source_paper_html", "policy_outcome", "verify", FILE),
+  entry("source_document_export", "policy_outcome", "verify", FILE),
+  entry("source_web_pointer", "policy_outcome", "verify", FILE),
+  entry("source_unsupported_export", "finding", "verify", FILE),
 
   // ---- teams archive: policy outcomes --------------------------------------
   entry("collected", "policy_outcome", "execute", TEAMS),
@@ -135,6 +139,8 @@ const consequences: Record<string, string> = {
   content_mismatch: "Source and destination content differ.",
   destination_rewrote_file: "The destination rewrote the source file.",
   metadata_mismatch: "Destination metadata differs from the source.",
+  source_unsupported_export:
+    "The source document has no supported downloadable export and was not migrated.",
   message_collection_incomplete: "The archive does not contain every requested message.",
   hosted_content_unavailable_deleted_thread: "Hosted content from deleted threads is missing.",
   hosted_content_unavailable_retained_message: "Hosted content from retained messages is missing.",

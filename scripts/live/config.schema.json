@@ -5,6 +5,27 @@
   "type": "object",
   "required": ["schemaVersion", "jobType", "jobConfig", "acknowledgement"],
   "properties": {
+    "dropboxProbe": {
+      "type": "object",
+      "description": "Read-only pre-existing Dropbox samples; creates and removes only a unique child of the acknowledged Google folder. Backend qualification, not an engine lifecycle probe.",
+      "required": [
+        "adminMemberId",
+        "namespaceId",
+        "destDriveId",
+        "destFolderId",
+        "filePath",
+        "paperPath"
+      ],
+      "properties": {
+        "adminMemberId": { "type": "string", "pattern": "^dbmid:[A-Za-z0-9_-]+$" },
+        "namespaceId": { "type": "string", "pattern": "^[0-9]+$" },
+        "destDriveId": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "destFolderId": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "filePath": { "type": "string", "minLength": 1 },
+        "paperPath": { "type": "string", "pattern": "\\.paper$" }
+      },
+      "additionalProperties": false
+    },
     "schemaVersion": {
       "const": 1
     },
@@ -19,7 +40,7 @@
       "description": "The same parsed operator configuration accepted by production. Credentials remain typed file references, never raw secrets.",
       "properties": {
         "sourceProvider": {
-          "enum": ["sharepoint", "google_shared_drive"]
+          "enum": ["sharepoint", "google_shared_drive", "dropbox"]
         },
         "destinationProvider": {
           "enum": ["sharepoint", "google_shared_drive"],
@@ -307,6 +328,37 @@
   "allOf": [
     {
       "if": {
+        "properties": {
+          "jobConfig": {
+            "required": ["sourceProvider"],
+            "properties": { "sourceProvider": { "const": "dropbox" } }
+          }
+        }
+      },
+      "then": {
+        "required": ["dropboxProbe"],
+        "properties": {
+          "jobType": { "const": "file_migration" },
+          "jobConfig": {
+            "required": ["sourceProvider", "destinationProvider", "rclone"],
+            "properties": {
+              "destinationProvider": { "const": "google_shared_drive" },
+              "rclone": { "required": ["sourceRemote"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "not": {
+          "properties": {
+            "jobConfig": {
+              "required": ["sourceProvider"],
+              "properties": { "sourceProvider": { "const": "dropbox" } }
+            }
+          }
+        },
         "properties": {
           "jobType": {
             "const": "file_migration"

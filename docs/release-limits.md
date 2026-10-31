@@ -1,11 +1,11 @@
 # Release limits
 
-This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders to existing SharePoint document libraries or folders. Teams archives remain local packages with optional Shared Drive cold storage.
+This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots and Dropbox shared namespaces to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders to existing SharePoint document libraries or folders. Teams archives remain local packages with optional Shared Drive cold storage.
 
 File configuration selects top-level `sourceProvider = "sharepoint"` and
-`destinationProvider = "google_shared_drive"`, or the reversed pair. Only those
-two cross-provider combinations are shipped; Dropbox, same-provider copies and
-all other pairs refuse `unsupported_route`. Empty config defaults to the forward
+`destinationProvider = "google_shared_drive"`, or the reversed pair, or
+`sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"`.
+Dropbox destinations, Dropbox → SharePoint, and same-provider pairs refuse `unsupported_route`. Empty config defaults to the forward
 pair; saved file configs name both providers. An explicit `route` in a new file
 config refuses `configuration_invalid`: replace it with the two provider fields
 above (swap the values for reverse jobs). Historical persisted file routes are
@@ -14,6 +14,50 @@ Recorded close authorizations and go-live acknowledgments keep the frozen plan's
 configuration-digest encoding. Equivalent provider-pair spelling preserves their authority;
 changes to the current authority-bearing settings still invalidate it.
 Teams archives keep `route = "teams_global_archive"`.
+
+**Dropbox source boundary.** A read-only team app is onboarded through PKCE with offline
+access; scope proof comes only from the initial code exchange. Refresh responses are
+not used to infer scopes. Write scopes and `shared_folders` refuse. Shared namespace
+IDs are deduplicated across enumeration pages, and mappings use `namespaceId` plus
+`folderPath`; member homes/app folders remain out of scope. Select-Admin and an explicit
+root namespace keep reads out of the administrator's personal home.
+Paper exports prefer HTML with plan/report disclosure; pinned rclone v1.75.0 falls
+back to Markdown (`.md`) when HTML is unavailable. Both conversions are nonblocking.
+Visible Files API documents without either downloadable format produce blocking
+per-file `source_unsupported_export` findings, not legacy-Paper findings.
+`.web` pointers copy as-is with a disclosure.
+If an exported name collides with another source item (for example `Notes.paper`
+and `Notes.html` both becoming `Notes.html`, or a Markdown-only Paper document
+colliding with `Notes.md`), execution records blocking
+`destination_duplicate_name` findings identifying both source objects and refuses
+to start that mapping's copy pass. Rename or remove the conflicting source item
+before replanning; equal sizes do not establish that both objects were copied.
+Google's 100-folder-level limit applies to all sources and includes destination wrappers.
+Execution checks folder constraints before starting that mapping's copy pass; a conflict
+records its path and blocks the mapping without starting an unfiltered transfer.
+Listing proof compares paths and sizes (unknown export sizes require reading exported bytes).
+Hash proof downloads source bytes for Drive SHA-256, falling back to MD5; Dropbox's
+block hash is not compared directly. Pinned rclone v1.75.0 walks Dropbox folders individually
+because the backend has no ListR. No authenticated Dropbox tenant run has been performed;
+optional copy/export/hash probes are backend qualification, not whole-tenant content coverage.
+During PLAN, Dropbox-source jobs observe the selected administrator's `paper_as_files`
+via `users/features/get_values` with `Dropbox-API-Select-User`. `false` emits a
+nonblocking notice that legacy Paper outside selected namespaces is not migrated;
+`true` emits no legacy notice; unknown emits a nonblocking could-not-check notice.
+None requires legacy-Paper acceptance. Every observation is frozen in the plan,
+including `true`, and reports use that evidence rather than a fresh check.
+Legacy document IDs have no documented shared-namespace attribution, and `true`
+does not prove pre-migration legacy documents are absent. Legacy document scope or a
+separate member/Paper discovery workflow remains an operator decision; no Paper parity
+is guaranteed. This evidence uses schema 8 established by #123, without another schema bump.
+Dropbox native inventories, export-collision indexes, and folder traversal use
+disposable disk-backed listings; verification coverage stays paged and reports
+stream complete evidence without retaining a whole namespace listing in memory.
+The optional Dropbox live probe selects original Paper metadata uniquely from
+the source parent listing. It obtains the disposable Drive folder's ID from
+the configured destination parent listing and rechecks that identity before
+cleanup; missing, changed, or ambiguous entries refuse cleanup rather than
+deleting an unproven folder.
 
 Shared member roles are `reader`, `writer`, and `manager`. Google keeps the first
 two and maps `manager` to `organizer`; native `organizer`, `fileOrganizer`, and
@@ -88,13 +132,13 @@ identity-provider calls were needed.
 Plan snapshots and current `status.uploadActivity` report job-content uploads
 observed in one engine home, keyed by the approved Google account email (trim/case
 normalization only). Concurrent jobs share `uploads.sqlite`, whose independent
-ledger schema is version 1; the per-job store remains version 7 from detached
-execution. This is local accounting, with no discovery, merging or coordination
+ledger schema is version 1; the per-job store uses version 8 for paged evidence.
+This is local accounting, with no discovery, merging or coordination
 across engine homes or hosts. Other homes/hosts and non-Migmate uploads are
 unobserved even when local coverage is complete.
 
-Coverage includes file-migration uploads to Google and acknowledged Teams Google
-content uploads, including failed/stopped attempts. Existing recovered archive
+Coverage includes file-migration uploads to Google (including Dropbox sources)
+and acknowledged Teams Google content uploads, including failed/stopped attempts. Existing recovered archive
 objects are not charged again. Downloads, Google-to-SharePoint uploads, local-only
 archives and packaging, verification/hash reads, metadata/HTTP overhead and
 preflight probes are excluded. Observed counters are not Google's charged bytes;
@@ -534,7 +578,7 @@ object and its provenance.
 
 Per-file findings report the compared size in `sourceSize`; if it differs from the listing, `listedSize` preserves that listing. When `source_size_inconsistent` accompanies `size_mismatch` or `content_mismatch` for the same path, those dependent findings carry `cause: "source_size_inconsistent"`. A source change between copy and verify can produce all three. They remain separate blocking findings requiring explicit acceptance.
 
-**What refuses.** `unsupported_route` (exit 4) names a shape this build does not implement: a destination outside the configured Shared Drive, a source that is not the named document library, a cloud other than Global, a mapping root that is not an ordinary folder, or a route name not listed above. Generic remotes and My Drive are not implemented: the credential loader accepts only `onedrive` document-library remotes (the source and, for reverse mappings, the destination) and a `drive` service-account remote, so any other backend refuses `credential_backend_unsupported`. That is a statement about what was built, not a gap in evidence.
+**What refuses.** `unsupported_route` (exit 4) names a shape this build does not implement: a destination outside the configured Shared Drive, a source outside the named shared container, personal storage, a cloud other than Global, a mapping root that is not an ordinary folder, or an unshipped provider pair. Generic remotes and My Drive are not implemented: supported backends are document-library `onedrive`, service-account `drive`, and the read-only, PKCE-onboarded team-app `dropbox` source. Other backends refuse `credential_backend_unsupported`. This is a statement about what was built, not a gap in evidence.
 
 **What a release no longer proves.** Published live evidence does not gate jobs ([ADR-0009](adr/0009-per-job-verification-replaces-route-qualification.md)). Engine tests cover mapping recovery and verification with the fake provider; opt-in real-binary checks exercise local-folder copy passes. Tenant execution is exercised only by the optional live suite. No live run is implied by a passing offline suite.
 

@@ -73,7 +73,7 @@ export interface TransferWorkerProbe {
 /** A resolved rclone filesystem; fake trees use their root item id as fs. */
 export interface FilePassRoot {
   fs: string;
-  kind: "local" | "sharepoint" | "google_drive";
+  kind: "local" | "sharepoint" | "google_drive" | "dropbox";
   /** Backend compares timestamps because upload can rewrite size/checksum. */
   ignoreSizeAndChecksum?: boolean;
 }
@@ -213,7 +213,7 @@ export interface ProviderPort extends FilePassProvider {
   listDriveMembers(driveId: string): Promise<DriveMembership[]>;
   addDriveMember(driveId: string, member: DriveMember): Promise<void>;
   resolveFilePass(input: {
-    sourceType?: "sharepoint" | "google_shared_drive";
+    sourceType?: "sharepoint" | "google_shared_drive" | "dropbox";
     sourceDriveId: string;
     sourceItemId: string;
     destDriveId: string;
@@ -221,6 +221,10 @@ export interface ProviderPort extends FilePassProvider {
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
   discoverSharePoint?(): Promise<SharePointDiscovery>;
+  sourcePlanningEvidence?(signal?: AbortSignal): Promise<{
+    evidence: Record<string, unknown>;
+    notices: readonly string[];
+  }>;
   preflight?(input: {
     jobType: JobType;
     config: unknown;
@@ -256,12 +260,12 @@ export interface ProviderPort extends FilePassProvider {
     sourceItemId: string;
     signal?: AbortSignal;
   }): Promise<SourceEntry | null>;
-  /** Graph item IDs are unique only within a drive: every source read names both. */
+  /** Drive-scoped, repeatable inventory. Caller must disposeListing after use. */
   listSourceChildren(input: {
     driveId: string;
     itemId: string;
     signal?: AbortSignal;
-  }): Promise<SourceEntry[]>;
+  }): Promise<Iterable<SourceEntry>>;
   openSourceContent(input: { driveId: string; itemId: string }): AsyncIterable<Uint8Array>;
 
   resolveDestinationFolder(input: {

@@ -103,6 +103,9 @@ export class FileEffects {
   async discoverSharePoint() {
     return this.#effect(this.#source, "discoverSharePoint").call(this.#source);
   }
+  async sourcePlanningEvidence(signal?: AbortSignal) {
+    return this.#source.sourcePlanningEvidence?.(signal) ?? { evidence: {}, notices: [] };
+  }
 
   async resolveSourceFolder(
     ...input: Parameters<NonNullable<ProviderPort["resolveSourceFolder"]>>

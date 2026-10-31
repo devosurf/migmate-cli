@@ -9,8 +9,10 @@ import { unsupportedNode } from "../src/versions.ts";
 import { LIVE_TEST_ACKNOWLEDGEMENT, LiveTestBlocked } from "./live/common.ts";
 import { runFileLiveTest } from "./live/file.ts";
 import { runArchiveLiveTest } from "./live/archive.ts";
+import { runDropboxFileLiveTest } from "./live/file-dropbox.ts";
 import {
   fileProbeIds,
+  dropboxFileProbeIds,
   probeFailures,
   reverseFileProbeIds,
   type ProbeCapture,
@@ -139,7 +141,12 @@ if (args.length === 1 && args[0] === "--help") {
     const captures: ProbeCapture[] = [];
     temporary = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "mml-"));
     await chmod(temporary, 0o700);
-    const suite = config.jobType === "file_migration" ? runFileLiveTest : runArchiveLiveTest;
+    const suite =
+      config.jobType === "file_migration"
+        ? config.jobConfig.sourceProvider === "dropbox"
+          ? runDropboxFileLiveTest
+          : runFileLiveTest
+        : runArchiveLiveTest;
     const result = await suite({
       config,
       jobDirectory: temporary,
@@ -154,10 +161,12 @@ if (args.length === 1 && args[0] === "--help") {
       config.jobType === "teams_archive" && jobConfig.retainedHistory === true;
     const requiredProbes =
       config.jobType === "file_migration"
-        ? jobConfig.sourceProvider === "google_shared_drive" &&
-          jobConfig.destinationProvider === "sharepoint"
-          ? [...reverseFileProbeIds]
-          : [...fileProbeIds]
+        ? jobConfig.sourceProvider === "dropbox"
+          ? [...dropboxFileProbeIds]
+          : jobConfig.sourceProvider === "google_shared_drive" &&
+              jobConfig.destinationProvider === "sharepoint"
+            ? [...reverseFileProbeIds]
+            : [...fileProbeIds]
         : [
             "graph_route_matrix",
             "hosted_content_bytes",

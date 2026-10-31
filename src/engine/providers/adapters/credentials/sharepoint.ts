@@ -249,6 +249,7 @@ export async function requestGraphToken(
 }
 
 export const sharepointCredentialAdapter: FileCredentialAdapter = {
+  sourceItemId: stableId,
   remoteKey: { source: "sourceRemote", destination: "sharepointDestinationRemote" },
   bindings: [
     {

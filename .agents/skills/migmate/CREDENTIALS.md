@@ -23,6 +23,73 @@ leave them out, especially when the manifest creates the destination drive. A va
 that is present must still be a stable ID or onboarding refuses
 `credential_config_invalid`.
 
+### Dropbox source authorization
+
+For Dropbox → Shared Drives, hand app creation and consent to a Dropbox team
+administrator. Use a scoped **Full Dropbox** app, with only these permissions:
+`account_info.read`, `files.metadata.read`, `files.content.read`, `team_data.member`.
+These are the requested minimum. Existing grants may additionally contain the known
+read-only scopes `sharing.read`, `team_info.read`, `team_data.content.read`, and
+`members.read`; Migmate does not request those unnecessary permissions.
+Full Dropbox selects the accessible content; these scopes constrain operations.
+Use the administrator's **team-member ID** (`dbmid:…`), not their email.
+
+Prepare an owner-only rclone file outside the engine home with the Google destination
+remote and this source seed:
+
+```ini
+[dropbox-source]
+type = dropbox
+client_id = DROPBOX_APP_KEY
+impersonate_admin = dbmid:ADMIN_TEAM_MEMBER_ID
+export_formats = html
+```
+
+The job config names `sourceProvider = "dropbox"`,
+`destinationProvider = "google_shared_drive"` and, under `[rclone]`,
+`dropboxRemote = "dropbox-source"` plus `destinationRemote` and the existing typed
+`config` file reference. There is no Dropbox app secret to paste into job config.
+`creds init` validates and persists these pair-specific remote bindings; Dropbox
+does not also require a SharePoint `sourceRemote`.
+Persisted Dropbox mappings retain `/` for the namespace root or the provider's
+immutable `id:…` folder identity. Credential reconstruction validates these
+Dropbox-specific identities without relaxing other providers' ID rules.
+
+Have the administrator run `migmate creds init --job ID --config job.toml` in a
+terminal, open the displayed URL in their browser, approve the app, and paste the
+authorization code into the command. Migmate uses single-use S256 PKCE with offline
+access. It writes the refresh token and initial authorization-code response's scope
+proof only to the referenced credential file. Job config, events and evidence
+contain no token or pasted code. The file must be writable (`0600`) for onboarding
+and rclone's token refresh; subsequent reads accept stricter owner-only permissions.
+
+Observe `doctor` after consent. Its Dropbox credential evidence names the app,
+team, acting administrator and granted scopes, with `scopeEvidence:
+authorization_code`. A successful refresh is authentication, not fresh permission
+introspection: Dropbox need not repeat scopes on refresh. Preserve the generated
+`migmate_scope_proof` field when rclone refreshes its token; its refresh-token digest
+binds the saved initial grant to the credential. Operator-owned evidence is not a
+tamper-proof audit log.
+
+During PLAN, `users/features/get_values` observes `paper_as_files` for this selected
+administrator using `Dropbox-API-Select-User`, rather than the namespace-read
+Select-Admin context. The plan freezes the observation even when true, and the
+report uses the frozen evidence. False produces a nonblocking outside-namespace
+legacy-Paper notice; true produces no legacy notice; unknown produces a nonblocking
+could-not-check notice, not a credential refusal or acceptance requirement.
+True describes the creation model, not proof that pre-migration legacy documents
+are absent. See [FINDINGS.md](FINDINGS.md) for the coverage limit.
+
+Any write or unknown scope, missing proof, or substituted app/refresh token refuses
+`credential_permissions_invalid`; importing a token from `rclone config` is not
+read-only proof. For a changed grant, have the administrator revoke the old
+authorization, prepare a new source credential file and repeat `creds init`.
+`shared_folders` is forbidden even when set to false: that backend mode can mount
+folders and mutate the source. `impersonate`, app secrets, custom OAuth endpoints
+and export-hiding overrides also refuse. Already-proven credentials can onboard
+without another browser prompt; first authorization without a terminal refuses
+`credential_interaction_required`.
+
 ### SharePoint source discovery
 
 Use exactly one source-app grant: `Sites.Selected` with a read grant per site for

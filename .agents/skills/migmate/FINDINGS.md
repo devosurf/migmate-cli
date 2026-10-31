@@ -4,7 +4,7 @@ Read each row's `kind`, `phase`, path and evidence, not its code alone. Present 
 
 Present `status.exceptionGroups` by code, consequences, affected-item counts and representative examples; use paged evidence for deeper review. Hand the human `migmate accept --job ID` or the verification web view. The human explicitly selects groups and supplies one non-empty rationale, retained with every selected code. Confirm selected **group count**, not a summed count of distinct items: groups may overlap. No preselected blanket acceptance. Afterward observe `status.acceptedExceptions` for the intended verification digest, codes, rationale and declared identity. Repair and reverify when evidence is unacceptable; reverification invalidates those acceptances. Genuine unattended CI supplies `--verification-digest`, `--approver`, repeated `--code` and one required `--note`; the guided agent does not use that path for a human decision.
 
-File-route omissions are disclosed once in the plan and report, not as per-file findings or advance exception acceptances; see [ROUTES.md](ROUTES.md). Default listing verification compares path and size, including folders, but not content equality. This limitation raises no finding and requires no exception acceptance.
+Route-wide limitations and conversions are disclosed in the map-only plan and report; planning does not enumerate files. Verification inventories visible Files API documents without a downloadable export as blocking per-file `source_unsupported_export` findings, including documents absent from transfer listings; this is not per-file legacy-Paper detection. Legacy Paper outside selected namespaces is not inventoried. Present its nonblocking plan observation as described below, without requesting acceptance. Default listing verification compares path and size, including folders, but not content equality. Unknown export sizes are measured from downloaded source bytes; this does not turn listing verification into hash proof.
 
 ## File evidence
 
@@ -24,10 +24,13 @@ File-route omissions are disclosed once in the plan and report, not as per-file 
 | `metadata_mismatch`               | Checked metadata differs.                                                                                                                                      | Review the exact attribute and accept only an agreed fidelity loss.                                                                                                      |
 | `mapping_overlap`                 | Mapping scopes overlap.                                                                                                                                        | Make roots disjoint and reload; avoid duplicate or conflicting work.                                                                                                     |
 | `path_unrepresentable`            | A source path cannot be represented on the destination.                                                                                                        | Agree a representable scope/path rather than silently dropping the item.                                                                                                 |
+| `source_unsupported_export`       | A source document has no export the transfer backend can download; its content is absent.                                                                      | Supply a supported source representation or explicitly accept the named document's loss.                                                                                 |
 | `destination_duplicate_name`      | Multiple destination items share the relevant name.                                                                                                            | Resolve ambiguity before relying on path-based results.                                                                                                                  |
 | `unowned_path_collision`          | The destination path collides with an item lacking required ownership evidence.                                                                                | Resolve ownership or select another destination; do not assume a name match grants authority.                                                                            |
 | `prior_copy_drift`                | Previously copied content differs from its recorded state.                                                                                                     | Inspect outside edits and agree which content to retain before further work.                                                                                             |
 | `source_identity_reuse_collision` | A source identity conflicts with earlier identity evidence.                                                                                                    | Investigate the conflicting records before approving a replacement.                                                                                                      |
+
+For Shared Drive destinations, `path_unrepresentable` includes paths requiring more than [100 folder levels](https://support.google.com/a/users/answer/7338880). Evidence includes the observed destination-root depth: existing wrapper folders count toward the limit, not just the source-relative hierarchy. Execution checks folders before starting the mapping's worker and records blocking paths without attempting an unfiltered copy. Resolve the source path or destination wrapper, then plan/approve again; exception acceptance cannot make an impossible destination path representable. Migmate never renames automatically.
 
 ### Three findings from one source-size inconsistency
 
@@ -41,8 +44,33 @@ Explain this opt-in hash-verification pattern together. Recommend examining actu
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `destination_only_retained` | Copy policy retained destination-only content.                                                                        | Review leftovers; this does not block close and is not mirror parity.                                                                                             |
 | `to_be_deleted`             | File/folder listings of both sides immediately before every mirror pass identify destination-only paths for deletion. | Review execute-phase evidence; `deleteLimit` counts files, with folder removals recorded separately. This is not an approval preview or proof deletion completed. |
+| `source_paper_html`         | A Paper document is exported as `.html`, not preserved as an editable Paper document.                                 | Review the conversion disclosure and copied HTML; this policy outcome needs no acceptance.                                                                        |
+| `source_document_export`    | A source document uses the supported Markdown (`.md`) export because HTML is unavailable.                             | Review the fallback conversion and copied Markdown; this policy outcome needs no acceptance.                                                                      |
+| `source_web_pointer`        | A `.web` file is copied as-is; it points to Google-hosted content rather than containing that content.                | Preserve the linked content separately if required; the pointer disclosure does not block close.                                                                  |
+
+The pinned [Dropbox backend](https://github.com/rclone/rclone/blob/v1.75.0/backend/dropbox/dropbox.go#L1773-L1804) prefers HTML, then falls back to the first recognized available format (currently Markdown). It removes one terminal lowercase `.paper` suffix and appends `.html` or `.md`; other suffixes remain intact. Unsupported-export findings mean neither format is available, not merely that HTML is unavailable.
+
+An exported name can also collide with an ordinary file: `Notes.paper` and
+`Notes.html` both target `Notes.html`; a Markdown-only `Notes.paper` can likewise
+collide with `Notes.md`. Execution raises blocking
+`destination_duplicate_name` findings with the exported path, original names,
+and both source IDs before starting that mapping's copy pass. Resolve the
+source conflict and replan; acceptance cannot make both objects fit one path.
 
 OneNote section files are a reference copy, not a working Google notebook. To use the copied notebook, download it and open `Open Notebook.onetoc2` in OneNote for Windows. Mac and Drive cannot open it. Editing through Drive for desktop is unsafe; Migmate does not enforce read-only Drive permissions.
+
+### Legacy Paper plan notices
+
+During PLAN, observe the selected administrator's `paper_as_files` using
+`users/features/get_values` with `Dropbox-API-Select-User`. Present the frozen
+plan evidence in the report: `false` means a nonblocking notice that legacy Paper
+outside selected namespaces is not migrated; `true` means no legacy notice;
+unknown means a nonblocking could-not-check notice. Preserve evidence in every case,
+including `true`; reporting does not recheck the feature. No legacy-Paper acceptance
+is required. This feature describes the user's creation model, so `true` does not
+prove pre-migration legacy documents are absent ([Dropbox's migration guide](https://docs.dropboxapi.com/dropbox-api/docs/paper-migration)).
+Do not promise Paper parity or infer a per-file legacy inventory. Preserve legacy
+content through a separately scoped workflow if needed.
 
 ## Staging and access gates
 
