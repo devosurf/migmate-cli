@@ -53,6 +53,11 @@ Use [CREDENTIALS.md](CREDENTIALS.md) to read existing references, client/tenant 
 
 Run `plan`. Present roots, drives, members and roles, grant timing, mirror/limits, copy concurrency, acting account, route-wide omissions and verification mode from the recorded plan. Highlight `status.approvalAuthority`: newly enabled/expanded mirror authority or increased limits, and new grants or role escalations, compared with the latest approved plan. The human confirms each changed set once; unchanged limits stay visible but need no repeated high-risk challenge. File plans always bind the map, with no file/deletion preview, inventory-age/freshness gate or predicted upload allowance. Hand off approval through the gate, observe its durable binding, then run `execute` and `verify`. Explain findings using [FINDINGS.md](FINDINGS.md). Recover interrupted passes through [ROUTES.md](ROUTES.md). Route a single-shot or archive job to phase 7 once verification is ready; keep a staged job open.
 
+For Google destinations, present the plan's observed-account activity snapshot
+and current `status.uploadActivity` using [ROUTES.md — Observed Google uploads](ROUTES.md#observed-google-uploads):
+partial bytes, gaps, one-home scope and unavailable plan prediction are part of
+the review. A numeric estimate is advisory, never permission to resume after quota.
+
 **Complete when:** approval is durable, execution exits 0, and verification's findings and proof scope have been presented to the human.
 
 ## 5 — Deltas

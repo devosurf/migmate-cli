@@ -272,17 +272,31 @@ export async function* uploadArchiveDestination(
         yield unit(ctx, "execute", payload, state);
       }
       ctx.signal?.throwIfAborted();
-      const uploaded = await ctx.provider.uploadDestinationContent({
-        destinationId: state.output.id,
-        create: true,
-        marker: state.marker,
-        parentFolderId: destination.destFolderId,
-        name: payload.name,
-        content: createReadStream(path),
-        createdAt: state.output.createdAt,
-        modifiedAt: state.output.modifiedAt,
-        mimeType: payload.mimeType,
-      });
+      const upload = ctx.beginUpload?.("teams", state.output.id, ctx.actingGoogleAccount);
+      let observedBytes: number | undefined;
+      let uploaded: DestinationEntry;
+      try {
+        uploaded = await ctx.provider.uploadDestinationContent({
+          destinationId: state.output.id,
+          create: true,
+          marker: state.marker,
+          parentFolderId: destination.destFolderId,
+          name: payload.name,
+          content: createReadStream(path),
+          createdAt: state.output.createdAt,
+          modifiedAt: state.output.modifiedAt,
+          mimeType: payload.mimeType,
+          onUploadProgress(bytes) {
+            upload?.observe(bytes, ctx.now());
+            observedBytes = bytes;
+          },
+        });
+        if (observedBytes !== undefined) upload?.observe(observedBytes, ctx.now(), true);
+        else upload?.missing(ctx.now(), "provider_upload_progress_unavailable");
+      } catch (error) {
+        upload?.missing(ctx.now(), "archive_upload_terminal_response_unavailable");
+        throw error;
+      }
       if (uploaded.id !== state.output.id)
         throw Object.assign(new Error("Destination ignored reserved identity"), {
           code: "provenance_mismatch",

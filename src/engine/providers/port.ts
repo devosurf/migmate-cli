@@ -285,6 +285,8 @@ export interface ProviderPort extends FilePassProvider {
     parentFolderId: string;
     name: string;
     content: Uint8Array | AsyncIterable<Uint8Array>;
+    /** Cumulative acknowledged job-content bytes, not package size or HTTP overhead. */
+    onUploadProgress?: (bytes: number) => void;
     createdAt: string;
     modifiedAt: string;
     mimeType: string | null;

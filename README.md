@@ -194,6 +194,60 @@ quiet and verification do not by themselves prove exact cutover parity.
 Omissions, retained destination-only content and accepted exceptions continue to
 qualify the report even with a freeze.
 
+### Observed uploads in one engine home
+
+`status.uploadActivity` shows **job-content uploads observed in this engine home**,
+by the provider-observed, approved acting Google account. All jobs using the same
+home (`MIGMATE_HOME`, or the home selected above) share its private `uploads.sqlite`
+ledger. Account emails are trimmed and case-normalized; changing credential files
+does not reset an account total. Unknown identities remain separate job/attempt
+evidence. Teams Google destinations bind their observed account too.
+File accounting follows the destination adapter's policy: Google Shared Drive
+destinations contribute; SharePoint destinations do not. The retired `route`
+option is not an accounting switch.
+
+The trailing window is `(asOf - 24 hours, asOf]`, independent of midnight. It
+includes SharePoint-to-Google copy counters and acknowledged Teams cold-storage
+content chunks, even from failed or interrupted attempts. Recovered archive
+objects add no upload bytes. It excludes downloads, reverse-route uploads,
+local-only archives/packaging, verification, metadata/HTTP overhead and preflight
+test uploads. **Other engine homes, other hosts and non-Migmate uploads are
+unobserved; there is no cross-home or cross-host coordination.**
+
+Read each account's `gaps`, `coverageStart` and `complete` alongside its partial
+`observedBytesInWindow`. New/older uninstrumented history, unknown identities,
+crashes, missing final counters, counter decreases and sampling gaps keep
+`estimatedRemainingBytes` unavailable (`null`). File samples normally arrive
+about every ten seconds; archive samples follow bounded acknowledged chunks.
+Intervals longer than 30 seconds disclose uncertain timing rather than pretending
+all accumulated bytes were uploaded at the end. Counter-reset uncertainty extends
+through the affected attempt's termination. Clock rollback behind durable ledger
+timestamps excludes future bytes and withholds an allowance estimate until the
+clock catches up. A stop acknowledgment alone does not establish a final counter:
+interruption and consumer-exit cleanup reconcile available worker stats, but
+unconfirmed termination remains an open gap until writer recovery proves the
+worker ended. Expiry alone does not repair an unresolved attempt.
+
+Only complete local coverage produces `max(0, 750,000,000,000 - observedBytes)`.
+**750 GB is decimal; this is an estimate, not Google's remaining quota, a safe
+upload budget, reservation or reset clock.** Retry accounting and excluded
+activity can make it overstate or understate actual allowance. Plans retain a
+dated snapshot; later status reads do not change approval. Planned upload bytes
+remain unavailable: no planning scan or predicted-size warning is added, and
+Migmate cannot assess whether a plan fits the allowance. Non-upload routes are
+not applicable.
+
+Measurements are retained for 48 hours with writer-side pruning; compact attempt
+checkpoints survive for the ledger's lifetime. Status does not repair or prune the
+ledger. Keep it with the engine home; deleting it loses observation history, not
+Google's quota usage. Accounting failures are surfaced instead of an empty total.
+If execute cannot verify the approved acting Google account, it refuses
+`preflight_failed` with safe provider evidence; an observed identity change still
+requires a new plan. Cancellation remains cancellation, not an identity mismatch.
+The estimate never gates execution or changes concurrency. Provider-observed
+quota stops and manual `execute` resume remain unchanged, with no automatic wait
+or guaranteed reset time.
+
 ### Acting Google account
 
 File jobs optionally enable domain-wide delegation with top-level job TOML settings
@@ -641,7 +695,7 @@ These are conservative defaults: two active mappings, each with up to four file 
 }
 ```
 
-`hitAt` is when Migmate observed the failure. The account comes from plan evidence, falling back to the impersonation subject (or `null` for an older non-impersonated plan without that evidence). `earliestResumeAt` is hit time plus 24 hours, an **estimate**, not Google's reset clock or a guaranteed allowance. Wait until that estimate before retrying `execute` on the same job; an earlier manual retry is allowed. There is no automatic quota resume, allowance warning or trailing-24-hour byte accounting. Quota stops do not count against the ordinary failure budget. Because rclone's aggregate cannot separate quota errors from file failures, the quota pass's final `lastStats.errors` and progress `errors` are `null` (unknown), with the raw aggregate preserved as `rcloneErrors`, not an ordinary per-file failure count. Other Drive limits (storage, Shared Drive file count, downloads, ordinary API throttling) do not receive this daily-upload classification.
+`hitAt` is when Migmate observed the failure. The account comes from plan evidence, falling back to the impersonation subject (or `null` for an older non-impersonated plan without that evidence). `earliestResumeAt` is hit time plus 24 hours, an **estimate**, not Google's reset clock or a guaranteed allowance. Wait until that estimate before retrying `execute` on the same job; an earlier manual retry is allowed. There is no automatic quota resume or allowance warning. The engine-home ledger separately reports trailing-24-hour observed bytes with gaps; it does not gate resumption. Quota stops do not count against the ordinary failure budget. Because rclone's aggregate cannot separate quota errors from file failures, the quota pass's final `lastStats.errors` and progress `errors` are `null` (unknown), with the raw aggregate preserved as `rcloneErrors`, not an ordinary per-file failure count. Other Drive limits (storage, Shared Drive file count, downloads, ordinary API throttling) do not receive this daily-upload classification.
 
 Ctrl-C (SIGINT, exit **130**), SIGTERM (exit **143**) and terminal hangup (SIGHUP, exit **129**) stop foreground work cooperatively. Active passes are checkpointed and stopped; after successful worker cleanup and lease release the job remains resumable, not cancelled. Read `status`, then repeat `execute` without `reclaim`: interrupted/failed passes resume and completed passes are skipped. `execute --output jsonl` emits `mapping_progress` events with `mappingId`, `passNumber`, `bytes`, `files`, `speed`, and `errors`. These statistics describe copying; `verify` supplies the content proof.
 

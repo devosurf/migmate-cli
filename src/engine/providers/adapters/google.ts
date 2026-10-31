@@ -680,7 +680,9 @@ export class GoogleAdapter implements FileAdapter {
           },
           body: new Uint8Array(0),
         });
-        return this.#destination(await responseJson<GoogleFile>(response));
+        const entry = this.#destination(await responseJson<GoogleFile>(response));
+        input.onUploadProgress?.(0);
+        return entry;
       }
       while (!current.done) {
         const next = await chunks.next();
@@ -694,7 +696,11 @@ export class GoogleAdapter implements FileAdapter {
           },
           body: current.value,
         });
-        if (next.done) return this.#destination(await responseJson<GoogleFile>(response));
+        if (next.done) {
+          const entry = this.#destination(await responseJson<GoogleFile>(response));
+          input.onUploadProgress?.(end + 1);
+          return entry;
+        }
         if (response.status !== 308 || response.headers.get("range") !== `bytes=0-${end}`) {
           await requireSuccess(response);
           throw new ProviderFault(
@@ -703,6 +709,7 @@ export class GoogleAdapter implements FileAdapter {
           );
         }
         await response.body?.cancel();
+        input.onUploadProgress?.(end + 1);
         offset = end + 1;
         current = next;
       }

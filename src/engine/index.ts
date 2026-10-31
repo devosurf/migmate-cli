@@ -83,6 +83,15 @@ import {
 import { canonicalJson, digestJson } from "./store/digest.ts";
 import { answerControl, enqueueControl, pendingControl, readControl } from "./store/control.ts";
 import {
+  beginUploadAttempt,
+  endAbandonedUploads,
+  initializeUploadLedger,
+  normalizeUploadAccount,
+  readUploadActivity,
+  uploadActivityText,
+  UploadLedgerError,
+} from "./store/uploads.ts";
+import {
   acquire,
   LEASE_EXPIRY_MS,
   getHostId,
@@ -729,6 +738,10 @@ function persistConfig(paths: JobPaths, config: JobConfig, store: Store): void {
   } else atomicFile(paths.configPath, stringifyToml(config));
 }
 function expectedFailure<T>(error: unknown): Outcome<T> | null {
+  if (error instanceof UploadLedgerError)
+    return refuse("configuration_invalid", error.message, {
+      detail: { component: "upload_ledger" },
+    });
   if (error instanceof EngineRefusalError) return { ok: false, refusal: error.refusal };
   if (error instanceof ManifestError)
     return refuse(error.code, error.message, { detail: error.detail });
@@ -923,7 +936,29 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
     },
     status: () =>
       withStore((s) => {
-        const status = s.status();
+        const stored = s.status();
+        const plan = stored.planRevision === null ? null : s.readPlanRevision(stored.planRevision);
+        const approvedAccount = plan
+          ? object(plan.evidence, "plan.evidence").actingGoogleAccount
+          : undefined;
+        const plannedConfig = plan
+          ? object(JSON.parse(plan.inputs.configuration ?? "{}"), "plan.configuration")
+          : {};
+        const ledgerAccountedUploads =
+          stored.jobType === "file_migration"
+            ? fileProviderPair(persisted(plannedConfig, stored.jobType)).destination
+                .ledgerAccountedUploads
+            : plannedConfig.destination !== undefined;
+        const status = {
+          ...stored,
+          uploadActivity: readUploadActivity(
+            deps.home,
+            deps.now(),
+            plan && ledgerAccountedUploads
+              ? [typeof approvedAccount === "string" ? approvedAccount : ""]
+              : [],
+          ),
+        };
         if (!status.currentPlan || !status.verificationDigest)
           return { ...status, closeReview: null, goLiveReview: null };
         try {
@@ -1065,6 +1100,7 @@ async function withWriter<T>(
         hostId,
         ownerUuid: acquired.value.row.ownerUuid,
       });
+      endAbandonedUploads(deps.home, job.id, deps.now());
       if (store.inventoryPlanRevision() === null) migrateConfig(paths, job.type);
       if (
         job.type === "file_migration" &&
@@ -1906,6 +1942,18 @@ function makeWriter(
       revision,
       ...(stage === "prestage" || stage === "delta" || stage === "final" ? { stage } : {}),
       ...(typeof actingGoogleAccount === "string" ? { actingGoogleAccount } : {}),
+      beginUpload: (source, identity, account) =>
+        beginUploadAttempt(
+          deps.home,
+          {
+            jobId: job().id,
+            revision,
+            source,
+            identity,
+            ...(account !== undefined ? { account } : {}),
+          },
+          deps.now(),
+        ),
       jobDirectory: paths.dir,
       resume: {
         ...(reporting ? store.readReportResume(revision) : store.readResume(revision)),
@@ -2742,6 +2790,20 @@ function makeWriter(
           const actingGoogleAccount =
             typeof observedAccount === "string" ? observedAccount : undefined;
           const reportSections = await sections(p, config, revision, actingGoogleAccount);
+          const ledgerAccountedUploads =
+            "mappings" in config
+              ? fileProviderPair(config).destination.ledgerAccountedUploads
+              : config.destination !== undefined;
+          const uploadActivity = ledgerAccountedUploads
+            ? (initializeUploadLedger(deps.home, deps.now()),
+              readUploadActivity(deps.home, deps.now(), [actingGoogleAccount ?? ""]))
+            : null;
+          if (uploadActivity)
+            reportSections.push({
+              title: "Observed Google job-content uploads",
+              body: uploadActivityText(uploadActivity),
+              format: "text",
+            });
           const disclosures = reportSections
             .filter((s) => !s.body.startsWith("{") && !s.body.startsWith("["))
             .flatMap((s) => s.body.split("\n"));
@@ -2770,6 +2832,7 @@ function makeWriter(
               binding: evidence,
               reportSections,
               ...(actingGoogleAccount !== undefined ? { actingGoogleAccount } : {}),
+              uploadActivity,
             },
             disclosures,
             sections: reportSections.map((s, i) => ({
@@ -2962,6 +3025,48 @@ function makeWriter(
               "plan_revision_required",
               "The approved inputs or authenticated route identity have changed.",
             );
+          const approvedAccount = object(plan.evidence, "plan.evidence").actingGoogleAccount;
+          if (typeof approvedAccount === "string") {
+            let observedAccount: string | null;
+            try {
+              signal.throwIfAborted();
+              observedAccount = normalizeUploadAccount(
+                (await p.googleAbout(signal)).user.emailAddress,
+              );
+              signal.throwIfAborted();
+            } catch (error) {
+              if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+                if (opts?.onAdmitted) throw error;
+                transition("execute", "execute");
+                return terminalResult(
+                  "interrupted",
+                  0,
+                  new RetryBudget(Math.max(1, plan.rowCount)),
+                );
+              }
+              if (
+                !(error instanceof ProviderFault) &&
+                !errorCode(error) &&
+                !(error instanceof TypeError)
+              )
+                throw error;
+              return refuse(
+                "preflight_failed",
+                "The acting Google account could not be verified.",
+                {
+                  detail: {
+                    prerequisiteEstablished: false,
+                    ...(error instanceof ProviderFault ? { provider: error.evidence } : {}),
+                  },
+                },
+              );
+            }
+            if (observedAccount !== normalizeUploadAccount(approvedAccount))
+              return refuse(
+                "plan_revision_required",
+                "The approved acting Google account has changed.",
+              );
+          }
           const bound = readBoundEvidence(plan.evidence);
           if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
           if ("mappings" in config)

@@ -117,6 +117,16 @@ test("archive destination retains three root objects and one byte-verified conta
         createHash("sha256").update(downloaded).digest("hex"),
       );
     }
+    const status = await engine.reader(ref).status();
+    assert.ok(status.ok);
+    assert.equal(
+      status.value.uploadActivity?.accounts[0]?.observedBytesInWindow,
+      entries.reduce((total, entry) => {
+        assert.ok(entry.size !== null);
+        return total + entry.size;
+      }, 0),
+    );
+    assert.equal(status.value.uploadActivity?.accounts[0]?.account, "service-account@example.com");
     const verification = await engine.withWriterResult(ref, (writer) => writer.verify());
     assert.ok(verification.ok);
     assert.deepEqual(
@@ -153,6 +163,20 @@ test("a lost archive upload response resumes after reopening without replacing o
       "index-html",
       "manifest",
     ]);
+    const status = await reopened.reader(ref).status();
+    assert.ok(status.ok);
+    assert.equal(
+      status.value.uploadActivity?.accounts[0]?.observedBytesInWindow,
+      after.reduce((total, entry) => {
+        assert.ok(entry.size !== null);
+        return total + entry.size;
+      }, 0),
+    );
+    assert.ok(
+      status.value.uploadActivity?.accounts[0]?.gaps.some(
+        (gap) => gap.reason === "archive_upload_terminal_response_unavailable",
+      ),
+    );
     for (const entry of before)
       assert.deepEqual(
         after.find((candidate) => candidate.id === entry.id),
@@ -269,6 +293,25 @@ test("archive byte verification streams missing checksums and never accepts size
     assert.ok(drifted.value.findings.some((f) => f.code === "content_mismatch"));
     assert.ok(drifted.value.findings.some((f) => f.code === "prior_copy_drift"));
     assert.ok(!drifted.value.findings.some((f) => f.code === "size_mismatch"));
+  } finally {
+    engine.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("an archive Google destination refuses a changed observed acting account before uploading", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "migmate-archive-account-"));
+  const port = provider();
+  const { engine, ref } = await approved(home, port);
+  try {
+    t.mock.method(port, "googleAbout", async () => ({
+      user: { emailAddress: "another@example.com" },
+      canCreateDrives: false,
+    }));
+    const result = await engine.withWriterResult(ref, (writer) => writer.execute());
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.refusal.code, "plan_revision_required");
+    assert.deepEqual(await port.listDestinationChildren("archive-root"), []);
   } finally {
     engine.close();
     await rm(home, { recursive: true, force: true });

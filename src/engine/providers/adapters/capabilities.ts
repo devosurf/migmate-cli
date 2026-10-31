@@ -22,6 +22,8 @@ export interface FileProviderCapabilities {
   hashType: "quickxor" | "sha256";
   ignoreSizeAndChecksum: boolean;
   uploadQuota: boolean;
+  /** Whether observed destination uploads contribute to the engine-home account ledger. */
+  ledgerAccountedUploads: boolean;
   quotaStop?(ctx: FileContext, error: string | null): UploadQuotaStop | undefined;
   creatorRole: DriveMember["role"];
   memberRole(role: unknown): DriveMember["role"] | undefined;

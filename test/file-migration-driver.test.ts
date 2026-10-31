@@ -2886,7 +2886,10 @@ describe("file migration through the engine", () => {
           `
       import { openEngine } from ${JSON.stringify(new URL("../src/engine/index.ts", import.meta.url).href)};
       import { FakeFileMigrationPort } from ${JSON.stringify(new URL("../src/engine/providers/fake.ts", import.meta.url).href)};
-      const provider = new FakeFileMigrationPort(JSON.parse(process.env.COPY_FIXTURE));
+      const fixture = JSON.parse(process.env.COPY_FIXTURE);
+      // The scripted worker lives in this child; an arbitrary PID can belong to another process.
+      fixture.worker = { ...fixture.worker, pid: process.pid };
+      const provider = new FakeFileMigrationPort(fixture);
       const startCopyPass = provider.startCopyPass.bind(provider);
       provider.startCopyPass = async (input) => {
         const handle = await startCopyPass(input);

@@ -72,7 +72,8 @@ transfer-permission change is introduced. See
 Both existing file directions now use ADR-0014 map-only approval. Approval binds
 mapping roots, drives to create, members and options, not a file inventory.
 There is no file/deletion preview or inventory-age/freshness gate.
-Informational account-activity snapshots in #78 remain separate work.
+Informational account-activity snapshots are described next; they add no planning
+scan, prediction, quota threshold or inventory-age gate.
 
 Local verification covers fake-provider stale submissions, cancelled confirmations,
 identity reuse, unattended labels, authority expansion, required rationale and
@@ -81,6 +82,51 @@ web HTML/client/protocol was exercised in Chromium through a loopback bridge,
 including pending-review preservation across another window's replan/reverification.
 This is not native-window or live-tenant qualification. No tenant mutations or
 identity-provider calls were needed.
+
+## Observed upload accounting — #78
+
+Plan snapshots and current `status.uploadActivity` report job-content uploads
+observed in one engine home, keyed by the approved Google account email (trim/case
+normalization only). Concurrent jobs share `uploads.sqlite`, whose independent
+ledger schema is version 1; the per-job store remains version 7 from detached
+execution. This is local accounting, with no discovery, merging or coordination
+across engine homes or hosts. Other homes/hosts and non-Migmate uploads are
+unobserved even when local coverage is complete.
+
+Coverage includes file-migration uploads to Google and acknowledged Teams Google
+content uploads, including failed/stopped attempts. Existing recovered archive
+objects are not charged again. Downloads, Google-to-SharePoint uploads, local-only
+archives and packaging, verification/hash reads, metadata/HTTP overhead and
+preflight probes are excluded. Observed counters are not Google's charged bytes;
+provider retries and ambiguous responses retain uncertainty.
+The destination adapter declares file-upload accounting eligibility; plan, status
+and execution use the same provider-pair policy. Google Shared Drive destinations
+opt in, while SharePoint destinations and local-only archives do not create an
+account-activity snapshot. Teams upload acknowledgments come from the Google adapter.
+
+The UTC window is `(asOf - 24 hours, asOf]`. File progress uses its roughly
+ten-second cadence; Teams uses bounded chunk acknowledgments. Partial totals
+remain visible, but new/uninstrumented history, unattributed attempts, missing
+terminal counters, unresolved crashes, decreases and sampling intervals over
+30 seconds disclose gaps. Unattributed attempts prevent known-account completeness
+while relevant. Unresolved active attempts never age into complete coverage.
+Only complete local coverage yields the clamped estimate against decimal
+750,000,000,000 bytes. It is neither a safe budget nor an authoritative quota.
+Counter-reset uncertainty covers subsequent observations through termination.
+A clock earlier than durable ledger timing evidence withholds the estimate
+without re-dating or including future bytes. Both interruption and iterator-exit
+cleanup reconcile worker counters, finalizing only after a terminal pass status;
+unconfirmed termination keeps an open gap. Expected execute-time identity-probe
+failures refuse `preflight_failed`; only an observed mismatch requires replanning.
+
+Measurements retain their observation timestamps for 48 hours. Writer-side
+maintenance prunes measurements and expired resolved gaps, retaining lifetime
+attempt tombstones for replay protection. Status performs no repair, worker
+launch or ledger maintenance; storage failures surface instead of empty totals.
+Plan snapshots are immutable and contain no predicted upload size. Estimates do
+not gate approval/execution, allocate allowance or schedule jobs. The existing
+provider quota stop, exit 5, hit + 24-hour estimate and manual resume are unchanged.
+Local worker/fake-provider tests are not live Google charging qualification.
 
 ## 1. File copy is path-based, not collision-protected
 
@@ -349,7 +395,7 @@ Job `[options]` settings `mappingsInFlight` (default **2**) and `transfersPerMap
 
 **Drive upload quota blocks the whole job.** File uploads into Google Drive enable rclone's `--drive-stop-on-upload-limit`. The first detected daily-upload failure cooperatively stops other active passes and admits no queued mapping: all mappings use the same acting account. Execute returns the existing `blocked` outcome (exit 5), with `uploadQuota` evidence also retained on the failed pass in `status.mappingPasses[].uploadQuota` and the terminal event: `code = "upload_quota_exceeded"`, `hitAt`, `actingGoogleAccount`, `earliestResumeAt`, and `resumeTimeIsEstimate = true`. Account identity comes from the approved plan, falling back to the impersonation subject; old non-impersonated plans without that identity report `null`. No store schema version or outcome/exit-code change is required.
 
-[Google documents 750 GB per user per day](https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints), not a reset clock. The resume estimate is 24 hours after Migmate observes the failure; wait until then and re-run `execute` on the same job. Earlier manual retries are allowed, not refused by a cooldown fence. Quota stops bypass the ordinary failure budget. On that pass, `lastStats.errors` and terminal mapping-progress `errors` become `null` because rclone cannot separate quota errors from real file failures; `rcloneErrors` preserves the unclassified aggregate. This is not a zero-error claim. Detection follows v1.75.0's exact lower-case `User rate limit exceeded.` message with `userRateLimitExceeded` or `rateLimitExceeded`, or its `quotaExceeded` reason. Its fatal wrapper preserves the Google error text in RC job status; the “Received upload limit error” prefix exists only in logs. Storage quota, Shared Drive file count, ordinary API rate limits and download limits are not classified as daily-upload quota. No download-limit flag is enabled; the reverse route is unaffected. Trailing-24-hour byte accounting, plan-time allowance warnings and automatic quota resume are not implemented.
+[Google documents 750 GB per user per day](https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints), not a reset clock. The resume estimate is 24 hours after Migmate observes the failure; wait until then and re-run `execute` on the same job. Earlier manual retries are allowed, not refused by a cooldown fence. Quota stops bypass the ordinary failure budget. On that pass, `lastStats.errors` and terminal mapping-progress `errors` become `null` because rclone cannot separate quota errors from real file failures; `rcloneErrors` preserves the unclassified aggregate. This is not a zero-error claim. Detection follows v1.75.0's exact lower-case `User rate limit exceeded.` message with `userRateLimitExceeded` or `rateLimitExceeded`, or its `quotaExceeded` reason. Its fatal wrapper preserves the Google error text in RC job status; the “Received upload limit error” prefix exists only in logs. Storage quota, Shared Drive file count, ordinary API rate limits and download limits are not classified as daily-upload quota. No download-limit flag is enabled; the reverse route is unaffected. Trailing-24-hour observed-byte accounting is informational and discloses gaps; plan-time allowance warnings and automatic quota resume are not implemented.
 
 On writer-open recovery, all unfinished passes whose worker is gone become interrupted, including every pass active at a crash. The next `execute` retries failed/interrupted mappings and skips completed passes for the approved revision. rclone compares files and skips identical ones on retry; this is not replay of a durable rclone job. Ctrl-C stops all active passes cooperatively and exits 130, leaving the job resumable.
 

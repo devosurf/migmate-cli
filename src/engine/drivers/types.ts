@@ -10,6 +10,7 @@ import type { ProviderPort } from "../providers/port.ts";
 import type { CommitFinding, CommitRow, CommitUnit } from "../commit.ts";
 import type { ArchiveResumeState } from "../providers/archive.ts";
 import type { ReportArray, ReportText } from "../report.ts";
+import type { UploadAttempt } from "../store/uploads.ts";
 
 export type {
   CommitFinding,
@@ -41,6 +42,12 @@ export interface DriverContext<Cfg> {
   stage?: "prestage" | "delta" | "final";
   /** Observed in preflight and retained in the plan, never refreshed while reporting. */
   actingGoogleAccount?: string;
+  /** Account belongs to this attempt, so each approved pool account uses the same ledger. */
+  beginUpload?: (
+    source: "file" | "teams",
+    identity: string,
+    account: string | undefined,
+  ) => UploadAttempt;
   resume: DriverResumeState;
   reportEvidence?: {
     settled(mappingId: string): unknown;

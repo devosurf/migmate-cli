@@ -265,6 +265,13 @@ describe("durable mapping progress", () => {
       );
       const status = value(await h.engine.reader(h.ref).status());
       assert.equal(status.mappingPasses[0]?.lastStats?.bytes, 3);
+      assert.equal(status.uploadActivity?.accounts[0]?.observedBytesInWindow, 3);
+      if (terminal === "interrupted")
+        assert.ok(
+          status.uploadActivity?.accounts[0]?.gaps.some(
+            (gap) => gap.reason === "copy_pass_termination_unconfirmed",
+          ),
+        );
       assert.equal(status.mappingPasses[0]?.lastStats?.transferringTotal, 0);
       assert.equal(status.mappingPasses[0]?.lastStats?.transferringTruncated, false);
       assert.equal(status.worker.active, false);
@@ -425,6 +432,11 @@ describe("durable mapping progress", () => {
     assert.equal(pass.lastStats?.errors, null);
     assert.equal(pass.lastStats?.rcloneErrors, 7);
     assert.equal(pass.lastStats?.bytes, 3);
+    assert.equal(
+      value(await h.engine.reader(h.ref).status()).uploadActivity?.accounts[0]
+        ?.observedBytesInWindow,
+      3,
+    );
     assert.deepEqual(pass.uploadQuota, result.uploadQuota);
     const progress = (await events(h)).filter((event) => event.kind === "mapping_progress");
     assert.equal(progress.length, 2);

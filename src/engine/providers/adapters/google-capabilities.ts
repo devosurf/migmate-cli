@@ -19,6 +19,7 @@ export const googleCapabilities: FileProviderCapabilities = {
   hashType: "sha256",
   ignoreSizeAndChecksum: false,
   uploadQuota: true,
+  ledgerAccountedUploads: true,
   quotaStop: uploadQuotaStop,
   creatorRole: "organizer",
   memberRole(role) {
