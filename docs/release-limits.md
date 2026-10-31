@@ -87,8 +87,9 @@ identity-provider calls were needed.
 
 Plan snapshots and current `status.uploadActivity` report job-content uploads
 observed in one engine home, keyed by the approved Google account email (trim/case
-normalization only). Concurrent jobs share `uploads.sqlite`; per-job schema stays
-at version 6. This is local accounting, with no discovery, merging or coordination
+normalization only). Concurrent jobs share `uploads.sqlite`, whose independent
+ledger schema is version 1; the per-job store remains version 7 from detached
+execution. This is local accounting, with no discovery, merging or coordination
 across engine homes or hosts. Other homes/hosts and non-Migmate uploads are
 unobserved even when local coverage is complete.
 

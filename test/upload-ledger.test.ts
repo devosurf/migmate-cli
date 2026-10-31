@@ -681,6 +681,29 @@ for (const type of ["file_migration", "teams_archive"] satisfies Array<
     if (!refused.ok) assert.equal(refused.refusal.code, "preflight_failed");
     assert.ok(!JSON.stringify(refused).includes("secret-bearing"));
     networkFailure.mock.restore();
+    const admissionController = new AbortController();
+    const admissionProbe = t.mock.method(provider, "googleAbout", async (signal?: AbortSignal) => {
+      admissionController.abort();
+      signal?.throwIfAborted();
+      throw new Error("The acting-account probe must receive the admission signal");
+    });
+    let admitted = false;
+    const admission = await engine.withWriterResult(ref, (writer) =>
+      writer.execute({
+        signal: admissionController.signal,
+        onAdmitted: async () => {
+          admitted = true;
+        },
+      }),
+    );
+    assert.equal(admission.ok, false);
+    if (!admission.ok) assert.equal(admission.refusal.detail?.interrupted, true);
+    assert.equal(admitted, false);
+    const unadmitted = value(await engine.reader(ref).status());
+    assert.equal(unadmitted.state, before.state);
+    assert.equal(unadmitted.currentApproval?.planDigest, digest);
+    assert.deepEqual(unadmitted.mappingPasses, before.mappingPasses);
+    admissionProbe.mock.restore();
     const controller = new AbortController();
     t.mock.method(provider, "googleAbout", async (signal?: AbortSignal) => {
       controller.abort();

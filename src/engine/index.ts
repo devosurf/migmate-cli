@@ -3038,7 +3038,11 @@ function makeWriter(
               if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
                 if (opts?.onAdmitted) throw error;
                 transition("execute", "execute");
-                return terminalResult("interrupted", 0, new RetryBudget(Math.max(1, plan.rowCount)));
+                return terminalResult(
+                  "interrupted",
+                  0,
+                  new RetryBudget(Math.max(1, plan.rowCount)),
+                );
               }
               if (
                 !(error instanceof ProviderFault) &&
@@ -3046,12 +3050,16 @@ function makeWriter(
                 !(error instanceof TypeError)
               )
                 throw error;
-              return refuse("preflight_failed", "The acting Google account could not be verified.", {
-                detail: {
-                  prerequisiteEstablished: false,
-                  ...(error instanceof ProviderFault ? { provider: error.evidence } : {}),
+              return refuse(
+                "preflight_failed",
+                "The acting Google account could not be verified.",
+                {
+                  detail: {
+                    prerequisiteEstablished: false,
+                    ...(error instanceof ProviderFault ? { provider: error.evidence } : {}),
+                  },
                 },
-              });
+              );
             }
             if (observedAccount !== normalizeUploadAccount(approvedAccount))
               return refuse(
