@@ -332,9 +332,11 @@ the same mounted namespace twice. Member homes and app folders are out of scope.
 Select-Admin uses an administrator's **team-member ID**, and `root_namespace` pins
 the namespace rather than defaulting to that administrator's member home.
 
-Paper exports as `.html`, disclosed in the plan and report; visible Files API documents
-without a downloadable export produce blocking per-file `source_unsupported_export`
-findings, not legacy-Paper findings. `.web` files copy unchanged as pointers,
+Paper exports prefer `.html`, disclosed in the plan and report; pinned rclone falls
+back to Markdown (`.md`) when HTML is unavailable. Both conversions are nonblocking
+disclosures. Visible Files API documents without either downloadable format produce
+blocking per-file `source_unsupported_export` findings, not legacy-Paper findings.
+`.web` files copy unchanged as pointers,
 not the Google-hosted targets. Shared Drive paths over 100 folder levels, including
 destination wrapper folders, raise blocking findings for every source provider.
 A pre-copy folder check blocks the affected mapping before its worker starts; repair

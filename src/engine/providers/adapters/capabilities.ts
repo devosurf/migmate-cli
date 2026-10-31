@@ -78,12 +78,13 @@ const providers: Record<FileProviderId, FileProviderAdapter> = {
     memberRole: () => undefined,
     rewritesPath: () => false,
     sourceDisclosures: [
-      "Dropbox Paper documents export as .html; visible files without a supported export raise blocking findings. .web files copy as pointers, not their Google-hosted targets.",
+      "Dropbox Paper documents export as .html when available; pinned rclone falls back to Markdown (.md) when HTML is unavailable. Visible files without either supported export raise blocking findings. .web files copy as pointers, not their Google-hosted targets.",
       "Pinned rclone v1.75.0 has no Dropbox ListR; recursive listing walks folders individually.",
     ],
     sourceEntryFindings: (entry) => {
       const code = {
         paper_html: "source_paper_html",
+        document_export: "source_document_export",
         unsupported_export: "source_unsupported_export",
         web_pointer: "source_web_pointer",
       }[String(entry.metadata?.contentDisposition)];

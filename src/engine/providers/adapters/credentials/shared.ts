@@ -21,6 +21,8 @@ export interface CredentialLoadContext {
 export interface FileCredentialAdapter {
   /** Preserve the provider marker in credential mapping evidence when needed. */
   mappingSourceType?: FileProviderId;
+  /** Validate a persisted source root identity using this provider's immutable-ID syntax. */
+  sourceItemId(value: unknown): string;
   remoteKey: { source: string; destination: string };
   bindings: readonly {
     key: string;

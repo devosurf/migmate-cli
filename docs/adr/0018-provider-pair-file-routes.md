@@ -35,6 +35,13 @@ Dropbox team access needs an administrator to approve the app once in a browser,
 
 Dropbox namespaces are deduplicated by namespace ID, so a shared folder mounted under different names in several members' homes is one source. Paper documents export as `.html`, and plan and report disclose the conversion. Visible Files API documents with exports rclone cannot download raise one blocking `source_unsupported_export` finding per file, because a document that did not migrate is lost content; this is not legacy-Paper detection. `.web` files only point to Google-hosted content; they copy as-is with a non-blocking disclosure.
 
+Pinned-backend export detail: v1.75.0's `chooseExportFormat` treats HTML as a
+preference, not an exclusive allowlist. When HTML is unavailable, a recognized
+Markdown export copies as `.md` with a nonblocking conversion disclosure.
+Inventory, collision checks, and byte verification must use that same effective
+format and filename; only documents without either recognized format are
+unexportable.
+
 #### D5 amendment — Morgan, 2026-10-31
 
 Morgan replaces the legacy-Paper blocking/acceptance policy with a nonblocking scope disclosure. During PLAN, observe the selected administrator's `paper_as_files` through `users/features/get_values` with `Dropbox-API-Select-User`: false produces a notice that legacy Paper outside selected namespaces is not migrated; true produces no legacy notice; unknown produces a could-not-check notice. Neither notice blocks the job or requires acceptance. Freeze the observed evidence in all cases, including true, and report that plan evidence without rechecking. Legacy document IDs cannot be attributed to selected namespaces; the feature describes the user's creation model, and true does not prove pre-migration legacy documents are absent. There is no Paper parity guarantee. Visible Files API unexportable documents remain per-file `source_unsupported_export` blockers. Evidence stays in schema 7 after #120; no schema bump.

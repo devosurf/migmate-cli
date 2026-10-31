@@ -39,6 +39,18 @@ function quote(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
+function chooseExportFormat(raw: DropboxItem): "html" | "markdown" | undefined {
+  if (raw[".tag"] !== "file" || raw.is_downloadable !== false) return undefined;
+  // rclone v1.75.0 backend/dropbox chooseExportFormat: prefer configured HTML,
+  // then the first recognized API format in export_as followed by export_options.
+  let fallback: "markdown" | undefined;
+  for (const format of [raw.export_info?.export_as, ...(raw.export_info?.export_options ?? [])]) {
+    if (format === "html") return "html";
+    if (format === "markdown") fallback = "markdown";
+  }
+  return fallback;
+}
+
 /** Namespace identity, not a member's mount name, determines every Dropbox source read. */
 export class DropboxAdapter implements FileAdapter {
   readonly #session: CredentialSession;
@@ -195,9 +207,8 @@ export class DropboxAdapter implements FileAdapter {
 
   #entry(raw: DropboxItem, namespace: string, parentId: string): SourceEntry {
     const folder = raw[".tag"] === "folder";
-    const exportFormats = [raw.export_info?.export_as, ...(raw.export_info?.export_options ?? [])];
-    const paper = raw.is_downloadable === false && exportFormats.includes("html");
-    const unsupportedExport = !folder && raw.is_downloadable === false && !paper;
+    const exportFormat = chooseExportFormat(raw);
+    const unsupportedExport = !folder && raw.is_downloadable === false && !exportFormat;
     const path = raw.path_display ?? raw.path_lower;
     if (!path || !path.startsWith("/"))
       throw new ProviderFault(
@@ -208,13 +219,21 @@ export class DropboxAdapter implements FileAdapter {
       id: raw.id,
       driveId: namespace,
       parentId,
-      name: paper ? raw.name.replace(/\.paper$/, "") + ".html" : raw.name,
+      name: exportFormat
+        ? (raw.name.endsWith(".paper") ? raw.name.slice(0, -6) : raw.name) +
+          (exportFormat === "html" ? ".html" : ".md")
+        : raw.name,
       kind: folder ? "folder" : unsupportedExport ? "undownloadable" : "file",
-      size: folder || paper || unsupportedExport ? null : (raw.size ?? null),
+      size: folder || exportFormat || unsupportedExport ? null : (raw.size ?? null),
       etag: raw.rev ?? null,
       createdAt: raw.client_modified ?? "",
       modifiedAt: raw.server_modified ?? "",
-      mimeType: paper ? "text/html" : null,
+      mimeType:
+        exportFormat === "html"
+          ? "text/html"
+          : exportFormat === "markdown"
+            ? "text/markdown"
+            : null,
       identity: `${namespace}:${raw.id}`,
       downloadable: !folder && !unsupportedExport,
       webUrl: null,
@@ -222,8 +241,11 @@ export class DropboxAdapter implements FileAdapter {
       metadata: {
         path,
         originalName: raw.name,
-        ...(paper
-          ? { contentDisposition: "paper_html" }
+        ...(exportFormat
+          ? {
+              contentDisposition: exportFormat === "html" ? "paper_html" : "document_export",
+              exportFormat,
+            }
           : unsupportedExport
             ? { contentDisposition: "unsupported_export" }
             : /\.web$/i.test(raw.name)
@@ -331,10 +353,10 @@ export class DropboxAdapter implements FileAdapter {
         "source_read_failed",
         "The Dropbox item has no supported downloadable representation.",
       );
-    const paper = entry.metadata?.contentDisposition === "paper_html";
+    const exportFormat = entry.metadata?.exportFormat;
     const response = await this.#response(
-      paper ? "files/export" : "files/download",
-      { path: input.itemId, ...(paper ? { export_format: "html" } : {}) },
+      exportFormat ? "files/export" : "files/download",
+      { path: input.itemId, ...(exportFormat ? { export_format: exportFormat } : {}) },
       input.driveId,
       undefined,
       true,

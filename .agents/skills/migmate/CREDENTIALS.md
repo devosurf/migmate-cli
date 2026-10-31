@@ -51,6 +51,9 @@ The job config names `sourceProvider = "dropbox"`,
 `config` file reference. There is no Dropbox app secret to paste into job config.
 `creds init` validates and persists these pair-specific remote bindings; Dropbox
 does not also require a SharePoint `sourceRemote`.
+Persisted Dropbox mappings retain `/` for the namespace root or the provider's
+immutable `id:…` folder identity. Credential reconstruction validates these
+Dropbox-specific identities without relaxing other providers' ID rules.
 
 Have the administrator run `migmate creds init --job ID --config job.toml` in a
 terminal, open the displayed URL in their browser, approve the app, and paste the

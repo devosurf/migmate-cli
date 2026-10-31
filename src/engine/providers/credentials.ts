@@ -33,6 +33,7 @@ import {
 } from "./adapters/credentials/shared.ts";
 import type {
   CredentialMaterial,
+  FileCredentialAdapter,
   FileCredentialReference,
   Token,
 } from "./adapters/credentials/shared.ts";
@@ -210,16 +211,17 @@ export function parseCredentialIni(bytes: Buffer): Map<string, Map<string, strin
   return sections;
 }
 
-function parseMappings(value: unknown): MappingIdentity[] {
+function parseMappings(value: unknown, defaultSource: FileCredentialAdapter): MappingIdentity[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw refused("credential_mapping_invalid");
   return value.map((item: unknown) => {
     try {
       const mapping = record(item);
-      const sourceType =
+      const source =
         mapping.sourceType === undefined
-          ? undefined
-          : fileProvider(mapping.sourceType).credentials.mappingSourceType;
+          ? defaultSource
+          : fileProvider(mapping.sourceType).credentials;
+      const sourceType = mapping.sourceType === undefined ? undefined : source.mappingSourceType;
       const result: MappingIdentity = {
         sourceDriveId: stableId(mapping.sourceDriveId),
         ...(sourceType ? { sourceType } : {}),
@@ -233,7 +235,8 @@ function parseMappings(value: unknown): MappingIdentity[] {
             }
           : {}),
       };
-      if (mapping.sourceItemId !== undefined) result.sourceItemId = stableId(mapping.sourceItemId);
+      if (mapping.sourceItemId !== undefined)
+        result.sourceItemId = source.sourceItemId(mapping.sourceItemId);
       else if (typeof mapping.sourceFolderPath === "string")
         result.sourceFolderPath = mapping.sourceFolderPath;
       else throw refused("credential_mapping_invalid");
@@ -288,7 +291,7 @@ async function loadCredentials(
     // File jobs authenticate with the same explicit credentials as the worker.
     if (input.graph !== undefined) throw refused("credential_config_unsupported");
     const pair = fileProviderPair(input);
-    const mappings = parseMappings(input.mappings);
+    const mappings = parseMappings(input.mappings, pair.source.credentials);
     const rclone = record(input.rclone);
     allowedKeys(rclone, ["config", ...credentialBindings.map((binding) => binding.key)]);
     const required = [

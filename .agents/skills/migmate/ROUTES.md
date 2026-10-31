@@ -50,7 +50,9 @@ Deduplicate by namespace ID, not member mount name; member homes/app folders are
 The adapter uses Select-Admin plus an explicit root namespace; `shared_folders` refuses
 because it mounts content and changes the source.
 
-Disclose Paper → `.html` conversion and `.web` pointer-only copies. Present visible
+Disclose Paper → `.html` conversion, Markdown (`.md`) fallback when HTML is
+unavailable, and `.web` pointer-only copies. Both export formats are nonblocking.
+Present visible
 Files API unexportable documents as per-file `source_unsupported_export` blockers,
 not legacy-Paper detections. Use [FINDINGS.md](FINDINGS.md) for the nonblocking legacy
 notices: PLAN observes the selected admin's `paper_as_files`; false means outside-

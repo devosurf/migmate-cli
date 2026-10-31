@@ -243,6 +243,249 @@ test("Dropbox exports HTML bytes by immutable item identity", async (t) => {
   assert.equal(Buffer.concat(chunks).toString(), html);
 });
 
+test("Dropbox pinned export fallback downloads Markdown by immutable item identity", async (t) => {
+  const calls: { url: string; argument: unknown }[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("team/namespaces/list"))
+      return Response.json({ namespaces: [namespace], has_more: false });
+    if (url.endsWith("files/get_metadata"))
+      return Response.json({
+        ".tag": "file",
+        id: "id:paper",
+        name: "Notes.paper",
+        path_display: "/Notes.paper",
+        is_downloadable: false,
+        export_info: { export_as: "markdown" },
+      });
+    calls.push({
+      url,
+      argument: JSON.parse(new Headers(init?.headers).get("Dropbox-API-Arg")!),
+    });
+    return new Response("# Notes");
+  });
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of adapter().openSourceContent({ driveId: "123", itemId: "id:paper" }))
+    chunks.push(chunk);
+  assert.equal(Buffer.concat(chunks).toString(), "# Notes");
+  assert.deepEqual(calls, [
+    {
+      url: "https://content.dropboxapi.com/2/files/export",
+      argument: { path: "id:paper", export_format: "markdown" },
+    },
+  ]);
+});
+
+// rclone v1.75.0 backend/dropbox: chooseExportFormat and setMetadataForExport.
+const exportCases: {
+  label: string;
+  name: string;
+  info?: { export_as?: string; export_options?: string[] };
+  format: "html" | "markdown" | null;
+  exportedName: string;
+  downloadable?: boolean;
+}[] = [
+  {
+    label: "Markdown-only Paper",
+    name: "Notes.paper",
+    info: { export_as: "markdown" },
+    format: "markdown",
+    exportedName: "Notes.md",
+  },
+  {
+    label: "HTML preference overrides the Dropbox preferred Markdown format",
+    name: "Notes.paper",
+    info: { export_as: "markdown", export_options: ["html"] },
+    format: "html",
+    exportedName: "Notes.html",
+  },
+  {
+    label: "HTML in export_as need not be repeated in export_options",
+    name: "Notes.paper",
+    info: { export_as: "html", export_options: ["markdown"] },
+    format: "html",
+    exportedName: "Notes.html",
+  },
+  {
+    label: "unknown preferred format falls back to a recognized option",
+    name: "Notes.paper",
+    info: { export_as: "pdf", export_options: ["docx", "markdown"] },
+    format: "markdown",
+    exportedName: "Notes.md",
+  },
+  {
+    label: "missing preferred format uses export_options",
+    name: "Notes.paper",
+    info: { export_options: ["markdown"] },
+    format: "markdown",
+    exportedName: "Notes.md",
+  },
+  {
+    label: "format recognition is case-sensitive",
+    name: "Notes.paper",
+    info: { export_as: "HTML", export_options: ["Markdown", "markdown"] },
+    format: "markdown",
+    exportedName: "Notes.md",
+  },
+  {
+    label: "only one terminal Paper suffix is removed",
+    name: "Notes.paper.paper",
+    info: { export_as: "markdown" },
+    format: "markdown",
+    exportedName: "Notes.paper.md",
+  },
+  {
+    label: "uppercase Paper suffix is preserved",
+    name: "Notes.PAPER",
+    info: { export_as: "html" },
+    format: "html",
+    exportedName: "Notes.PAPER.html",
+  },
+  {
+    label: "Paper template suffix is preserved",
+    name: "Notes.papert",
+    info: { export_as: "markdown" },
+    format: "markdown",
+    exportedName: "Notes.papert.md",
+  },
+  {
+    label: "existing export extension is not stripped",
+    name: "Notes.md",
+    info: { export_as: "markdown" },
+    format: "markdown",
+    exportedName: "Notes.md.md",
+  },
+  {
+    label: "extensionless name receives an export suffix",
+    name: "Notes",
+    info: { export_as: "markdown" },
+    format: "markdown",
+    exportedName: "Notes.md",
+  },
+  {
+    label: "unknown-only export formats are unsupported",
+    name: "Drawing.cloud",
+    info: { export_as: "pdf", export_options: ["docx", "unknown"] },
+    format: null,
+    exportedName: "Drawing.cloud",
+  },
+  {
+    label: "uppercase-only export formats are unsupported",
+    name: "Notes.paper",
+    info: { export_as: "HTML", export_options: ["MARKDOWN"] },
+    format: null,
+    exportedName: "Notes.paper",
+  },
+  {
+    label: "empty export info is unsupported",
+    name: "Notes.paper",
+    info: {},
+    format: null,
+    exportedName: "Notes.paper",
+  },
+  {
+    label: "absent export info is unsupported",
+    name: "Notes.paper",
+    format: null,
+    exportedName: "Notes.paper",
+  },
+  {
+    label: "downloadable file ignores advertised export formats",
+    name: "Notes.paper",
+    info: { export_as: "markdown", export_options: ["html"] },
+    format: null,
+    exportedName: "Notes.paper",
+    downloadable: true,
+  },
+];
+
+for (const fixture of exportCases) {
+  test(`Dropbox pinned export inventory and content: ${fixture.label}`, async (t) => {
+    const raw = {
+      ".tag": "file",
+      id: "id:export",
+      name: fixture.name,
+      path_display: `/${fixture.name}`,
+      is_downloadable: fixture.downloadable ?? false,
+      size: 100,
+      ...(fixture.info ? { export_info: fixture.info } : {}),
+    };
+    const contentCalls: { url: string; argument: unknown }[] = [];
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("team/namespaces/list"))
+          return Response.json({ namespaces: [namespace], has_more: false });
+        if (url.endsWith("files/list_folder"))
+          return Response.json({ entries: [raw], has_more: false });
+        if (url.endsWith("files/get_metadata")) return Response.json(raw);
+        contentCalls.push({
+          url,
+          argument: JSON.parse(new Headers(init?.headers).get("Dropbox-API-Arg")!),
+        });
+        return new Response("exported bytes");
+      },
+    );
+    const source = adapter();
+    const entries = await source.listSourceChildren({ driveId: "123", itemId: "/" });
+    assert.equal(entries.length, 1);
+    const entry = entries[0]!;
+    assert.equal(entry.name, fixture.exportedName);
+    assert.equal(entry.id, "id:export");
+    assert.equal(entry.metadata?.originalName, fixture.name);
+    assert.equal(entry.metadata?.path, `/${fixture.name}`);
+    assert.equal(entry.metadata?.exportFormat, fixture.format ?? undefined);
+    assert.equal(
+      entry.metadata?.contentDisposition,
+      fixture.format === "html"
+        ? "paper_html"
+        : fixture.format === "markdown"
+          ? "document_export"
+          : fixture.downloadable
+            ? undefined
+            : "unsupported_export",
+    );
+    assert.equal(entry.kind, fixture.format || fixture.downloadable ? "file" : "undownloadable");
+    assert.equal(entry.downloadable, !!(fixture.format || fixture.downloadable));
+    assert.equal(entry.size, fixture.downloadable ? 100 : null);
+    assert.equal(
+      entry.mimeType,
+      fixture.format === "html"
+        ? "text/html"
+        : fixture.format === "markdown"
+          ? "text/markdown"
+          : null,
+    );
+    assert.deepEqual(await source.readSourceItem({ driveId: "123", itemId: "id:export" }), entry);
+    const download = async () => {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of source.openSourceContent({ driveId: "123", itemId: "id:export" }))
+        chunks.push(chunk);
+      return Buffer.concat(chunks).toString();
+    };
+    if (!fixture.format && !fixture.downloadable) {
+      await assert.rejects(
+        download(),
+        (error: unknown) => error instanceof ProviderFault && error.code === "source_read_failed",
+      );
+      assert.deepEqual(contentCalls, []);
+    } else {
+      assert.equal(await download(), "exported bytes");
+      assert.deepEqual(contentCalls, [
+        {
+          url: `https://content.dropboxapi.com/2/files/${fixture.format ? "export" : "download"}`,
+          argument: {
+            path: "id:export",
+            ...(fixture.format ? { export_format: fixture.format } : {}),
+          },
+        },
+      ]);
+    }
+  });
+}
+
 for (const enabled of [true, false, null]) {
   test(`Paper creation-model evidence ${enabled} becomes a nonblocking planning observation`, async (t) => {
     t.mock.method(

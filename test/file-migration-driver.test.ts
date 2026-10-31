@@ -557,62 +557,68 @@ describe("provider content findings and destination depth", () => {
     };
   }
 
-  it("blocks Paper export collisions before copy and identifies both equal-sized source objects", async (t) => {
-    const h = await harness(
-      t,
-      fileFixture([
-        {
-          id: "paper",
-          parentId: "source-root",
-          name: "Notes.html",
-          kind: "file",
-          content: "same",
-          metadata: { contentDisposition: "paper_html", originalName: "Notes.paper" },
-        },
-        {
-          id: "ordinary",
-          parentId: "source-root",
-          name: "Notes.html",
-          kind: "file",
-          content: "diff",
-          metadata: { originalName: "Notes.html" },
-        },
-      ]),
-      sourceConfig("dropbox"),
-    );
-    const copies = t.mock.method(h.port, "startCopyPass");
-    await approve(h);
-    await execute(h);
-    assert.equal(copies.mock.callCount(), 0);
-    assert.equal(value(await h.engine.reader(h.ref).status()).state, "blocked");
-    const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
-    const json = JSON.parse(
-      await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
-    );
-    const conflicts = json.findings.filter(
-      (item: { code: string }) => item.code === "destination_duplicate_name",
-    );
-    assert.equal(conflicts.length, 2);
-    for (const conflict of conflicts) {
-      assert.equal(conflict.evidence.path, "Notes.html");
-      assert.deepEqual(conflict.evidence.sourceIds, ["paper", "ordinary"]);
-    }
-    assert.deepEqual(
-      conflicts
-        .map((item: { evidence: { originalName: string } }) => item.evidence.originalName)
-        .sort(),
-      ["Notes.html", "Notes.paper"],
-    );
-    h.port.renameSourceItem("ordinary", "Distinct.html");
-    await approve(h);
-    await execute(h);
-    assert.equal(copies.mock.callCount(), 1);
-    assert.equal(
-      value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify())).clean,
-      true,
-    );
-    assert.equal(h.port.snapshotDestination().filter((item) => item.kind === "file").length, 2);
-  });
+  for (const extension of ["html", "md"]) {
+    it(`blocks Paper ${extension} export collisions before copy and identifies both equal-sized source objects`, async (t) => {
+      const h = await harness(
+        t,
+        fileFixture([
+          {
+            id: "paper",
+            parentId: "source-root",
+            name: `Notes.${extension}`,
+            kind: "file",
+            content: "same",
+            metadata: {
+              contentDisposition: extension === "html" ? "paper_html" : "document_export",
+              originalName: "Notes.paper",
+              exportFormat: extension === "html" ? "html" : "markdown",
+            },
+          },
+          {
+            id: "ordinary",
+            parentId: "source-root",
+            name: `Notes.${extension}`,
+            kind: "file",
+            content: "diff",
+            metadata: { originalName: `Notes.${extension}` },
+          },
+        ]),
+        sourceConfig("dropbox"),
+      );
+      const copies = t.mock.method(h.port, "startCopyPass");
+      await approve(h);
+      await execute(h);
+      assert.equal(copies.mock.callCount(), 0);
+      assert.equal(value(await h.engine.reader(h.ref).status()).state, "blocked");
+      const report = value(await h.engine.withWriterResult(h.ref, (writer) => writer.report()));
+      const json = JSON.parse(
+        await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+      );
+      const conflicts = json.findings.filter(
+        (item: { code: string }) => item.code === "destination_duplicate_name",
+      );
+      assert.equal(conflicts.length, 2);
+      for (const conflict of conflicts) {
+        assert.equal(conflict.evidence.path, `Notes.${extension}`);
+        assert.deepEqual(conflict.evidence.sourceIds, ["paper", "ordinary"]);
+      }
+      assert.deepEqual(
+        conflicts
+          .map((item: { evidence: { originalName: string } }) => item.evidence.originalName)
+          .sort(),
+        [`Notes.${extension}`, "Notes.paper"],
+      );
+      h.port.renameSourceItem("ordinary", `Distinct.${extension}`);
+      await approve(h);
+      await execute(h);
+      assert.equal(copies.mock.callCount(), 1);
+      assert.equal(
+        value(await h.engine.withWriterResult(h.ref, (writer) => writer.verify())).clean,
+        true,
+      );
+      assert.equal(h.port.snapshotDestination().filter((item) => item.kind === "file").length, 2);
+    });
+  }
 
   it("discloses Paper conversion in a root-only plan and report; pointers remain nonblocking", async (t) => {
     const h = await harness(
@@ -625,6 +631,14 @@ describe("provider content findings and destination depth", () => {
           kind: "file",
           content: "<p>notes</p>",
           metadata: { contentDisposition: "paper_html" },
+        },
+        {
+          id: "markdown",
+          parentId: "source-root",
+          name: "fallback.md",
+          kind: "file",
+          content: "# Fallback",
+          metadata: { contentDisposition: "document_export", exportFormat: "markdown" },
         },
         {
           id: "web",
@@ -650,7 +664,7 @@ describe("provider content findings and destination depth", () => {
     const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
     assert.equal(verified.clean, true);
     const rows = value(await h.engine.reader(h.ref).rows({ phase: "verify", limit: 100 })).rows;
-    for (const code of ["source_paper_html", "source_web_pointer"]) {
+    for (const code of ["source_paper_html", "source_document_export", "source_web_pointer"]) {
       const matching = rows.filter((item) => item.code === code);
       assert.equal(matching.length, 1);
       assert.equal(matching[0]?.kind, "policy_outcome");
@@ -816,35 +830,42 @@ describe("provider content findings and destination depth", () => {
     });
   }
 
-  it("measures unknown Paper export sizes and blocks a wrong-sized destination", async (t) => {
-    const h = await harness(
-      t,
-      fileFixture([
-        {
-          id: "paper",
-          parentId: "source-root",
-          name: "notes.html",
-          kind: "file",
-          size: -1,
-          content: "<p>notes</p>",
-          metadata: { contentDisposition: "paper_html" },
-        },
-      ]),
-      sourceConfig("dropbox"),
-    );
-    await approve(h);
-    await execute(h);
-    assert.deepEqual(value(await h.engine.reader(h.ref).status()).outstandingFindings, []);
-    assert.ok(h.port.calls.includes("openSourceContent:paper"));
-    const copied = h.port.snapshotDestination().find((item) => item.path === "notes.html")!;
-    h.port.mutateDestinationContent(copied.id, "truncated");
-    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
-    assert.equal(verified.clean, false);
-    assert.deepEqual(
-      verified.findings.map((item) => item.code),
-      ["size_mismatch"],
-    );
-  });
+  for (const extension of ["html", "md"]) {
+    it(`measures unknown Paper ${extension} export sizes and blocks a wrong-sized destination`, async (t) => {
+      const h = await harness(
+        t,
+        fileFixture([
+          {
+            id: "paper",
+            parentId: "source-root",
+            name: `notes.${extension}`,
+            kind: "file",
+            size: -1,
+            content: extension === "html" ? "<p>notes</p>" : "# notes",
+            metadata: {
+              contentDisposition: extension === "html" ? "paper_html" : "document_export",
+              exportFormat: extension === "html" ? "html" : "markdown",
+            },
+          },
+        ]),
+        sourceConfig("dropbox"),
+      );
+      await approve(h);
+      await execute(h);
+      assert.deepEqual(value(await h.engine.reader(h.ref).status()).outstandingFindings, []);
+      assert.ok(h.port.calls.includes("openSourceContent:paper"));
+      const copied = h.port
+        .snapshotDestination()
+        .find((item) => item.path === `notes.${extension}`)!;
+      h.port.mutateDestinationContent(copied.id, "truncated");
+      const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.equal(verified.clean, false);
+      assert.deepEqual(
+        verified.findings.map((item) => item.code),
+        ["size_mismatch"],
+      );
+    });
+  }
 
   it("compares Dropbox paths and sizes without claiming same-size content equality", async (t) => {
     const h = await harness(

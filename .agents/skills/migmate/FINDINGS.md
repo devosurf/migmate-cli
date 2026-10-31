@@ -45,12 +45,14 @@ Explain this opt-in hash-verification pattern together. Recommend examining actu
 | `destination_only_retained` | Copy policy retained destination-only content.                                                                        | Review leftovers; this does not block close and is not mirror parity.                                                                                             |
 | `to_be_deleted`             | File/folder listings of both sides immediately before every mirror pass identify destination-only paths for deletion. | Review execute-phase evidence; `deleteLimit` counts files, with folder removals recorded separately. This is not an approval preview or proof deletion completed. |
 | `source_paper_html`         | A Paper document is exported as `.html`, not preserved as an editable Paper document.                                 | Review the conversion disclosure and copied HTML; this policy outcome needs no acceptance.                                                                        |
+| `source_document_export`    | A source document uses the supported Markdown (`.md`) export because HTML is unavailable.                             | Review the fallback conversion and copied Markdown; this policy outcome needs no acceptance.                                                                      |
 | `source_web_pointer`        | A `.web` file is copied as-is; it points to Google-hosted content rather than containing that content.                | Preserve the linked content separately if required; the pointer disclosure does not block close.                                                                  |
 
-The transfer backend's [Dropbox export contract](https://rclone.org/dropbox/#exporting-files) explains Paper's HTML filename conversion and supported export formats.
+The pinned [Dropbox backend](https://github.com/rclone/rclone/blob/v1.75.0/backend/dropbox/dropbox.go#L1773-L1804) prefers HTML, then falls back to the first recognized available format (currently Markdown). It removes one terminal lowercase `.paper` suffix and appends `.html` or `.md`; other suffixes remain intact. Unsupported-export findings mean neither format is available, not merely that HTML is unavailable.
 
 An exported name can also collide with an ordinary file: `Notes.paper` and
-`Notes.html` both target `Notes.html`. Execution raises blocking
+`Notes.html` both target `Notes.html`; a Markdown-only `Notes.paper` can likewise
+collide with `Notes.md`. Execution raises blocking
 `destination_duplicate_name` findings with the exported path, original names,
 and both source IDs before starting that mapping's copy pass. Resolve the
 source conflict and replan; acceptance cannot make both objects fit one path.

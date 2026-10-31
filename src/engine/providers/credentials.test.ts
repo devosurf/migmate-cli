@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { appendFile, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { TestContext } from "node:test";
 import { createCredentialSession } from "./credentials.ts";
 import { ProviderFault } from "./fault.ts";
 import { createProductionProvider } from "./production.ts";
@@ -903,6 +904,144 @@ test("Dropbox credential session authenticates once, retains grant evidence and 
   assert.match(await session.identity(), /^sha256:[a-f0-9]{64}$/u);
   session.dispose();
   await assert.rejects(session.dropboxToken(), { code: "credential_session_disposed" });
+});
+
+async function persistedDropboxCredentials(t: TestContext) {
+  t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
+    if (String(target) === "https://oauth2.googleapis.com/token")
+      return Response.json({
+        access_token: "google-token",
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    assert.equal(String(target), "https://api.dropboxapi.com/oauth2/token");
+    assert.ok(init?.body instanceof URLSearchParams);
+    return Response.json({
+      access_token: "dropbox-token",
+      token_type: "Bearer",
+      expires_in: 14400,
+      ...(init.body.get("grant_type") === "authorization_code"
+        ? {
+            refresh_token: "refresh-canary",
+            team_id: "dbtid:team",
+            scope: DROPBOX_READ_SCOPES.join(" "),
+          }
+        : {}),
+    });
+  });
+  const fields = await beginDropboxAuthorization("dropbox-app").exchange(
+    "code",
+    new AbortController().signal,
+  );
+  const files = await operatorFiles(
+    t,
+    [...dropboxSource, ...fields].map(([key, value]) => `${key} = ${value}`).join("\n"),
+  );
+  return {
+    jobDirectory: files.jobDirectory,
+    config: {
+      sourceProvider: "dropbox",
+      destinationProvider: "google_shared_drive",
+      rclone: {
+        config: files.config.rclone.config,
+        dropboxRemote: "sharepoint-source",
+        destinationRemote: "google-destination",
+      },
+    },
+  };
+}
+
+for (const sourceItemId of ["/", "id:a4ayc_80_OEAAAAAAAAAXw"]) {
+  test(`persisted source item identity reconstructs Dropbox credentials: ${sourceItemId}`, async (t) => {
+    const files = await persistedDropboxCredentials(t);
+    for (const sourceType of ["dropbox", undefined]) {
+      const persistedMapping = {
+        ...mapping,
+        ...(sourceType ? { sourceType } : {}),
+        sourceDriveId: "123456789",
+        sourceItemId,
+        sourceFolderPath: sourceItemId === "/" ? "/" : "/Department",
+      };
+      const session = await createCredentialSession({
+        jobType: "file_migration",
+        jobDirectory: files.jobDirectory,
+        config: { ...files.config, mappings: [persistedMapping] },
+      });
+      t.after(() => session.dispose());
+      assert.equal(session.rcloneConfigPath, await realpath(files.config.rclone.config.path));
+      assert.equal(await session.dropboxToken(), "dropbox-token");
+      const evidence = await session.evidence();
+      assert.deepEqual(evidence.mappings, [
+        {
+          ...(sourceType ? { sourceType } : {}),
+          sourceDriveId: "123456789",
+          sourceItemId,
+          destDriveId: mapping.destDriveId,
+          destFolderId: mapping.destFolderId,
+        },
+      ]);
+      assert.ok(evidence.dropbox && typeof evidence.dropbox === "object");
+      assert.equal(Reflect.get(evidence.dropbox, "scopeEvidence"), "authorization_code");
+    }
+  });
+}
+
+test("persisted source item identity rejects Dropbox paths and malformed immutable IDs", async (t) => {
+  const files = await persistedDropboxCredentials(t);
+  for (const sourceItemId of [
+    "folder",
+    "root",
+    ".",
+    "..",
+    "/Department",
+    "//",
+    "id:",
+    "id:folder/child",
+    "id:folder:child",
+    "id:folder child",
+    "id:folder\n",
+    "id:folder.",
+    "ns:123456789",
+    "",
+  ]) {
+    await assert.rejects(
+      createCredentialSession({
+        jobType: "file_migration",
+        jobDirectory: files.jobDirectory,
+        config: {
+          ...files.config,
+          mappings: [
+            { ...mapping, sourceType: "dropbox", sourceDriveId: "123456789", sourceItemId },
+          ],
+        },
+      }),
+      { code: "credential_mapping_invalid" },
+      JSON.stringify(sourceItemId),
+    );
+  }
+});
+
+test("persisted source item identity keeps SharePoint and Google slash and colon refusals", async (t) => {
+  const files = await operatorFiles(t, source.join("\n"));
+  for (const providers of [forwardProviders, reverseProviders]) {
+    for (const sourceItemId of ["/", "folder/child", "id:a4ayc_80_OEAAAAAAAAAXw", "folder:child"]) {
+      for (const sourceType of [providers.sourceProvider, undefined]) {
+        await assert.rejects(
+          createCredentialSession({
+            jobType: "file_migration",
+            jobDirectory: files.jobDirectory,
+            config: {
+              ...files.config,
+              ...providers,
+              mappings: [{ ...mapping, ...(sourceType ? { sourceType } : {}), sourceItemId }],
+            },
+          }),
+          { code: "credential_mapping_invalid" },
+          `${providers.sourceProvider}: ${sourceItemId}`,
+        );
+      }
+    }
+  }
 });
 
 test("Dropbox OAuth HTTP refusals suppress provider response secrets", async (t) => {

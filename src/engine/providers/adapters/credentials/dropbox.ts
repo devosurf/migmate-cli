@@ -222,6 +222,11 @@ export async function requestDropboxToken(
 
 export const dropboxCredentialAdapter: FileCredentialAdapter = {
   mappingSourceType: "dropbox",
+  sourceItemId(value) {
+    const id = text(value);
+    if (id !== "/" && !/^id:[A-Za-z0-9_-]+$/u.test(id)) throw refused("credential_config_invalid");
+    return id;
+  },
   remoteKey: { source: "dropboxRemote", destination: "dropboxRemote" },
   bindings: [
     {

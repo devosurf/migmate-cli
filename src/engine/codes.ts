@@ -70,6 +70,7 @@ export const CODES: readonly CodeEntry[] = [
   entry("destination_rewrote_file", "finding", "verify", FILE),
   entry("metadata_mismatch", "finding", "verify", FILE),
   entry("source_paper_html", "policy_outcome", "verify", FILE),
+  entry("source_document_export", "policy_outcome", "verify", FILE),
   entry("source_web_pointer", "policy_outcome", "verify", FILE),
   entry("source_unsupported_export", "finding", "verify", FILE),
 

@@ -21,11 +21,14 @@ not used to infer scopes. Write scopes and `shared_folders` refuse. Shared names
 IDs are deduplicated across enumeration pages, and mappings use `namespaceId` plus
 `folderPath`; member homes/app folders remain out of scope. Select-Admin and an explicit
 root namespace keep reads out of the administrator's personal home.
-Paper exports as HTML with plan/report disclosure; visible Files API documents without
-a downloadable export produce blocking per-file `source_unsupported_export` findings,
-not legacy-Paper findings. `.web` pointers copy as-is with a disclosure.
+Paper exports prefer HTML with plan/report disclosure; pinned rclone v1.75.0 falls
+back to Markdown (`.md`) when HTML is unavailable. Both conversions are nonblocking.
+Visible Files API documents without either downloadable format produce blocking
+per-file `source_unsupported_export` findings, not legacy-Paper findings.
+`.web` pointers copy as-is with a disclosure.
 If an exported name collides with another source item (for example `Notes.paper`
-and `Notes.html` both becoming `Notes.html`), execution records blocking
+and `Notes.html` both becoming `Notes.html`, or a Markdown-only Paper document
+colliding with `Notes.md`), execution records blocking
 `destination_duplicate_name` findings identifying both source objects and refuses
 to start that mapping's copy pass. Rename or remove the conflicting source item
 before replanning; equal sizes do not establish that both objects were copied.
