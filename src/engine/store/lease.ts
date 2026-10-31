@@ -26,7 +26,7 @@ import { reconcileOnWriterOpen } from "../state-chart.ts";
 import { canonicalJson } from "./digest.ts";
 
 const HEARTBEAT_MS = 5_000;
-const LEASE_EXPIRY_MS = 30_000;
+export const LEASE_EXPIRY_MS = 30_000;
 const MIGMATE_VERSION = JSON.parse(
   readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
 ).version as string;
@@ -41,6 +41,8 @@ export interface LeaseRow extends LeaseIdentity {
   ownerUuid: string;
   heartbeatAt: string;
   kind: "cli" | "web";
+  detached?: boolean;
+  logPath?: string | null;
   socketPath: string | null;
   workerGroup: string | null;
   workerPid: number | null;
@@ -87,6 +89,7 @@ export interface LeaseAcquireOptions extends LeaseInspectionOptions {
   lastCheckpoint?: string | null;
   migmateVersion?: string;
   heartbeatMs?: number;
+  onHeartbeat?: () => void;
 }
 
 export interface LeaseInspection {
@@ -126,6 +129,7 @@ type ProcessObservation =
 
 const SELECT_LEASE_SQL = `SELECT owner_uuid AS ownerUuid, host_id AS hostId, pid,
   process_start_time AS processStartTime, heartbeat_at AS heartbeatAt, kind,
+  detached, log_path AS logPath,
   socket_path AS socketPath, worker_group AS workerGroup, worker_pid AS workerPid,
   worker_process_start_time AS workerProcessStartTime, worker_executable AS workerExecutable,
   last_checkpoint AS lastCheckpoint, migmate_version AS migmateVersion FROM lease WHERE id = 1`;
@@ -707,6 +711,8 @@ export async function acquire(
       workerExecutable: opts.workerExecutable ?? null,
       lastCheckpoint: opts.lastCheckpoint ?? job.lastCheckpoint,
       migmateVersion: opts.migmateVersion ?? MIGMATE_VERSION,
+      detached: false,
+      logPath: null,
     };
     db.prepare(
       `INSERT INTO lease (id, owner_uuid, host_id, pid, process_start_time, heartbeat_at, kind,
@@ -727,6 +733,9 @@ export async function acquire(
       row.lastCheckpoint,
       row.migmateVersion,
     );
+    db.prepare(
+      "UPDATE control_request SET answered_at = ?, outcome = 'lease_held' WHERE answered_at IS NULL AND owner_uuid <> ?",
+    ).run(now().toISOString(), ownerUuid);
     db.prepare("UPDATE job SET host_id = ? WHERE id = ? AND host_id IS NULL").run(
       identity.hostId,
       job.id,
@@ -739,7 +748,7 @@ export async function acquire(
   const handle: LeaseHandle = { row, timer: null };
   handle.timer = setInterval(() => {
     try {
-      heartbeat(db, handle, now);
+      if (heartbeat(db, handle, now)) opts.onHeartbeat?.();
     } catch {
       clearInterval(handle.timer ?? undefined);
       handle.timer = null;

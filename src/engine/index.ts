@@ -17,7 +17,16 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { Engine, EngineOptions, JobReader, JobWriter, ReclaimDecision } from "./engine.ts";
+import type {
+  ControlOptions,
+  ControlResult,
+  Engine,
+  EngineOptions,
+  JobReader,
+  JobWriter,
+  ReclaimDecision,
+  WriterOptions,
+} from "./engine.ts";
 import { mappingsCsv, exceptionsCsv } from "./report-csv.ts";
 import {
   ManifestError,
@@ -72,8 +81,10 @@ import {
   type LeaseRecord,
 } from "./store/store.ts";
 import { canonicalJson, digestJson } from "./store/digest.ts";
+import { answerControl, enqueueControl, pendingControl, readControl } from "./store/control.ts";
 import {
   acquire,
+  LEASE_EXPIRY_MS,
   getHostId,
   getProcessStartTime,
   readHostId,
@@ -114,7 +125,17 @@ import {
   hashReportArtifact,
 } from "./report.ts";
 
-export type { Engine, JobReader, JobWriter, EngineOptions, ReclaimDecision } from "./engine.ts";
+export type {
+  ControlOptions,
+  ControlResult,
+  ExecuteOptions,
+  Engine,
+  JobReader,
+  JobWriter,
+  EngineOptions,
+  ReclaimDecision,
+  WriterOptions,
+} from "./engine.ts";
 export * from "./types.ts";
 
 const packageMetadata: unknown = JSON.parse(
@@ -773,11 +794,12 @@ export function openEngine(opts: ProvidedEngineOptions): Engine {
   return {
     initJob: (spec) => initJob(deps, spec),
     reader: (ref) => makeReader(deps, ref),
-    withWriter: (ref, fn) => withWriter(deps, ref, fn),
+    withWriter: (ref, fn, options) => withWriter(deps, ref, fn, options),
     async withWriterResult(ref, fn) {
       const outer = await withWriter(deps, ref, fn);
       return outer.ok ? outer.value : outer;
     },
+    requestControl: (ref, options) => requestControl(deps, ref, options),
     reclaim: (ref, decision) => reclaimJob(deps, ref, decision),
     close() {
       deps.closed = true;
@@ -984,6 +1006,7 @@ async function withWriter<T>(
   deps: EngineDeps,
   ref: JobRef,
   fn: (writer: JobWriter) => Promise<T>,
+  options?: WriterOptions,
 ): Promise<Outcome<T>> {
   let store: Store | undefined;
   try {
@@ -1014,14 +1037,28 @@ async function withWriter<T>(
         }
       : probeWorker;
     const identity = { hostId, pid: process.pid, processStartTime: getProcessStartTime() };
+    let checkControl = () => {};
     const acquired = await acquire(store.db, identity, {
       kind: deps.adapter,
       now: deps.now,
       probeWorker: probe,
+      onHeartbeat: () => checkControl(),
     });
     if (!acquired.ok) return acquired;
     let active = true;
-    const session = makeWriter(deps, store, paths, () => active, acquired.value.row.ownerUuid);
+    const session = makeWriter(
+      deps,
+      store,
+      paths,
+      () => active,
+      acquired.value.row.ownerUuid,
+      options?.onControl,
+    );
+    checkControl = session.checkControl;
+    let value: T | undefined;
+    let operationError: unknown;
+    let failed = false;
+    let controlled: Refusal | null = null;
     try {
       await reconcileWriterOpen(store.db, reconcileOnWriterOpen, {
         now: deps.now,
@@ -1054,18 +1091,163 @@ async function withWriter<T>(
             if (prefixes.some((prefix) => name.startsWith(prefix)))
               rmSync(join(staging, name), { recursive: true, force: true });
       }
-      return ok(await fn(session.writer));
-    } finally {
-      active = false;
       try {
-        await session.dispose();
+        value = await fn(session.writer);
+      } catch (error) {
+        operationError = error;
+        failed = true;
+      }
+    } finally {
+      try {
+        try {
+          controlled = await session.finishControl();
+        } finally {
+          try {
+            await session.dispose();
+          } finally {
+            // Close the request inbox and release ownership under one write lock.
+            // A racing requester reaches this owner or observes no holder.
+            while (true) {
+              const pending = store.atomic(() => {
+                if (store!.readLease()?.ownerUuid !== acquired.value.row.ownerUuid) return false;
+                if (pendingControl(store!, acquired.value.row.ownerUuid)) return true;
+                if (!store!.readLease()?.socketPath) release(store!.db, acquired.value);
+                else clearInterval(acquired.value.timer ?? undefined);
+                return false;
+              });
+              if (!pending) break;
+              controlled = (await session.finishControl()) ?? controlled;
+            }
+          }
+        }
       } finally {
-        if (!store.readLease()?.socketPath) release(store.db, acquired.value);
-        else clearInterval(acquired.value.timer ?? undefined);
+        active = false;
+        clearInterval(acquired.value.timer ?? undefined);
       }
     }
+    if (controlled) return { ok: false, refusal: controlled };
+    if (failed) throw operationError;
+    return ok(value as T);
   } catch (error) {
     const failure = expectedFailure<T>(error);
+    if (failure) return failure;
+    throw error;
+  } finally {
+    store?.close();
+  }
+}
+
+async function requestControl(
+  deps: EngineDeps,
+  ref: JobRef,
+  options: ControlOptions,
+): Promise<Outcome<ControlResult>> {
+  let store: Store | undefined;
+  try {
+    if (deps.closed) return refuse("lease_held", "The engine is closed.");
+    if (options.kind !== "stop" && options.kind !== "cancel") configError("control.kind");
+    text(options.commandId, "commandId");
+    if (options.reason !== undefined) text(options.reason, "reason");
+    const paths = pathsFor(deps, ref);
+    const local = localFilesystem(paths.dir);
+    if (!local.ok) return local;
+    const opened = openStore(paths.dir, {
+      migmateVersion: MIGMATE_VERSION,
+      now: deps.now,
+      existingOnly: true,
+    });
+    if (!opened.ok) return opened;
+    store = opened.value;
+    const hostId = readHostId(deps.home) ?? "";
+    let requestId: number | undefined;
+    let targetOwner: string | undefined;
+    while (true) {
+      if (options.signal?.aborted)
+        return refuse(
+          "retry_budget_exhausted",
+          "Waiting for the control request was interrupted.",
+          {
+            detail: { interrupted: true },
+          },
+        );
+      const snapshot = store.atomic<{
+        result?: Outcome<ControlResult>;
+        noHolder?: boolean;
+        stale?: LeaseRecord;
+      }>(() => {
+        const job = store!.readJob();
+        const lease = store!.readLease();
+        if (!job) return { result: refuse("job_not_found", "The job does not exist.") };
+        if (requestId !== undefined) {
+          const request = readControl(store!, requestId);
+          if (request?.outcome && lease?.ownerUuid !== targetOwner) {
+            if (request.outcome === "stopped") return { result: ok({ stopped: true }) };
+            if (request.outcome === "cancelled") return { result: ok({ cancelled: true }) };
+            return { result: refuse(request.outcome, "The owner refused the control request.") };
+          }
+          if (lease?.ownerUuid !== targetOwner)
+            return {
+              result: refuse(
+                "lease_held",
+                "The addressed owner ended without acknowledging the request.",
+              ),
+            };
+        } else {
+          const terminal = refusalForClosedJob(job.state);
+          if (terminal)
+            return { result: refuse(terminal, "The job has reached an absorbing terminal state.") };
+          if (!lease) return { noHolder: true };
+          const mismatch = hostRefusal<ControlResult>(
+            { ...job, hostId: lease.hostId },
+            hostId,
+            lease,
+          );
+          if (mismatch) return { result: mismatch };
+        }
+        if (!lease) return { noHolder: true };
+        const age = deps.now().getTime() - Date.parse(lease.heartbeatAt);
+        if (!Number.isFinite(age) || age >= LEASE_EXPIRY_MS) return { stale: lease };
+        if (requestId === undefined) {
+          const request = enqueueControl(store!, lease.ownerUuid, hostId, options, deps.now);
+          requestId = request.id;
+          targetOwner = request.ownerUuid;
+        }
+        return {};
+      });
+      if (snapshot.result) return snapshot.result;
+      if (snapshot.stale) {
+        const inspection = await inspectLease(snapshot.stale, hostId, {
+          now: deps.now,
+          ...(deps.provider
+            ? {
+                probeWorker: async (socketPath: string) =>
+                  (await deps.provider!.probeTransferWorker({ socketPath })).alive,
+              }
+            : {}),
+        });
+        return refuse(
+          inspection.decision.code ?? "lease_held",
+          "The existing lease requires explicit recovery",
+          { recovery: inspection.report },
+        );
+      }
+      if (snapshot.noHolder) {
+        if (options.kind === "stop") return ok({ stopped: false });
+        const cancelled = await withWriter(deps, ref, (writer) =>
+          writer.cancel(options.reason ?? "Cancelled by operator."),
+        );
+        if (!cancelled.ok) {
+          if (cancelled.refusal.code === "lease_held") continue;
+          return cancelled;
+        }
+        return cancelled.value.ok
+          ? ok({ ...cancelled.value.value, cancelled: true })
+          : cancelled.value;
+      }
+      await delay(100, options.signal);
+    }
+  } catch (error) {
+    const failure = expectedFailure<ControlResult>(error);
     if (failure) return failure;
     throw error;
   } finally {
@@ -1489,11 +1671,95 @@ function makeWriter(
   paths: JobPaths,
   active: () => boolean,
   ownerUuid: string,
-): { writer: JobWriter; dispose: () => Promise<void> } {
+  onControl?: () => void,
+): {
+  writer: JobWriter;
+  checkControl: () => void;
+  finishControl: () => Promise<Refusal | null>;
+  dispose: () => Promise<void>;
+} {
   let busy = false;
   let executionInterrupt: AbortController | undefined;
   let settled = Promise.resolve();
   const providers = new Set<ProviderPort>();
+  let currentVerb: Verb = "execute";
+  let stopping = false;
+  let finishingControl = false;
+  let controlOutcome: Refusal | null = null;
+  function cancelAdmission(): Refusal | null {
+    const terminal = refusalForClosedJob(job().state);
+    if (terminal)
+      return { code: terminal, message: "The job has reached an absorbing terminal state." };
+    if (store.readCreatedDrives().some((drive) => drive.goLive))
+      return {
+        code: "go_live_started",
+        message: "Go-live has started; only close with its final report can end this job.",
+      };
+    return null;
+  }
+  function checkControl(): void {
+    if (!active() || finishingControl || store.readLease()?.ownerUuid !== ownerUuid) return;
+    const admitted = store.atomic(() => {
+      const request = pendingControl(store, ownerUuid);
+      if (!request) return;
+      if (request.kind === "cancel") {
+        const refusal = cancelAdmission();
+        if (refusal) {
+          answerControl(store, request, refusal.code, currentVerb, deps.now);
+          return;
+        }
+      }
+      const notify = !stopping;
+      stopping = true;
+      executionInterrupt?.abort(
+        new EngineRefusalError({
+          code: "retry_budget_exhausted",
+          message: `${request.kind} requested; the command was interrupted.`,
+          detail: { interrupted: true },
+        }),
+      );
+      return notify;
+    });
+    if (admitted) onControl?.();
+  }
+  async function finishControl(): Promise<Refusal | null> {
+    checkControl();
+    await settled;
+    finishingControl = true;
+    try {
+      while (true) {
+        const request = pendingControl(store, ownerUuid);
+        if (!request || store.readLease()?.ownerUuid !== ownerUuid) break;
+        if (request.kind === "cancel") {
+          const refusal = cancelAdmission();
+          if (refusal) {
+            answerControl(store, request, refusal.code, currentVerb, deps.now);
+            continue;
+          }
+          const cancelled = await writer.cancel(request.reason ?? "Cancelled by operator.");
+          if (!cancelled.ok) {
+            answerControl(store, request, cancelled.refusal.code, currentVerb, deps.now);
+            continue;
+          }
+          answerControl(store, request, "cancelled", currentVerb, deps.now);
+          controlOutcome = {
+            code: "job_cancelled",
+            message: "Cancellation requested by operator.",
+          };
+        } else {
+          if (!answerControl(store, request, "stopped", currentVerb, deps.now)) continue;
+          controlOutcome ??= {
+            code: "retry_budget_exhausted",
+            message: "Stop requested; the command is interrupted and can be resumed.",
+            detail: { interrupted: true },
+          };
+        }
+      }
+      return controlOutcome;
+    } finally {
+      finishingControl = false;
+    }
+  }
   function job(): JobRecord {
     const record = store.readJob();
     if (!record) throw new Error("Missing durable job record");
@@ -1522,7 +1788,7 @@ function makeWriter(
   }
   async function operation<T>(
     verb: Verb,
-    fn: () => Promise<Outcome<T>>,
+    fn: (signal: AbortSignal) => Promise<Outcome<T>>,
     signal?: AbortSignal,
   ): Promise<Outcome<T>> {
     let entered = false;
@@ -1546,8 +1812,20 @@ function makeWriter(
     try {
       guard(verb);
       if (busy) return refuse("lease_held", "The writer already owns an active operation.");
+      if (stopping && !finishingControl)
+        throw new EngineRefusalError({
+          code: "retry_budget_exhausted",
+          message: "Stop requested; the command is interrupted and can be resumed.",
+          detail: { interrupted: true },
+        });
       busy = true;
       entered = true;
+      currentVerb = verb;
+      executionInterrupt = new AbortController();
+      signal = signal
+        ? AbortSignal.any([signal, executionInterrupt.signal])
+        : executionInterrupt.signal;
+      if (!finishingControl) checkControl();
       settled = new Promise<void>((resolve) => {
         finish = resolve;
       });
@@ -1565,18 +1843,16 @@ function makeWriter(
           executionInterrupt?.abort();
         }
       })();
-      signal?.throwIfAborted();
-      const outcome = await fn();
-      signal?.throwIfAborted();
+      if (verb !== "execute") signal.throwIfAborted();
+      const outcome = await fn(signal);
+      if (verb === "plan" || verb === "verify") signal.throwIfAborted();
       return record(outcome);
     } catch (error) {
-      if (verb === "plan" && signal?.aborted)
+      if ((verb === "plan" || verb === "verify" || verb === "execute") && signal?.aborted)
         return record(
-          refuse(
-            "retry_budget_exhausted",
-            "Plan collection was interrupted before a complete review could be produced.",
-            { detail: { interrupted: true } },
-          ),
+          refuse("retry_budget_exhausted", `${verb} was interrupted before completion.`, {
+            detail: { interrupted: true },
+          }),
         );
       const failure = expectedFailure<T>(error);
       if (failure) return record(failure);
@@ -2382,7 +2658,7 @@ function makeWriter(
     plan: (input) =>
       operation(
         "plan",
-        async () => {
+        async (signal) => {
           if (job().type === "teams_archive" && job().executionCompleted)
             return refuse(
               "plan_revision_required",
@@ -2417,7 +2693,7 @@ function makeWriter(
               config = { ...config, window: { ...config.window, to: previous.window.to } };
           }
           const p = provider(config),
-            ready = await preflight(config, p, input?.signal);
+            ready = await preflight(config, p, signal);
           if (!ready.ok) return ready;
           const revision = store.nextPlanRevision();
           // ADR-0012 A1: the destination is prestaged once an execution completes, so
@@ -2441,9 +2717,9 @@ function makeWriter(
           let drained: { committed: number; interrupted: boolean; blocked: boolean };
           try {
             if (needsTransferWorker(config)) planWorker = await startWorker(p);
-            drained = await drain(p, config, revision, "plan", new RetryBudget(200), input?.signal);
+            drained = await drain(p, config, revision, "plan", new RetryBudget(200), signal);
           } finally {
-            if (planWorker) await stopWorker(p, planWorker, input?.signal?.aborted);
+            if (planWorker) await stopWorker(p, planWorker, signal.aborted);
           }
           if (drained.interrupted)
             return refuse(
@@ -2455,7 +2731,7 @@ function makeWriter(
             return refuse("retry_budget_exhausted", "Plan collection exhausted its retry budget.");
           const rows = store.readAllRows(revision, "plan"),
             resume = store.readResume(revision),
-            evidence = await boundEvidence(p, config, input?.signal);
+            evidence = await boundEvidence(p, config, signal);
           if (!("mappings" in config) && !config.window.to && resume.archivePlan)
             config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
           const inputs = inputFields(config, evidence, rows, resume.archivePlan),
@@ -2503,7 +2779,7 @@ function makeWriter(
             })),
           };
           store.atomic(() => {
-            input?.signal?.throwIfAborted();
+            signal.throwIfAborted();
             store.writePlanRevision(record);
             store.writeJob({ ...job(), planRevision: revision, verificationRevision: null });
             transition("plan", "plan", { revision, planDigest });
@@ -2602,201 +2878,225 @@ function makeWriter(
         return ok(record);
       }),
     execute: (opts) =>
-      operation("execute", async () => {
-        const configured = readConfig(paths, job().type, store);
-        if ("mappings" in configured) {
-          const fenced = store
-            .readCreatedDrives()
-            .filter(
-              (drive) =>
-                drive.goLive &&
-                configured.mappings.some(
-                  (mapping) =>
-                    mapping.id === drive.mappingId || mapping.destDriveId === drive.driveId,
-                ),
-            );
-          if (fenced.length)
-            return refuse(
-              "go_live_started",
-              "Go-live has permanently fenced transfers to these drives. Resume close; some access may already exist.",
-              {
-                detail: { driveIds: fenced.map((drive) => drive.driveId) },
-              },
-            );
-        }
-        executionInterrupt = new AbortController();
-        const signal = opts?.signal
-          ? AbortSignal.any([opts.signal, executionInterrupt.signal])
-          : executionInterrupt.signal;
-        const revision = job().planRevision,
-          plan = revision === null ? null : store.readPlanRevision(revision);
-        if (!plan) return refuse("approval_required", "There is no approved plan.");
-        const approval = store.readApproval(plan.revision);
-        if (!approval) return refuse("approval_required", "The current plan has no approval.");
-        if (approval.planDigest !== plan.planDigest)
-          return refuse("approval_digest_stale", "The approval is stale.");
-        const archiveVerificationResume =
-          job().type === "teams_archive" &&
-          job().executionCompleted === true &&
-          ["interrupted", "blocked"].includes(job().state);
-        if (
-          job().type === "teams_archive" &&
-          job().executionCompleted &&
-          !archiveVerificationResume
-        )
-          return refuse(
-            "plan_revision_required",
-            "A completed archive cannot execute a second pass.",
-          );
-        if (!nextState(job().state, "execute"))
-          return refuse(
-            "verification_unaccepted",
-            "The current execution must be assessed before another pass.",
-          );
-        let config = readConfig(paths, job().type, store);
-        requireFileMappings(config);
-        // Migration adds a store digest, not a new input to an immutable older approval.
-        // Only a newly collected plan can bind that additional manifest identity.
-        if ("mappings" in config && plan.manifestDigest === undefined) delete config.manifestDigest;
-        const resume = store.readResume(plan.revision);
-        if (!("mappings" in config) && !config.window.to && resume.archivePlan)
-          config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
-        const p = provider(config, archiveVerificationResume),
-          evidence = await boundEvidence(p, config);
-        const currentInputs = inputFields(
-          config,
-          evidence,
-          store.readAllRows(plan.revision, "plan"),
-          resume.archivePlan,
-          plan.inputs.configuration,
-        );
-        if (digestJson(currentInputs) !== plan.inputsDigest)
-          return refuse(
-            "plan_revision_required",
-            "The approved inputs or authenticated route identity have changed.",
-          );
-        const bound = readBoundEvidence(plan.evidence);
-        if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
-        if ("mappings" in config)
-          await checkApprovedMappingScope(p, config, store.readAllRows(plan.revision, "plan"));
-        transition("execute", "execute");
-        store.appendEvent({
-          verb: "execute",
-          phase: "execute",
-          kind: "phase_started",
-          payload: { revision: plan.revision },
-        });
-        const budget = new RetryBudget(Math.max(1, plan.rowCount));
-        if (signal.aborted) return terminalResult("interrupted", 0, budget);
-        let worker: TransferWorkerHandle | undefined;
-        try {
-          if (needsTransferWorker(config)) {
-            worker = await startWorker(p, evidence.binaryPath);
-            const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
+      operation(
+        "execute",
+        async (signal) => {
+          if (opts?.detached) {
+            const logPath = text(opts.detached.logPath, "detached.logPath");
+            const relativeLogPath = relative(paths.dir, resolve(paths.dir, logPath));
             if (
-              version !== worker.version ||
-              (bound.binaryVersion && version !== bound.binaryVersion)
+              isAbsolute(logPath) ||
+              relativeLogPath === ".." ||
+              relativeLogPath.startsWith(`..${sep}`)
             )
-              throw new EngineRefusalError({
-                code: "plan_revision_required",
-                message: "The live worker version changed after approval.",
-              });
-            if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+              configError("detached.logPath");
+            const lease = store.readLease()!;
+            store.writeLease({ ...lease, detached: true, logPath });
           }
-          const drained = archiveVerificationResume
-            ? { committed: 0, interrupted: false, blocked: false, uploadQuota: undefined }
-            : await drain(p, config, plan.revision, "execute", budget, signal);
-          if (drained.interrupted || drained.blocked)
-            return terminalResult(
-              drained.interrupted ? "interrupted" : "blocked",
-              drained.committed,
-              budget,
-              drained.uploadQuota,
+          const configured = readConfig(paths, job().type, store);
+          if ("mappings" in configured) {
+            const fenced = store
+              .readCreatedDrives()
+              .filter(
+                (drive) =>
+                  drive.goLive &&
+                  configured.mappings.some(
+                    (mapping) =>
+                      mapping.id === drive.mappingId || mapping.destDriveId === drive.driveId,
+                  ),
+              );
+            if (fenced.length)
+              return refuse(
+                "go_live_started",
+                "Go-live has permanently fenced transfers to these drives. Resume close; some access may already exist.",
+                {
+                  detail: { driveIds: fenced.map((drive) => drive.driveId) },
+                },
+              );
+          }
+          const revision = job().planRevision,
+            plan = revision === null ? null : store.readPlanRevision(revision);
+          if (!plan) return refuse("approval_required", "There is no approved plan.");
+          const approval = store.readApproval(plan.revision);
+          if (!approval) return refuse("approval_required", "The current plan has no approval.");
+          if (approval.planDigest !== plan.planDigest)
+            return refuse("approval_digest_stale", "The approval is stale.");
+          const archiveVerificationResume =
+            job().type === "teams_archive" &&
+            job().executionCompleted === true &&
+            ["interrupted", "blocked"].includes(job().state);
+          if (
+            job().type === "teams_archive" &&
+            job().executionCompleted &&
+            !archiveVerificationResume
+          )
+            return refuse(
+              "plan_revision_required",
+              "A completed archive cannot execute a second pass.",
             );
-          store.writeJob({ ...job(), executionCompleted: true });
+          if (!nextState(job().state, "execute"))
+            return refuse(
+              "verification_unaccepted",
+              "The current execution must be assessed before another pass.",
+            );
+          let config = readConfig(paths, job().type, store);
+          requireFileMappings(config);
+          // Migration adds a store digest, not a new input to an immutable older approval.
+          // Only a newly collected plan can bind that additional manifest identity.
+          if ("mappings" in config && plan.manifestDigest === undefined)
+            delete config.manifestDigest;
+          const resume = store.readResume(plan.revision);
+          if (!("mappings" in config) && !config.window.to && resume.archivePlan)
+            config = { ...config, window: { ...config.window, to: resume.archivePlan.window.to } };
+          const p = provider(config, archiveVerificationResume),
+            evidence = await boundEvidence(p, config);
+          const currentInputs = inputFields(
+            config,
+            evidence,
+            store.readAllRows(plan.revision, "plan"),
+            resume.archivePlan,
+            plan.inputs.configuration,
+          );
+          if (digestJson(currentInputs) !== plan.inputsDigest)
+            return refuse(
+              "plan_revision_required",
+              "The approved inputs or authenticated route identity have changed.",
+            );
+          const bound = readBoundEvidence(plan.evidence);
+          if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+          if ("mappings" in config)
+            await checkApprovedMappingScope(p, config, store.readAllRows(plan.revision, "plan"));
+          if (opts?.onAdmitted) signal.throwIfAborted();
+          transition("execute", "execute");
+          try {
+            if (opts?.onAdmitted) await opts.onAdmitted({ ownerUuid });
+          } catch (error) {
+            transition("interrupt", "execute");
+            throw error;
+          }
           store.appendEvent({
             verb: "execute",
             phase: "execute",
-            kind: "phase_completed",
-            payload: { revision: plan.revision, committed: drained.committed },
+            kind: "phase_started",
+            payload: { revision: plan.revision },
           });
-          const verified = await verifyRun(p, config, plan.revision, budget, signal);
-          if (!verified.ok)
-            return terminalResult(
-              signal.aborted ? "interrupted" : "blocked",
-              drained.committed,
-              budget,
-            );
-          transition(verified.value.clean ? "finish_clean" : "finish_gaps", "verify", {
-            verificationDigest: verified.value.verificationDigest,
-          });
-          return terminalResult("completed", drained.committed, budget);
-        } catch (error) {
-          if (job().state === "executing") transition("interrupt", "execute");
-          throw error;
-        } finally {
-          if (worker) await stopWorker(p, worker);
-        }
-      }),
-    verify: (opts) =>
-      operation("verify", async () => {
-        if (!["verified", "needs_attention"].includes(job().state) || job().planRevision === null)
-          return refuse("verification_unaccepted", "Verification requires completed execution.");
-        const config = readConfig(paths, job().type, store);
-        requireFileMappings(config);
-        const p = provider(config, true),
-          revision = job().planRevision!,
-          plan = store.readPlanRevision(revision)!;
-        // Verification proves what was approved: an options edit cannot weaken it.
-        if (
-          "mappings" in config &&
-          (approvedOptions(plan)?.verificationMode ?? "listing") !==
-            (config.options?.verificationMode ?? "listing")
-        )
-          return refuse(
-            "plan_revision_required",
-            "The verification mode differs from the approved plan; plan and approve again.",
-            { detail: { field: "options.verificationMode" } },
-          );
-        let worker: TransferWorkerHandle | undefined;
-        try {
-          if (needsTransferWorker(config)) {
-            const bound = readBoundEvidence(plan.evidence);
-            const evidence = await boundEvidence(p, config);
-            if (canonicalJson(evidence) !== canonicalJson(bound))
-              return refuse(
-                "plan_revision_required",
-                "The approved application, route, or binary evidence changed.",
+          const budget = new RetryBudget(Math.max(1, plan.rowCount));
+          if (signal.aborted) return terminalResult("interrupted", 0, budget);
+          let worker: TransferWorkerHandle | undefined;
+          try {
+            if (needsTransferWorker(config)) {
+              worker = await startWorker(p, evidence.binaryPath);
+              const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
+              if (
+                version !== worker.version ||
+                (bound.binaryVersion && version !== bound.binaryVersion)
+              )
+                throw new EngineRefusalError({
+                  code: "plan_revision_required",
+                  message: "The live worker version changed after approval.",
+                });
+              if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+            }
+            const drained = archiveVerificationResume
+              ? { committed: 0, interrupted: false, blocked: false, uploadQuota: undefined }
+              : await drain(p, config, plan.revision, "execute", budget, signal);
+            if (drained.interrupted || drained.blocked)
+              return terminalResult(
+                drained.interrupted ? "interrupted" : "blocked",
+                drained.committed,
+                budget,
+                drained.uploadQuota,
               );
-            if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
-            worker = await startWorker(p, evidence.binaryPath);
-            const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
-            if (
-              version !== worker.version ||
-              (bound.binaryVersion && version !== bound.binaryVersion)
-            )
-              return refuse(
-                "plan_revision_required",
-                "The live worker version changed after approval.",
+            store.writeJob({ ...job(), executionCompleted: true });
+            store.appendEvent({
+              verb: "execute",
+              phase: "execute",
+              kind: "phase_completed",
+              payload: { revision: plan.revision, committed: drained.committed },
+            });
+            const verified = await verifyRun(p, config, plan.revision, budget, signal);
+            if (!verified.ok)
+              return terminalResult(
+                signal.aborted ? "interrupted" : "blocked",
+                drained.committed,
+                budget,
               );
-            if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+            transition(verified.value.clean ? "finish_clean" : "finish_gaps", "verify", {
+              verificationDigest: verified.value.verificationDigest,
+            });
+            return terminalResult("completed", drained.committed, budget);
+          } catch (error) {
+            if (job().state === "executing") transition("interrupt", "execute");
+            throw error;
+          } finally {
+            if (worker) await stopWorker(p, worker);
           }
-          const result = await verifyRun(
-            p,
-            config,
-            revision,
-            new RetryBudget(plan.rowCount),
-            opts?.signal,
-          );
-          if (!result.ok) return result;
-          transition(result.value.clean ? "verify_clean" : "verify_gaps", "verify", {
-            verificationDigest: result.value.verificationDigest,
-          });
-          return result;
-        } finally {
-          if (worker) await stopWorker(p, worker);
-        }
-      }),
+        },
+        opts?.signal,
+      ),
+    verify: (opts) =>
+      operation(
+        "verify",
+        async (signal) => {
+          if (!["verified", "needs_attention"].includes(job().state) || job().planRevision === null)
+            return refuse("verification_unaccepted", "Verification requires completed execution.");
+          const config = readConfig(paths, job().type, store);
+          requireFileMappings(config);
+          const p = provider(config, true),
+            revision = job().planRevision!,
+            plan = store.readPlanRevision(revision)!;
+          // Verification proves what was approved: an options edit cannot weaken it.
+          if (
+            "mappings" in config &&
+            (approvedOptions(plan)?.verificationMode ?? "listing") !==
+              (config.options?.verificationMode ?? "listing")
+          )
+            return refuse(
+              "plan_revision_required",
+              "The verification mode differs from the approved plan; plan and approve again.",
+              { detail: { field: "options.verificationMode" } },
+            );
+          let worker: TransferWorkerHandle | undefined;
+          try {
+            if (needsTransferWorker(config)) {
+              const bound = readBoundEvidence(plan.evidence);
+              const evidence = await boundEvidence(p, config);
+              if (canonicalJson(evidence) !== canonicalJson(bound))
+                return refuse(
+                  "plan_revision_required",
+                  "The approved application, route, or binary evidence changed.",
+                );
+              if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+              worker = await startWorker(p, evidence.binaryPath);
+              const version = await p.transferWorkerVersion({ socketPath: worker.socketPath });
+              if (
+                version !== worker.version ||
+                (bound.binaryVersion && version !== bound.binaryVersion)
+              )
+                return refuse(
+                  "plan_revision_required",
+                  "The live worker version changed after approval.",
+                );
+              if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
+            }
+            const result = await verifyRun(
+              p,
+              config,
+              revision,
+              new RetryBudget(plan.rowCount),
+              signal,
+            );
+            if (!result.ok) return result;
+            transition(result.value.clean ? "verify_clean" : "verify_gaps", "verify", {
+              verificationDigest: result.value.verificationDigest,
+            });
+            return result;
+          } finally {
+            if (worker) await stopWorker(p, worker);
+          }
+        },
+        opts?.signal,
+      ),
     accept: (x) =>
       operation("verify", async () => {
         if (
@@ -2866,7 +3166,7 @@ function makeWriter(
           return ok({ ...current, clean, acceptedCodes });
         });
       }),
-    report: () => operation("report", createReport),
+    report: () => operation("report", () => createReport()),
     acknowledgeGoLive: (input) =>
       operation("close", async () => {
         if (
@@ -3171,17 +3471,16 @@ function makeWriter(
         return ok(result);
       }),
     async cancel(reason) {
+      text(reason, "reason");
+      const admission = cancelAdmission();
+      if (admission) return { ok: false, refusal: admission };
       if (busy) {
         executionInterrupt?.abort();
         await settled;
       }
       return operation("cancel", async () => {
-        text(reason, "reason");
-        if (store.readCreatedDrives().some((drive) => drive.goLive))
-          return refuse(
-            "go_live_started",
-            "Go-live has started; only close with its final report can end this job.",
-          );
+        const admission = cancelAdmission();
+        if (admission) return { ok: false, refusal: admission };
         const verification = currentVerification(store);
         const result: Closure = {
           state: "cancelled",
@@ -3207,6 +3506,8 @@ function makeWriter(
   };
   return {
     writer,
+    checkControl,
+    finishControl,
     async dispose() {
       let failure: unknown;
       for (const p of providers)

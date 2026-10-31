@@ -42,6 +42,32 @@ export interface EngineOptions {
 export interface ExecuteOptions {
   /** Interrupt, never cancellation: aborting stops at the next commit boundary. */
   signal?: AbortSignal;
+  /** Detached attempt evidence, relative to the job folder; persisted before admission. */
+  detached?: { logPath: string };
+  /** Called only after admission has durably entered executing, before worker startup. */
+  onAdmitted?: (owner: { ownerUuid: string }) => void | Promise<void>;
+}
+
+export interface ControlOptions {
+  kind: "stop" | "cancel";
+  reason?: string;
+  commandId: string;
+  /** Cancels waiting, never withdraws a delivered request. */
+  signal?: AbortSignal;
+}
+
+export interface ControlResult {
+  stopped?: boolean;
+  cancelled?: boolean;
+}
+
+export interface WriterOptions {
+  /**
+   * Called once when an admitted stop/cancel requires this writer lifetime to end.
+   * The engine interrupts the operation; persistent adapters must let it settle
+   * and return from their writer callback. Refused controls never notify.
+   */
+  onControl?: () => void;
 }
 
 export interface ReclaimDecision {
@@ -55,13 +81,18 @@ export interface Engine {
   initJob(spec: JobSpec): Promise<Outcome<JobRef>>;
   /** Never takes the lease. */
   reader(ref: JobRef): JobReader;
-  withWriter<T>(ref: JobRef, fn: (w: JobWriter) => Promise<T>): Promise<Outcome<T>>;
+  withWriter<T>(
+    ref: JobRef,
+    fn: (w: JobWriter) => Promise<T>,
+    options?: WriterOptions,
+  ): Promise<Outcome<T>>;
   /**
    * The form every adapter wants: a lease refusal and a verb refusal collapse into
    * one envelope. Nesting them makes a refused verb look like a successful call,
    * which is how a caller ends up reporting exit 0 for a job that refused.
    */
   withWriterResult<T>(ref: JobRef, fn: (w: JobWriter) => Promise<Outcome<T>>): Promise<Outcome<T>>;
+  requestControl(ref: JobRef, options: ControlOptions): Promise<Outcome<ControlResult>>;
   reclaim(ref: JobRef, decision: ReclaimDecision): Promise<Outcome<RecoveryReport>>;
   close(): void;
 }

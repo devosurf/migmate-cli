@@ -69,7 +69,7 @@ import { approvalAuthority } from "../decisions.ts";
 import { ReportArray } from "../report.ts";
 import type { DriverContext } from "../drivers/types.ts";
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 const BUSY_TIMEOUT_MS = 5_000;
 const schemaSql = readFileSync(join(import.meta.dirname, "schema.sql"), "utf8");
 const extensionMarker = "-- Full file intents/results are retained";
@@ -113,6 +113,8 @@ export interface LeaseRecord {
   processStartTime: number;
   heartbeatAt: string;
   kind: "cli" | "web";
+  detached?: boolean;
+  logPath?: string | null;
   socketPath: string | null;
   workerGroup: string | null;
   workerPid: number | null;
@@ -156,7 +158,7 @@ export interface ResumeRecord extends ArchiveResumeState {
 }
 export interface Store {
   close(): void;
-  // Only lease handling and crash reconciliation may use raw SQL.
+  // Only lease/control handling and crash reconciliation may use raw SQL.
   readonly db: DatabaseSync;
   atomic<T>(fn: () => T): T;
   readJob(): JobRecord | null;
@@ -296,6 +298,8 @@ function rowToLease(row: SqlRow): LeaseRecord {
     processStartTime: Number(row.process_start_time),
     heartbeatAt: String(row.heartbeat_at),
     kind: row.kind as LeaseRecord["kind"],
+    detached: Number(row.detached) === 1,
+    logPath: nullableString(row.log_path),
     socketPath: nullableString(row.socket_path),
     workerGroup: nullableString(row.worker_group),
     workerPid: nullableNumber(row.worker_pid),
@@ -470,6 +474,18 @@ function migrateDecisions(db: DatabaseSync): void {
       "ALTER TABLE acceptance ADD COLUMN mode TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK (mode IN ('interactive','unattended','legacy_unknown'))",
     );
   db.exec(schemaSql.slice(schemaSql.indexOf("-- Local decision evidence")));
+  db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
+}
+
+function migrateControlRequests(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(lease)").all();
+  if (!columns.some((row) => row.name === "detached"))
+    db.exec(
+      "ALTER TABLE lease ADD COLUMN detached INTEGER NOT NULL DEFAULT 0 CHECK (detached IN (0, 1))",
+    );
+  if (!columns.some((row) => row.name === "log_path"))
+    db.exec("ALTER TABLE lease ADD COLUMN log_path TEXT");
+  db.exec(schemaSql.slice(schemaSql.indexOf("-- Requests bind")));
   db.prepare("UPDATE job SET schema_version = ?").run(SCHEMA_VERSION);
 }
 
@@ -778,11 +794,11 @@ class StoreImpl implements Store {
       this.db.prepare("UPDATE job SET host_id=? WHERE host_id IS NULL").run(lease.hostId);
       this.db
         .prepare(
-          `INSERT INTO lease (id,owner_uuid,host_id,pid,process_start_time,heartbeat_at,kind,socket_path,worker_group,worker_pid,worker_process_start_time,worker_executable,last_checkpoint,migmate_version)
-        VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+          `INSERT INTO lease (id,owner_uuid,host_id,pid,process_start_time,heartbeat_at,kind,socket_path,worker_group,worker_pid,worker_process_start_time,worker_executable,last_checkpoint,migmate_version,detached,log_path)
+        VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
         owner_uuid=excluded.owner_uuid,host_id=excluded.host_id,pid=excluded.pid,process_start_time=excluded.process_start_time,
         heartbeat_at=excluded.heartbeat_at,kind=excluded.kind,socket_path=excluded.socket_path,worker_group=excluded.worker_group,
-        worker_pid=excluded.worker_pid,worker_process_start_time=excluded.worker_process_start_time,worker_executable=excluded.worker_executable,last_checkpoint=excluded.last_checkpoint,migmate_version=excluded.migmate_version`,
+        worker_pid=excluded.worker_pid,worker_process_start_time=excluded.worker_process_start_time,worker_executable=excluded.worker_executable,last_checkpoint=excluded.last_checkpoint,migmate_version=excluded.migmate_version,detached=excluded.detached,log_path=excluded.log_path`,
         )
         .run(
           lease.ownerUuid,
@@ -798,6 +814,8 @@ class StoreImpl implements Store {
           lease.workerExecutable ?? null,
           lease.lastCheckpoint,
           lease.migmateVersion,
+          lease.detached ? 1 : 0,
+          lease.logPath ?? null,
         );
     });
   }
@@ -2612,6 +2630,8 @@ class StoreImpl implements Store {
           pid: lease?.pid ?? null,
           heartbeatAt: lease?.heartbeatAt ?? null,
           kind: lease?.kind ?? null,
+          detached: lease?.detached ?? false,
+          logPath: lease?.logPath ?? null,
         },
         planRevision: job.planRevision,
         planDigest: plan?.planDigest ?? null,
@@ -2835,9 +2855,10 @@ export function openStore(
         else if (version === 2) migrateVersion2(db);
         else if (version === 3) migrateVersion3(db);
         else if (version === 4) migrateVersion4(db);
-        else if (version !== null && version !== 5 && version !== SCHEMA_VERSION)
+        else if (version !== null && version !== 5 && version !== 6 && version !== SCHEMA_VERSION)
           throw new Error("Job schema changed while opening");
         if (version !== null && version < 6) migrateDecisions(db);
+        if (version !== null && version < 7) migrateControlRequests(db);
       }
     });
     syncDirectory(root);

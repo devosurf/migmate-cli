@@ -1,12 +1,27 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcess,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  symlinkSync,
+  existsSync,
+  statSync,
+  readdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { it, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { DatabaseSync } from "node:sqlite";
 import { stringify as stringifyToml } from "smol-toml";
 import {
   CLI_JOB_CONFIG,
@@ -57,16 +72,33 @@ function setup(
   type: JobType = "file_migration",
   signal = t.signal,
   fileConfig: typeof CLI_JOB_CONFIG | typeof CLI_REVERSE_JOB_CONFIG = CLI_JOB_CONFIG,
+  homeName = "home",
+  initialTime = FIXTURE_TIME,
 ) {
   const root = mkdtempSync(join(tmpdir(), "migmate-cli-process-"));
-  const home = join(root, "home");
+  const home = join(root, homeName);
   const destination = join(root, "destination.json");
   const config = join(root, "input.toml");
   writeFileSync(config, stringifyToml(type === "teams_archive" ? CLI_ARCHIVE_CONFIG : fileConfig));
-  let now = Date.parse(FIXTURE_TIME);
+  let now = Date.parse(initialTime);
   const destinationRecords = (): DestinationRecord[] =>
     existsSync(destination) ? JSON.parse(readFileSync(destination, "utf8")) : [];
   const children = new Set<Running>();
+  const detached = new Set<number>();
+  const gone = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ESRCH") return true;
+      throw error;
+    }
+  };
+  const reapDetached = async (pid: number) => {
+    for (let attempt = 0; attempt < 300 && !gone(pid); attempt++) await delay(20);
+    assert.ok(gone(pid), `Detached coordinator ${pid} did not exit`);
+    detached.delete(pid);
+  };
   const abort = () => {
     for (const { child } of children)
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -74,12 +106,19 @@ function setup(
   signal.addEventListener("abort", abort, { once: true });
   t.after(async () => {
     signal.removeEventListener("abort", abort);
+    for (const pid of detached) if (!gone(pid)) process.kill(pid, "SIGTERM");
+    for (const pid of detached) await reapDetached(pid);
     for (const { child } of children)
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await Promise.all([...children].map((running) => running.done));
     rmSync(root, { recursive: true, force: true });
   });
-  const start = (argv: string[], held = false, blockOnAbort = false): Running => {
+  const start = (
+    argv: string[],
+    held = false,
+    blockOnAbort = false,
+    admissionMarker = "",
+  ): Running => {
     signal.throwIfAborted();
     const child = spawn(
       process.execPath,
@@ -92,8 +131,10 @@ function setup(
           CLI_TEST_HOLD: held ? "1" : "0",
           CLI_TEST_NOW: new Date(now).toISOString(),
           CLI_TEST_BLOCK_ON_ABORT: blockOnAbort ? "1" : "",
+          CLI_TEST_ADMISSION_MARKER: admissionMarker,
         },
         stdio: ["pipe", "pipe", "pipe", "ipc"],
+        detached: true,
       },
     );
     assertPiped(child);
@@ -105,6 +146,13 @@ function setup(
       exited = false;
     let checkpoint = false;
     child.on("message", (message) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        message.type === "migmate:launch-ready"
+      )
+        child.send({ type: "migmate:launch", detached: false });
       if (message === "checkpoint") {
         checkpoint = true;
         emitter.emit("event");
@@ -121,6 +169,8 @@ function setup(
         pending = pending.slice(boundary + 1);
         if (!line.trim()) continue;
         const value = JSON.parse(line);
+        if (value.ok && value.value?.detached && typeof value.value.pid === "number")
+          detached.add(value.value.pid);
         if (typeof value.cursor === "number") {
           events.push(value);
           emitter.emit("event", value);
@@ -285,6 +335,8 @@ function setup(
     command,
     approve,
     reclaimKilledWriter,
+    reapDetached,
+    trackDetached: (pid: number) => detached.add(pid),
   };
 }
 
@@ -800,3 +852,454 @@ for (const stop of ["SIGINT", "SIGKILL", "EPIPE"] as const) {
     },
   );
 }
+
+interface DetachedLaunch {
+  detached: true;
+  pid: number;
+  commandId: string;
+  logPath: string;
+}
+
+it(
+  "detached admission survives launcher session and stop releases ownership before success",
+  { timeout: 45000 },
+  async (t) => {
+    const h = setup(t);
+    const id = await h.approve();
+    const launcher = h.start(["execute", "--job", id, "--detach", "--output", "json"], true);
+    const launched = await launcher.done;
+    assert.equal(launched.code, 0, launched.stdout + launched.stderr);
+    const ack: Document<DetachedLaunch> = JSON.parse(launched.stdout);
+    assert.equal(ack.value.detached, true);
+    assert.notEqual(ack.value.pid, launcher.child.pid);
+    try {
+      process.kill(-launcher.child.pid!, "SIGTERM");
+    } catch (error) {
+      assert.ok(error instanceof Error && "code" in error && error.code === "ESRCH");
+    }
+    const status = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(status.value.state, "executing");
+    assert.equal(status.value.ownership.pid, ack.value.pid);
+    assert.equal(status.value.ownership.detached, true);
+    assert.ok(status.value.ownership.logPath?.startsWith("logs/execute-"));
+    assert.equal(statSync(dirname(ack.value.logPath)).mode & 0o777, 0o700);
+    assert.equal(statSync(ack.value.logPath).mode & 0o777, 0o600);
+    for (const extra of [[], ["--detach"]]) {
+      const duplicate = await h.start(["execute", "--job", id, ...extra, "--output", "json"]).done;
+      assert.equal(duplicate.code, 3, duplicate.stdout);
+      assert.equal(JSON.parse(duplicate.stdout).refusal.code, "lease_held");
+    }
+    const stopped = await h.command<{ stopped: boolean }>(["stop", "--job", id]);
+    assert.equal(stopped.value.stopped, true);
+    const after = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(after.value.state, "interrupted");
+    assert.equal(after.value.resumable, true);
+    assert.equal(after.value.ownership.held, false);
+    await h.reapDetached(ack.value.pid);
+    const lines = readFileSync(ack.value.logPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.ok(lines.some((line) => line.kind === "terminal"));
+    assert.ok("ok" in lines.at(-1));
+    assert.equal(lines.at(-1).commandId, ack.value.commandId);
+    const idle = await h.command<{ stopped: boolean }>(["stop", "--job", id]);
+    assert.equal(idle.value.stopped, false);
+    await h.command(["execute", "--job", id]);
+  },
+);
+
+it(
+  "racing detached launches admit one owner and running cancellation is acknowledged after release",
+  { timeout: 45000 },
+  async (t) => {
+    const h = setup(t);
+    const id = await h.approve();
+    const results = await Promise.all(
+      [0, 1].map(
+        () => h.start(["execute", "--job", id, "--detach", "--output", "json"], true).done,
+      ),
+    );
+    assert.deepEqual(results.map((result) => result.code).sort(), [0, 3]);
+    const winner = results.find((result) => result.code === 0)!;
+    const ack: Document<DetachedLaunch> = JSON.parse(winner.stdout);
+    await h.command(["cancel", "--job", id, "--reason", "operator request"]);
+    const status = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(status.value.state, "cancelled");
+    assert.equal(status.value.ownership.held, false);
+    await h.reapDetached(ack.value.pid);
+    const replay = await h.start(["status", "--job", id, "--output", "jsonl"]).done;
+    const events = replay.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.ok(
+      events.some(
+        (event) =>
+          event.kind === "control_request" &&
+          event.payload.kind === "cancel" &&
+          event.payload.outcome === "cancelled",
+      ),
+    );
+    for (const verb of ["stop", "cancel"]) {
+      const terminal = await h.start([verb, "--job", id, "--output", "json"]).done;
+      assert.equal(terminal.code, 7, terminal.stdout);
+    }
+  },
+);
+
+it(
+  "detached admission refusal leaves private evidence without an owner or worker",
+  { timeout: 20000 },
+  async (t) => {
+    const h = setup(t);
+    const init = await h.command<{ id: string }>([
+      "init",
+      "--type",
+      "file_migration",
+      "--config",
+      h.config,
+    ]);
+    const id = init.value.id;
+    const refused = await h.start(["execute", "--job", id, "--detach", "--output", "json"]).done;
+    assert.equal(refused.code, 4, refused.stdout + refused.stderr);
+    assert.equal(JSON.parse(refused.stdout).ok, false);
+    const status = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(status.value.ownership.held, false);
+    const logs = join(h.home, "jobs", id, "logs");
+    const files = readdirSync(logs);
+    assert.equal(files.length, 1);
+    const records = readFileSync(join(logs, files[0]!), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(records.at(-1).ok, false);
+  },
+);
+
+for (const verb of ["stop", "cancel"]) {
+  it(`${verb} reaches a foreground owner and waits for release`, { timeout: 30000 }, async (t) => {
+    const h = setup(t);
+    const id = await h.approve();
+    const owner = h.start(["execute", "--job", id, "--output", "jsonl"], true);
+    await owner.checkpoint((event) => event.kind === "unit_committed");
+    await h.command([verb, "--job", id]);
+    assert.equal((await owner.done).code, verb === "stop" ? 130 : 7);
+    const status = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(status.value.state, verb === "stop" ? "interrupted" : "cancelled");
+    assert.equal(status.value.ownership.held, false);
+  });
+}
+
+it("an unusable attempt-log directory refuses before admission", { timeout: 20000 }, async (t) => {
+  const h = setup(t);
+  const id = await h.approve();
+  writeFileSync(join(h.home, "jobs", id, "logs"), "not a directory");
+  const result = await h.start(["execute", "--job", id, "--detach", "--output", "json"]).done;
+  assert.notEqual(result.code, 0, result.stdout);
+  assert.equal(JSON.parse(result.stdout).ok, false);
+  const status = await h.command<JobStatus>(["status", "--job", id]);
+  assert.equal(status.value.ownership.held, false);
+  assert.notEqual(status.value.state, "executing");
+});
+
+for (const condition of ["foreign", "stale"] as const) {
+  it(
+    `${condition} ownership refuses control without delivering a request`,
+    { timeout: 30000 },
+    async (t) => {
+      const h = setup(t);
+      const id = await h.approve();
+      const owner = h.start(["execute", "--job", id, "--output", "jsonl"], true);
+      await owner.checkpoint((event) => event.kind === "unit_committed");
+      const db = new DatabaseSync(join(h.home, "jobs", id, "state.db"));
+      try {
+        if (condition === "foreign") db.prepare("UPDATE lease SET host_id = 'another-host'").run();
+        else
+          db.prepare("UPDATE lease SET heartbeat_at = ?").run(
+            new Date(Date.parse(FIXTURE_TIME) - 60000).toISOString(),
+          );
+        const result = await h.start(["stop", "--job", id, "--output", "json"]).done;
+        assert.equal(result.code, 3, result.stdout);
+        const count = db.prepare("SELECT COUNT(*) AS n FROM control_request").get();
+        assert.equal(count?.n, 0);
+      } finally {
+        db.close();
+        owner.child.kill("SIGTERM");
+        await owner.done;
+      }
+    },
+  );
+}
+
+it(
+  "SIGTERM stops a detached coordinator resumably and retains separate attempt logs",
+  { timeout: 30000 },
+  async (t) => {
+    const h = setup(t);
+    const id = await h.approve();
+    const first = await h.start(["execute", "--job", id, "--detach", "--output", "json"], true)
+      .done;
+    assert.equal(first.code, 0, first.stdout);
+    const ack: Document<DetachedLaunch> = JSON.parse(first.stdout);
+    process.kill(ack.value.pid, "SIGTERM");
+    await h.reapDetached(ack.value.pid);
+    const status = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(status.value.state, "interrupted");
+    assert.equal(status.value.ownership.held, false);
+    const original = readFileSync(ack.value.logPath, "utf8");
+    const second = await h.start(["execute", "--job", id, "--detach", "--output", "json"], true)
+      .done;
+    assert.equal(second.code, 0, second.stdout);
+    const next: Document<DetachedLaunch> = JSON.parse(second.stdout);
+    assert.notEqual(next.value.logPath, ack.value.logPath);
+    await h.command(["stop", "--job", id]);
+    await h.reapDetached(next.value.pid);
+    assert.equal(readFileSync(ack.value.logPath, "utf8"), original);
+  },
+);
+
+for (const target of ["launcher", "child"] as const) {
+  it(
+    `${target} death before admission never acknowledges or leaves work running`,
+    { timeout: 20000 },
+    async (t) => {
+      const h = setup(t);
+      const id = await h.approve();
+      const marker = join(h.root, "admission");
+      const launcher = h.start(
+        ["execute", "--job", id, "--detach", "--output", "json"],
+        false,
+        false,
+        marker,
+      );
+      for (let attempt = 0; attempt < 500 && !existsSync(marker); attempt++) await delay(10);
+      assert.ok(existsSync(marker), "child reached pre-admission barrier");
+      const pid = Number(readFileSync(marker, "utf8"));
+      h.trackDetached(pid);
+      if (target === "launcher") launcher.child.kill("SIGTERM");
+      else process.kill(pid, "SIGKILL");
+      const result = await launcher.done;
+      assert.equal(result.code, target === "launcher" ? 143 : 1, result.stdout + result.stderr);
+      assert.equal(JSON.parse(result.stdout).ok, false);
+      await h.reapDetached(pid);
+      const status = await h.command<JobStatus>(["status", "--job", id]);
+      assert.equal(status.value.ownership.held, false);
+      assert.notEqual(status.value.state, "executing");
+    },
+  );
+}
+
+it("detach refuses non-execute verbs and JSONL launch output", { timeout: 10000 }, async (t) => {
+  const h = setup(t);
+  for (const args of [
+    ["plan", "--job", "unused", "--detach", "--output", "json"],
+    ["execute", "--job", "unused", "--detach", "--output", "jsonl"],
+  ]) {
+    const result = await h.start(args).done;
+    assert.equal(result.code, 2, result.stdout);
+    assert.equal(JSON.parse(result.stdout).refusal.code, "usage");
+  }
+});
+
+it("a detached stale approval refuses before acknowledgement", { timeout: 20000 }, async (t) => {
+  const h = setup(t);
+  const id = await h.approve();
+  const db = new DatabaseSync(join(h.home, "jobs", id, "state.db"));
+  db.prepare(
+    "UPDATE approval SET plan_digest = 'older-plan', payload = json_set(payload, '$.planDigest', 'older-plan')",
+  ).run();
+  db.close();
+  const result = await h.start(["execute", "--job", id, "--detach", "--output", "json"]).done;
+  assert.equal(result.code, 4, result.stdout);
+  assert.equal(JSON.parse(result.stdout).refusal.code, "approval_digest_stale");
+  const status = await h.command<JobStatus>(["status", "--job", id]);
+  assert.equal(status.value.ownership.held, false);
+  assert.notEqual(status.value.state, "executing");
+});
+
+it("new ownership voids a pending request for an older owner", { timeout: 30000 }, async (t) => {
+  const h = setup(t);
+  const id = await h.approve();
+  const db = new DatabaseSync(join(h.home, "jobs", id, "state.db"));
+  try {
+    db.prepare(
+      `INSERT INTO control_request
+      (kind,owner_uuid,reason,host_id,pid,command_id,requested_at)
+      VALUES ('cancel','older-owner','old request','local',?,'older-command',?)`,
+    ).run(process.pid, FIXTURE_TIME);
+    const owner = h.start(["execute", "--job", id, "--output", "jsonl"], true);
+    await owner.checkpoint((event) => event.kind === "unit_committed");
+    const old = db
+      .prepare("SELECT answered_at, outcome FROM control_request WHERE command_id='older-command'")
+      .get();
+    assert.ok(old?.answered_at);
+    assert.equal(old?.outcome, "lease_held");
+    const status = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(status.value.state, "executing");
+    await h.command(["stop", "--job", id]);
+    assert.equal((await owner.done).code, 130);
+  } finally {
+    db.close();
+  }
+});
+
+it(
+  "repeated stops join and cancellation upgrades one pending owner request",
+  { timeout: 30000 },
+  async (t) => {
+    const h = setup(t);
+    const id = await h.approve();
+    const owner = h.start(["execute", "--job", id, "--output", "jsonl"], true);
+    await owner.checkpoint((event) => event.kind === "unit_committed");
+    const first = h.start(["stop", "--job", id, "--output", "json"]);
+    const db = new DatabaseSync(join(h.home, "jobs", id, "state.db"));
+    try {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (db.prepare("SELECT id FROM control_request WHERE answered_at IS NULL").get()) break;
+        await delay(10);
+      }
+      assert.ok(db.prepare("SELECT id FROM control_request WHERE answered_at IS NULL").get());
+      const second = h.start(["stop", "--job", id, "--output", "json"]);
+      const cancel = h.start(["cancel", "--job", id, "--output", "json"]);
+      const results = await Promise.all([first.done, second.done, cancel.done]);
+      for (const result of results) assert.equal(result.code, 0, result.stdout);
+      assert.equal((await owner.done).code, 7);
+      const requests = db.prepare("SELECT kind,outcome FROM control_request").all();
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0]?.kind, "cancel");
+      assert.equal(requests[0]?.outcome, "cancelled");
+    } finally {
+      db.close();
+    }
+  },
+);
+
+it(
+  "go-live refusal answers cancellation without interrupting the owner",
+  { timeout: 30000 },
+  async (t) => {
+    const h = setup(t);
+    const id = await h.approve();
+    const owner = h.start(["execute", "--job", id, "--output", "jsonl"], true);
+    await owner.checkpoint((event) => event.kind === "unit_committed");
+    const db = new DatabaseSync(join(h.home, "jobs", id, "state.db"));
+    try {
+      db.exec("PRAGMA busy_timeout=5000");
+      db.prepare("INSERT INTO created_drive (mapping_id,payload) VALUES (?,?)").run(
+        "fenced",
+        JSON.stringify({
+          mappingId: "fenced",
+          requestId: "request",
+          name: "fenced",
+          driveId: "fenced-drive",
+          creatorEmail: "fixture@example.invalid",
+          goLive: { startedAt: FIXTURE_TIME, revision: 1, verificationAt: FIXTURE_TIME },
+        }),
+      );
+      const cancel = h.start(["cancel", "--job", id, "--output", "json"]);
+      let answered = false;
+      for (let attempt = 0; attempt < 800; attempt++) {
+        const request = db.prepare("SELECT outcome FROM control_request WHERE kind='cancel'").get();
+        if (request?.outcome === "go_live_started") {
+          answered = true;
+          break;
+        }
+        await delay(10);
+      }
+      assert.equal(answered, true);
+      assert.equal(owner.child.exitCode, null);
+      const status = await h.command<JobStatus>(["status", "--job", id]);
+      assert.equal(status.value.state, "executing");
+      await h.command(["stop", "--job", id]);
+      assert.equal((await owner.done).code, 130);
+      const refused = await cancel.done;
+      assert.equal(refused.code, 4, refused.stdout);
+      assert.equal(JSON.parse(refused.stdout).refusal.code, "go_live_started");
+    } finally {
+      db.close();
+    }
+  },
+);
+
+it(
+  "generated detached control commands retain an explicitly selected engine home",
+  { timeout: 30000 },
+  async (t) => {
+    const h = setup(
+      t,
+      "file_migration",
+      t.signal,
+      CLI_JOB_CONFIG,
+      "home with ' quotes",
+      new Date().toISOString(),
+    );
+    const id = await h.approve();
+    const launched = await h.start(
+      ["execute", "--job", id, "--home", h.home, "--detach", "--output", "json"],
+      true,
+    ).done;
+    assert.equal(launched.code, 0, launched.stdout);
+    const ack: Document<
+      DetachedLaunch & { follow: { watch: string; stop: string; cancel: string } }
+    > = JSON.parse(launched.stdout);
+    const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
+    const runHint = (hint: string, output = "json") => {
+      const shell = hint.replace(
+        /^migmate /u,
+        `'${process.execPath.replaceAll("'", "'\\''")}' '${entry.replaceAll("'", "'\\''")}' `,
+      );
+      const result = spawnSync("/bin/sh", ["-c", `${shell} --output ${output}`], {
+        env: { ...process.env, MIGMATE_HOME: join(h.root, "ambient-home") },
+        cwd: h.root,
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      return output === "json" ? JSON.parse(result.stdout) : result.stdout;
+    };
+    assert.equal(runHint(ack.value.follow.watch).value.state, "executing");
+    assert.equal(runHint(ack.value.follow.stop).value.stopped, true);
+    await h.reapDetached(ack.value.pid);
+    const textLaunch = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL("./cli-process-fixture.ts", import.meta.url)),
+        "execute",
+        "--job",
+        id,
+        "--home",
+        h.home,
+        "--detach",
+      ],
+      {
+        env: {
+          ...process.env,
+          CLI_TEST_HOME: h.home,
+          CLI_TEST_DESTINATION: h.destination,
+          CLI_TEST_NOW: new Date().toISOString(),
+          CLI_TEST_HOLD: "1",
+        },
+        encoding: "utf8",
+        timeout: 15000,
+      },
+    );
+    assert.equal(textLaunch.status, 0, textLaunch.stdout + textLaunch.stderr);
+    const pid = Number(textLaunch.stdout.match(/\(PID (\d+)\)/u)?.[1]);
+    assert.ok(pid);
+    h.trackDetached(pid);
+    const stopHint = textLaunch.stdout.match(/^Stop:\s+(.+)$/mu)?.[1];
+    assert.ok(stopHint);
+    const stopped: string = runHint(stopHint, "text");
+    await h.reapDetached(pid);
+    const resume = stopped.match(/^Resume with: (.+)$/mu)?.[1];
+    assert.ok(resume);
+    // Inspect the resumed job through the same shell-parsed target arguments;
+    // the real provider cannot execute this fixture's approved fake-provider plan.
+    assert.equal(
+      runHint(resume.replace(/^migmate execute /u, "migmate status ")).value.state,
+      "interrupted",
+    );
+    assert.equal(runHint(ack.value.follow.cancel).value.cancelled, true);
+  },
+);

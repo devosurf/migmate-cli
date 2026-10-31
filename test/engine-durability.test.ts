@@ -1160,6 +1160,26 @@ describe("engine durability seam", () => {
     assert.equal((await verify(h)).clean, true);
   });
 
+  it("upgrades schema 6 ownership without losing approval or inventing detached metadata", async (t) => {
+    const h = await harness(t);
+    const digest = await approve(h);
+    const database = new DatabaseSync(join(h.home, "jobs", h.ref.id, "state.db"));
+    try {
+      database.exec(
+        "DROP TABLE control_request; ALTER TABLE lease DROP COLUMN detached; ALTER TABLE lease DROP COLUMN log_path; UPDATE job SET schema_version=6",
+      );
+    } finally {
+      database.close();
+    }
+    reopen(h);
+    const status = value(await h.engine.reader(h.ref).status());
+    assert.equal(status.schemaVersion, 7);
+    assert.equal(status.planDigest, digest);
+    assert.equal(status.ownership.detached, false);
+    assert.equal(status.ownership.logPath, null);
+    assert.equal((await execute(h)).outcome, "completed");
+  });
+
   it("closes an already-verified legacy plan whose approved inputs retain retired fields", async (t) => {
     const h = await harness(t);
     await approve(h);

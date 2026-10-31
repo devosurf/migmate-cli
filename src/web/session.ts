@@ -81,13 +81,24 @@ export class WebSession {
       this.#release = resolve;
     });
     this.#lease = this.engine
-      .withWriter(this.job, async (writer) => {
-        this.#writer = writer;
-        this.#refusal = null;
-        ready();
-        await lifetime;
-        this.#writer = null;
-      })
+      .withWriter(
+        this.job,
+        async (writer) => {
+          this.#writer = writer;
+          this.#refusal = null;
+          ready();
+          await lifetime;
+          this.#writer = null;
+        },
+        {
+          onControl: () => {
+            this.#writer = null;
+            // An active command releases in its finalizer, after its result settles.
+            // Awaiting that command here would cycle through #releaseWriter().
+            if (!this.#pending) this.#release?.();
+          },
+        },
+      )
       .then((outcome) => {
         if (!outcome.ok) this.#refusal = outcome.refusal;
       })
@@ -280,7 +291,8 @@ export class WebSession {
         this.#defect = error;
       })
       .finally(async () => {
-        if (this.#refusal || this.#defect !== undefined) await this.#releaseWriter();
+        if (!this.#writer || this.#refusal || this.#defect !== undefined)
+          await this.#releaseWriter();
         this.#busy = null;
         this.#pending = null;
       });

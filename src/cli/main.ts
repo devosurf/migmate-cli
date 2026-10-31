@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { constants, realpathSync, readFileSync } from "node:fs";
 import { open, writeFile } from "node:fs/promises";
-import { extname } from "node:path";
+import { extname, join } from "node:path";
 import { hostname, userInfo } from "node:os";
 import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
@@ -41,10 +41,18 @@ import {
 import { errorCode, processIo, type Io } from "./io.ts";
 import { redact } from "./redact.ts";
 import { unsupportedNode } from "../versions.ts";
+import {
+  initializeDetachedChild,
+  launchDetached,
+  openAttemptLog,
+  sendLaunchMessage,
+  type AttemptLog,
+} from "./detached.ts";
+export { initializeDetachedChild } from "./detached.ts";
 
 export type { Io, IoInput, IoStream } from "./io.ts";
 
-const HELP = `Migmate — one ten-verb lifecycle, two job types
+const HELP = `Migmate — one lifecycle, two job types
 
 migmate init --type file_migration|teams_archive [--config job.toml|job.json]
 migmate creds init --job ID --config job.toml|job.json
@@ -52,6 +60,8 @@ migmate manifest load --job ID --file manifest.json|manifest.csv
 migmate discover --job ID [--file draft.json]
 migmate doctor|plan|execute|status|verify|report|close --job ID
 migmate plan --job ID --final               # staged final cutover revision
+migmate execute --job ID --detach            # background coordinator; private JSONL attempt log
+migmate stop --job ID                        # stop running work resumably
 migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
   [--freeze-by IDENTITY --freeze-at TIMESTAMP --freeze-how TEXT]
 migmate approve --job ID                    # human terminal: review, then type yes
@@ -63,7 +73,7 @@ migmate close --job ID --close-digest DIGEST --approver IDENTITY  # unattended i
 migmate acknowledge --job ID                # review and acknowledge selected post-grant failures
 migmate acknowledge --job ID --go-live-digest DIGEST --mapping ID [--mapping ID ...]
   --note RATIONALE --approver IDENTITY --output json  # explicit unattended acknowledgment
-migmate cancel --job ID [--reason TEXT]
+migmate cancel --job ID [--reason TEXT]      # also reaches a running owner
 migmate reclaim --job ID --confirm [--stop-worker]
 migmate web --job ID
 migmate --version                           # installed release
@@ -110,7 +120,13 @@ execute and verify. After successful cleanup, inspect status and repeat the
 interrupted command; execute stays resumable, not cancelled. Partial planning
 is not approvable and interrupted verification is not success. SIGHUP exits
 129 even if output cannot flush. SIGKILL, host loss or failed worker cleanup
-may still require recovery/reclaim; this is not detached execution.
+may still require recovery/reclaim.
+Detached execute survives terminal/SSH disconnects, not reboot or shutdown.
+Linux logout may terminate it with systemd KillUserProcesses=yes; use loginctl
+enable-linger. macOS sleep pauses work; caffeinate -i -w PID keeps that run awake.
+Tail the private logs/execute-<UTC>-<commandId>.jsonl attempt log; status remains
+the durable record. --detach is execute-only and cannot use --output jsonl.
+stop waits for cleanup and lease release; cancel stops work and cancels the job.
 `;
 
 class Output {
@@ -120,8 +136,11 @@ class Output {
   failed: unknown;
   unknown = false;
   lastRefusal: string | undefined;
-  readonly io: Io;
-  readonly mode: OutputMode;
+  io: Io;
+  mode: OutputMode;
+  detachedLogPath: string | undefined;
+  admitted = false;
+  resumeVerb: string | undefined;
   command: string;
   readonly abort: AbortController;
   constructor(io: Io, mode: OutputMode, command: string, abort: AbortController) {
@@ -162,6 +181,13 @@ class Output {
       commandId: this.commandId,
       job: this.job,
       ...projected,
+      ...(outcome.ok &&
+      outcome.value &&
+      typeof outcome.value === "object" &&
+      "detached" in outcome.value &&
+      outcome.value.detached === true
+        ? { state: "executing" }
+        : {}),
     };
     if (this.mode === "text" && !outcome.ok) {
       await this.io.stderr.write(`${JSON.stringify(redact(envelope), null, 2)}\n`);
@@ -658,6 +684,10 @@ async function close(
   );
 }
 
+function jobCommand(verb: string, invocation: Invocation): string {
+  return `migmate ${verb} --home '${invocation.home.replaceAll("'", "'\\''")}' --job ${invocation.jobId}`;
+}
+
 async function executeCommand(
   invocation: Invocation,
   output: Output,
@@ -692,6 +722,26 @@ async function executeCommand(
   if (!status.ok) return status;
   output.job.type = status.value.jobType;
   if (!knownContract(status.value)) return { ok: true, value: status.value };
+  if (invocation.command === "execute" && invocation.detach) {
+    const launched = await launchDetached(invocation, output.abort.signal);
+    if (!launched.ok) return launched;
+    const logPath = join(invocation.home, "jobs", job.id, launched.value.logPath);
+    return {
+      ok: true,
+      value: {
+        detached: true,
+        pid: launched.value.pid,
+        commandId: launched.value.commandId,
+        logPath,
+        follow: {
+          tail: `tail -f '${logPath.replaceAll("'", "'\\''")}'`,
+          watch: jobCommand("status", invocation),
+          stop: jobCommand("stop", invocation),
+          cancel: jobCommand("cancel", invocation),
+        },
+      },
+    };
+  }
   if (invocation.command === "discover") {
     const result = await reader.discover();
     if (!result.ok) return result;
@@ -741,6 +791,24 @@ async function executeCommand(
     if (invocation.command === "close") return close(invocation, output, engine, status.value);
     if (invocation.command === "reclaim")
       return engine.reclaim(job, { confirm: true, stopWorker: invocation.stopWorker });
+    if (invocation.command === "stop" || invocation.command === "cancel") {
+      const controlled = await engine.requestControl(job, {
+        kind: invocation.command,
+        commandId: output.commandId,
+        signal: output.abort.signal,
+        ...(invocation.reason === undefined ? {} : { reason: invocation.reason }),
+      });
+      if (controlled.ok && invocation.command === "stop") {
+        const current = await reader.status();
+        if (current.ok)
+          output.resumeVerb =
+            current.value.incompleteClose?.nextAction ??
+            current.value.rail.find(
+              (entry) => entry.state === "current" || entry.state === "checkpoint",
+            )?.verb;
+      }
+      return controlled;
+    }
     return engine.withWriterResult(job, async (writer: JobWriter): Promise<Outcome<unknown>> => {
       switch (invocation.command) {
         case "manifest load": {
@@ -779,13 +847,31 @@ async function executeCommand(
             signal: output.abort.signal,
           });
         case "execute":
-          return writer.execute({ signal: output.abort.signal });
+          return writer.execute({
+            signal: output.abort.signal,
+            ...(output.detachedLogPath === undefined
+              ? {}
+              : {
+                  detached: { logPath: output.detachedLogPath },
+                  onAdmitted: async ({ ownerUuid }: { ownerUuid: string }) => {
+                    await sendLaunchMessage({
+                      type: "migmate:admitted",
+                      admission: {
+                        pid: process.pid,
+                        ownerUuid,
+                        commandId: output.commandId,
+                        logPath: output.detachedLogPath,
+                      },
+                    });
+                    output.admitted = true;
+                    process.disconnect?.();
+                  },
+                }),
+          });
         case "verify":
           return writer.verify({ signal: output.abort.signal });
         case "report":
           return writer.report();
-        case "cancel":
-          return writer.cancel(invocation.reason ?? "Operator cancelled the job.");
         default:
           throw new Error("Unexpected writer command");
       }
@@ -812,10 +898,26 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
   let engine = suppliedEngine;
   let result: AdapterOutcome;
   let invocation: Invocation | undefined;
+  let detachedChild = false;
+  let attemptLog: AttemptLog | undefined;
+  const disconnected = () => {
+    if (!output.admitted) abort.abort(new Error("Launcher disconnected before admission"));
+  };
   try {
     invocation = parseInvocation(argv);
     if (!invocation.help || output.command !== "help") output.command = invocation.command;
     if (invocation.jobId) output.job = { id: invocation.jobId, type: null };
+    if (invocation.command === "execute" && !invocation.help) {
+      detachedChild = await initializeDetachedChild();
+      if (detachedChild) {
+        process.once("disconnect", disconnected);
+        attemptLog = await openAttemptLog(invocation.home, invocation.jobId!, output.commandId, io);
+        output.io = attemptLog.io;
+        output.mode = "jsonl";
+        output.detachedLogPath = attemptLog.logPath;
+        invocation.output = "jsonl";
+      }
+    }
     if (invocation.help) result = { ok: true, value: { help: HELP } };
     // Answered before the Node floor and the store, like help, so a bug report can
     // always name the release.
@@ -839,12 +941,33 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
       result = caught(error);
     }
     io.signal?.removeEventListener("abort", onAbort);
+    process.off("disconnect", disconnected);
+  }
+  if (detachedChild && !output.admitted && process.connected) {
+    try {
+      await sendLaunchMessage({
+        type: "migmate:refused",
+        result: result.ok
+          ? refusal("internal_defect", "Execution ended before admission.")
+          : result,
+      });
+    } catch (error) {
+      result = caught(error);
+    } finally {
+      if (process.connected) process.disconnect?.();
+    }
   }
   const signal = errorCode(io.signal?.reason);
   const signalExit =
     signal === "SIGHUP" ? 129 : signal === "SIGTERM" ? 143 : signal === "SIGINT" ? 130 : undefined;
-  if (signal === "EPIPE" || errorCode(output.failed) === "EPIPE") return signalExit ?? 141;
-  if (output.failed) return signalExit ?? 1;
+  if (signal === "EPIPE" || errorCode(output.failed) === "EPIPE") {
+    await attemptLog?.file.close();
+    return signalExit ?? 141;
+  }
+  if (output.failed) {
+    await attemptLog?.file.close();
+    return signalExit ?? 1;
+  }
   const code = output.unknown ? 1 : outcomeExit(invocation?.command ?? output.command, result);
   try {
     // JSONL has no synthetic cursor or synthetic terminal. A pre-lease refusal
@@ -852,8 +975,27 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     if (invocation?.help && output.mode === "text" && result.ok) await io.stdout.write(HELP);
     else if (invocation?.command === "version" && output.mode === "text" && result.ok)
       await io.stdout.write(`${MIGMATE_VERSION}\n`);
-    else if (
+    else if (invocation?.detach && result.ok && output.mode === "text") {
+      const value = result.value as { pid: number; logPath: string };
+      await io.stdout.write(
+        `Started ${invocation.jobId} in the background (PID ${value.pid}).\nLog:   ${value.logPath}\nStop:  ${jobCommand("stop", invocation)}\n`,
+      );
+    } else if (
+      (invocation?.command === "stop" || invocation?.command === "cancel") &&
+      result.ok &&
+      output.mode === "text"
+    ) {
+      const value = result.value as { stopped?: boolean };
+      await io.stdout.write(
+        invocation.command === "cancel"
+          ? `Cancelled ${invocation.jobId}.\n`
+          : value.stopped === false
+            ? `Nothing running for ${invocation.jobId}.\n`
+            : `Stopped ${invocation.jobId}.\n${output.resumeVerb ? `Resume with: ${jobCommand(output.resumeVerb, invocation)}\n` : ""}`,
+      );
+    } else if (
       output.mode !== "jsonl" ||
+      invocation?.command === "execute" ||
       (!result.ok && output.lastRefusal !== result.refusal.code) ||
       (!output.attempted && result.ok)
     )
@@ -870,6 +1012,8 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
       }
     }
     return signalExit ?? 1;
+  } finally {
+    await attemptLog?.file.close();
   }
   return signalExit ?? code;
 }

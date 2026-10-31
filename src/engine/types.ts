@@ -248,6 +248,7 @@ export const EVENT_KINDS = [
   "mapping_progress",
   "refusal",
   "terminal",
+  "control_request",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -496,6 +497,8 @@ export interface JobStatus {
     pid: number | null;
     heartbeatAt: string | null;
     kind: "cli" | "web" | null;
+    detached: boolean;
+    logPath: string | null;
   };
   planRevision: number | null;
   planDigest: string | null;
