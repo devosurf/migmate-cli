@@ -40,6 +40,7 @@ export const CODES: readonly CodeEntry[] = [
   entry("to_be_deleted", "policy_outcome", "execute", FILE),
   entry("destination_only_retained", "policy_outcome", "plan", FILE),
   entry("source_deleted_destination_retained", "policy_outcome", "plan", FILE),
+  entry("destination_name_encoded", "policy_outcome", "plan", FILE),
 
   // ---- file migration: plan / collision blockers ---------------------------
   entry("mapping_overlap", "finding", "plan", FILE),
@@ -53,6 +54,9 @@ export const CODES: readonly CodeEntry[] = [
   entry("source_identity_reuse_collision", "finding", "plan", FILE),
 
   // ---- file migration: execution / verification findings -------------------
+  entry("destination_invalid_name", "finding", "execute", FILE),
+  entry("destination_path_too_long", "finding", "execute", FILE),
+  entry("destination_path_unverified", "finding", "execute", FILE),
   entry("source_read_failed", "finding", "execute", FILE, true),
   entry("destination_write_failed", "finding", "execute", FILE, true),
   entry("upload_quota_exceeded", "finding", "execute", FILE, true),
@@ -115,6 +119,17 @@ for (const code of CODES) CODE_BY_NAME[code.code] = code;
  * closure until accepted. Policy outcomes are neither.
  */
 export function isAcceptable(code: string): boolean {
+  // Remaining destination conflicts need source repair, not acceptance/exclusion.
+  // Encoding notices are policy outcomes and never require acceptance.
+  if (
+    [
+      "destination_duplicate_name",
+      "destination_invalid_name",
+      "destination_path_too_long",
+      "destination_path_unverified",
+    ].includes(code)
+  )
+    return false;
   const kind = CODE_BY_NAME[code]?.kind;
   return kind !== undefined && kind !== "policy_outcome";
 }
@@ -126,6 +141,14 @@ const consequences: Record<string, string> = {
   content_verification_degraded: "Archive destination content equality is not fully proven.",
   source_read_failed: "Source content could not be read and may be absent.",
   destination_write_failed: "Destination writes failed; affected content is not proven complete.",
+  destination_invalid_name:
+    "Source names cannot be expressed by the destination encoding and naming rules; parity is unproven.",
+  destination_path_too_long:
+    "Source paths exceed the destination limit; affected content parity is unproven.",
+  destination_path_unverified:
+    "The full destination path could not be proven representable; content parity is unproven.",
+  destination_duplicate_name:
+    "Distinct source objects collide at the destination; fix source names and re-check before copying.",
   destination_read_failed:
     "Destination content could not be verified; its required hash evidence is unavailable.",
   drive_membership_mismatch:

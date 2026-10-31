@@ -23,7 +23,14 @@ const provider = new FixturePort(
         },
       }
     : undefined,
+  process.env.CLI_TEST_DESTINATION_PROVIDER === "sharepoint" ? "sharepoint" : "google_shared_drive",
+  process.env.CLI_TEST_SHAREPOINT_MEMBERSHIP === "1",
 );
+if (process.env.CLI_TEST_ENCODED_NAMES === "1") {
+  provider.renameSourceItem("source-0", "report?.txt");
+  provider.renameSourceItem("source-1", "report？.txt");
+  provider.renameSourceItem("source-2", "literal/slash.txt");
+}
 const engine = openEngine({ home, provider, adapter: "cli", now: () => new Date(now) });
 const transport = processIo();
 const release = async (message: unknown) => {

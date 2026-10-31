@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { openEngine } from "../index.ts";
-import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, realpath, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createCredentialSession, type CredentialSession } from "./credentials.ts";
 import { ProviderFault } from "./fault.ts";
-import { disposeListing } from "./listing.ts";
 import {
   createGraphTransport,
   fetchProvider,
@@ -18,6 +17,10 @@ import {
 } from "./http.ts";
 import { FileEffects } from "./file-effects.ts";
 import type { ProvenanceRecord } from "./port.ts";
+import { DiskListing, disposeListing, ListingScratch } from "./listing.ts";
+import { GoogleAdapter } from "./adapters/google.ts";
+import { SharePointAdapter } from "./adapters/sharepoint.ts";
+import { SHAREPOINT_DESTINATION_ENCODING } from "./adapters/rclone-name-encoding.ts";
 
 const mapping = {
   id: "mapping",
@@ -101,6 +104,237 @@ async function bytes(content: AsyncIterable<Uint8Array>): Promise<Buffer> {
   const result: Uint8Array[] = [];
   for await (const chunk of content) result.push(chunk);
   return Buffer.concat(result);
+}
+
+function nativeFolder(id: string, driveId = mapping.sourceDriveId) {
+  return {
+    id,
+    driveId,
+    name: id,
+    folder: {},
+    mimeType: "application/vnd.google-apps.folder",
+    parents: [mapping.sourceItemId],
+    parentReference: { driveId, id: mapping.sourceItemId },
+    createdTime: "",
+    modifiedTime: "",
+  };
+}
+
+for (const Adapter of [GoogleAdapter, SharePointAdapter]) {
+  for (const outcome of ["success", "cycle", "error", "abort", "wrong-child-drive", "preflight"]) {
+    test(`${Adapter.name} native pages preserve entries and release scratch on ${outcome}`, async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), "migmate-native-listing-"));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      using scratch = new ListingScratch(directory);
+      const controller = new AbortController();
+      const aborted = new Error("Native listing cancelled");
+      let pages = 0;
+      t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/drives/source-drive"))
+          return Response.json({ id: mapping.sourceDriveId, driveType: "documentLibrary" });
+        if (
+          url.pathname.endsWith("/items/source-root") ||
+          url.pathname.endsWith("/files/source-root")
+        )
+          return Response.json(nativeFolder(mapping.sourceItemId));
+        assert.ok(url.pathname.endsWith("/children") || url.pathname === "/drive/v3/files");
+        const page = pages++;
+        assert.ok(page < 3, "Repeated cursors must refuse before fetching duplicate pages");
+        if (page === 1 && outcome === "error") return new Response(null, { status: 403 });
+        if (page === 1 && outcome === "abort") controller.abort(aborted);
+        const entries = Array.from({ length: 101 }, (_, offset) => ({
+          ...nativeFolder(
+            `entry-${page * 101 + offset}`,
+            page === 1 && outcome === "wrong-child-drive" ? "another-drive" : mapping.sourceDriveId,
+          ),
+          // Duplicate native IDs must survive; the collector needs both paths.
+          ...(offset === 0 ? { id: "duplicate", name: `duplicate-${page}` } : {}),
+        }));
+        const next = page === 2 ? undefined : outcome === "cycle" ? "repeat" : `page-${page + 1}`;
+        return Response.json({
+          files: entries,
+          value: entries,
+          ...(next
+            ? {
+                nextPageToken: next,
+                "@odata.nextLink": `https://graph.microsoft.com/v1.0/drives/source-drive/items/source-root/children?$skiptoken=${next}`,
+              }
+            : {}),
+        });
+      });
+      const adapter = new Adapter({
+        mappings: [mapping],
+        destinationRoots: [mapping],
+        session,
+        graph: createGraphTransport(session),
+        worker: {
+          read: () => {
+            throw new Error("Listing must not read source bytes");
+          },
+        },
+      });
+      const pending = scratch.run(() =>
+        outcome === "preflight"
+          ? adapter.preflightSource(mapping, controller.signal)
+          : adapter.listSourceChildren({
+              driveId: mapping.sourceDriveId,
+              itemId: mapping.sourceItemId,
+              signal: controller.signal,
+            }),
+      );
+      if (outcome === "success") {
+        const listing = await pending;
+        assert.ok(listing instanceof DiskListing);
+        try {
+          assert.equal(listing.size, 303);
+          const expected = Array.from({ length: 303 }, (_, index) =>
+            index % 101 === 0 ? `duplicate-${index / 101}` : `entry-${index}`,
+          );
+          assert.deepEqual(
+            Array.from(listing, (entry) => entry.name),
+            expected,
+          );
+          assert.deepEqual(
+            Array.from(listing, (entry) => entry.name),
+            expected,
+          );
+          const [owner] = await readdir(directory);
+          assert.ok(owner);
+          assert.equal(
+            (await readdir(join(directory, owner))).length,
+            1,
+            "Only the caller-owned inventory survives successful pagination",
+          );
+        } finally {
+          disposeListing(listing);
+        }
+      } else if (outcome === "preflight") {
+        await pending;
+      } else {
+        await assert.rejects(pending, (error: unknown) => {
+          if (outcome === "abort") return controller.signal.aborted && error instanceof Error;
+          if (!(error instanceof ProviderFault)) return false;
+          if (outcome === "cycle") return error.message === "Source paging repeated a cursor.";
+          if (outcome === "wrong-child-drive") return error.code === "unsupported_route";
+          return error instanceof HttpProviderFault && error.status === 403;
+        });
+      }
+      assert.equal(pages, outcome === "success" || outcome === "preflight" ? 3 : 2);
+      const [owner] = await readdir(directory);
+      assert.ok(owner);
+      assert.deepEqual(
+        await readdir(join(directory, owner)),
+        [],
+        "Failed, cancelled, consumed and preflight inventories release their scratch",
+      );
+    });
+  }
+
+  for (const mismatch of ["item", "drive", "missing", "not-folder", "unmapped"]) {
+    test(`${Adapter.name} revalidates stable source parents and refuses ${mismatch}`, async (t) => {
+      let reads = 0;
+      t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+        const url = new URL(String(input));
+        assert.ok(
+          url.pathname.endsWith("/items/source-root") ||
+            url.pathname.endsWith("/files/source-root"),
+          "Invalid identities must not list children or read bytes",
+        );
+        reads++;
+        if (mismatch === "missing") return new Response(null, { status: 404 });
+        return Response.json({
+          ...nativeFolder(
+            mismatch === "item" ? "another-item" : mapping.sourceItemId,
+            mismatch === "drive" ? "another-drive" : mapping.sourceDriveId,
+          ),
+          ...(mismatch === "not-folder"
+            ? {
+                folder: undefined,
+                remoteItem: {},
+                mimeType: "application/vnd.google-apps.shortcut",
+              }
+            : {}),
+        });
+      });
+      const adapter = new Adapter({
+        mappings: [mapping],
+        destinationRoots: [mapping],
+        session,
+        graph: createGraphTransport(session),
+        worker: {
+          read: () => {
+            throw new Error("Invalid identities must not read source bytes");
+          },
+        },
+      });
+      const identity = {
+        driveId: mismatch === "unmapped" ? "unmapped-drive" : mapping.sourceDriveId,
+        itemId: mapping.sourceItemId,
+      };
+      const expected =
+        mismatch === "item"
+          ? "source_read_failed"
+          : mismatch === "drive"
+            ? "unsupported_route"
+            : "preflight_failed";
+      await assert.rejects(
+        adapter.listSourceChildren(identity),
+        (error: unknown) => error instanceof ProviderFault && error.code === expected,
+      );
+      await assert.rejects(bytes(adapter.openSourceContent(identity)), ProviderFault);
+      assert.equal(reads, mismatch === "unmapped" ? 0 : 2);
+    });
+  }
+
+  test(`${Adapter.name} resolves child identities after the previous scratch owner closes`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "migmate-native-owners-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const resolved: string[] = [];
+    let currentParent = "";
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/children") || url.pathname === "/drive/v3/files") {
+        const entries = currentParent === mapping.sourceItemId ? [nativeFolder("nested")] : [];
+        return Response.json({ files: entries, value: entries });
+      }
+      const itemId = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+      assert.ok(itemId === mapping.sourceItemId || itemId === "nested");
+      resolved.push(itemId);
+      currentParent = itemId;
+      return Response.json(nativeFolder(itemId));
+    });
+    const adapter = new Adapter({
+      mappings: [mapping],
+      destinationRoots: [mapping],
+      session,
+      graph: createGraphTransport(session),
+      worker: {
+        read: () => {
+          throw new Error("Listing must not read source bytes");
+        },
+      },
+    });
+    for (const itemId of [mapping.sourceItemId, "nested"]) {
+      using scratch = new ListingScratch(directory);
+      const listing = await scratch.run(() =>
+        adapter.listSourceChildren({
+          driveId: mapping.sourceDriveId,
+          itemId,
+        }),
+      );
+      try {
+        assert.deepEqual(
+          Array.from(listing, (entry) => entry.id),
+          itemId === mapping.sourceItemId ? ["nested"] : [],
+        );
+      } finally {
+        disposeListing(listing);
+      }
+    }
+    assert.deepEqual(resolved, [mapping.sourceItemId, "nested"]);
+    assert.deepEqual(await readdir(directory), []);
+  });
 }
 
 for (const stalledCleanup of [false, true]) {
@@ -291,6 +525,9 @@ for (const blocked of [
 }
 
 test("SharePoint notebook sources retain their web URL and count sections across pages and section groups", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "migmate-notebook-listing-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  using scratch = new ListingScratch(directory);
   const notebook = {
     id: "notebook",
     name: "Team notebook",
@@ -334,6 +571,10 @@ test("SharePoint notebook sources retain their web URL and count sections across
     if (url.pathname.endsWith("/items/recycle-bin/children"))
       return Response.json({ value: [{ id: "deleted", name: "Old.one", file: {} }] });
     if (url.pathname.endsWith("/items/notebook")) return Response.json(notebook);
+    if (url.pathname.endsWith("/items/source-root"))
+      return Response.json({ id: "source-root", name: "root", folder: {} });
+    if (url.pathname.endsWith("/versions")) return Response.json({ value: [] });
+    if (url.pathname.endsWith("/retentionLabel")) return Response.json({});
     throw new Error(`Unexpected Graph request: ${url.pathname}`);
   });
   const files = new FileEffects({
@@ -350,17 +591,101 @@ test("SharePoint notebook sources retain their web URL and count sections across
       },
     },
   });
-  const source = await files.readSourceItem({ driveId: "source-drive", itemId: "notebook" });
+  const source = await scratch.run(() =>
+    files.readSourceItem({ driveId: "source-drive", itemId: "notebook" }),
+  );
   assert.equal(source?.webUrl, notebook.webUrl);
   assert.equal(source?.kind, "package");
   assert.equal(source?.packageSections, 4);
-  const children = await files.listSourceChildren({
-    driveId: "source-drive",
-    itemId: "source-root",
-  });
-  t.after(() => disposeListing(children));
-  assert.deepEqual(Array.from(children), [source]);
+  const children = await scratch.run(() =>
+    files.listSourceChildren({
+      driveId: "source-drive",
+      itemId: "source-root",
+    }),
+  );
+  try {
+    assert.deepEqual([...children], [source]);
+  } finally {
+    disposeListing(children);
+  }
+  const sections = await scratch.run(() =>
+    files.listSourceChildren({
+      driveId: "source-drive",
+      itemId: "notebook",
+    }),
+  );
+  try {
+    assert.deepEqual(
+      Array.from(sections, (entry) => entry.id),
+      ["section-1", "toc", "image", "section-2", "section-group", "recycle-bin"],
+    );
+  } finally {
+    disposeListing(sections);
+  }
+  const [owner] = await readdir(directory);
+  assert.ok(owner);
+  assert.deepEqual(await readdir(join(directory, owner)), []);
 });
+
+for (const outcome of ["cycle", "error", "abort"]) {
+  test(`SharePoint notebook counting releases its frontier and cursors on ${outcome}`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "migmate-notebook-failure-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    using scratch = new ListingScratch(directory);
+    const controller = new AbortController();
+    let pages = 0;
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/items/notebook"))
+        return Response.json({
+          id: "notebook",
+          name: "Notebook",
+          package: { type: "oneNote" },
+        });
+      assert.ok(url.pathname.endsWith("/items/notebook/children"));
+      assert.ok(++pages <= 2, "Repeated notebook cursors must refuse before another fetch");
+      if (pages === 2 && outcome === "error") return new Response(null, { status: 403 });
+      if (pages === 2 && outcome === "abort") controller.abort();
+      return Response.json({
+        value: [{ id: `group-${pages}`, name: "Group", folder: {} }],
+        "@odata.nextLink":
+          "https://graph.microsoft.com/v1.0/drives/source-drive/items/notebook/children?$skiptoken=repeat",
+      });
+    });
+    const adapter = new SharePointAdapter({
+      mappings: [mapping],
+      destinationRoots: [mapping],
+      session,
+      graph: createGraphTransport(session),
+      worker: {
+        read: () => {
+          throw new Error("Counting must not read source bytes");
+        },
+      },
+    });
+    await assert.rejects(
+      scratch.run(() =>
+        adapter.listSourceChildren({
+          driveId: mapping.sourceDriveId,
+          itemId: "notebook",
+          signal: controller.signal,
+        }),
+      ),
+      (error: unknown) => {
+        if (outcome === "abort") return controller.signal.aborted && error instanceof Error;
+        if (outcome === "error") return error instanceof HttpProviderFault && error.status === 403;
+        return (
+          error instanceof ProviderFault &&
+          error.message === "Notebook section paging repeated a cursor."
+        );
+      },
+    );
+    assert.equal(pages, 2);
+    const [owner] = await readdir(directory);
+    assert.ok(owner);
+    assert.deepEqual(await readdir(join(directory, owner)), []);
+  });
+}
 
 test("non-notebook sources have no section count and Google sources have no web URL", async (t) => {
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
@@ -375,6 +700,8 @@ test("non-notebook sources have no section count and Google sources have no web 
         modifiedTime: "",
       });
     assert.equal(url.hostname, "graph.microsoft.com");
+    if (url.pathname.endsWith("/items/source-root"))
+      return Response.json({ id: "source-root", name: "root", folder: {} });
     if (url.pathname.endsWith("/items/source-root/children"))
       return Response.json({
         value: [
@@ -482,11 +809,14 @@ test("libraries of one site resolve and list their shared root item ID within ea
     });
     assert.equal(root?.identity, `${driveId}:site-root`);
     const children = await files.listSourceChildren({ driveId, itemId: "site-root" });
-    t.after(() => disposeListing(children));
-    assert.deepEqual(
-      Array.from(children, ({ id, driveId: childDrive }) => [id, childDrive]),
-      [[`${driveId}-folder`, driveId]],
-    );
+    try {
+      assert.deepEqual(
+        Array.from(children, ({ id, driveId: childDrive }) => [id, childDrive]),
+        [[`${driveId}-folder`, driveId]],
+      );
+    } finally {
+      disposeListing(children);
+    }
   }
 });
 
@@ -522,6 +852,8 @@ test("delegated Google copies carry a per-mapping impersonation override", async
 
 test("reverse mappings read Google bytes as the actor and address SharePoint destinations by path", async (t) => {
   const reverse = { ...mapping };
+  const destinationRequests: string[] = [];
+  let destinationName = "Sub ？folder";
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const auth = new Headers(init?.headers).get("Authorization");
@@ -543,16 +875,17 @@ test("reverse mappings read Google bytes as the actor and address SharePoint des
       });
     }
     assert.equal(auth, "Bearer secret-destination-canary");
+    destinationRequests.push(url.pathname);
     if (url.pathname.endsWith("/root")) return Response.json({ id: "library-root" });
     return Response.json({
       id: "destination-root",
-      name: "Sub #folder",
+      name: destinationName,
       folder: {},
       eTag: "etag",
       parentReference: {
         id: "library-root",
         driveId: "shared-drive",
-        path: "/drives/shared-drive/root:/Parent%20folder",
+        path: "/drives/shared-drive/root:/Parent%EF%BC%9Afolder",
       },
     });
   });
@@ -595,10 +928,15 @@ test("reverse mappings read Google bytes as the actor and address SharePoint des
   );
   assert.equal(
     pass.destination.fs,
-    'sp-write,drive_id="shared-drive",encoding=Slash:Parent folder/Sub #folder',
+    `sp-write,drive_id="shared-drive",encoding="${SHAREPOINT_DESTINATION_ENCODING}":Parent:folder/Sub ?folder`,
   );
   assert.equal(pass.source.ignoreSizeAndChecksum, undefined);
   assert.equal(pass.destination.ignoreSizeAndChecksum, true);
+  assert.ok(
+    destinationRequests.includes(
+      "/v1.0/drives/shared-drive/root:/Parent%EF%BC%9Afolder/Sub%20%EF%BC%9Ffolder:/",
+    ),
+  );
   await assert.rejects(files.discoverSharePoint(), {
     code: "unsupported_route",
     message: "Discovery requires a SharePoint source file job.",
@@ -611,6 +949,8 @@ test("reverse mappings read Google bytes as the actor and address SharePoint des
     ).toString(),
     "source bytes",
   );
+  destinationName = "literal‛quote";
+  await assert.rejects(files.resolveFilePass(reverse), { code: "unsupported_route" });
 });
 
 test("Google about proves the acting email and exposes drive creation capability", async (t) => {
@@ -695,14 +1035,20 @@ test("creates Shared Drives with a replayable request id and reads and grants ex
   });
   const files = effects();
   assert.deepEqual(
-    await files.createSharedDrive({ name: "Finance's drive", requestId: "job-mapping-request" }),
+    await files.createDestinationContainer({
+      name: "Finance's drive",
+      requestId: "job-mapping-request",
+    }),
     { id: "new-drive", name: "Finance's drive", createdTime: "2026-09-01T00:00:01.000Z" },
   );
   assert.equal(
-    await files.createSharedDrive({ name: "Finance's drive", requestId: "job-mapping-request" }),
+    await files.createDestinationContainer({
+      name: "Finance's drive",
+      requestId: "job-mapping-request",
+    }),
     null,
   );
-  assert.deepEqual(await files.findSharedDrives("Finance's drive"), [
+  assert.deepEqual(await files.findDestinationContainers({ name: "Finance's drive" }), [
     { id: "new-drive", name: "Finance's drive", createdTime: "2026-09-01T00:00:01.000Z" },
   ]);
   assert.deepEqual(await files.listDriveMembers("new-drive"), [
@@ -1067,11 +1413,7 @@ test("source bytes are read by the drive-root path that is bound to the item", a
     },
   });
   const stable = { driveId: "source-drive", itemId: "stable-source" };
-  await effects
-    .listSourceChildren({ driveId: "source-drive", itemId: "source-root" })
-    .then(disposeListing)
-    .catch(() => undefined);
-  await effects.readSourceItem(stable);
+
   assert.equal((await bytes(effects.openSourceContent(stable))).toString(), "bytes");
   assert.deepEqual(requested, [
     { fs: "source,drive_id='source-drive',encoding=Slash:", path: "reports/Q4 2026/summary.txt" },

@@ -2,6 +2,7 @@ import type { FileProviderCapabilities } from "./capabilities.ts";
 import { googlePreflight, unreadableSourceDrives } from "./google-preflight.ts";
 import type { FileContext } from "../../drivers/file-state.ts";
 import type { UploadQuotaStop } from "../../types.ts";
+import { googleSourceName } from "./rclone-name-encoding.ts";
 
 const roles: Record<string, true> = {
   organizer: true,
@@ -16,6 +17,8 @@ export const googleCapabilities: FileProviderCapabilities = {
   id: "google_shared_drive",
   rcloneBackend: "drive",
   rootField: "folderId",
+  idempotentCreation: true,
+  sourceName: googleSourceName,
   hashType: "sha256",
   ignoreSizeAndChecksum: false,
   uploadQuota: true,

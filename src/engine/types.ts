@@ -4,7 +4,7 @@
  * contracts are the code registry, the exit-code table, and the CLI envelope.
  */
 
-import type { CopyPassStats, DriveMember } from "./providers/port.ts";
+import type { CopyPassStats, DriveMember, DriveMembership } from "./providers/port.ts";
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 import type { UploadActivity } from "./store/uploads.ts";
 
@@ -58,10 +58,22 @@ export interface CreatedDrive {
   requestId: string;
   name: string;
   driveId: string | null;
+  /** Container identity and root item identity differ on SharePoint. */
+  rootFolderId?: string;
+  siteId?: string;
+  /** Monotonic: clearing a manifest's members never restores inherited access. */
+  managedAccess?: boolean;
+  /** Proven empty initial ACL when no creator identity is available, before manifest grants. */
+  initialMembers?: DriveMembership[];
   creatorEmail: string;
   /** Absent on schema-5 records written before creation provenance was recorded. */
   intentAt?: string;
-  provenance?: { kind: "create_response" } | { kind: "name_recovery"; createdTime: string };
+  /** Recorded before a non-idempotent provider call; absence means it was not attempted. */
+  creationAttemptedAt?: string;
+  provenance?:
+    | { kind: "create_response" }
+    | { kind: "name_recovery"; createdTime: string }
+    | { kind: "request_marker"; requestId: string };
   /** Irreversible job-local transfer fence, committed before deferred access starts. */
   goLive?: {
     startedAt: string;
@@ -435,6 +447,15 @@ interface RowBase {
   accepted: boolean;
 }
 
+/** Observed destination-name policy evidence, not per-file approval scope. */
+export interface DestinationConstraintEvidence {
+  blocking: boolean;
+  originalPath: string;
+  encodedPath?: string;
+  originalName?: string;
+  encodedName?: string;
+}
+
 export interface FileItemRow extends RowBase {
   jobType: "file_migration";
   mappingId: string;
@@ -451,6 +472,7 @@ export interface FileItemRow extends RowBase {
   mappingPass?: MappingPass;
   sourceDisclosures?: readonly string[];
   sourceObservation?: Record<string, unknown>;
+  destinationConstraint?: DestinationConstraintEvidence;
 }
 
 export interface ConversationRow extends RowBase {

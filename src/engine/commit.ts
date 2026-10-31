@@ -12,6 +12,7 @@
 import type {
   CodeKind,
   CreatedDrive,
+  DestinationConstraintEvidence,
   MemberGrant,
   MappingPass,
   ProgressUnit,
@@ -53,6 +54,7 @@ export interface FileCommitRow extends CommitRowBase {
   nextStep?: string | null;
   omissionReason?: string | null;
   fileScope?: FileScope;
+  destinationConstraint?: DestinationConstraintEvidence;
 }
 
 export interface ConversationCommitRow extends CommitRowBase {
