@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
-import { DiskListing, disposeListing, indexListing } from "./listing.ts";
+import { DiskListing, ListingScratch, disposeListing, indexListing } from "./listing.ts";
 
 it("preserves duplicates, last-value lookup, bigint and repeatable insertion order", () => {
   using listing = new DiskListing<{ path: string; modified: bigint; size: number }>();
@@ -91,14 +91,13 @@ it("external sorting preserves stable locale digest order across odd merge runs"
   assert.deepEqual([...listing.sorted(() => 0)], values);
 });
 
-it("removes sort scratch on early return, failure and listing disposal", () => {
-  const before = new Set(readdirSync(tmpdir()));
-  const listing = new DiskListing<{ path: string }>();
-  const directory = readdirSync(tmpdir()).find(
-    (name) => name.startsWith("migmate-listing-") && !before.has(name),
-  );
-  assert.ok(directory);
-  const path = join(tmpdir(), directory);
+it("removes sort scratch on early return, failure and listing disposal", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "migmate-sort-test-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  using scratch = new ListingScratch(parent);
+  const listing = scratch.run(() => new DiskListing<{ path: string }>());
+  const owner = join(parent, readdirSync(parent)[0]!);
+  const path = join(owner, readdirSync(owner)[0]!);
   try {
     for (let index = 0; index < 2049; index++) listing.add({ path: String(index) });
     const iterator = listing.sorted((a, b) => a.path.localeCompare(b.path));
