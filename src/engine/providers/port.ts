@@ -221,12 +221,10 @@ export interface ProviderPort extends FilePassProvider {
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
   discoverSharePoint?(): Promise<SharePointDiscovery>;
-  sourceCoverageFindings?(signal?: AbortSignal): Promise<
-    readonly {
-      code: string;
-      evidence: Record<string, unknown>;
-    }[]
-  >;
+  sourcePlanningEvidence?(signal?: AbortSignal): Promise<{
+    evidence: Record<string, unknown>;
+    notices: readonly string[];
+  }>;
   preflight?(input: {
     jobType: JobType;
     config: unknown;

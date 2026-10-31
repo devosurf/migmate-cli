@@ -450,6 +450,7 @@ export interface FileItemRow extends RowBase {
   mapping?: FileMappingConfig;
   mappingPass?: MappingPass;
   sourceDisclosures?: readonly string[];
+  sourceObservation?: Record<string, unknown>;
 }
 
 export interface ConversationRow extends RowBase {

@@ -384,7 +384,7 @@ export class DropboxAdapter implements FileAdapter {
     };
   }
 
-  async sourceCoverageFindings(signal?: AbortSignal) {
+  async sourcePlanningEvidence(signal?: AbortSignal) {
     let paperAsFiles: boolean | null = null;
     try {
       const response = await this.#response(
@@ -397,9 +397,9 @@ export class DropboxAdapter implements FileAdapter {
         false,
         true,
       );
-      const result = (await response.json()) as {
+      const result = await responseJson<{
         values?: { ".tag": string; paper_as_files?: { ".tag": string; enabled?: boolean } }[];
-      };
+      }>(response);
       const feature = result.values?.find(
         (value) => value[".tag"] === "paper_as_files",
       )?.paper_as_files;
@@ -409,19 +409,17 @@ export class DropboxAdapter implements FileAdapter {
       signal?.throwIfAborted();
       // Failure to observe the creation model never proves an empty legacy store.
     }
-    return [
-      {
-        code: "source_legacy_paper_scope_unverified",
-        evidence: {
-          paperAsFiles,
-          selectedAdminId: this.#session.dropboxAdminId ?? null,
-          reason:
-            "Legacy Paper documents live outside file namespaces and cannot be attributed or copied by this route. paper_as_files identifies the selected user's creation model, not the absence of accessible legacy documents.",
-          decisionRequired:
-            "Explicit legacy doc IDs/scope or a separate member/Paper discovery workflow.",
-        },
+    return {
+      evidence: {
+        paperAsFiles,
+        selectedAdminId: this.#session.dropboxAdminId ?? null,
       },
-    ];
+      notices: paperAsFiles === true
+        ? []
+        : [paperAsFiles === false
+          ? "Legacy Paper is enabled for the selected administrator. Legacy Paper documents live outside file namespaces and this route does not migrate them."
+          : "The selected administrator's paper_as_files feature could not be checked. Legacy Paper documents live outside file namespaces and this route does not migrate them."],
+    };
   }
 
   async resolveDestinationPass(): Promise<FilePassRoot> {

@@ -78,14 +78,12 @@ const providers: Record<FileProviderId, FileProviderAdapter> = {
     memberRole: () => undefined,
     rewritesPath: () => false,
     sourceDisclosures: [
-      "Dropbox Paper documents export as .html; legacy Paper and unsupported exports are blocking findings. .web files copy as pointers, not their Google-hosted targets.",
-      "Legacy Paper namespace coverage is unproven for every Dropbox-source job, regardless of the selected admin's paper_as_files feature. One blocking job finding requires explicit exception acceptance; no Paper parity is claimed.",
+      "Dropbox Paper documents export as .html; visible files without a supported export raise blocking findings. .web files copy as pointers, not their Google-hosted targets.",
       "Pinned rclone v1.75.0 has no Dropbox ListR; recursive listing walks folders individually.",
     ],
     sourceEntryFindings: (entry) => {
       const code = {
         paper_html: "source_paper_html",
-        legacy_paper: "source_legacy_paper",
         unsupported_export: "source_unsupported_export",
         web_pointer: "source_web_pointer",
       }[String(entry.metadata?.contentDisposition)];

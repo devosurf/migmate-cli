@@ -332,8 +332,9 @@ the same mounted namespace twice. Member homes and app folders are out of scope.
 Select-Admin uses an administrator's **team-member ID**, and `root_namespace` pins
 the namespace rather than defaulting to that administrator's member home.
 
-Paper exports as `.html`, disclosed in the plan and report; unsupported exports and
-legacy Paper are blocking findings per file. `.web` files copy unchanged as pointers,
+Paper exports as `.html`, disclosed in the plan and report; visible Files API documents
+without a downloadable export produce blocking per-file `source_unsupported_export`
+findings, not legacy-Paper findings. `.web` files copy unchanged as pointers,
 not the Google-hosted targets. Shared Drive paths over 100 folder levels, including
 destination wrapper folders, raise blocking findings for every source provider.
 A pre-copy folder check blocks the affected mapping before its worker starts; repair
@@ -345,11 +346,16 @@ Pinned rclone v1.75.0 has no Dropbox ListR: recursive listing walks folders indi
 so neither planning nor aggregate size estimates promise cheap recursive enumeration.
 
 Legacy Paper has no documented mapping from its document IDs to a shared namespace.
-Every Dropbox-source job therefore records one blocking legacy-Paper coverage finding,
-clearable only by explicit exception acceptance. The observed admin `paper_as_files`
-value is evidence of that user's creation model, not proof that accessible legacy docs
-are absent. This route never claims Paper parity; teams needing legacy content require
-an explicit legacy document scope or a separate member/Paper discovery workflow.
+During PLAN, Migmate observes the selected administrator's `paper_as_files` through
+`users/features/get_values` with `Dropbox-API-Select-User`. `false` produces a
+nonblocking notice that legacy Paper outside the selected namespaces is not migrated;
+`true` produces no legacy notice; an unknown result produces a nonblocking
+could-not-check notice. No legacy-Paper exception acceptance is required.
+The observation is frozen in the plan in every case, including `true`, and the report
+reflects that evidence rather than rechecking. This feature describes the user's
+creation model: `true` still does not prove pre-migration legacy documents are absent.
+This route never guarantees Paper parity; teams needing legacy content require an
+explicit legacy document scope or a separate member/Paper discovery workflow.
 
 ### Mapping manifests
 

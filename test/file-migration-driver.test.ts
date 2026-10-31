@@ -615,11 +615,11 @@ describe("provider content findings and destination depth", () => {
     const input = fileFixture([
       { id: "folder", parentId: "source-root", name: "documents", kind: "folder" },
       {
-        id: "legacy",
+        id: "noexport",
         parentId: "folder",
-        name: "old.paper",
+        name: "unavailable.paper",
         kind: "undownloadable",
-        metadata: { contentDisposition: "legacy_paper" },
+        metadata: { contentDisposition: "unsupported_export" },
       },
       {
         id: "unsupported",
@@ -650,10 +650,7 @@ describe("provider content findings and destination depth", () => {
     assert.equal(verified.clean, false);
     assert.deepEqual(
       verified.findings.map(({ code, count }) => ({ code, count })),
-      [
-        { code: "source_legacy_paper", count: 1 },
-        { code: "source_unsupported_export", count: 1 },
-      ],
+      [{ code: "source_unsupported_export", count: 2 }],
     );
     const rows = value(await h.engine.reader(h.ref).rows({ phase: "verify", limit: 100 })).rows;
     assert.deepEqual(
@@ -666,7 +663,7 @@ describe("provider content findings and destination depth", () => {
         )
         .sort(),
       [
-        ["legacy", "documents/old.paper", "source_legacy_paper"],
+        ["noexport", "documents/unavailable.paper", "source_unsupported_export"],
         ["unsupported", "documents/unsupported", "source_unsupported_export"],
       ],
     );
@@ -677,63 +674,90 @@ describe("provider content findings and destination depth", () => {
     if (!closure.ok) assert.equal(closure.refusal.code, "verification_unaccepted");
   });
 
-  it("requires explicit acceptance of one job-wide legacy coverage gap across mappings", async (t) => {
-    class CoveragePort extends FakeFileMigrationPort {
-      coverageCalls = 0;
-      async sourceCoverageFindings() {
-        this.coverageCalls++;
-        return [
-          {
-            code: "source_legacy_paper_scope_unverified",
-            evidence: {
-              paperAsFiles: true,
-              reason: "Legacy document IDs cannot be attributed to namespace roots",
-            },
-          },
-        ];
+  for (const paperAsFiles of [true, false, null]) {
+    it(`freezes Paper feature ${paperAsFiles} once at plan across mappings and closes without acceptance`, async (t) => {
+      const notices =
+        paperAsFiles === false
+          ? ["Legacy Paper documents outside file namespaces are not migrated."]
+          : paperAsFiles === null
+            ? ["Could not check the selected admin's Paper creation model."]
+            : [];
+      const evidence = { paperAsFiles, selectedAdminId: "dbmid:admin" };
+      class PlanningPort extends FakeFileMigrationPort {
+        observationCalls = 0;
+        observation = { evidence: { ...evidence }, notices: [...notices] };
+        async sourcePlanningEvidence() {
+          this.observationCalls++;
+          return this.observation;
+        }
       }
-    }
-    const { input, selected } = multiMapping();
-    const port = new CoveragePort(input);
-    const h = await harness(
-      t,
-      input,
-      {
-        ...sourceConfig("dropbox"),
-        mappings: selected.mappings.map((mapping) => ({ ...mapping, sourceType: "dropbox" })),
-      },
-      port,
-    );
-    await approve(h);
-    assert.equal(port.coverageCalls, 0);
-    await execute(h);
-    assert.equal(port.coverageCalls, 1);
-    const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
-    assert.deepEqual(
-      verified.findings.map(({ code, count }) => ({ code, count })),
-      [{ code: "source_legacy_paper_scope_unverified", count: 1 }],
-    );
-    const refused = await h.engine.withWriterResult(h.ref, async (w) =>
-      w.close(await closeDecision(h)),
-    );
-    assert.equal(refused.ok, false);
-    if (!refused.ok) assert.equal(refused.refusal.code, "verification_unaccepted");
-    value(
-      await h.engine.withWriterResult(h.ref, (w) =>
-        w.accept({
-          verificationDigest: verified.verificationDigest,
-          approver: "operator",
-          codes: ["source_legacy_paper_scope_unverified"],
-          rationale: "Legacy Paper is preserved separately; namespace coverage remains unproven",
-          mode: "unattended",
-        }),
-      ),
-    );
-    const closed = value(
-      await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
-    );
-    assert.equal(closed.outcome, "completed_with_accepted_exceptions");
-  });
+      const { input, selected } = multiMapping();
+      const port = new PlanningPort(input);
+      const h = await harness(
+        t,
+        input,
+        {
+          ...sourceConfig("dropbox"),
+          mappings: selected.mappings.map((mapping) => ({ ...mapping, sourceType: "dropbox" })),
+        },
+        port,
+      );
+      assert.equal(port.observationCalls, 0);
+      await approve(h);
+      assert.equal(port.observationCalls, 1);
+      const planned = value(await h.engine.reader(h.ref).rows({ phase: "plan" })).rows;
+      assert.equal(planned.length, selected.mappings.length);
+      for (const row of planned) {
+        assert.ok(row.jobType === "file_migration");
+        assert.deepEqual(row.sourceObservation, evidence);
+        const disclosures = row.sourceDisclosures ?? [];
+        assert.ok(disclosures.some((notice) => notice.includes(".html")));
+        for (const notice of notices)
+          assert.equal(disclosures.filter((entry) => entry === notice).length, 1);
+        if (paperAsFiles === true) assert.doesNotMatch(disclosures.join("\n"), /legacy Paper/i);
+      }
+      port.observation.evidence.paperAsFiles = paperAsFiles === true ? false : true;
+      port.observation.evidence.selectedAdminId = "dbmid:changed";
+      port.observation.notices = ["Changed after planning; must not appear in the report."];
+      h.engine.close();
+      h.engine = openEngine({
+        home: h.home,
+        now: () => new Date(now),
+        provider: port,
+      });
+      await execute(h);
+      assert.equal(port.observationCalls, 1);
+      const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
+      assert.equal(verified.clean, true);
+      assert.deepEqual(verified.findings, []);
+      assert.equal(port.observationCalls, 1);
+      const report = value(await h.engine.withWriterResult(h.ref, (w) => w.report()));
+      const json = JSON.parse(
+        await readFile(report.artifacts.find((item) => item.name === "report.json")!.path, "utf8"),
+      );
+      for (const mapping of selected.mappings) {
+        const section = json.sections.find(
+          (entry: { title: string }) => entry.title === `Mapping ${mapping.id}`,
+        );
+        assert.ok(section);
+        const reported = JSON.parse(section.body);
+        assert.deepEqual(reported.sourceObservation, evidence);
+        const plannedRow = planned.find(
+          (row) => row.jobType === "file_migration" && row.mappingId === mapping.id,
+        );
+        assert.ok(plannedRow?.jobType === "file_migration");
+        assert.deepEqual(reported.sourceDisclosures, plannedRow.sourceDisclosures);
+      }
+      assert.doesNotMatch(JSON.stringify(json), /Changed after planning/);
+      assert.deepEqual(json.acceptedExceptions, []);
+      const closed = value(
+        await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))),
+      );
+      assert.equal(closed.outcome, "completed");
+      assert.deepEqual(closed.acceptedExceptions, []);
+      assert.equal(port.observationCalls, 1);
+    });
+  }
 
   it("measures unknown Paper export sizes and blocks a wrong-sized destination", async (t) => {
     const h = await harness(

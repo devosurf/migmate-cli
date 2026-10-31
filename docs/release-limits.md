@@ -21,8 +21,9 @@ not used to infer scopes. Write scopes and `shared_folders` refuse. Shared names
 IDs are deduplicated across enumeration pages, and mappings use `namespaceId` plus
 `folderPath`; member homes/app folders remain out of scope. Select-Admin and an explicit
 root namespace keep reads out of the administrator's personal home.
-Paper exports as HTML with plan/report disclosure; legacy Paper and unsupported
-exports produce blocking findings, while `.web` pointers copy as-is with a disclosure.
+Paper exports as HTML with plan/report disclosure; visible Files API documents without
+a downloadable export produce blocking per-file `source_unsupported_export` findings,
+not legacy-Paper findings. `.web` pointers copy as-is with a disclosure.
 Google's 100-folder-level limit applies to all sources and includes destination wrappers.
 Execution checks folder constraints before starting that mapping's copy pass; a conflict
 records its path and blocks the mapping without starting an unfiltered transfer.
@@ -31,12 +32,16 @@ Hash proof downloads source bytes for Drive SHA-256, falling back to MD5; Dropbo
 block hash is not compared directly. Pinned rclone v1.75.0 walks Dropbox folders individually
 because the backend has no ListR. No authenticated Dropbox tenant run has been performed;
 optional copy/export/hash probes are backend qualification, not whole-tenant content coverage.
-Every Dropbox-source job also receives one blocking legacy-Paper coverage finding:
-legacy document IDs have no documented shared-namespace attribution. The selected
-admin's observed `paper_as_files` feature is evidence, not an absence proof; only
-explicit exception acceptance clears this gap. Legacy document scope or a separate
-member/Paper discovery workflow remains an operator decision, and no Paper parity
-claim is made.
+During PLAN, Dropbox-source jobs observe the selected administrator's `paper_as_files`
+via `users/features/get_values` with `Dropbox-API-Select-User`. `false` emits a
+nonblocking notice that legacy Paper outside selected namespaces is not migrated;
+`true` emits no legacy notice; unknown emits a nonblocking could-not-check notice.
+None requires legacy-Paper acceptance. Every observation is frozen in the plan,
+including `true`, and reports use that evidence rather than a fresh check.
+Legacy document IDs have no documented shared-namespace attribution, and `true`
+does not prove pre-migration legacy documents are absent. Legacy document scope or a
+separate member/Paper discovery workflow remains an operator decision; no Paper parity
+is guaranteed. This evidence uses schema 7 established by #120, without a schema bump.
 
 Shared member roles are `reader`, `writer`, and `manager`. Google keeps the first
 two and maps `manager` to `organizer`; native `organizer`, `fileOrganizer`, and

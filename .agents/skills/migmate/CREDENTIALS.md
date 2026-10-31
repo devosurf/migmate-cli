@@ -66,6 +66,15 @@ introspection: Dropbox need not repeat scopes on refresh. Preserve the generated
 binds the saved initial grant to the credential. Operator-owned evidence is not a
 tamper-proof audit log.
 
+During PLAN, `users/features/get_values` observes `paper_as_files` for this selected
+administrator using `Dropbox-API-Select-User`, rather than the namespace-read
+Select-Admin context. The plan freezes the observation even when true, and the
+report uses the frozen evidence. False produces a nonblocking outside-namespace
+legacy-Paper notice; true produces no legacy notice; unknown produces a nonblocking
+could-not-check notice, not a credential refusal or acceptance requirement.
+True describes the creation model, not proof that pre-migration legacy documents
+are absent. See [FINDINGS.md](FINDINGS.md) for the coverage limit.
+
 Any write or unknown scope, missing proof, or substituted app/refresh token refuses
 `credential_permissions_invalid`; importing a token from `rclone config` is not
 read-only proof. For a changed grant, have the administrator revoke the old

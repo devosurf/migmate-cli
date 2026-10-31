@@ -150,8 +150,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
         throw new ProviderFault("unsupported_route", "Discovery requires a source file job.");
       return (await files()).discoverSharePoint();
     },
-    async sourceCoverageFindings(signal) {
-      return (await files()).sourceCoverageFindings(signal);
+    async sourcePlanningEvidence(signal) {
+      return (await files()).sourcePlanningEvidence(signal);
     },
     async *preflight({ signal }): AsyncIterable<CheckResult> {
       let loaded: ProviderState | undefined;

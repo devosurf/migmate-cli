@@ -51,6 +51,10 @@ export interface DriverContext<Cfg> {
   resume: DriverResumeState;
   reportEvidence?: {
     settled(mappingId: string): unknown;
+    sourcePlanning(mappingId: string): {
+      sourceObservation?: Record<string, unknown>;
+      sourceDisclosures?: readonly string[];
+    } | undefined;
     coverage: ReportArray;
   };
   provider: ProviderPort;

@@ -279,15 +279,10 @@ export class DropboxCliPort extends PersistentCliPort {
     super(destinationPath, control, fixture);
   }
 
-  async sourceCoverageFindings() {
-    return [
-      {
-        code: "source_legacy_paper_scope_unverified",
-        evidence: {
-          paperAsFiles: true,
-          reason: "The fake Dropbox team exposes no namespace attribution for legacy Paper.",
-        },
-      },
-    ];
+  async sourcePlanningEvidence() {
+    return {
+      evidence: { paperAsFiles: true, selectedAdminId: "dbmid:admin" },
+      notices: [],
+    };
   }
 }

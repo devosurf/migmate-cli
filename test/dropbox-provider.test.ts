@@ -231,7 +231,7 @@ test("Dropbox exports HTML bytes by immutable item identity", async (t) => {
 });
 
 for (const enabled of [true, false, null]) {
-  test(`Paper creation-model evidence ${enabled} never proves legacy coverage`, async (t) => {
+  test(`Paper creation-model evidence ${enabled} becomes a nonblocking planning observation`, async (t) => {
     t.mock.method(
       globalThis,
       "fetch",
@@ -252,9 +252,18 @@ for (const enabled of [true, false, null]) {
             });
       },
     );
-    const findings = await adapter().sourceCoverageFindings();
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]?.code, "source_legacy_paper_scope_unverified");
-    assert.equal(findings[0]?.evidence.paperAsFiles, enabled);
+    const observation = await adapter().sourcePlanningEvidence();
+    assert.deepEqual(observation.evidence, {
+      paperAsFiles: enabled,
+      selectedAdminId: "dbmid:admin",
+    });
+    assert.equal(observation.notices.length, enabled === true ? 0 : 1);
+    if (enabled === false) {
+      assert.match(observation.notices[0]!, /legacy Paper/i);
+      assert.match(observation.notices[0]!, /outside.*namespaces/i);
+      assert.match(observation.notices[0]!, /not.*migrat/i);
+    } else if (enabled === null) {
+      assert.match(observation.notices[0]!, /could not.*check/i);
+    }
   });
 }

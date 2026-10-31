@@ -933,6 +933,11 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     ctx.signal,
   );
   let done = 0;
+  const sourcePlanning = await ctx.provider.sourcePlanningEvidence?.(ctx.signal);
+  const sourceDisclosures = [
+    ...(fileProviderPair(ctx.config).source.sourceDisclosures ?? []),
+    ...(sourcePlanning?.notices ?? []),
+  ];
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
     const root = await sourceRoot(ctx, mapping);
@@ -940,10 +945,12 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     const evidence = row(ctx, "plan", mapping, root, "unchanged");
     evidence.destinationDriveId = mapping.destDriveId ?? null;
     evidence.destinationFileId = mapping.destFolderId ?? null;
-    const sourceDisclosures = fileProviderPair(ctx.config).source.sourceDisclosures;
     evidence.fileScope = {
       mapOnly: true,
-      ...(sourceDisclosures?.length ? { sourceDisclosures } : {}),
+      ...(sourceDisclosures.length ? { sourceDisclosures } : {}),
+      ...(sourcePlanning && Object.keys(sourcePlanning.evidence).length
+        ? { sourceObservation: sourcePlanning.evidence }
+        : {}),
     };
     const unit = commit(ctx, "plan", evidence, [], "plan", ++done);
     unit.mappingPass = pendingPass(
@@ -1491,20 +1498,6 @@ function goLiveBaseline(
 async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
   let done = 0;
   const { source: sourceAdapter, destination: destinationAdapter } = fileProviderPair(ctx.config);
-  const coverageFindings = (await ctx.provider.sourceCoverageFindings?.(ctx.signal)) ?? [];
-  if (coverageFindings.length) {
-    yield {
-      rev: ctx.revision,
-      phase: "verify",
-      unitKey: JSON.stringify(["source-coverage", ctx.revision, digest(coverageFindings)]),
-      checkpoint: "source-coverage",
-      rows: [],
-      findings: coverageFindings.map(({ code, evidence }) => ({
-        ...finding(ctx, "verify", code, "source-coverage", evidence),
-        subjectKind: "job",
-      })),
-    };
-  }
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
     if (ctx.stage === "final" && settleState(ctx, mapping)?.outcome !== "settled")
@@ -2130,6 +2123,10 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     ].join("\n"),
   };
   for (const mapping of ctx.config.mappings) {
+    const planned = plannedScope(ctx, mapping);
+    const sourcePlanning = ctx.reportEvidence
+      ? ctx.reportEvidence.sourcePlanning(mapping.id)
+      : planned?.jobType === "file_migration" ? planned.fileScope : undefined;
     yield {
       title: `Mapping ${mapping.id}`,
       format: "text",
@@ -2141,6 +2138,12 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
             destDriveId: mapping.destDriveId,
             destFolderId: mapping.destFolderId,
             revision: ctx.revision,
+            ...(sourcePlanning?.sourceObservation
+              ? { sourceObservation: sourcePlanning.sourceObservation }
+              : {}),
+            ...(sourcePlanning?.sourceDisclosures
+              ? { sourceDisclosures: sourcePlanning.sourceDisclosures }
+              : {}),
             passes: (ctx.resume.mappingPasses ?? []).filter(
               (pass) => pass.mappingId === mapping.id,
             ),
