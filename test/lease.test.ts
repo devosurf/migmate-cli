@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { EngineRefusalError, openEngine } from "../src/engine/index.ts";
 import { DiskListing } from "../src/engine/providers/listing.ts";
 import { reconcileOnWriterOpen } from "../src/engine/state-chart.ts";
@@ -223,7 +224,7 @@ describe("own-process identity acquisition", () => {
     const output = join(root, "identity.json");
     const child = spawn(
       process.execPath,
-      [new URL("./lease-identity-fixture.ts", import.meta.url).pathname, home, mode, output],
+      [fileURLToPath(new URL("./lease-identity-fixture.ts", import.meta.url)), home, mode, output],
       { detached, stdio: "ignore" },
     );
     const exited = once(child, "exit");
