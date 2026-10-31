@@ -4,7 +4,7 @@ Finite, one-way movement or preservation of organizational content. The authorit
 
 Two job types:
 
-- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder, and Google Shared Drive folder to an existing SharePoint document library or folder.
+- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder, and Google Shared Drive folder to a SharePoint document library or folder, including libraries created inside existing sites.
 - **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package, optionally retained as conversation ZIPs in a Google Shared Drive folder.
 
 `CONTEXT.md` is the glossary. It is the authority on what each term means; this README assumes it.
@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release. Releases are GitHub Releases cut from `v*` tags by `.github/workflows/release.yml`; nothing is published to npm, and merging to `main` does not release.
 
-Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. File migrations approve mapping roots and options, execute rclone copy passes, and verify listings by path and size, including folders; content hashing is opt-in. Archives verify their local package and any uploaded copy. Blocking findings require acceptance before `close`. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on all four platforms. Unsupported shapes refuse with `unsupported_route` (exit 4). Historical live observations and their limits are recorded in `docs/release-limits.md`; they do not prove the new rclone-executed file route.
+Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. File migrations approve mapping roots and options, execute rclone copy passes, and verify listings by path and size, including folders; content hashing is opt-in. Archives verify their local package and any uploaded copy. Blocking findings require repair or, where supported, explicit acceptance before `close`; blocking destination name/path constraints require repair and re-check, never acceptance. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on all four platforms. Unsupported shapes refuse with `unsupported_route` (exit 4). Historical live observations and their limits are recorded in `docs/release-limits.md`; they do not prove the new rclone-executed file route.
 
 ## Requirements
 
@@ -108,7 +108,7 @@ flowchart LR
   cancel
 ```
 
-`init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of a finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any blocking finding is unaccepted. With deferred member grants, confirming `close` also authorizes go-live.
+`init` creates the job; `creds init` onboards an operator config onto it. `doctor` runs preflight — the checks only an administrator can satisfy, which refuse rather than retry. `plan` produces an immutable digest-bound proposal. `approve` binds an identity to that exact digest. `execute` does the work. `verify` compares the destination against the plan and raises findings; `accept` records an operator's acknowledgement of an eligible finding as an exception, which never disappears from a report. `close` is terminal, and refuses while any blocking finding remains unresolved. Blocking destination name/path constraints cannot be accepted. With deferred member grants, confirming `close` also authorizes go-live.
 
 With opt-in hash verification, a source that changed between copy and verify can raise three findings for one path: `source_size_inconsistent`, `size_mismatch`, and `content_mismatch`. `sourceSize` reports the size actually compared with `destinationSize`; when the listing contradicts served bytes, `listedSize` preserves the listing and the inconsistency finding also carries `servedSize`. The dependent size and content findings carry `cause: "source_size_inconsistent"` so they can be reviewed together. All three still block `close` until explicitly accepted; accepting the cause alone does not accept the other findings.
 
@@ -118,13 +118,32 @@ File-migration approval binds mapping roots, not individual files or unrelated d
 
 Both existing file routes, SharePoint → Shared Drive and Shared Drive → SharePoint, use map-only planning:
 
-- `plan` resolves each mapping's source and destination roots, drives to create, members and options. Approval binds that map, not a file list. Planning performs no per-file Graph inventory, file/deletion preview or inventory-freshness gate.
+- `plan` resolves each mapping's source and destination roots, drives to create, members and options. Approval binds that map, not a file list. Destination name/path checks walk source names and disclose constraints and encoding notices as planning observations, not a frozen per-file approval inventory. There is no file/deletion preview or inventory-freshness gate.
 - rclone selects files by size and modification time and checks upload size.
 - Default verification compares rclone listings by relative path and size, including folders and empty folders. It does not compare content bytes, and this disclosed limitation raises no degraded-content finding. Each verification covers whole mappings.
 - Set `[options] verificationMode = "hash"` to opt into content verification. It downloads source bytes to compute the destination's hash type and compares with stored destination hashes, without a Graph inventory or destination download.
 - On Shared Drive → SharePoint, size differences for PDF, Office and HTML files raise `destination_rewrote_file`; other size differences raise `size_mismatch`. On SharePoint → Shared Drive, served-size rewrites can still cause copy failures and `size_mismatch`.
 - Final execution settles by comparing file and folder listings until nothing remains to copy or delete, within the configured catch-up bound.
 - Mirror requires job-created-drive provenance and `deleteLimit`. File/folder listings of both sides immediately before every pass record deletion candidates as execute-phase `to_be_deleted` rows. The limit counts files, with folder removals recorded separately, and is enforced at execution rather than approval.
+
+SharePoint destinations use the pinned rclone OneDrive default encoding for invalid
+characters. This changes existing Google → SharePoint behavior: names that previously
+caused invalid-name copy failures or refusals now copy under encoded destination names,
+without changing native source names. Plan and report disclose every affected path as a
+nonblocking `destination_name_encoded` notice, with original and encoded names and paths,
+including descendants whose path changes because an ancestor's name is encoded.
+These notices need no acceptance and do not expand approval beyond the mapping roots.
+
+Duplicate sibling names (including collisions after encoding), unsupported reserved
+names or prefixes, excessive path length and folder depth remain blocking. Fix the
+source and re-check; acceptance, per-path exclusion and collision-resolving renames
+are unavailable. SharePoint's 400-character decoded server-relative destination path
+limit includes site/library prefixes and is measured **after encoding**; a desktop
+255-character component limit is not a cloud-copy limit. Missing destination root
+path proof also blocks copying. Planning a not-yet-created library checks names,
+duplicates and encoding notices, but defers path proof and length checks until the
+root exists. Constraints are checked before every copy pass, including catch-up passes,
+and during verification.
 
 Version history, list-item fields, retention labels and permissions are not copied. The plan and report disclose these route-wide omissions once, not as per-file findings or accepted exceptions. OneNote notebooks copy as their section files, not as working Google notebooks. Mapping roots are the only scope selection.
 
@@ -420,10 +439,11 @@ to create may coexist in one manifest. Members apply only to drives the job
 creates; types are `user` or `group`. Shared roles are `reader`, `writer`, and
 `manager`; Google maps `manager` to `organizer` and leaves `reader`/`writer` unchanged.
 Google-native `organizer`, `fileOrganizer`, and `commenter` are also valid.
-SharePoint maps shared roles to `read`, `write`, and `owner`, respectively, but
-SharePoint container creation and membership are not shipped: reverse jobs require
-existing destinations and cannot declare members. `anyone` and `domain` refuse at
-load, naming the row and `members.N.type`. Emails are case-insensitive and duplicates refuse.
+SharePoint maps shared roles to `read`, `write`, and `owner`, respectively.
+Created SharePoint libraries with named members require the optional scoped
+certificate setup below; libraries without members inherit site access without it.
+`anyone` and `domain` refuse at load, naming the row and `members.N.type`.
+Emails are case-insensitive and duplicates refuse.
 
 **Member grant timing.**
 
@@ -443,8 +463,10 @@ copying. With `after_verification`, execute creates drives and copies without
 granting manifest members; `status.memberGrants` stays empty through execution.
 A verified prestage or intermediate delta does not grant access.
 
-Verify, review the pre-close report, and explicitly accept any blocking findings
-before the human runs `migmate close --job "$ID"` or confirms close in the web view.
+Verify, review the pre-close report, and repair blocking findings or explicitly
+accept eligible exceptions before the human runs `migmate close --job "$ID"` or
+confirms close in the web view. Destination name/path blockers require repair and
+re-check, not acceptance or exclusion.
 The confirmation captures the exact reviewed evidence and an editable, unverified
 declared identity. For staged jobs, the latest revision must also be final,
 settled and fully verified. Deferred close renders and publishes the readiness
@@ -613,8 +635,8 @@ item rows.
 ### Google Shared Drives to SharePoint
 
 A job whose top-level TOML sets `sourceProvider = "google_shared_drive"` and
-`destinationProvider = "sharepoint"` copies Google Shared Drive folders into existing
-SharePoint document libraries or folders. The provider pair fixes one direction for the
+`destinationProvider = "sharepoint"` copies Google Shared Drive folders into SharePoint
+document libraries or folders. The provider pair fixes one direction for the
 whole job and is frozen into the plan and report: `manifest load` refuses any row in the
 other direction, including every row of a mixed manifest, with its row and `source.type`.
 Each reverse mapping looks like:
@@ -637,16 +659,86 @@ Each reverse mapping looks like:
 
 `source.folderId` is the source folder's stable Drive ID. `destination.folderPath`
 follows the source `folderPath` rules above; `""` selects the library root. The
-library and folder must already exist: Migmate creates no SharePoint sites,
-libraries or folders, so `create`, `members` and `mirror` refuse for these mappings.
-CSV uses the exact eleven-column layout, which appends `source.folderId` and
-`destination.folderPath`; leave `source.folderPath`, `destination.folderId`,
-`destination.create` and `members` empty on reverse rows:
+library and folder must already exist for this existing-root form. To create a
+document library inside an **existing** site, replace the destination with
+`{ "type": "sharepoint", "siteId": "hostname,site-collection-id,web-id", "create": "Finance" }`.
+Migmate never creates sites. The creation intent is durable before the provider call.
+Recovery searches only the selected site and requires a durable `creationAttemptedAt`
+plus the exact `creationRequestId` in the library list's description:
+`migmate:creation-request:<requestId>`. The marker is written in the same creation
+POST, not attached later. Name, site and creation time alone do not prove ownership.
+Only a unique qualifying job-marked candidate may be recovered; foreign or unmarked
+same-title candidates and HTTP 409 refuse, never authorize adoption or another POST.
+Existing libraries refuse mirror; newly created libraries permit mirror only with
+durable creation provenance. The library's root item ID is recorded separately from its drive ID.
+Graph library creation has no documented idempotency key. The durable attempt
+timestamp therefore precedes its POST. After an attempted but unobserved creation,
+zero visible candidates refuses `drive_creation_ambiguous`
+(`reason: creation_outcome_unknown`) instead of risking a second library; retry
+can observe a later-visible job-marked candidate. An intent without a recorded
+attempt may still make its first call, but cannot adopt a candidate as its own.
+
+**Access is optional, not an implicit isolation guarantee.** Without manifest
+members, a created library inherits its site's permissions and is visible to site
+members before go-live. Plan and report disclose this per library: access is
+unfenced, membership is neither managed nor proven, and close requires no membership
+evidence. Only the existing Graph write credential is needed.
+
+When the manifest names members, supply the optional certificate reference:
+
+```toml
+[rclone.sharepointDestinationCertificate]
+resolver = "file"
+path = "/operator-owned/sharepoint-destination.pem"
+mode = "0600"
+```
+
+The PEM contains a matching RSA private key and valid X.509 certificate registered
+on the **same destination write app** as the Graph remote. An administrator grants
+that app SharePoint-audience `Sites.Selected` and `fullcontrol` on each named site;
+tenant-wide SharePoint `Sites.FullControl.All` refuses. The existing Graph grant
+stays `Sites.ReadWrite.All`. Missing credentials or denied/unproven site capabilities
+refuse; token scope alone never proves the site's grant. See
+[CREDENTIALS.md](.agents/skills/migmate/CREDENTIALS.md#optional-sharepoint-library-membership).
+
+Named-member libraries get unique permissions before copying. With
+`memberGrants = "after_verification"` (the staged default), named grants wait for
+the durable go-live fence and membership checks. Removing named members later does
+not restore inheritance or revoke prior grants. App/system principals remain visible
+in membership evidence, never silently filtered. Because the app-only creator
+principal is not independently proven, a nonempty initial ACL refuses **before any
+copy or manifest grant** with `destination_initial_access_unproven`; observing an
+ACL does not authorize its principals. This may block a real tenant's implicit
+current-principal grant until independent identity proof is implemented. No
+live-tenant permission measurement is claimed.
+
+CSV retains the eleven-column layout for existing roots. Created-library rows use
+the same columns plus `destination.siteId` as column twelve; quote site IDs containing
+commas. Leave existing destination IDs/path empty when using `destination.create`.
+For existing-root reverse rows, leave `source.folderPath`, `destination.folderId`,
+`destination.create` and `members` empty:
 
 ```csv
 id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members,source.folderId,destination.folderPath
 archive,google_shared_drive,shared-drive-id,,sharepoint,sharepoint-library-id,,,,folder-id,Imported/2026
 ```
+
+SharePoint-invalid characters use the pinned rclone OneDrive default encoding;
+native source names are unchanged. Existing Google → SharePoint copies therefore
+encode destination names that previously failed or refused. Plan and report show
+every affected original → encoded path and both names as nonblocking
+`destination_name_encoded` notices, including descendants of encoded folders.
+
+Before **every** copy pass and after every final consistency wait, destination
+constraints check native source identities and their encoded paths. Duplicate
+siblings (including case-insensitive and encoded collisions), reserved names or
+prefixes, unrepresentable names, and paths beyond **400 decoded server-relative
+characters after encoding** block each affected path/ID. The limit includes the
+site and library prefix; missing root metadata blocks proof. Microsoft documents
+the [current limits](https://support.microsoft.com/en-us/office/restrictions-and-limitations-in-onedrive-and-sharepoint-64883a5d-228e-48f5-b3d2-eb39e07630fa).
+Fix the source and re-check: conflicts cannot be accepted, omitted, merged, or
+resolved by another rename. Existing destination roots must round-trip through
+the worker encoding without changing their native path; otherwise they refuse.
 
 Sources are read as the [acting Google account](#acting-google-account), which must
 already be a member of every source Shared Drive; Migmate never adds it. `manifest load`
@@ -817,7 +909,7 @@ A successful mirror removes leftovers, so verification reports no
 Verification still reports any leftovers it actually observes (for example,
 outside writes after the pass); mirror never suppresses that evidence.
 
-File migration no longer stages file bytes locally or uses reserved destination IDs, private provenance markers, or move-by-id. Teams archive uploads retain their separate create-only protections.
+File copies no longer stage bytes locally or use reserved destination IDs, per-file private provenance markers, or move-by-id. SharePoint library provisioning separately writes its creation-request marker in the list description for recovery. Teams archive uploads retain their separate create-only protections.
 
 A minimal file-migration job, with human decisions in their terminal:
 

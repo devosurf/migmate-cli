@@ -202,12 +202,37 @@ export class FileEffects {
     return this.#effect(adapter, "googleAbout").call(adapter, ...input);
   }
 
-  async createSharedDrive(...input: Parameters<NonNullable<ProviderPort["createSharedDrive"]>>) {
-    return this.#effect(this.#destination, "createSharedDrive").call(this.#destination, ...input);
+  async destinationCreator() {
+    return this.#effect(this.#destination, "destinationCreator").call(this.#destination);
   }
 
-  async findSharedDrives(...input: Parameters<NonNullable<ProviderPort["findSharedDrives"]>>) {
-    return this.#effect(this.#destination, "findSharedDrives").call(this.#destination, ...input);
+  async validateDestinationCreation(
+    input: Parameters<NonNullable<ProviderPort["validateDestinationCreation"]>>[0],
+  ): Promise<void> {
+    await this.#destination.validateDestinationCreation?.(input);
+  }
+
+  async createDestinationContainer(
+    ...input: Parameters<ProviderPort["createDestinationContainer"]>
+  ) {
+    return this.#effect(this.#destination, "createDestinationContainer").call(
+      this.#destination,
+      ...input,
+    );
+  }
+
+  async findDestinationContainers(...input: Parameters<ProviderPort["findDestinationContainers"]>) {
+    return this.#effect(this.#destination, "findDestinationContainers").call(
+      this.#destination,
+      ...input,
+    );
+  }
+
+  async prepareDestinationMembers(driveId: string) {
+    return this.#effect(this.#destination, "prepareDestinationMembers").call(
+      this.#destination,
+      driveId,
+    );
   }
 
   async listDriveMembers(...input: Parameters<NonNullable<ProviderPort["listDriveMembers"]>>) {

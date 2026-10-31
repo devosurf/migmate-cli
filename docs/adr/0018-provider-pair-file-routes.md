@@ -56,11 +56,57 @@ Same-provider routes default to hash verification, comparing the hashes both sid
 
 Migmate creates Shared Drives, Dropbox team folders, and SharePoint document libraries inside existing sites. It never creates SharePoint sites, which is tenant administration. Creation keeps the creation-intent recovery and provenance rules, and mirror stays limited to containers with proven creation provenance.
 
+SharePoint's non-idempotent library creation records `creationAttemptedAt` before
+the POST and writes `migmate:creation-request:<requestId>` into the list description
+in that same POST. Recovery requires the durable attempt plus a unique qualifying
+candidate with the exact durable `creationRequestId` marker in the approved site;
+name, site and creation time alone are insufficient. Foreign or unmarked same-title
+candidates and HTTP 409 refuse, never authorize adoption or replay. An unobserved
+attempt stays ambiguous until observation can prove its result. Google Shared Drive
+name/time recovery remains unchanged.
+
 Created containers on every provider follow the same go-live lifecycle: manifest members, the fence, grants at go-live, membership checks and acknowledgment (ADR-0012, ADR-0015, ADR-0017). Manifest roles use the shared set `reader`, `writer` and `manager`, which the destination adapter maps to native roles. Native roles the destination supports, such as Google's `commenter` and `fileOrganizer`, stay valid so existing manifests keep their meaning. A role the destination cannot represent refuses at manifest load. A SharePoint library gets unique permissions only when the manifest names members.
 
-### D8: Name and path conflicts are findings, never renames
+**Amendment — Morgan, 2026-10-31:** SharePoint library creation uses the existing
+Graph write credential and does not require a certificate. A created library with
+no manifest members inherits its site's permissions: plan and report disclose per
+library that site members can access it before go-live, access is unfenced, and
+Migmate neither manages nor proves membership. Close requires no membership proof
+for that library and claims none.
 
-Some destinations are stricter than their source: Google allows duplicate names, Dropbox is case-insensitive, SharePoint restricts characters and path length, and Shared Drives allow 100 folder levels. Every path that conflicts with the destination raises a blocking finding, to be fixed in the source or explicitly accepted. Migmate never renames automatically.
+Certificate-backed SharePoint-audience credentials are optional and required only
+when manifest members request unique library permissions. They use `Sites.Selected`
+with administrator-provisioned per-site `fullcontrol`, never `Sites.FullControl.All`.
+Named-member libraries retain the full fence, deferred grants, membership checks
+and acknowledgment lifecycle. Missing credentials refuse with an onboarding
+prerequisite; denied or absent runtime capability refuses rather than inferring a
+site grant from the token's scope. This accommodates migrations whose access is
+managed externally after copying without weakening proof for Migmate-managed grants.
+
+### D8: Disclosed destination encoding; other name/path conflicts block
+
+**Amendment — Morgan, 2026-10-31:** SharePoint-invalid characters use the pinned
+rclone OneDrive default encoding. This permits disclosed destination filename
+changes while preserving native source names. Existing Google → SharePoint copies
+therefore encode names that previously failed or refused as invalid.
+
+Plan and report disclose every affected original → encoded path as a nonblocking
+`destination_name_encoded` notice, retaining original and encoded names and paths
+and source identity. An encoded ancestor gives each affected descendant its own
+notice. These are planning observations, not a frozen per-file inventory or a
+separate acceptance gate; map-only approval continues to cover mapping roots.
+
+All other destination name/path conflicts block: duplicate source siblings and
+collisions after encoding, unsupported reserved names/prefixes, excessive path
+length and folder depth (Shared Drives allow 100 folder levels). Fix the source
+and re-check; acceptance, per-path exclusion and collision-resolving renames are
+unavailable. SharePoint's 400-character decoded server-relative destination path
+limit includes site/library prefixes and is measured after encoding, not against
+the original spelling. Desktop 255-character component limits are not cloud-copy
+limits. Missing root path proof blocks copying until readable metadata establishes
+it. Planning a not-yet-created root checks names, duplicates and encoding notices,
+deferring path proof and length checks until the root exists; every copy pass,
+post-wait settle comparison and verification re-checks destination constraints.
 
 ### D9: Destination limits that stop a job
 

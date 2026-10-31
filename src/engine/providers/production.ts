@@ -281,11 +281,20 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async googleAbout(signal) {
       return (await files()).googleAbout(signal);
     },
-    async createSharedDrive(input) {
-      return (await files()).createSharedDrive(input);
+    async destinationCreator() {
+      return (await files()).destinationCreator();
     },
-    async findSharedDrives(name) {
-      return (await files()).findSharedDrives(name);
+    async validateDestinationCreation(input) {
+      await (await files()).validateDestinationCreation(input);
+    },
+    async createDestinationContainer(input) {
+      return (await files()).createDestinationContainer(input);
+    },
+    async findDestinationContainers(input) {
+      return (await files()).findDestinationContainers(input);
+    },
+    async prepareDestinationMembers(driveId) {
+      return (await files()).prepareDestinationMembers(driveId);
     },
     async listDriveMembers(driveId) {
       return (await files()).listDriveMembers(driveId);

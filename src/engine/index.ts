@@ -113,6 +113,7 @@ import {
   goLive,
   GoLiveCheckError,
   memberGrantTiming,
+  managesCreatedAccess,
   type FileMappingConfig,
   type FileMigrationConfig,
 } from "./drivers/file-migration.ts";
@@ -236,6 +237,7 @@ type FileConfig = CommonConfig & {
     destinationRemote: string;
     sharepointDestinationRemote?: string;
     dropboxRemote?: string;
+    sharepointDestinationCertificate?: FileReference;
   };
 };
 type TeamsConfig = CommonConfig &
@@ -472,7 +474,15 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
     }
     if (input.rclone !== undefined) {
       const r = object(input.rclone, "rclone");
-      keys(r, ["config", ...credentialBindings.map((binding) => binding.key)], "rclone");
+      keys(
+        r,
+        [
+          "config",
+          "sharepointDestinationCertificate",
+          ...credentialBindings.map((binding) => binding.key),
+        ],
+        "rclone",
+      );
       const required = [
         pair.source.credentials.remoteKey.source,
         pair.destination.credentials.remoteKey.destination,
@@ -497,6 +507,15 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
       config.rclone = {
         config: fileReference(r.config, "rclone.config", paths.dir),
         ...remotes,
+        ...(r.sharepointDestinationCertificate !== undefined
+          ? {
+              sharepointDestinationCertificate: fileReference(
+                r.sharepointDestinationCertificate,
+                "rclone.sharepointDestinationCertificate",
+                paths.dir,
+              ),
+            }
+          : {}),
         destinationRemote: remotes.destinationRemote!,
       };
     }
@@ -980,7 +999,7 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
                     checksSettled:
                       "mappings" in config &&
                       config.mappings
-                        .filter((mapping) => mapping.createDrive)
+                        .filter((mapping) => managesCreatedAccess(config, mapping))
                         .every((mapping) =>
                           status.createdDrives.some(
                             (drive) =>
@@ -1537,25 +1556,42 @@ function closeReview(store: Store, config: JobConfig) {
   const approvedConfig: Partial<FileMigrationConfig> = JSON.parse(
     plan.inputs.configuration ?? "{}",
   );
+  const managedMappings =
+    "mappings" in config
+      ? (approvedConfig.mappings ?? []).filter((mapping) => managesCreatedAccess(config, mapping))
+      : [];
+  const inheritedMappings =
+    "mappings" in config
+      ? (approvedConfig.mappings ?? []).filter(
+          (mapping) => mapping.createDrive && !managesCreatedAccess(config, mapping),
+        )
+      : [];
   return {
     evidenceDigest,
     authorized: store.readCloseAuthorization()?.evidenceDigest === evidenceDigest,
-    consequences: deferred
-      ? [
-          "Grant the approved destination members access. Transfers become permanently fenced.",
-          ...(approvedConfig.mappings?.flatMap(
-            (mapping) =>
-              mapping.createDrive?.members.map(
+    consequences: [
+      ...(deferred && managedMappings.length > 0
+        ? [
+            inheritedMappings.length
+              ? "Grant the approved destination members access. Managed destination transfers become permanently fenced."
+              : "Grant the approved destination members access. Transfers become permanently fenced.",
+            ...managedMappings.flatMap((mapping) =>
+              mapping.createDrive!.members.map(
                 (member) =>
                   `${mapping.id}: ${mapping.createDrive!.name} — ${member.email} (${member.type}), role ${member.role}, timing after_verification.`,
-              ) ?? [],
-          ) ?? []),
-          "Every affected destination must pass drift checking before any new fence or grant. Post-grant checks must pass or be explicitly acknowledged, and the final report must succeed. Access is never revoked automatically.",
-        ]
-      : [
-          "Complete this job with its current verification and explicitly recorded exceptions.",
-          "No deferred member access will be granted by close.",
-        ],
+              ),
+            ),
+            `${inheritedMappings.length ? "Every managed destination" : "Every affected destination"} must pass drift checking before any new fence or grant. Post-grant checks must pass or be explicitly acknowledged, and the final report must succeed. Access is never revoked automatically.`,
+          ]
+        : [
+            "Complete this job with its current verification and explicitly recorded exceptions.",
+            "No deferred member access will be granted by close.",
+          ]),
+      ...inheritedMappings.map(
+        (mapping) =>
+          `${mapping.id}: ${mapping.createDrive!.name} — inherited site access is already visible before go-live and remains unfenced. Membership is neither managed nor proven; close requires no membership evidence.`,
+      ),
+    ],
   };
 }
 function currentGoLiveReview(store: Store, config: JobConfig) {
@@ -1573,7 +1609,9 @@ function currentGoLiveReview(store: Store, config: JobConfig) {
   )
     return null;
   const mappings = new Set(
-    config.mappings.filter((mapping) => mapping.createDrive).map((mapping) => mapping.id),
+    config.mappings
+      .filter((mapping) => managesCreatedAccess(config, mapping))
+      .map((mapping) => mapping.id),
   );
   return reviewGoLiveFailures(
     store
@@ -1922,8 +1960,14 @@ function makeWriter(
   function resolvedMappings<T extends { id: string; createDrive?: unknown }>(mappings: T[]): T[] {
     const drives = new Map(store.readCreatedDrives().map((drive) => [drive.mappingId, drive]));
     return mappings.map((mapping) => {
-      const driveId = mapping.createDrive ? drives.get(mapping.id)?.driveId : null;
-      return driveId ? { ...mapping, destDriveId: driveId, destFolderId: driveId } : mapping;
+      const drive = mapping.createDrive ? drives.get(mapping.id) : undefined;
+      return drive?.driveId
+        ? {
+            ...mapping,
+            destDriveId: drive.driveId,
+            destFolderId: drive.rootFolderId ?? drive.driveId,
+          }
+        : mapping;
     });
   }
   function provider(config: JobConfig, archiveVerification = false): ProviderPort {
@@ -2616,12 +2660,13 @@ function makeWriter(
           if (
             previous &&
             "create" in mapping.destination &&
-            previous.name !== mapping.destination.create
+            (previous.name !== mapping.destination.create ||
+              previous.siteId !== mapping.destination.siteId)
           )
             throw new ManifestError(
               index + 1,
               "destination.create",
-              "A submitted creation name is immutable; use the existing drive id",
+              "A submitted creation name and parent are immutable; use the existing container id",
             );
         }
         const base = existsSync(paths.configPath)
@@ -2636,7 +2681,14 @@ function makeWriter(
             ? { sourceFolderPath: m.source.folderPath }
             : { sourceItemId: m.source.folderId }),
           ...("create" in m.destination
-            ? { createDrive: { name: m.destination.create, members: m.members ?? [] } }
+            ? {
+                createDrive: {
+                  name: m.destination.create,
+                  members: m.members ?? [],
+                  ...(m.destination.siteId ? { siteId: m.destination.siteId } : {}),
+                  ...(creations.get(m.id)?.managedAccess ? { manageAccess: true as const } : {}),
+                },
+              }
             : "folderPath" in m.destination
               ? { destDriveId: m.destination.driveId, destFolderPath: m.destination.folderPath }
               : { destDriveId: m.destination.driveId, destFolderId: m.destination.folderId }),
@@ -2651,6 +2703,8 @@ function makeWriter(
             jobDirectory: paths.dir,
           });
         providers.add(p);
+        for (const mapping of pending)
+          if ("createDrive" in mapping) await p.validateDestinationCreation?.(mapping.createDrive);
         // Name every source drive the acting account cannot read, not just the first bad row.
         const unreadable =
           (await fileProviderPair(base).source.unreadableSources?.(p, pending)) ?? [];
@@ -3505,7 +3559,7 @@ function makeWriter(
         const pendingGoLive =
           "mappings" in config &&
           config.mappings.some((mapping) => {
-            if (!mapping.createDrive) return false;
+            if (!mapping.createDrive || !managesCreatedAccess(config, mapping)) return false;
             const drive = closeDrives.find((item) => item.mappingId === mapping.id);
             return (
               !drive ||

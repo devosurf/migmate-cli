@@ -21,7 +21,13 @@ export function fileFixture(
       ...sourceItems,
     ],
     destinationItems: [
-      { id: "destination-root", parentId: null, name: "existing", kind: "folder" },
+      {
+        id: "destination-root",
+        parentId: null,
+        name: "existing",
+        kind: "folder",
+        webUrl: "https://fake.sharepoint.com/sites/Existing/Documents",
+      },
     ],
   };
 }

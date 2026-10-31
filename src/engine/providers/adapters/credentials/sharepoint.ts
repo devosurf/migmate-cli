@@ -1,3 +1,12 @@
+import {
+  constants,
+  createHash,
+  createPrivateKey,
+  randomUUID,
+  sign,
+  X509Certificate,
+  type KeyObject,
+} from "node:crypto";
 import type { JobType } from "../../../types.ts";
 import {
   allowedKeys,
@@ -20,6 +29,111 @@ export interface GraphCredential {
   tenantId: string;
   clientId: string;
   secret: Buffer | null;
+}
+
+export interface SharePointCertificate {
+  privateKey: KeyObject;
+  thumbprint: string;
+}
+
+/** SharePoint REST app-only authentication requires a certificate.
+ * https://learn.microsoft.com/sharepoint/dev/solution-guidance/security-apponly-azuread
+ */
+export function loadSharePointCertificate(bytes: Buffer): SharePointCertificate {
+  try {
+    const certificate = new X509Certificate(bytes);
+    const privateKey = createPrivateKey(bytes);
+    if (
+      privateKey.asymmetricKeyType !== "rsa" ||
+      (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048 ||
+      !certificate.checkPrivateKey(privateKey) ||
+      Date.parse(certificate.validFrom) > Date.now() ||
+      Date.parse(certificate.validTo) <= Date.now()
+    )
+      throw refused("credential_certificate_invalid");
+    return {
+      privateKey,
+      thumbprint: createHash("sha256").update(certificate.raw).digest("base64url"),
+    };
+  } catch {
+    throw refused("credential_certificate_invalid");
+  }
+}
+
+export function sharepointOrigin(siteUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(siteUrl);
+  } catch {
+    throw refused("credential_sharepoint_resource_invalid");
+  }
+  if (
+    url.protocol !== "https:" ||
+    !url.hostname.endsWith(".sharepoint.com") ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.search ||
+    url.hash
+  )
+    throw refused("credential_sharepoint_resource_invalid");
+  return url.origin;
+}
+
+export async function requestSharePointToken(
+  credential: GraphCredential,
+  certificate: SharePointCertificate,
+  siteUrl: string,
+  signal: AbortSignal,
+): Promise<Token> {
+  const origin = sharepointOrigin(siteUrl);
+  const endpoint = `https://login.microsoftonline.com/${credential.tenantId}/oauth2/v2.0/token`;
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(
+    JSON.stringify({
+      alg: "PS256",
+      typ: "JWT",
+      "x5t#S256": certificate.thumbprint,
+    }),
+  ).toString("base64url");
+  const claims = Buffer.from(
+    JSON.stringify({
+      aud: endpoint,
+      iss: credential.clientId,
+      sub: credential.clientId,
+      jti: randomUUID(),
+      iat: now,
+      nbf: now - 60,
+      exp: now + 300,
+    }),
+  ).toString("base64url");
+  const signed = `${header}.${claims}`;
+  // https://learn.microsoft.com/entra/identity-platform/certificate-credentials
+  const assertion = `${signed}.${sign("sha256", Buffer.from(signed), {
+    key: certificate.privateKey,
+    padding: constants.RSA_PKCS1_PSS_PADDING,
+    saltLength: 32,
+  }).toString("base64url")}`;
+  const requestedAt = Date.now();
+  const token = parseToken(
+    await tokenResponse(
+      endpoint,
+      new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: credential.clientId,
+        client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        client_assertion: assertion,
+        scope: `${origin}/.default`,
+      }),
+      signal,
+      "sharepoint",
+    ),
+    requestedAt,
+  );
+  // Sites.Selected is scope evidence only. A read-only site permission probe
+  // must separately observe capabilities before creation or membership mutation.
+  graphPermissions(token, credential, "file_migration", true, origin);
+  return token;
 }
 
 const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
@@ -163,6 +277,7 @@ function graphPermissions(
   credential: GraphCredential,
   jobType: JobType,
   destination = false,
+  sharepointResource?: string,
 ): void {
   // These are evidence from a fresh HTTPS token response, NOT local authorization.
   // Microsoft Graph itself validates the token during the parent's real probes.
@@ -187,9 +302,13 @@ function graphPermissions(
     claims.tid.toLowerCase() !== credential.tenantId ||
     typeof (claims.appid ?? claims.azp) !== "string" ||
     String(claims.appid ?? claims.azp).toLowerCase() !== credential.clientId ||
-    (claims.aud !== "https://graph.microsoft.com" &&
-      claims.aud !== "https://graph.microsoft.com/" &&
-      claims.aud !== "00000003-0000-0000-c000-000000000000") ||
+    (sharepointResource
+      ? claims.aud !== sharepointResource &&
+        claims.aud !== `${sharepointResource}/` &&
+        claims.aud !== "00000003-0000-0ff1-ce00-000000000000"
+      : claims.aud !== "https://graph.microsoft.com" &&
+        claims.aud !== "https://graph.microsoft.com/" &&
+        claims.aud !== "00000003-0000-0000-c000-000000000000") ||
     typeof claims.exp !== "number" ||
     !Number.isFinite(claims.exp) ||
     claims.exp * 1000 <= Date.now() + 60_000 ||
@@ -206,11 +325,13 @@ function graphPermissions(
     throw refused("credential_permission_evidence_unavailable");
   }
   const roles = [...new Set<string>(claims.roles)].sort();
-  const permitted = destination
-    ? SHAREPOINT_DESTINATION_ROLES
-    : jobType === "file_migration"
-      ? FILE_ROLES
-      : ARCHIVE_ROLES;
+  const permitted = sharepointResource
+    ? { "Sites.Selected": true }
+    : destination
+      ? SHAREPOINT_DESTINATION_ROLES
+      : jobType === "file_migration"
+        ? FILE_ROLES
+        : ARCHIVE_ROLES;
   if (
     roles.some((role) => !Object.hasOwn(permitted, role)) ||
     (jobType === "file_migration" && !destination && roles.length !== 1) ||

@@ -78,7 +78,14 @@ export function cliFixture(count = 8): FakeFileMigrationFixture {
       })),
     ],
     destinationItems: [
-      { id: "dst-root", parentId: null, name: "root", kind: "folder", identity: "dst-root" },
+      {
+        id: "dst-root",
+        parentId: null,
+        name: "root",
+        kind: "folder",
+        identity: "dst-root",
+        webUrl: "https://fake.sharepoint.com/sites/Existing/Documents",
+      },
     ],
     worker: { version: "1.75.0", alive: false },
   };
@@ -143,12 +150,20 @@ export class PersistentCliPort extends FakeFileMigrationPort {
   constructor(
     destinationPath: string,
     control?: { verb: string; ready: () => void },
+    destinationProvider: "google_shared_drive" | "sharepoint" = "google_shared_drive",
+    sharepointMembershipAvailable = false,
     fixture = cliFixture(),
   ) {
     // These effects live in the CLI process. An arbitrary fake PID can collide
     // with an unrelated live process and correctly prevent stale-lease recovery.
     fixture.worker = { ...fixture.worker, pid: process.pid };
     fixture.archive = cliArchiveFixture();
+    fixture.destinationProvider = destinationProvider;
+    fixture.sharepointMembershipAvailable = sharepointMembershipAvailable;
+    if (existsSync(`${destinationPath}.containers.json`))
+      fixture.destinationContainers = JSON.parse(
+        readFileSync(`${destinationPath}.containers.json`, "utf8"),
+      );
     if (control) fixture.copyPasses = [{ pause: true, afterFiles: 1 }];
     if (existsSync(destinationPath))
       fixture.destinationItems = JSON.parse(readFileSync(destinationPath, "utf8"));
@@ -230,36 +245,71 @@ export class PersistentCliPort extends FakeFileMigrationPort {
     await this.persist();
     return result;
   }
+  override async createDestinationContainer(
+    input: Parameters<ProviderPort["createDestinationContainer"]>[0],
+  ) {
+    const created = await super.createDestinationContainer(input);
+    await this.persist();
+    return created;
+  }
+  override async prepareDestinationMembers(driveId: string) {
+    await super.prepareDestinationMembers(driveId);
+    await this.persist();
+  }
+  override async addDriveMember(
+    driveId: string,
+    member: Parameters<ProviderPort["addDriveMember"]>[1],
+  ) {
+    await super.addDriveMember(driveId, member);
+    await this.persist();
+  }
   async persist() {
     const records: FakeDestinationItemFixture[] = [];
-    for (const row of this.snapshotDestination()) {
-      const metadata =
-        row.parentId === null
-          ? await this.resolveDestinationFolder({
-              destDriveId: this.destinationDriveId,
-              destFolderId: row.id,
-            })
-          : (await this.listDestinationChildren(row.parentId)).find((entry) => entry.id === row.id);
-      if (!metadata) throw new Error("Fixture destination disappeared during persistence");
-      const chunks: Uint8Array[] = [];
-      if (row.kind === "file")
-        for await (const bytes of this.streamDestinationContent(row.id)) chunks.push(bytes);
-      const content = Buffer.concat(chunks).toString("utf8");
-      records.push({
-        id: row.id,
-        parentId: row.parentId,
-        name: row.name,
-        kind: row.kind,
-        content,
-        size: metadata.size,
-        mimeType: metadata.mimeType,
-        revision: metadata.revision,
-        createdAt: metadata.createdAt,
-        modifiedAt: metadata.modifiedAt,
-        provenance: row.provenance,
-        reportedChecksum: metadata.reportedChecksum,
-      });
+    const containers = this.snapshotDestinationContainers();
+    const roots = [
+      { driveId: this.destinationDriveId, rootId: this.destinationRootId },
+      ...containers.map(({ container }) => ({
+        driveId: container.id,
+        rootId: container.rootFolderId ?? container.id,
+      })),
+    ];
+    for (const root of roots) {
+      for (const row of this.snapshotDestination(root.rootId)) {
+        const metadata =
+          row.parentId === null
+            ? await this.resolveDestinationFolder({
+                destDriveId: root.driveId,
+                destFolderId: row.id,
+              })
+            : (await this.listDestinationChildren(row.parentId)).find(
+                (entry) => entry.id === row.id,
+              );
+        if (!metadata) throw new Error("Fixture destination disappeared during persistence");
+        const chunks: Uint8Array[] = [];
+        if (row.kind === "file")
+          for await (const bytes of this.streamDestinationContent(row.id)) chunks.push(bytes);
+        const content = Buffer.concat(chunks).toString("utf8");
+        records.push({
+          id: row.id,
+          parentId: row.parentId,
+          driveId: metadata.driveId,
+          ...(metadata.webUrl ? { webUrl: metadata.webUrl } : {}),
+          name: row.name,
+          kind: row.kind,
+          content,
+          size: metadata.size,
+          mimeType: metadata.mimeType,
+          revision: metadata.revision,
+          createdAt: metadata.createdAt,
+          modifiedAt: metadata.modifiedAt,
+          provenance: row.provenance,
+          reportedChecksum: metadata.reportedChecksum,
+        });
+      }
     }
+    const containerStaging = `${this.destinationPath}.containers.json.staging`;
+    writeFileSync(containerStaging, JSON.stringify(containers), { mode: 0o600 });
+    renameSync(containerStaging, `${this.destinationPath}.containers.json`);
     const staging = `${this.destinationPath}.staging`;
     writeFileSync(staging, JSON.stringify(records), { mode: 0o600 });
     const fd = openSync(staging, "r");
@@ -273,10 +323,15 @@ export class PersistentCliPort extends FakeFileMigrationPort {
 }
 
 export class DropboxCliPort extends PersistentCliPort {
-  constructor(destinationPath: string, control?: { verb: string; ready: () => void }) {
+  constructor(
+    destinationPath: string,
+    control?: { verb: string; ready: () => void },
+    destinationProvider: "google_shared_drive" | "sharepoint" = "google_shared_drive",
+    sharepointMembershipAvailable = false,
+  ) {
     const fixture = cliFixture();
     fixture.sourceDriveId = "123456";
-    super(destinationPath, control, fixture);
+    super(destinationPath, control, destinationProvider, sharepointMembershipAvailable, fixture);
   }
 
   async sourcePlanningEvidence() {

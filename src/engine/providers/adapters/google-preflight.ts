@@ -22,7 +22,10 @@ export async function unreadableSourceDrives(
   }
   return unreadable;
 }
-export async function* googlePreflight(ctx: FileContext): AsyncGenerator<CheckResult, boolean> {
+export async function* googlePreflight(
+  ctx: FileContext,
+  destination: boolean,
+): AsyncGenerator<CheckResult, boolean> {
   const provider = ctx.provider;
   let about: GoogleAbout | undefined;
   try {
@@ -61,7 +64,7 @@ export async function* googlePreflight(ctx: FileContext): AsyncGenerator<CheckRe
     };
     if (!pass) return false;
   }
-  if (ctx.config.mappings.some((m) => m.createDrive)) {
+  if (destination && ctx.config.mappings.some((m) => m.createDrive)) {
     const canCreateDrives = about?.canCreateDrives ?? false;
     yield {
       id: "google.canCreateDrives",
