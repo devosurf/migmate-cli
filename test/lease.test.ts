@@ -18,6 +18,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it, type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { EngineRefusalError, openEngine } from "../src/engine/index.ts";
 import { DiskListing } from "../src/engine/providers/listing.ts";
 import { reconcileOnWriterOpen } from "../src/engine/state-chart.ts";
@@ -214,6 +216,75 @@ describe("persistent host identity", () => {
     assert.throws(() => getHostId(home));
     assert.equal(readFileSync(target, "utf8"), contents);
   });
+});
+
+describe("own-process identity acquisition", () => {
+  async function identityChild(t: TestContext, mode: string, detached = false) {
+    const { root, home } = engineHome(t);
+    const output = join(root, "identity.json");
+    const child = spawn(
+      process.execPath,
+      [fileURLToPath(new URL("./lease-identity-fixture.ts", import.meta.url)), home, mode, output],
+      { detached, stdio: "ignore" },
+    );
+    const exited = once(child, "exit");
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+    });
+    const deadline = performance.now() + 15_000;
+    while (!existsSync(output)) {
+      assert.equal(child.exitCode, null, "identity child exited before publishing evidence");
+      assert.ok(performance.now() < deadline, "identity child did not publish evidence");
+      await delay(10);
+    }
+    const result = JSON.parse(readFileSync(output, "utf8"));
+    assert.equal(result.error, undefined, result.stack);
+    assert.ok(child.pid);
+    return { result, pid: child.pid };
+  }
+
+  for (const detached of [false, true]) {
+    it(
+      `retries first and subsequent acquisitions with independently compatible identity (detached=${detached})`,
+      { skip: process.platform !== "darwin" },
+      async (t) => {
+        const { result, pid } = await identityChild(t, "transient", detached);
+        assert.equal(result.identity, getProcessStartTime(pid));
+        assert.equal(processAlive(pid, result.identity), true);
+        assert.equal(processAlive(pid, result.identity + 1), false);
+      },
+    );
+  }
+
+  for (const mode of [
+    "permanent",
+    "ENOENT",
+    "EACCES",
+    "EAGAIN",
+    "nonzero",
+    "signal",
+    "empty",
+    "malformed",
+    "invalid-date",
+    "foreign",
+  ]) {
+    it(
+      `fails closed for ${mode} inspection without broadening retries`,
+      {
+        skip: process.platform !== "darwin",
+      },
+      async (t) => {
+        await identityChild(t, mode);
+      },
+    );
+  }
+
+  for (const mode of ["linux", "linux-failure"]) {
+    it(`preserves ${mode} /proc behavior without subprocess retries`, async (t) => {
+      await identityChild(t, mode);
+    });
+  }
 });
 
 describe("lease adjudication", () => {
