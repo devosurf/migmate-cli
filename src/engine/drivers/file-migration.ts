@@ -701,29 +701,43 @@ async function* sourceContentFindings(
   codes: readonly string[];
   evidence?: Record<string, unknown>;
 }> {
-  const pending = [{ id: root.id, path: "" }];
-  while (pending.length) {
-    const parent = pending.pop()!;
-    const children = await ctx.provider.listSourceChildren({
-      driveId: mapping.sourceDriveId,
-      itemId: parent.id,
-      ...abortable(ctx),
-    });
-    const firstByName = new Map<string, SourceEntry>();
-    const collisions = new Map<string, string[]>();
-    for (const child of children) {
-      const first = firstByName.get(child.name);
-      if (!first) firstByName.set(child.name, child);
-      else if (first.id !== child.id) {
-        const ids = collisions.get(child.name);
-        if (ids) ids.push(child.id);
-        else collisions.set(child.name, [first.id, child.id]);
+  // Iteration sees newly appended folders without retaining the frontier in RAM.
+  // Keeping visited IDs on disk also prevents duplicate mounts or cycles.
+  using folders = new DiskListing<{ id: string; path: string }>((folder) => folder.id);
+  folders.add({ id: root.id, path: "" });
+  for (const parent of folders) {
+    ctx.signal?.throwIfAborted();
+    using children = indexListing(
+      await ctx.provider.listSourceChildren({
+        driveId: mapping.sourceDriveId,
+        itemId: parent.id,
+        ...abortable(ctx),
+      }),
+      (child) => child.id,
+    );
+    using names = new DiskListing<{ name: string; first: string; second?: string }>(
+      (entry) => entry.name,
+    );
+    for (const child of children.uniqueValues()) {
+      ctx.signal?.throwIfAborted();
+      const previous = names.get(child.name);
+      if (!previous) names.add({ name: child.name, first: child.id });
+      else if (previous.first !== child.id && previous.second === undefined) {
+        names.delete(child.name);
+        names.add({ ...previous, second: child.id });
       }
     }
-    for (const child of children) {
+    for (const child of children.uniqueValues()) {
+      ctx.signal?.throwIfAborted();
       const path = parent.path ? `${parent.path}/${child.name}` : child.name;
-      if (child.kind === "folder") pending.push({ id: child.id, path });
-      const sourceIds = collisions.get(child.name);
+      if (child.kind === "folder" && !folders.has(child.id)) folders.add({ id: child.id, path });
+      const collision = names.get(child.name);
+      // Every affected item identifies itself and one distinct conflicting item,
+      // never an unbounded array of all IDs sharing the same effective name.
+      const sourceIds =
+        collision?.second === undefined
+          ? undefined
+          : [collision.first, child.id === collision.first ? collision.second : child.id];
       const codes = sourceIds
         ? ["destination_duplicate_name", ...classify(child)]
         : classify(child);
@@ -1341,29 +1355,37 @@ async function* copyPass(
         ...abortable(ctx),
       });
       let blocked = false;
-      for (const path of [".", ...folders]) {
-        const conflicts = destinationAdapter.destinationPathFindings(
-          path,
-          "folder",
-          constraintRoot,
-        );
-        if (!conflicts.length) continue;
-        blocked = true;
-        const source = listedItem(mapping.sourceDriveId, `path:${path}`, path, "folder", null);
-        const evidence = row(ctx, "execute", mapping, source, conflicts[0]!.code);
-        evidence.destinationDriveId = mapping.destDriveId ?? null;
-        yield {
-          ...unit(),
-          rows: [evidence],
-          findings: conflicts.map((conflict) =>
-            finding(ctx, "execute", conflict.code, source.id, {
-              path,
-              itemType: "folder",
-              destinationRootDepth: constraintRoot.folderDepth,
-              message: conflict.message,
-            }),
-          ),
-        };
+      function* paths(): Iterable<string> {
+        yield ".";
+        yield* folders;
+      }
+      try {
+        for (const path of paths()) {
+          const conflicts = destinationAdapter.destinationPathFindings(
+            path,
+            "folder",
+            constraintRoot,
+          );
+          if (!conflicts.length) continue;
+          blocked = true;
+          const source = listedItem(mapping.sourceDriveId, `path:${path}`, path, "folder", null);
+          const evidence = row(ctx, "execute", mapping, source, conflicts[0]!.code);
+          evidence.destinationDriveId = mapping.destDriveId ?? null;
+          yield {
+            ...unit(),
+            rows: [evidence],
+            findings: conflicts.map((conflict) =>
+              finding(ctx, "execute", conflict.code, source.id, {
+                path,
+                itemType: "folder",
+                destinationRootDepth: constraintRoot.folderDepth,
+                message: conflict.message,
+              }),
+            ),
+          };
+        }
+      } finally {
+        disposeListing(folders);
       }
       if (blocked) {
         pass = {
@@ -1652,7 +1674,84 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
       const coverage = new DiskListing<string>((path) => path);
       resources.push(coverage);
       for (const entry of sources) if (!coverage.has(entry.path)) coverage.add(entry.path);
-      for (const path of sourceFolders) coverage.add(path);
+      for (const path of sourceFolders) if (!coverage.has(path)) coverage.add(path);
+      const excludedPaths = new DiskListing<string>((path) => path);
+      resources.push(excludedPaths);
+      const sourceContentByPath = new DiskListing<SourceView>();
+      resources.push(sourceContentByPath);
+      if (sourceAdapter.sourceEntryFindings) {
+        for await (const item of sourceContentFindings(
+          ctx,
+          mapping,
+          root,
+          sourceAdapter.sourceEntryFindings,
+        )) {
+          if (!coverage.has(item.source.path)) coverage.add(item.source.path);
+          sourceContentByPath.add(item.source);
+          if (
+            item.codes.some((code) => CODE_BY_NAME[code]?.kind !== "policy_outcome") &&
+            !excludedPaths.has(item.source.path)
+          )
+            excludedPaths.add(item.source.path);
+          const evidence = row(ctx, "verify", mapping, item.source, item.codes[0]!);
+          evidence.id = JSON.stringify([mapping.id, item.source.id, "verify", "source-content"]);
+          evidence.destinationDriveId = mapping.destDriveId ?? null;
+          evidence.destinationFileId = destinations.get(item.source.path)?.id ?? null;
+          yield commit(
+            ctx,
+            "verify",
+            evidence,
+            item.codes.map((code) =>
+              finding(ctx, "verify", code, item.source.id, {
+                path: item.source.path,
+                ...item.evidence,
+              }),
+            ),
+            "source-content",
+            ++done,
+          );
+        }
+      }
+      if (destinationAdapter.destinationPathFindings) {
+        const constraintRoot = { folderDepth: await destinationFolderDepth(ctx, mapping) };
+        for (const kind of ["file", "folder"] as const) {
+          for (const entry of kind === "file" ? sources : sourceFolders) {
+            const path = typeof entry === "string" ? entry : entry.path;
+            if (excludedPaths.has(path)) continue;
+            const conflicts = destinationAdapter.destinationPathFindings(
+              path,
+              kind,
+              constraintRoot,
+            );
+            if (!conflicts.length) continue;
+            excludedPaths.add(path);
+            const view = listedItem(
+              mapping.sourceDriveId,
+              `path:${path}`,
+              path,
+              kind,
+              typeof entry === "string" ? null : entry.size,
+            );
+            const evidence = row(ctx, "verify", mapping, view, conflicts[0]!.code);
+            evidence.destinationDriveId = mapping.destDriveId ?? null;
+            yield commit(
+              ctx,
+              "verify",
+              evidence,
+              conflicts.map((conflict) =>
+                finding(ctx, "verify", conflict.code, view.id, {
+                  path,
+                  itemType: kind,
+                  destinationRootDepth: constraintRoot.folderDepth,
+                  message: conflict.message,
+                }),
+              ),
+              "destination-path",
+              ++done,
+            );
+          }
+        }
+      }
       let coveredPaths: string[] = [];
       let coveragePage = 0;
       for (const path of coverage.sorted((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -1702,6 +1801,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const source of sources) {
+        if (excludedPaths.has(source.path)) continue;
         const copied = destinations.get(source.path);
         // rclone's OneDrive IDs are `driveId#itemId`; durable rows keep the item ID.
         const listedId = source.id?.startsWith(`${mapping.sourceDriveId}#`)
@@ -1709,7 +1809,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           : source.id;
         const view = listedItem(
           mapping.sourceDriveId,
-          listedId ?? `path:${source.path}`,
+          listedId ?? sourceContentByPath.get(source.path)?.id ?? `path:${source.path}`,
           source.path,
           "file",
           source.size,
@@ -1722,8 +1822,28 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           : null;
         const codes: string[] = [];
         let servedSize = view.size;
+        // Matching downloaded bytes already prove an unknown export's stored size.
+        if (servedSize === null && hash && sourceHash && sourceHash === destinationHash && copied)
+          servedSize = copied.size >= 0 ? copied.size : null;
+        if (servedSize === null) {
+          try {
+            let size = 0;
+            for await (const chunk of ctx.provider.openSourceContent({
+              driveId: mapping.sourceDriveId,
+              itemId: view.id,
+            })) {
+              ctx.signal?.throwIfAborted();
+              size += chunk.byteLength;
+            }
+            servedSize = size;
+          } catch (error) {
+            if (!terminalUnavailable(error)) throw error;
+            codes.push("source_read_failed");
+          }
+        }
         if (
           hash &&
+          source.size >= 0 &&
           primaryHash === "sha256" &&
           sourceHash &&
           copied &&
@@ -1767,6 +1887,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           if (hash && !destinationHash) codes.push("destination_read_failed");
         }
         const evidence = row(ctx, "verify", mapping, view, codes[0] ?? "unchanged");
+        if (view.size === null) evidence.size = servedSize;
         evidence.destinationDriveId = mapping.destDriveId ?? null;
         evidence.destinationFileId = copied?.id ?? null;
         evidence.sourceFingerprint = sourceHash;
@@ -1802,7 +1923,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const path of sourceFolders) {
-        if (destinationFolders.has(path)) continue;
+        if (destinationFolders.has(path) || excludedPaths.has(path)) continue;
         const conflicting = destinations.get(path);
         const code = conflicting ? "destination_type_conflict" : "destination_missing";
         const view = listedItem(mapping.sourceDriveId, `folder:${path}`, path, "folder", null);
@@ -1834,7 +1955,12 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const retained of destinations) {
-        if (sources.has(retained.path) || sourceFolders.has(retained.path)) continue;
+        if (
+          sources.has(retained.path) ||
+          sourceFolders.has(retained.path) ||
+          sourceContentByPath.has(retained.path)
+        )
+          continue;
         const view = listedItem(
           mapping.sourceDriveId,
           `destination:${retained.path}`,
@@ -1871,7 +1997,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         );
       }
       for (const path of destinationFolders) {
-        if (sourceFolders.has(path) || sources.has(path)) continue;
+        if (sourceFolders.has(path) || sources.has(path) || sourceContentByPath.has(path)) continue;
         const view = listedItem(
           mapping.sourceDriveId,
           `destination-folder:${path}`,

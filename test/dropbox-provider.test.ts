@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { DropboxAdapter } from "../src/engine/providers/adapters/dropbox.ts";
 import { fileProviderPair } from "../src/engine/providers/adapters/capabilities.ts";
 import type { CredentialSession } from "../src/engine/providers/credentials.ts";
 import { parseManifest } from "../src/engine/manifest.ts";
 import { ProviderFault } from "../src/engine/providers/fault.ts";
+import { DiskListing, ListingScratch } from "../src/engine/providers/listing.ts";
+import { FakeFileMigrationPort } from "../src/engine/providers/fake.ts";
+import {
+  fileMigrationDriver,
+  type FileMigrationConfig,
+} from "../src/engine/drivers/file-migration.ts";
+import type { CommitFinding, DriverContext } from "../src/engine/drivers/types.ts";
+import { fileConfig, fileFixture } from "./engine-fixture.ts";
 
 const session: CredentialSession = {
   async graphToken() {
@@ -198,7 +209,8 @@ test("Dropbox listing keeps unsupported exports visible and labels exported HTML
       has_more: false,
     });
   });
-  const entries = await adapter().listSourceChildren({ driveId: "123", itemId: "/" });
+  using inventory = await adapter().listSourceChildren({ driveId: "123", itemId: "/" });
+  const entries = Array.from(inventory);
   assert.deepEqual(
     entries.map((entry) => [entry.name, entry.kind, entry.metadata?.contentDisposition]),
     [
@@ -429,9 +441,9 @@ for (const fixture of exportCases) {
       },
     );
     const source = adapter();
-    const entries = await source.listSourceChildren({ driveId: "123", itemId: "/" });
-    assert.equal(entries.length, 1);
-    const entry = entries[0]!;
+    using entries = await source.listSourceChildren({ driveId: "123", itemId: "/" });
+    assert.equal(entries.size, 1);
+    const entry = entries.get("id:export")!;
     assert.equal(entry.name, fixture.exportedName);
     assert.equal(entry.id, "id:export");
     assert.equal(entry.metadata?.originalName, fixture.name);
@@ -521,5 +533,208 @@ for (const enabled of [true, false, null]) {
     } else if (enabled === null) {
       assert.match(observation.notices[0]!, /could not.*check/i);
     }
+  });
+}
+
+test("Dropbox paged inventories deduplicate on disk and remain repeatable after early iterator return", async (t) => {
+  let pages = 0;
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    if (String(input).endsWith("team/namespaces/list"))
+      return Response.json({ namespaces: [namespace], has_more: false });
+    const page = pages++;
+    return Response.json({
+      entries: Array.from({ length: 300 }, (_, index) => {
+        const id = page * 299 + index;
+        return {
+          ".tag": "file",
+          id: `id:${id}`,
+          name: `${id}.txt`,
+          path_display: `/${id}.txt`,
+          size: 1,
+        };
+      }),
+      has_more: page < 3,
+      cursor: `page-${page}`,
+    });
+  });
+  const inventory = await adapter().listSourceChildren({ driveId: "123", itemId: "/" });
+  {
+    using owned = inventory;
+    assert.ok(owned instanceof DiskListing);
+    assert.equal(pages, 4);
+    assert.equal(owned.size, 1197);
+    for (const entry of owned) {
+      assert.equal(entry.id, "id:0");
+      break;
+    }
+    let count = 0;
+    for (const entry of owned) {
+      assert.equal(entry.id, `id:${count++}`);
+    }
+    assert.equal(count, 1197);
+  }
+  assert.throws(() => inventory.get("id:0"), /disposed/);
+});
+
+for (const failure of ["cursor", "entry", "abort"]) {
+  test(`Dropbox disposes partial inventories and cursor indexes on ${failure} failure`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "migmate-dropbox-dispose-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    using scratch = new ListingScratch(directory);
+    const controller = new AbortController();
+    let pages = 0;
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      if (String(input).endsWith("team/namespaces/list"))
+        return Response.json({ namespaces: [namespace], has_more: false });
+      const page = pages++;
+      if (page === 1 && failure === "abort") controller.abort(new Error("cancel listing"));
+      return Response.json({
+        entries: [
+          {
+            ".tag": "file",
+            id: `id:${page}`,
+            name: `${page}.txt`,
+            ...(page === 1 && failure === "entry" ? {} : { path_display: `/${page}.txt` }),
+            size: 1,
+          },
+        ],
+        has_more: true,
+        cursor: "repeated",
+      });
+    });
+    await scratch.run(async () => {
+      await assert.rejects(
+        adapter().listSourceChildren({ driveId: "123", itemId: "/", signal: controller.signal }),
+        failure === "abort" ? /cancel listing/ : /Dropbox/,
+      );
+      assert.equal(pages, 2);
+      assert.equal(
+        (await readdir(directory, { recursive: true })).some((path) => path.includes("listing-")),
+        false,
+      );
+    });
+  });
+}
+
+for (const earlyReturn of [false, true]) {
+  test(`Dropbox detects cross-page export collisions with bounded ID pairs and disposes native indexes${earlyReturn ? " on return" : ""}`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "migmate-dropbox-collisions-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    using scratch = new ListingScratch(directory);
+    let pages = 0;
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      if (String(input).endsWith("team/namespaces/list"))
+        return Response.json({ namespaces: [namespace], has_more: false });
+      const page = pages++;
+      return Response.json({
+        entries:
+          page === 0
+            ? [
+                {
+                  ".tag": "file",
+                  id: "id:paper",
+                  name: "Notes.paper",
+                  path_display: "/Notes.paper",
+                  is_downloadable: false,
+                  export_info: { export_as: "html" },
+                },
+                ...Array.from({ length: 260 }, (_, index) => ({
+                  ".tag": "file",
+                  id: `id:filler-${index}`,
+                  name: `${index}.txt`,
+                  path_display: `/${index}.txt`,
+                  size: 1,
+                })),
+              ]
+            : [
+                {
+                  ".tag": "file",
+                  id: "id:ordinary",
+                  name: "Notes.html",
+                  path_display: "/Notes.html",
+                  size: 1,
+                },
+                {
+                  ".tag": "file",
+                  id: "id:third",
+                  name: "Notes.html",
+                  path_display: "/Notes.html",
+                  size: 1,
+                },
+                {
+                  ".tag": "file",
+                  id: "id:paper",
+                  name: "Notes.paper",
+                  path_display: "/Notes.paper",
+                  is_downloadable: false,
+                  export_info: { export_as: "html" },
+                },
+              ],
+        has_more: page === 0,
+        cursor: "next",
+      });
+    });
+    const source = adapter();
+    const fake = new FakeFileMigrationPort({
+      ...fileFixture(),
+      sourceDriveId: "123",
+      sourceRootId: "/",
+      sourceItems: [{ id: "/", parentId: null, name: "root", kind: "folder" }],
+    });
+    const copy = t.mock.method(fake, "startCopyPass");
+    const worker = await fake.startTransferWorker({ runDirectory: directory });
+    t.after(() => fake.stopTransferWorker(worker));
+    const ctx: DriverContext<FileMigrationConfig> = {
+      jobDirectory: directory,
+      config: {
+        sourceProvider: "dropbox",
+        destinationProvider: "google_shared_drive",
+        mappings: fileConfig().mappings.map((mapping) => ({
+          ...mapping,
+          sourceDriveId: "123",
+          sourceItemId: "/",
+        })),
+      },
+      revision: 1,
+      resume: { checkpoint: null, watermarks: {}, rows: [], mappingPasses: [] },
+      provider: new Proxy(fake, {
+        get(target, key) {
+          if (key === "listSourceChildren") return source.listSourceChildren.bind(source);
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+      now: () => new Date("2026-09-01T00:00:00.000Z"),
+    };
+    await scratch.run(async () => {
+      for await (const unit of fileMigrationDriver.collect(ctx))
+        ctx.resume.rows!.push(...unit.rows);
+      const findings: CommitFinding[] = [];
+      for await (const unit of fileMigrationDriver.execute(ctx)) {
+        findings.push(
+          ...(unit.findings ?? []).filter(
+            (finding) => finding.code === "destination_duplicate_name",
+          ),
+        );
+        if (earlyReturn && findings.length) break;
+      }
+      assert.equal(pages, 2);
+      assert.equal(findings.length, earlyReturn ? 1 : 3);
+      assert.deepEqual(
+        findings.map((finding) => finding.evidence.sourceIds),
+        earlyReturn
+          ? [["id:paper", "id:ordinary"]]
+          : [
+              ["id:paper", "id:ordinary"],
+              ["id:paper", "id:ordinary"],
+              ["id:paper", "id:third"],
+            ],
+      );
+      assert.equal(copy.mock.callCount(), 0);
+      assert.equal(
+        (await readdir(directory, { recursive: true })).some((path) => path.includes("listing-")),
+        false,
+      );
+    });
   });
 }

@@ -1,11 +1,6 @@
 import { ProviderFault } from "../fault.ts";
-import {
-  HttpProviderFault,
-  cursorPages,
-  fetchProvider,
-  responseBytes,
-  responseJson,
-} from "../http.ts";
+import { DiskListing } from "../listing.ts";
+import { HttpProviderFault, fetchProvider, responseBytes, responseJson } from "../http.ts";
 import type { CredentialSession } from "../credentials.ts";
 import type { SourceEntry, DestinationEntry, FilePassRoot, ProviderPort } from "../port.ts";
 import type { AdapterInput, FileAdapter, FilePassInput, Mapping } from "./effects.ts";
@@ -154,36 +149,45 @@ export class DropboxAdapter implements FileAdapter {
   }
 
   async #loadNamespaces(signal?: AbortSignal): Promise<Map<string, Namespace>> {
-    const namespaces = new Map<string, Namespace>();
-    for await (const entries of cursorPages(
-      null,
-      async (cursor) => {
-        const page = await this.#request<{
-          namespaces: Namespace[];
-          has_more: boolean;
-          cursor: string;
-        }>(
-          cursor ? "team/namespaces/list/continue" : "team/namespaces/list",
-          cursor ? { cursor } : {},
+    using namespaces = new DiskListing<Namespace>((entry) => entry.namespace_id);
+    using cursors = new DiskListing<string>((cursor) => cursor);
+    let cursor: string | null = null;
+    for (;;) {
+      signal?.throwIfAborted();
+      const page: { namespaces: Namespace[]; has_more: boolean; cursor: string } =
+        await this.#request(
+          cursor === null ? "team/namespaces/list" : "team/namespaces/list/continue",
+          cursor === null ? {} : { cursor },
           undefined,
           signal,
         );
-        return { value: page.namespaces, next: page.has_more ? page.cursor : null };
-      },
-      () =>
-        new ProviderFault("provider_request_failed", "Dropbox namespace paging repeated a cursor."),
-    )) {
-      for (const entry of entries) {
+      for (const entry of page.namespaces) {
+        signal?.throwIfAborted();
         const previous = namespaces.get(entry.namespace_id);
         if (previous && previous.namespace_type[".tag"] !== entry.namespace_type[".tag"])
           throw new ProviderFault(
             "provider_request_failed",
             "Dropbox returned conflicting namespace identities.",
           );
-        namespaces.set(entry.namespace_id, entry);
+        if (previous) namespaces.delete(entry.namespace_id);
+        namespaces.add(entry);
       }
+      if (!page.has_more) break;
+      if (!page.cursor || cursors.has(page.cursor))
+        throw new ProviderFault(
+          "provider_request_failed",
+          "Dropbox namespace paging repeated a cursor.",
+        );
+      cursor = page.cursor;
+      cursors.add(cursor);
     }
-    return namespaces;
+    // Retain only explicit mapping roots, never the complete tenant inventory.
+    const selected = new Map<string, Namespace>();
+    for (const mapping of this.#mappings) {
+      const namespace = namespaces.get(mapping.sourceDriveId);
+      if (namespace) selected.set(mapping.sourceDriveId, namespace);
+    }
+    return selected;
   }
 
   #root(namespace: Namespace): SourceEntry {
@@ -302,46 +306,60 @@ export class DropboxAdapter implements FileAdapter {
     return this.readSourceItem({ driveId: input.driveId, itemId: `/${input.folderPath}` });
   }
 
-  async listSourceChildren(
+  async *#sourceChildPages(
     input: Parameters<ProviderPort["listSourceChildren"]>[0],
-  ): Promise<SourceEntry[]> {
-    await this.#namespace(input.driveId, input.signal);
-    const entries: SourceEntry[] = [];
-    const seen = new Set<string>();
-    for await (const page of cursorPages(
-      null,
-      async (cursor) => {
-        const result = await this.#request<{
-          entries: DropboxItem[];
-          has_more: boolean;
-          cursor: string;
-        }>(
-          cursor ? "files/list_folder/continue" : "files/list_folder",
-          cursor
-            ? { cursor }
-            : {
+  ): AsyncIterable<DropboxItem[]> {
+    using cursors = new DiskListing<string>((cursor) => cursor);
+    let cursor: string | null = null;
+    for (;;) {
+      input.signal?.throwIfAborted();
+      const result: { entries: DropboxItem[]; has_more: boolean; cursor: string } =
+        await this.#request(
+          cursor === null ? "files/list_folder" : "files/list_folder/continue",
+          cursor === null
+            ? {
                 path: input.itemId === "/" ? "" : input.itemId,
                 recursive: false,
                 include_deleted: false,
                 include_non_downloadable_files: true,
                 include_mounted_folders: false,
                 limit: 1000,
-              },
+              }
+            : { cursor },
           input.driveId,
           input.signal,
         );
-        return { value: result.entries, next: result.has_more ? result.cursor : null };
-      },
-      () =>
-        new ProviderFault("provider_request_failed", "Dropbox folder paging repeated a cursor."),
-    )) {
-      for (const raw of page)
-        if (raw[".tag"] !== "deleted" && !seen.has(raw.id)) {
-          seen.add(raw.id);
-          entries.push(this.#entry(raw, input.driveId, input.itemId));
-        }
+      input.signal?.throwIfAborted();
+      yield result.entries;
+      if (!result.has_more) return;
+      if (!result.cursor || cursors.has(result.cursor))
+        throw new ProviderFault(
+          "provider_request_failed",
+          "Dropbox folder paging repeated a cursor.",
+        );
+      cursor = result.cursor;
+      cursors.add(cursor);
     }
-    return entries;
+  }
+
+  async listSourceChildren(
+    input: Parameters<ProviderPort["listSourceChildren"]>[0],
+  ): Promise<DiskListing<SourceEntry>> {
+    await this.#namespace(input.driveId, input.signal);
+    const entries = new DiskListing<SourceEntry>((entry) => entry.id);
+    try {
+      for await (const page of this.#sourceChildPages(input)) {
+        for (const raw of page) {
+          input.signal?.throwIfAborted();
+          if (raw[".tag"] !== "deleted" && !entries.has(raw.id))
+            entries.add(this.#entry(raw, input.driveId, input.itemId));
+        }
+      }
+      return entries;
+    } catch (error) {
+      entries[Symbol.dispose]();
+      throw error;
+    }
   }
 
   async *openSourceContent(

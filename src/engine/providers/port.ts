@@ -260,12 +260,12 @@ export interface ProviderPort extends FilePassProvider {
     sourceItemId: string;
     signal?: AbortSignal;
   }): Promise<SourceEntry | null>;
-  /** Graph item IDs are unique only within a drive: every source read names both. */
+  /** Drive-scoped, repeatable inventory. Caller must disposeListing after use. */
   listSourceChildren(input: {
     driveId: string;
     itemId: string;
     signal?: AbortSignal;
-  }): Promise<SourceEntry[]>;
+  }): Promise<Iterable<SourceEntry>>;
   openSourceContent(input: { driveId: string; itemId: string }): AsyncIterable<Uint8Array>;
 
   resolveDestinationFolder(input: {

@@ -346,6 +346,10 @@ export bytes. Opt-in hash verification downloads Dropbox bytes and compares Driv
 SHA-256, falling back to MD5. Dropbox's block content hash is not ordinary SHA-256.
 Pinned rclone v1.75.0 has no Dropbox ListR: recursive listing walks folders individually,
 so neither planning nor aggregate size estimates promise cheap recursive enumeration.
+Native Dropbox inventories, export-name collision checks, and verification coverage
+use disk-backed indexes and bounded pages rather than retaining a whole listing.
+Dropbox → Google uploads contribute to the same engine-home Google account ledger
+as other Google-destination jobs; the Dropbox content hash does not measure uploads.
 
 Legacy Paper has no documented mapping from its document IDs to a shared namespace.
 During PLAN, Migmate observes the selected administrator's `paper_as_files` through

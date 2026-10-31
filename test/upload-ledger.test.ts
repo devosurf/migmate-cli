@@ -314,6 +314,63 @@ test("file jobs contribute through the engine and later activity never rewrites 
   );
 });
 
+test("Dropbox source uploads contribute to the Google destination account ledger", async (t) => {
+  const directory = await home(t);
+  const provider = new FakeFileMigrationPort({
+    ...fileFixture(),
+    sourceItems: [
+      { id: "/", parentId: null, name: "Namespace", kind: "folder" },
+      { id: "id:file", parentId: "/", name: "file.txt", kind: "file", content: "hello", size: 5 },
+    ],
+    sourceDriveId: "123",
+    sourceRootId: "/",
+  });
+  const engine = openEngine({ home: directory, now: () => new Date(BASE), provider });
+  t.after(() => engine.close());
+  const ref = value(
+    await engine.initJob({
+      type: "file_migration",
+      config: {
+        sourceProvider: "dropbox",
+        destinationProvider: "google_shared_drive",
+        mappings: [],
+      },
+    }),
+  );
+  value(
+    await engine.withWriterResult(ref, (writer) =>
+      writer.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "dropbox",
+              source: { type: "dropbox", namespaceId: "123", folderPath: "" },
+              destination: {
+                type: "google_shared_drive",
+                driveId: "destination-drive",
+                folderId: "destination-root",
+              },
+            },
+          ],
+        }),
+      }),
+    ),
+  );
+  await approve({ engine, ref });
+  const before = value(await engine.reader(ref).status()).currentPlan;
+  assert.equal(
+    value(await engine.withWriterResult(ref, (writer) => writer.execute())).outcome,
+    "completed",
+  );
+  const status = value(await engine.reader(ref).status());
+  assert.equal(status.uploadActivity?.accounts[0]?.observedBytesInWindow, 5);
+  assert.equal(status.uploadActivity?.accounts[0]?.estimatedRemainingBytes, null);
+  assert.deepEqual(status.currentPlan, before);
+  assert.equal(value(await engine.withWriterResult(ref, (writer) => writer.verify())).clean, true);
+});
+
 test("writer recovery bounds only its own abandoned attempts; unresolved peers remain incomplete", async (t) => {
   const directory = await home(t);
   initializeUploadLedger(directory, new Date(BASE - DAY));

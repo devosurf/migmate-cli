@@ -74,6 +74,7 @@ const providers: Record<FileProviderId, FileProviderAdapter> = {
     hashType: "sha256",
     ignoreSizeAndChecksum: false,
     uploadQuota: false,
+    ledgerAccountedUploads: false,
     creatorRole: "owner",
     memberRole: () => undefined,
     rewritesPath: () => false,

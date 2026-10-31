@@ -49,7 +49,10 @@ including `true`, and reports use that evidence rather than a fresh check.
 Legacy document IDs have no documented shared-namespace attribution, and `true`
 does not prove pre-migration legacy documents are absent. Legacy document scope or a
 separate member/Paper discovery workflow remains an operator decision; no Paper parity
-is guaranteed. This evidence uses schema 7 established by #120, without a schema bump.
+is guaranteed. This evidence uses schema 8 established by #123, without another schema bump.
+Dropbox native inventories, export-collision indexes, and folder traversal use
+disposable disk-backed listings; verification coverage stays paged and reports
+stream complete evidence without retaining a whole namespace listing in memory.
 The optional Dropbox live probe selects original Paper metadata uniquely from
 the source parent listing. It obtains the disposable Drive folder's ID from
 the configured destination parent listing and rechecks that identity before
@@ -129,13 +132,13 @@ identity-provider calls were needed.
 Plan snapshots and current `status.uploadActivity` report job-content uploads
 observed in one engine home, keyed by the approved Google account email (trim/case
 normalization only). Concurrent jobs share `uploads.sqlite`, whose independent
-ledger schema is version 1; the per-job store remains version 7 from detached
-execution. This is local accounting, with no discovery, merging or coordination
+ledger schema is version 1; the per-job store uses version 8 for paged evidence.
+This is local accounting, with no discovery, merging or coordination
 across engine homes or hosts. Other homes/hosts and non-Migmate uploads are
 unobserved even when local coverage is complete.
 
-Coverage includes file-migration uploads to Google and acknowledged Teams Google
-content uploads, including failed/stopped attempts. Existing recovered archive
+Coverage includes file-migration uploads to Google (including Dropbox sources)
+and acknowledged Teams Google content uploads, including failed/stopped attempts. Existing recovered archive
 objects are not charged again. Downloads, Google-to-SharePoint uploads, local-only
 archives and packaging, verification/hash reads, metadata/HTTP overhead and
 preflight probes are excluded. Observed counters are not Google's charged bytes;

@@ -66,6 +66,9 @@ hierarchy or destination wrapper, then plan/approve again before retrying.
 Listing verification compares paths and sizes, downloading exports with unknown size;
 hash verification downloads source bytes for Drive SHA-256, falling back to MD5.
 Pinned rclone has no Dropbox ListR; recursive listings walk folders individually.
+Listings and export-collision checks use disposable disk-backed indexes; verification
+coverage is paged. Dropbox → Google uploaded bytes contribute to the Google
+destination's engine-home account ledger, not a Dropbox upload allowance.
 
 ## Mapping manifests
 
