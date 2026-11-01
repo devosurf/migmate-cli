@@ -100,9 +100,6 @@ export class FileEffects {
     return this.#effect(adapter, "readSharedDrive").call(adapter, ...input);
   }
 
-  async discoverSharePoint() {
-    return this.#effect(this.#source, "discoverSharePoint").call(this.#source);
-  }
   async discoverSource(signal?: AbortSignal) {
     return this.#effect(this.#source, "discoverSource").call(this.#source, signal);
   }

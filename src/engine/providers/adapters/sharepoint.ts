@@ -25,7 +25,7 @@ import type {
 } from "../port.ts";
 import { markCreationRejected } from "../port.ts";
 import { sharepointOrigin } from "./credentials/sharepoint.ts";
-import { discoverSharePoint, discoverSharePointSource } from "../discovery.ts";
+import { discoverSharePointSource } from "../discovery.ts";
 import {
   sourceKey,
   type AdapterInput,
@@ -760,10 +760,6 @@ export class SharePointAdapter implements FileAdapter {
       kind: "sharepoint" as const,
       ignoreSizeAndChecksum: true,
     };
-  }
-
-  async discoverSharePoint() {
-    return discoverSharePoint(this.#graph);
   }
 
   async discoverSource(signal?: AbortSignal) {

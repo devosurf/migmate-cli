@@ -145,11 +145,6 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     ...(input.jobType === "teams_archive"
       ? { archive: createArchiveProvider(archiveTransport) }
       : {}),
-    async discoverSharePoint() {
-      if (input.jobType !== "file_migration")
-        throw new ProviderFault("unsupported_route", "Discovery requires a source file job.");
-      return (await files()).discoverSharePoint();
-    },
     async discoverSource(signal) {
       if (input.jobType !== "file_migration")
         throw new ProviderFault("unsupported_route", "Discovery requires a source file job.");

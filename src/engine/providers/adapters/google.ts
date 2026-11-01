@@ -32,7 +32,6 @@ import {
   HttpProviderFault,
   cursorPages,
 } from "../http.ts";
-import type { SharePointDiscovery } from "../discovery.ts";
 import type { SourceDiscovery } from "../../partition.ts";
 import { discoverSharedDrives } from "./google-discovery.ts";
 
@@ -427,13 +426,6 @@ export class GoogleAdapter implements FileAdapter {
     throw new ProviderFault(
       "unsupported_route",
       "Shared Drive destinations require stable folder identifiers.",
-    );
-  }
-
-  async discoverSharePoint(): Promise<SharePointDiscovery> {
-    throw new ProviderFault(
-      "unsupported_route",
-      "Discovery requires a SharePoint source file job.",
     );
   }
 
