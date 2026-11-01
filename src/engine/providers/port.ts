@@ -79,6 +79,12 @@ export interface FilePassRoot {
   kind: "local" | "sharepoint" | "google_drive" | "dropbox";
   /** Backend compares timestamps because upload can rewrite size/checksum. */
   ignoreSizeAndChecksum?: boolean;
+  /**
+   * ADR-0020 D4: only the root's direct files. Its folders are outside the mapping:
+   * on the source they are split into other mappings, on the destination they belong
+   * to them. Listings, copies and mirror deletions never see them.
+   */
+  filesOnly?: true;
 }
 
 export interface CopyPassHandle {
@@ -257,6 +263,8 @@ export interface ProviderPort extends FilePassProvider {
     sourceItemId: string;
     destDriveId: string;
     destFolderId: string;
+    /** Marks both resolved roots files-only (ADR-0020 D4). */
+    filesOnly?: true;
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
   discoverSharePoint?(): Promise<SharePointDiscovery>;

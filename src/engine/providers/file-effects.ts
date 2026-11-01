@@ -89,9 +89,11 @@ export class FileEffects {
   async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
     if (input.sourceType !== undefined && input.sourceType !== this.#sourceProvider)
       throw new ProviderFault("unsupported_route", "The pass direction differs from its mapping.");
+    // The scope is the mapping's, not the backend's: adapters resolve whole roots.
+    const scope = input.filesOnly ? { filesOnly: true as const } : {};
     return {
-      source: await this.#source.resolveSourcePass(input),
-      destination: await this.#destination.resolveDestinationPass(input),
+      source: { ...(await this.#source.resolveSourcePass(input)), ...scope },
+      destination: { ...(await this.#destination.resolveDestinationPass(input)), ...scope },
     };
   }
 
