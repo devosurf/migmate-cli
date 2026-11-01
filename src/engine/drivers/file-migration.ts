@@ -823,7 +823,15 @@ async function destinationFolderDepth(
   return depth;
 }
 
-/** Provider-native inventory finds exceptional content omitted by transfer listings. */
+/** What the transfer backend lists as a directory: folders and OneNote notebooks. */
+function transferDirectory(entry: SourceEntry): boolean {
+  return entry.kind === "folder" || (entry.kind === "package" && entry.packageSections !== null);
+}
+
+/**
+ * Provider-native inventory finds exceptional content omitted by transfer listings.
+ * A files-only root's folders are outside its mapping, so they raise nothing.
+ */
 async function* sourceContentFindings(
   ctx: FileContext,
   mapping: FileMappingConfig,
@@ -853,6 +861,7 @@ async function* sourceContentFindings(
     );
     for (const child of children.uniqueValues()) {
       ctx.signal?.throwIfAborted();
+      if (mapping.filesOnly && transferDirectory(child)) continue;
       const previous = names.get(child.name);
       if (!previous) names.add({ name: child.name, first: child.id });
       else if (previous.first !== child.id && previous.second === undefined) {
@@ -862,6 +871,7 @@ async function* sourceContentFindings(
     }
     for (const child of children.uniqueValues()) {
       ctx.signal?.throwIfAborted();
+      if (mapping.filesOnly && transferDirectory(child)) continue;
       const path = parent.path ? `${parent.path}/${child.name}` : child.name;
       if (child.kind === "folder" && !folders.has(child.id)) folders.add({ id: child.id, path });
       const collision = names.get(child.name);
@@ -1263,6 +1273,7 @@ async function destinationConstraints(
     checkPaths: !planning || !pendingCreation,
     sourceDriveId: mapping.sourceDriveId,
     sourceItemId: mapping.sourceItemId,
+    ...(mapping.filesOnly ? { filesOnly: true } : {}),
     root: {
       ...(root?.webUrl ? { webUrl: root.webUrl } : {}),
       ...(mapping.createDrive
