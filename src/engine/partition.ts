@@ -63,6 +63,11 @@ export interface DiscoveredFolder {
    * listed in `folders`, and no mapping of this boundary may cover them.
    */
   nested?: string[];
+  /**
+   * Packages (OneNote notebooks) directly inside, already counted in `files`. rclone
+   * lists them as folders, so a files-only mapping cannot carry them.
+   */
+  packages?: number;
 }
 
 /** Every item a folder's subtree adds below it: files and folders, not the folder itself. */
@@ -157,10 +162,15 @@ export function partition(input: PartitionInput): Partition {
     const target = targetOf(boundary);
     const items = subtreeItems(folder);
     // A folder without subfolders cannot split further, whatever its size.
-    const whole = !folder.folders.length || target === null || items <= target;
+    // Nor can one holding a package: its files-only mapping would leave it behind.
+    const whole = !folder.folders.length || !!folder.packages || target === null || items <= target;
     if (!holdsNestedBoundary(folder) && whole)
       return [{ boundary, folder, path, filesOnly: false, items }];
     const units: Unit[] = [];
+    if (folder.packages)
+      notices.push(
+        `${[boundary.name, ...path].join("/")} holds ${folder.packages} OneNote notebook${folder.packages === 1 ? "" : "s"} beside a folder with its own access. Its files-only mapping cannot carry them: move them, or map them by hand.`,
+      );
     if (folder.files > 0)
       units.push({ boundary, folder, path, filesOnly: true, items: folder.files });
     for (const child of [...folder.folders].sort((a, b) => compare(a.name, b.name)))
@@ -285,7 +295,7 @@ export function partition(input: PartitionInput): Partition {
     }
     if (container.overTarget)
       notices.push(
-        `Container "${unique}" plans ${container.items} items, over its target of ${bin.target}: a folder holds more files directly than the target allows and cannot split further.`,
+        `Container "${unique}" plans ${container.items} items, over its target of ${bin.target}: a folder holds more files directly than the target allows, or holds OneNote notebooks, and cannot split further.`,
       );
     containers.push(container);
   }

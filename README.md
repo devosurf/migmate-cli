@@ -1099,7 +1099,9 @@ it for several. Lower a target where people will sync the destination to their d
   subfolder** across containers. A files-only mapping carries the files directly
   inside each split folder.
 - A folder whose own files exceed the target cannot split further: its container is
-  flagged `overTarget`, and a notice names it.
+  flagged `overTarget`, and a notice names it. Neither can a folder holding a OneNote
+  notebook, since a files-only mapping copies no subfolders and rclone lists
+  notebooks as folders.
 
 The envelope's `value` holds `boundaries` (counts, members as source identities,
 parent boundary), `containers` (planned item counts, target, boundaries, mappings and

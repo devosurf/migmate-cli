@@ -124,6 +124,23 @@ test("a folder over the target on its own files stays whole and is flagged", () 
   assert.match(result.notices.join("\n"), /over its target of 400000/u);
 });
 
+test("a folder holding a notebook never splits, since files-only cannot carry it", () => {
+  const notes = { ...folder("", 6, [folder("Q1", 5), folder("Q2", 5)]), packages: 1 };
+  const result = run([boundary("ns1", "Reports", notes)], { defaultTarget: 10 });
+  assert.deepEqual(rows(result), [["", "Reports", "", "tree"]]);
+  assert.equal(result.containers[0]!.overTarget, true);
+
+  // Around a nested boundary it must split anyway, and the notice says what is left behind.
+  const parent = boundary("ns1", "Clients", { ...folder("", 2, []), nested: ["ns9"], packages: 2 });
+  const child = { ...boundary("ns9", "Private", folder("", 1), other), parent: "ns1" };
+  const around = run([parent, child]);
+  assert.deepEqual(rows(around), [
+    ["", "Clients", "", "files"],
+    ["", "Private", "", "tree"],
+  ]);
+  assert.match(around.notices.join("\n"), /Clients holds 2 OneNote notebooks/u);
+});
+
 test("boundaries with identical membership share a container, each in its own folder", () => {
   const result = run([
     boundary("ns3", "Budgets", folder("", 100)),

@@ -480,13 +480,17 @@ async function discoverLibrary(walk: Walk, library: Library, notices: string[]) 
   }
   const counts = new Map<string, number>();
   const add = (at: string) => counts.set(at, (counts.get(at) ?? 0) + 1);
+  const packages = new Map<string, number>();
   const children = new Map<string, string[]>();
   let orphans = 0;
   for (const [id, node] of folders) {
     const at = hostOf(id);
     if (at === null) orphans++;
-    else if (at !== id) add(at);
-    else {
+    else if (at !== id) {
+      add(at);
+      // The outermost package sits directly in the folder that hosts it.
+      if (node.package && node.parent === at) packages.set(at, (packages.get(at) ?? 0) + 1);
+    } else {
       const siblings = children.get(node.parent);
       if (siblings) siblings.push(id);
       else children.set(node.parent, [id]);
@@ -512,6 +516,7 @@ async function discoverLibrary(walk: Walk, library: Library, notices: string[]) 
   type Pending = (typeof pending)[number];
   function tree(boundary: Pending, id: string, name: string, path: string): DiscoveredFolder {
     const folder: DiscoveredFolder = { name, files: counts.get(id) ?? 0, folders: [] };
+    if (packages.has(id)) folder.packages = packages.get(id)!;
     const nested: string[] = [];
     const below = (children.get(id) ?? [])
       .map((child) => ({ id: child, name: folders.get(child)!.name }))

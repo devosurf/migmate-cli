@@ -194,7 +194,7 @@ test("discovery counts a library in one delta walk and splits it at unique acces
             {
               name: "Projects",
               files: 1,
-              folders: [{ name: "Alpha", files: 4, folders: [] }],
+              folders: [{ name: "Alpha", files: 4, folders: [], packages: 1 }],
               nested: ["drive-a/secret"],
             },
           ],
