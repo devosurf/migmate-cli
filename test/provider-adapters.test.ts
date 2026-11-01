@@ -51,20 +51,20 @@ test("new file configurations refuse route and point to provider-pair fields", a
   }
 });
 
-test("same-provider pairs refuse before creating a job", async (t) => {
+test("same-provider pairs create jobs that verify stored hashes by default", async (t) => {
   const h = await harness(t);
   for (const [sourceProvider, destinationProvider] of [
     ["dropbox", "dropbox"],
     ["sharepoint", "sharepoint"],
     ["google_shared_drive", "google_shared_drive"],
   ]) {
-    const result = await h.engine.initJob({
-      type: "file_migration",
-      config: { sourceProvider, destinationProvider },
-    });
-    assert.equal(result.ok, false);
-    if (result.ok) throw new Error("unsupported pair accepted");
-    assert.equal(result.refusal.code, "unsupported_route");
+    const ref = value(
+      await h.engine.initJob({
+        type: "file_migration",
+        config: { sourceProvider, destinationProvider },
+      }),
+    );
+    assert.ok(ref);
   }
 });
 
@@ -183,51 +183,47 @@ test("route-named stored configuration and frozen plan remain readable without r
 
 const manifestFormats: Array<"json" | "csv"> = ["json", "csv"];
 for (const format of manifestFormats) {
-  test(`unsupported manifest provider pairs retain their refusal in ${format}`, async (t) => {
+  test(`same-provider manifest rows refuse in a job with another pair in ${format}`, async (t) => {
     const h = await harness(t);
-    for (const [source, destination] of [
-      ["dropbox", "dropbox"],
-      ["sharepoint", "sharepoint"],
-      ["google_shared_drive", "google_shared_drive"],
-    ]) {
+    const side = (type: string, drive: string, root: string) =>
+      type === "dropbox"
+        ? { type, namespaceId: drive, folderPath: "" }
+        : type === "sharepoint"
+          ? { type, driveId: drive, folderPath: "" }
+          : { type, driveId: drive, folderId: root };
+    for (const provider of ["dropbox", "sharepoint", "google_shared_drive"]) {
+      const source = side(provider, "source-drive", "source-root");
+      const destination = side(provider, "destination-drive", "destination-root");
       const content =
         format === "json"
-          ? JSON.stringify({
-              version: 1,
-              mappings: [
-                {
-                  id: "mapping",
-                  source: { type: source, driveId: "source-drive", folderId: "source-root" },
-                  destination: {
-                    type: destination,
-                    driveId: "destination-drive",
-                    folderId: "destination-root",
-                  },
-                },
-              ],
-            })
+          ? JSON.stringify({ version: 1, mappings: [{ id: "mapping", source, destination }] })
           : [
               "id,source.type,source.driveId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members,source.folderId,destination.folderPath",
               [
                 "mapping",
-                source,
+                provider,
                 "source-drive",
                 "",
-                destination,
+                provider,
                 "destination-drive",
-                "destination-root",
+                "folderId" in destination ? "destination-root" : "",
                 "",
                 "",
-                "source-root",
+                "folderId" in source ? "source-root" : "",
                 "",
               ].join(","),
             ].join("\n");
       const result = await h.engine.withWriterResult(h.ref, (writer) =>
         writer.loadManifest({ format, content }),
       );
-      assert.equal(result.ok, false);
-      if (result.ok) throw new Error("Unsupported pair accepted");
-      assert.equal(result.refusal.code, "unsupported_route", `${source} → ${destination}`);
+      if (result.ok) throw new Error(`${provider} rows loaded into a SharePoint → Google job`);
+      // The job's pair fixes one direction for all its mappings.
+      assert.equal(result.refusal.code, "configuration_invalid", provider);
+      assert.deepEqual(
+        result.refusal.detail,
+        { row: 1, field: provider === "sharepoint" ? "destination.type" : "source.type" },
+        provider,
+      );
     }
   });
 }
