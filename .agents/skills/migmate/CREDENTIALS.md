@@ -131,18 +131,31 @@ reaches granted sites; a leaked tenant-read key reaches every site, including si
 outside the job. Surface that tradeoff before asking an administrator to replace
 the grant; Migmate never widens it automatically.
 
-For a SharePoint-source file job with no mappings, onboard the provider pair/options and
-`[rclone]` config with `creds init --job ID --config job.toml --output json`, then run
-`discover --job ID --file draft.json --output json`. Read `value.sites` and
-`value.manifest`; the optional new private file contains only the manifest and
-refuses overwrite. Without `--file`, the same draft remains in the envelope.
-Discovery covers subsites too, and skips personal OneDrive sites. Review each proposed
-`Site name (host/site path) - Library name`, remove unwanted libraries, and
-fill in `members` before explicitly running `manifest load`. A site Graph returns
-unnamed (the classic Search Center, for one) is labelled from its URL path segment or
-host, and an unnamed library by its drive ID.
-Discovery neither loads nor provisions; human plan approval still gates creation.
-Empty discovery produces an empty draft, which cannot be loaded until it has a mapping.
+### Discover and partition (every source)
+
+For a file job with no mappings, onboard the provider pair/options and `[rclone]`
+config with `creds init --job ID --config job.toml --output json`, then run
+`discover --job ID --file draft.json --output json`. The optional new private file
+contains only the manifest and refuses overwrite. Discovery counts files and folders
+per access boundary (Dropbox team and shared folders, Shared Drives, SharePoint
+libraries and folders with unique permissions) and proposes containers filled to a
+capacity target: 80% of the destination's hard item limit by default (400,000 per
+Shared Drive), none where the limit is not established (Dropbox, SharePoint).
+Ask the human whether people will sync any destination to their desktops; if so,
+offer a lower target with `--capacity-target BOUNDARY_ID=ITEMS` for those
+boundaries, or `--capacity-target ITEMS` for all, and rerun.
+
+Present `value.containers` (name, planned items, target, `overTarget`, boundaries,
+`sourceMembers`) with a keep/drop recommendation per boundary from `value.boundaries`,
+and every `value.notices` entry. Boundaries with identical source membership share
+a container, each in its own folder; split boundaries carry their loose files in a
+files-only mapping. Before `manifest load`, the human translates each container's
+`sourceMembers` into destination `members`, identical on every row of that
+container, and fills `destination.siteId` for SharePoint destinations. Renaming a
+container means renaming it on every row that shares it. Discovery neither loads
+nor provisions; human plan approval still gates creation. On `configuration_invalid`
+with `detail.field: "--capacity-target"`, the named `boundaryIds` were not
+discovered: correct the ID from `value.boundaries`.
 
 On `preflight_failed` with `detail.check: discovery_requires_sites_read_all`,
 surface `detail.requiredGrant: Sites.Read.All`. Keep `Sites.Selected` and author

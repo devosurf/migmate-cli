@@ -611,35 +611,45 @@ On macOS, acquiring the writer's own OS-observed start identity retries one expl
 
 **Where you see it.** The `provider.credentials` preflight check and its recorded evidence — tenant id, client id, granted roles — and the `credential_permissions_invalid` refusal.
 
-### Tenant discovery boundary
+### Discovery and partitioning — ADR-0020
 
-`discover --job ID [--file draft.json]` follows Graph `sites/getAllSites`, each
-site's `sites` (subsites, recursively) and `drives` paging links, visiting each site
-once and selecting document libraries. Personal OneDrive sites (`isPersonalSite`, or a
-`-my.sharepoint.com` host) are skipped without a request; a document library someone
-added inside a OneDrive site is therefore never proposed. It requires
-`Sites.Read.All`; scoped discovery refuses with `preflight_failed`, detail check
-`discovery_requires_sites_read_all`, and required grant `Sites.Read.All`. Site and
-library names only label the draft: a missing or unusable name falls back to the
-site's URL path segment or host, or the library's drive ID, and never refuses.
-Missing or invalid site and library identifiers, site URLs, and malformed, off-Graph
-or repeating pages refuse `preflight_failed` with detail check
-`discovery_response_invalid`, naming the `object`, `field`, and site or route. A failed
-Graph request is not retried: it refuses `preflight_failed` with detail check
-`discovery_request_failed`, its HTTP `status`, and the route and site it was reading.
-Credential onboarding, `doctor` and discovery accept a job with no mappings;
-mapping-specific access checks apply after load. `plan` requires at least one mapping
-and otherwise refuses `configuration_invalid`, field `mappings`, directing the operator
-to `manifest load`. A fresh job still refuses `execute` with `approval_required` and
-`verify` with `verification_unaccepted`; neither can migrate an empty job.
-The JSON envelope carries sites/libraries and a draft manifest, proposing one
-Shared Drive per library named from site name, site URL path and library with
-empty members for the operator. No access translation, automatic manifest load, or provisioning occurs.
-The optional private file contains only the draft and never overwrites an existing
-path. Review mappings, names and members, then explicitly load, plan and approve.
-An empty tenant returns an empty draft, not a loadable job manifest. Enumeration
-is a point-in-time observation, not a tenant snapshot or a guarantee against sites
-and libraries added after discovery.
+`discover --job ID [--file draft.json] [--capacity-target ITEMS|BOUNDARY_ID=ITEMS ...]`
+counts every source provider per access boundary and proposes a partitioned draft
+manifest. It is read-only: no load, provisioning or access translation.
+
+**Boundaries.** Dropbox: team folders and shared folders from `team/namespaces/list`,
+each namespace ID once; a mount of another namespace inside one is a nested boundary,
+excluded from its parent. Member and app folders are skipped with a notice. The
+source app needs `sharing.read` for members and refuses `preflight_failed`
+(`discovery_requires_sharing_read`) without it. Google: the Shared Drives the acting
+account belongs to (`drives.list` without domain-admin access); untrashed items count,
+and trashed items are reported in a notice because they count toward Google's limit
+but are not migrated. SharePoint: every document library from `sites/getAllSites`
+and each site's subsites, skipping personal OneDrive sites, plus each folder carrying
+a `shared` facet in a `Prefer: hierarchicalsharing` delta walk, as a nested boundary.
+It requires `Sites.Read.All`; scoped discovery refuses with detail check
+`discovery_requires_sites_read_all`. Untrusted responses refuse
+`discovery_response_invalid` and failed requests `discovery_request_failed`, naming
+the object, field, route and container they were reading.
+
+**Partition.** Boundaries with identical membership and target share a container, each
+in its own folder; unreadable membership never shares. A boundary over its target, or
+around a nested boundary, splits by subfolder, with a files-only mapping for each
+split folder's own files. The default target is 80% of the destination's hard item
+limit, counting files and folders: 400,000 for a Shared Drive. Dropbox team folders
+and SharePoint libraries have no established hard limit, so without a target they
+split only by boundary. A folder whose own files exceed the target is proposed whole
+and flagged `overTarget`. Members stay empty, with each container's source members
+listed for the reviewer; SharePoint destinations also need `destination.siteId`.
+
+**Not yet proven live.** No real tenant has run discovery. Unconfirmed against live
+services: that a SharePoint delta under `hierarchicalsharing` marks exactly the
+folders with broken inheritance, and that app-only permission reads return the full
+audience; that Dropbox lists a mount point's folder entry while excluding mounted
+content, and whether a nested shared folder's member list includes inherited
+members; that a recursive Dropbox listing of a very large namespace completes.
+Discovery holds the folder tree in memory, not files; counts are a point-in-time
+observation.
 
 ## 5. Supported routes, and every job verifies itself
 
