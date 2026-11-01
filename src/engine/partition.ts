@@ -164,10 +164,23 @@ export function partition(input: PartitionInput): Partition {
     const items = subtreeItems(folder);
     // A folder without subfolders cannot split further, whatever its size.
     // Nor can one holding a package: its files-only mapping would leave it behind.
-    const whole = !folder.folders.length || !!folder.packages || target === null || items <= target;
+    // Nor one whose subfolders share a destination name: their mappings would overlap.
+    const sibling = destination.destinationSiblingKey ?? ((name: string) => name);
+    const names = folder.folders.map((child) => sibling(destinationName(child.name)));
+    const colliding = new Set(names).size < names.length;
+    const whole =
+      !folder.folders.length ||
+      !!folder.packages ||
+      colliding ||
+      target === null ||
+      items <= target;
     if (!holdsNestedBoundary(folder) && whole)
       return [{ boundary, folder, path, filesOnly: false, items }];
     const units: Unit[] = [];
+    if (colliding)
+      notices.push(
+        `${[boundary.name, ...path].join("/")} holds subfolders whose names collide at the destination beside a folder with its own access. Rename them before loading: their mappings overlap.`,
+      );
     if (folder.packages)
       notices.push(
         `${[boundary.name, ...path].join("/")} holds ${folder.packages} OneNote notebook${folder.packages === 1 ? "" : "s"} beside a folder with its own access. Its files-only mapping cannot carry them: move them, or map them by hand.`,
@@ -296,7 +309,7 @@ export function partition(input: PartitionInput): Partition {
     }
     if (container.overTarget)
       notices.push(
-        `Container "${unique}" plans ${container.items} items, over its target of ${bin.target}: a folder holds more files directly than the target allows, or holds OneNote notebooks, and cannot split further.`,
+        `Container "${unique}" plans ${container.items} items, over its target of ${bin.target}: a folder holds more files directly than the target allows, or holds OneNote notebooks or subfolders whose names collide, and cannot split further.`,
       );
     containers.push(container);
   }

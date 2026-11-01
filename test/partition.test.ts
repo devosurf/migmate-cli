@@ -141,6 +141,19 @@ test("a folder holding a notebook never splits, since files-only cannot carry it
   assert.match(around.notices.join("\n"), /Clients holds 2 OneNote notebooks/u);
 });
 
+test("a folder whose subfolders collide at the destination never splits", () => {
+  const tree = folder("", 0, [folder("Big", 0, [folder("X", 5), folder("x", 5)]), folder("Y", 1)]);
+  const result = run([boundary("ns1", "Docs", tree)], {
+    destinationProvider: "sharepoint",
+    defaultTarget: 8,
+  });
+  // SharePoint compares names case-insensitively, so X and x stay together under Big.
+  assert.deepEqual(rows(result), [
+    ["Big", "Docs (part 1 of 2)", "Big", "tree"],
+    ["Y", "Docs (part 2 of 2)", "Y", "tree"],
+  ]);
+});
+
 test("boundaries with identical membership share a container, each in its own folder", () => {
   const result = run([
     boundary("ns3", "Budgets", folder("", 100)),
