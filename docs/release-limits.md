@@ -538,7 +538,8 @@ an app onboarded for the other direction. Jobs in other engine homes are not see
 Destinations are team-folder namespaces only. Created team folders come from
 `team/team_folder/create`, which documents no request key and leaves no marker: a lost
 response or any visible same-name team folder refuses `drive_creation_ambiguous`,
-never adoption. Team-space teams (`has_team_shared_dropbox`) refuse creation before
+never adoption. A 4xx refusal (a name conflict included) proves nothing was
+created, so it clears the attempt and a later `execute` may create. Team-space teams (`has_team_shared_dropbox`) refuse creation before
 any effect, because new top-level folders there are visible to the whole team. An
 API-created team folder shares with no one, so it is fenced until go-live; members
 are groups by group ID with `viewer` or `editor`. Whether the selected administrator
@@ -549,8 +550,9 @@ over 255 characters block; a trailing space is encoded with disclosure. Uploads 
 `batch_mode=sync`. The monthly team upload-call allowance (403
 `invalid_account_type/feature`) is detected in rclone's running error text, because
 rclone retries it; the job blocks with `uploadQuota.limit =
-"dropbox_team_monthly_upload_calls"` and an estimated resume on the first of the next
-month in UTC (Dropbox names no time zone). No authenticated Dropbox destination run has
+"dropbox_team_monthly_upload_calls"` and an estimated resume at 08:00 UTC on the first of
+the next month: midnight US Pacific standard time, the latest plausible reset, since
+Dropbox names no time zone. No authenticated Dropbox destination run has
 been performed.
 
 ## 2. Mapping recovery is durable; rclone jobs are not

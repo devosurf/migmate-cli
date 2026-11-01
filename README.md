@@ -433,7 +433,10 @@ fence: groups are granted at go-live after verification, and membership checks b
 and after the grant compare the folder's groups, users and invitees to the manifest.
 Team folders have no request key or description field, so a lost creation response,
 or any visible same-name team folder (compared case-insensitively, archived ones
-included), blocks `drive_creation_ambiguous` instead of adopting it. Teams that use a
+included), blocks `drive_creation_ambiguous` instead of adopting it. A refusal
+Dropbox returns before creating anything (a name conflict, a reserved name, 4xx
+including rate limiting) clears the recorded attempt, so `execute` can create once the
+cause is gone; only a lost response or 5xx stays ambiguous. Teams that use a
 Dropbox team space refuse creation at manifest load, because a new top-level folder
 there is visible to the whole team at once; copy into an existing team folder instead.
 Existing destinations must be team folders, never member homes or shared folders.
@@ -448,8 +451,8 @@ listing each path. Uploads run with rclone's `batch_mode=sync`, committing up to
 Dropbox counts upload calls per team per month. When the allowance runs out
 (HTTP 403 `invalid_account_type/feature`), Migmate stops every pass instead of
 letting rclone retry: execute returns `blocked` with `uploadQuota.limit =
-"dropbox_team_monthly_upload_calls"` and an `earliestResumeAt` estimate of the first
-of the next month (UTC). For existing team-folder destinations, doctor records the
+"dropbox_team_monthly_upload_calls"` and an `earliestResumeAt` estimate of 08:00 UTC
+on the first of the next month (midnight US Pacific; Dropbox names no time zone). For existing team-folder destinations, doctor records the
 team's `upload_api_rate_limit` ceiling.
 No authenticated Dropbox destination run has been performed.
 

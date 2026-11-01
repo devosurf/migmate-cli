@@ -113,7 +113,9 @@ Name it under `[rclone]` as `dropboxDestinationRemote = "dropbox-destination"`, 
 the source remote, and run `creds init` as for the source app; the browser prompt
 names the destination write app. `creds init` records each app key's direction in the
 engine home: an app key already onboarded for the other direction refuses with
-`detail.reason` `destination_reuses_source_app` or `source_reuses_destination_app`.
+`detail.reason` `destination_reuses_source_app` or `source_reuses_destination_app`. Only apps run
+through `creds init` since this check shipped are recorded: re-run `creds init` for an
+older source job before onboarding its destination app.
 Created team folders need a team without a team space; manifest members are Dropbox
 groups by `groupId` (`g:…`).
 
