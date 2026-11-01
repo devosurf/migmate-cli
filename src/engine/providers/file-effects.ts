@@ -3,7 +3,7 @@ import { ProviderFault } from "./fault.ts";
 import type { GraphTransport } from "./http.ts";
 import type { CheckResult } from "../types.ts";
 import type { ProviderPort } from "./port.ts";
-import { fileProviderPair } from "./adapters/capabilities.ts";
+import { fileProviderPair, sameProviderPair, serverSideCopy } from "./adapters/capabilities.ts";
 import type { DestinationRoot, Mapping, SourceWorker, FileAdapter } from "./adapters/effects.ts";
 
 function readMappings(config: unknown): Mapping[] {
@@ -92,8 +92,16 @@ export class FileEffects {
       mappings: this.mappings,
       destinationRoots: this.#destinationRoots,
     };
-    this.#source = pair.source.createEffects(adapterInput);
-    this.#destination = pair.destination.createEffects(adapterInput);
+    this.#source = pair.source.createEffects({
+      ...adapterInput,
+      role: "source",
+      sameProvider: sameProviderPair(pair),
+    });
+    this.#destination = pair.destination.createEffects({
+      ...adapterInput,
+      role: "destination",
+      serverSideCopy: !input.destination && serverSideCopy(input.config),
+    });
     this.#sourceProvider = pair.source.id;
   }
 
@@ -119,7 +127,11 @@ export class FileEffects {
   }
 
   async readSharedDrive(...input: Parameters<ProviderPort["readSharedDrive"]>) {
-    const adapter = this.#source.readSharedDrive ? this.#source : this.#destination;
+    const side = input[2];
+    const adapter =
+      side === "destination" || (side === undefined && !this.#source.readSharedDrive)
+        ? this.#destination
+        : this.#source;
     return this.#effect(adapter, "readSharedDrive").call(adapter, ...input);
   }
 
@@ -221,7 +233,11 @@ export class FileEffects {
   }
 
   async googleAbout(...input: Parameters<NonNullable<ProviderPort["googleAbout"]>>) {
-    const adapter = this.#source.googleAbout ? this.#source : this.#destination;
+    const side = input[1];
+    const adapter =
+      side === "source" || (side === undefined && !this.#destination.googleAbout)
+        ? this.#source
+        : this.#destination;
     return this.#effect(adapter, "googleAbout").call(adapter, ...input);
   }
 

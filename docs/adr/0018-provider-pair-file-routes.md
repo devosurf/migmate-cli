@@ -118,6 +118,8 @@ Same-provider routes copy files only; identity, mailbox and domain cutover stay 
 
 Only Google → Google inside one Workspace copies server side, because the delegated identity already holds that authority. Dropbox and SharePoint same-tenant routes stream through the host, since server-side copy would need write scopes on the source app and end the read-only source proof.
 
+Implemented in #113: server-side copy is opted into with `serverSideCopy`, runs as the destination's acting account, and requires that account to already read the source drives. The read-only Google source account is proven by its `drive.readonly` scope. Same-provider routes default to stored-hash verification.
+
 ## Considered alternatives
 
 - **More named routes:** rejected. Nine named routes would multiply the provider branches already spread through the engine.

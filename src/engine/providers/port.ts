@@ -84,6 +84,8 @@ export interface FilePassRoot {
    * to them. Listings, copies and mirror deletions never see them.
    */
   filesOnly?: true;
+  /** Destination copies server side from a same-provider source (ADR-0018 D10). */
+  serverSideCopy?: boolean;
 }
 
 export interface CopyPassHandle {
@@ -232,8 +234,14 @@ export interface DriveMembership {
 }
 
 export interface ProviderPort extends FilePassProvider {
-  googleAbout(signal?: AbortSignal): Promise<GoogleAbout>;
-  readSharedDrive(driveId: string, signal?: AbortSignal): Promise<SharedDrive | null>;
+  /** Without a side: the destination's Google account when it has one, else the source's. */
+  googleAbout(signal?: AbortSignal, side?: "source" | "destination"): Promise<GoogleAbout>;
+  /** Without a side: as the source's Google account when it has one. */
+  readSharedDrive(
+    driveId: string,
+    signal?: AbortSignal,
+    side?: "source" | "destination",
+  ): Promise<SharedDrive | null>;
   /** Empty means app-only identity, with no implicit person membership. */
   destinationCreator(): Promise<string>;
   /** Read-only provider prerequisites, before any creation or permission mutation. */

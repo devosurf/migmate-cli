@@ -19,6 +19,7 @@ import { FileEffects } from "./file-effects.ts";
 import type { ProvenanceRecord } from "./port.ts";
 import { DiskListing, disposeListing, ListingScratch } from "./listing.ts";
 import { GoogleAdapter } from "./adapters/google.ts";
+import { serverSideCopy } from "./adapters/capabilities.ts";
 import { SharePointAdapter } from "./adapters/sharepoint.ts";
 import { SHAREPOINT_DESTINATION_ENCODING } from "./adapters/rclone-name-encoding.ts";
 
@@ -1445,4 +1446,133 @@ test("a source path that resolves to another item refuses instead of serving its
     (error: unknown) => error instanceof ProviderFault && error.code === "source_read_failed",
   );
   assert.equal(read, false);
+});
+
+test("Google → Google reads as the read-only source account and copies server side only when chosen", async (t) => {
+  const tokens: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    assert.equal(url.hostname, "www.googleapis.com");
+    const auth = new Headers(init?.headers).get("Authorization")!;
+    tokens.push(`${auth.slice("Bearer ".length)} ${url.pathname}`);
+    if (url.pathname === "/drive/v3/about")
+      return Response.json({
+        user: {
+          emailAddress: auth.includes("source") ? "reader@example.com" : "writer@example.com",
+        },
+        canCreateDrives: true,
+      });
+    if (url.pathname.startsWith("/drive/v3/drives/"))
+      return Response.json({ id: "source-drive", name: "Source" });
+    return Response.json({
+      id: "source-root",
+      driveId: "source-drive",
+      name: "root",
+      parents: ["source-drive"],
+      mimeType: "application/vnd.google-apps.folder",
+      createdTime: "",
+      modifiedTime: "",
+    });
+  });
+  const googleSession: CredentialSession = {
+    ...session,
+    sourceRemote: null,
+    destinationRemote: "google-write",
+    delegatedSubject: "writer@example.com",
+    googleSourceRemote: "google-read",
+    googleSourceDelegatedSubject: "reader@example.com",
+    async googleSourceToken() {
+      return "secret-google-source-canary";
+    },
+  };
+  const effects = (options: Record<string, unknown> = {}) =>
+    new FileEffects({
+      config: {
+        sourceProvider: "google_shared_drive",
+        destinationProvider: "google_shared_drive",
+        mappings: [mapping],
+        options,
+      },
+      session: googleSession,
+      graph,
+      worker: {
+        async *read() {
+          throw new Error("No bytes expected");
+        },
+      },
+    });
+  const streamed = await effects().resolveFilePass(mapping);
+  assert.equal(
+    streamed.source.fs,
+    'google-read,team_drive="source-drive",root_folder_id="source-root",impersonate="reader@example.com":',
+  );
+  assert.equal(
+    streamed.destination.fs,
+    'google-write,team_drive="shared-drive",root_folder_id="destination-root",impersonate="writer@example.com":',
+  );
+  assert.equal(streamed.destination.serverSideCopy, undefined);
+  assert.deepEqual(tokens, ["secret-google-source-canary /drive/v3/files/source-root"]);
+  const serverSide = effects({ serverSideCopy: true });
+  const copied = await serverSide.resolveFilePass(mapping);
+  assert.equal(copied.source.fs, streamed.source.fs);
+  assert.equal(
+    copied.destination.fs,
+    'google-write,team_drive="shared-drive",root_folder_id="destination-root",impersonate="writer@example.com",server_side_across_configs=true:',
+  );
+  assert.equal(copied.destination.serverSideCopy, true);
+  // Each side answers as its own account; unnamed asks keep the writing account.
+  tokens.length = 0;
+  assert.equal(
+    (await serverSide.googleAbout(undefined, "source")).user.emailAddress,
+    "reader@example.com",
+  );
+  assert.equal((await serverSide.googleAbout()).user.emailAddress, "writer@example.com");
+  await serverSide.readSharedDrive("source-drive", undefined, "destination");
+  await serverSide.readSharedDrive("source-drive");
+  assert.deepEqual(
+    tokens.map((entry) => entry.split(" ")[0]),
+    [
+      "secret-google-source-canary",
+      "secret-google-canary",
+      "secret-google-canary",
+      "secret-google-source-canary",
+    ],
+  );
+});
+
+test("only Google → Google with the option selects server-side copy", () => {
+  const pairs = [
+    ["google_shared_drive", "google_shared_drive", true],
+    ["dropbox", "dropbox", false],
+    ["sharepoint", "sharepoint", false],
+    ["google_shared_drive", "sharepoint", false],
+    ["sharepoint", "google_shared_drive", false],
+  ] as const;
+  for (const [sourceProvider, destinationProvider, expected] of pairs) {
+    const config = { sourceProvider, destinationProvider, mappings: [] };
+    assert.equal(serverSideCopy(config), false);
+    // Dropbox and SharePoint would need write scopes on the read-only source app (D10).
+    assert.equal(serverSideCopy({ ...config, options: { serverSideCopy: true } }), expected);
+  }
+});
+
+test("Google → Google never falls back to the writer for source reads", () => {
+  assert.throws(
+    () =>
+      new FileEffects({
+        config: {
+          sourceProvider: "google_shared_drive",
+          destinationProvider: "google_shared_drive",
+          mappings: [mapping],
+        },
+        session: { ...session, destinationRemote: "google-write" },
+        graph,
+        worker: {
+          async *read() {
+            throw new Error("No bytes expected");
+          },
+        },
+      }),
+    { code: "credential_config_invalid" },
+  );
 });

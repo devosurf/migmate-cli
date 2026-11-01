@@ -14,6 +14,8 @@ import {
 } from "./created-containers.ts";
 import {
   fileProviderPair,
+  sameProviderPair,
+  serverSideCopy,
   type FileProviderId,
   type FileProviderCapabilities,
 } from "../providers/adapters/capabilities.ts";
@@ -85,8 +87,13 @@ export interface FileMigrationConfig {
   mappings: FileMappingConfig[];
   impersonate?: boolean;
   subject?: string;
+  /** Google → Google only: the read-only source account's delegation. */
+  sourceImpersonate?: boolean;
+  sourceSubject?: string;
   options?: {
     verificationMode?: "hash";
+    /** ADR-0018 D10: Google → Google inside one Workspace copies server side. */
+    serverSideCopy?: boolean;
     mappingsInFlight?: number;
     transfersPerMapping?: number;
     mirror?: boolean;
@@ -1257,6 +1264,7 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     ctx.provider,
     ctx.config.mappings.map((mapping) => provisionedMapping(ctx, mapping)),
     ctx.signal,
+    sameProviderPair(fileProviderPair(ctx.config)),
   );
   let done = 0;
   const sourcePlanning = await ctx.provider.sourcePlanningEvidence?.(ctx.signal);
@@ -2055,8 +2063,10 @@ async function goLiveBaseline(
 }
 
 /**
- * Compare whole mappings by listing. Hash verification additionally downloads source
- * content using the destination's hash type, without a Graph inventory.
+ * Compare whole mappings by listing. Cross-provider hash verification additionally
+ * downloads source content using the destination's hash type, without a Graph inventory.
+ * Same-provider routes compare the hashes both sides store (ADR-0018 D6); only source
+ * files that store none, such as exported documents, are downloaded to hash.
  */
 async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
   let done = 0;
@@ -2080,7 +2090,12 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
     )
       throw new FilePlanRevisionRequiredError();
     const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
-    const hash = ctx.config.options?.verificationMode === "hash";
+    const sameProvider = sameProviderPair({
+      source: sourceAdapter,
+      destination: destinationAdapter,
+    });
+    const hash = sameProvider || ctx.config.options?.verificationMode === "hash";
+    const download = hash && !sameProvider;
     const primaryHash = destinationAdapter.hashType;
     const resources: Disposable[] = [];
     try {
@@ -2103,7 +2118,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
         resources.push(result);
         return result;
       };
-      const sources = await list(pass.source, primaryHash, hash);
+      const sources = await list(pass.source, primaryHash, download);
       const destinations = await list(pass.destination, primaryHash);
       const sourceFolders = indexListing(
         await ctx.provider.listFolders({
@@ -2131,33 +2146,78 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
             break;
           }
         }
+        // Drive stores no SHA-256 for some older files; both sides still store MD5.
+        if (sameProvider && !needsMd5)
+          for (const entry of sources) {
+            if (entry.hash === null && destinations.has(entry.path)) {
+              needsMd5 = true;
+              break;
+            }
+          }
       }
+      const usesMd5 = (sourceHash: string | null, copied: FileHashEntry | undefined) =>
+        needsMd5 && (copied?.hash === null || (sameProvider && sourceHash === null));
       const destinationMd5 = needsMd5
         ? await list(pass.destination, "md5")
         : new DiskListing<FileHashEntry>();
       resources.push(destinationMd5);
       const sourceMd5 = new DiskListing<FileHashEntry>();
       resources.push(sourceMd5);
-      if (hash && needsMd5) {
+      // Source hashes read by path, a page at a time: MD5 fallbacks, and on same-provider
+      // routes the few source files that store no hash of their own.
+      const readSourceHashes = async (
+        target: DiskListing<FileHashEntry>,
+        hashType: "quickxor" | "sha256" | "md5" | "dropbox",
+        downloaded: boolean,
+        selected: Iterable<string>,
+      ) => {
         let paths: string[] = [];
-        for (const entry of destinations) {
-          if (entry.hash !== null) continue;
-          paths.push(entry.path);
-          if (paths.length === 1000) {
-            const page = await list(pass.source, "md5", true, paths);
-            for (const value of page) sourceMd5.add(value);
-            page[Symbol.dispose]();
-            resources.pop();
-            paths = [];
-          }
-        }
-        if (paths.length) {
-          const page = await list(pass.source, "md5", true, paths);
-          for (const value of page) sourceMd5.add(value);
+        const flush = async () => {
+          const page = await list(pass.source, hashType, downloaded, paths);
+          for (const value of page) target.add(value);
           page[Symbol.dispose]();
           resources.pop();
+          paths = [];
+        };
+        for (const path of selected) {
+          paths.push(path);
+          if (paths.length === 1000) await flush();
         }
+        if (paths.length) await flush();
+      };
+      if (hash && needsMd5) {
+        await readSourceHashes(
+          sourceMd5,
+          "md5",
+          download,
+          (function* () {
+            for (const entry of destinations) if (entry.hash === null) yield entry.path;
+            if (sameProvider)
+              for (const entry of sources) {
+                const copied = destinations.get(entry.path);
+                if (entry.hash === null && copied && copied.hash !== null) yield entry.path;
+              }
+          })(),
+        );
       }
+      const sourceDownloaded = new DiskListing<FileHashEntry>();
+      resources.push(sourceDownloaded);
+      if (sameProvider)
+        await readSourceHashes(
+          sourceDownloaded,
+          primaryHash,
+          true,
+          (function* () {
+            for (const entry of sources) {
+              const copied = destinations.get(entry.path);
+              if (!copied) continue;
+              const stored = usesMd5(entry.hash, copied)
+                ? (sourceMd5.get(entry.path)?.hash ?? null)
+                : entry.hash;
+              if (stored === null) yield entry.path;
+            }
+          })(),
+        );
       const coverage = new DiskListing<string>((path) => path);
       resources.push(coverage);
       for (const entry of sources) if (!coverage.has(entry.path)) coverage.add(entry.path);
@@ -2304,12 +2364,22 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           "file",
           source.size,
         );
-        const hashType = needsMd5 && copied?.hash === null ? "md5" : primaryHash;
-        const sourceHash =
+        let hashType: "quickxor" | "sha256" | "md5" | "dropbox" = usesMd5(source.hash, copied)
+          ? "md5"
+          : primaryHash;
+        let sourceHash =
           hashType === "md5" ? (sourceMd5.get(source.path)?.hash ?? null) : source.hash;
-        const destinationHash = copied
-          ? (copied.hash ?? destinationMd5.get(copied.path)?.hash ?? null)
+        let destinationHash = copied
+          ? hashType === "md5"
+            ? (destinationMd5.get(copied.path)?.hash ?? null)
+            : (copied.hash ?? destinationMd5.get(copied.path)?.hash ?? null)
           : null;
+        // A source that stores no hash was downloaded and hashed as the destination stores it.
+        if (sourceHash === null && sourceDownloaded.has(source.path)) {
+          hashType = primaryHash;
+          sourceHash = sourceDownloaded.get(source.path)!.hash;
+          destinationHash = copied?.hash ?? null;
+        }
         const codes: string[] = [];
         let servedSize = view.size;
         // Matching downloaded bytes already prove an unknown export's stored size.
@@ -2332,7 +2402,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           }
         }
         if (
-          hash &&
+          download &&
           source.size >= 0 &&
           primaryHash === "sha256" &&
           sourceHash &&
@@ -2526,8 +2596,12 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
 
 async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
   const pair = fileProviderPair(ctx.config);
-  for (const adapter of [pair.source, pair.destination])
-    if (adapter.preflight && !(yield* adapter.preflight(ctx, adapter === pair.destination))) return;
+  // Same-provider pairs share one adapter, so each side is named by position, not identity.
+  for (const [adapter, destination] of [
+    [pair.source, false],
+    [pair.destination, true],
+  ] as const)
+    if (adapter.preflight && !(yield* adapter.preflight(ctx, destination))) return;
   const provider = ctx.provider;
   for (const mapping of ctx.config.mappings) {
     ctx.signal?.throwIfAborted();
@@ -2569,17 +2643,27 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
     format: "text",
     body: [
       "Approval binds mapping roots, drives, members and options, not a per-file inventory.",
-      "Listing verification compares paths and sizes, folders included; it compares no content.",
       ...(filesOnly.length
         ? [
             `Files-only mappings (${filesOnly.join(", ")}) copy, verify and mirror only the files directly inside their roots; folders on either side are outside them and never created, compared or deleted.`,
           ]
         : []),
-      ...(ctx.config.options?.verificationMode === "hash"
+      ...(sameProviderPair(fileProviderPair(ctx.config))
         ? [
-            "Hash verification is enabled: rclone downloads source content to compare the destination's stored hash type.",
+            "Same-provider route: files only. Identities, mailboxes and domain cutover are outside this job.",
+            "Hash verification compares the hashes both sides store, folders by path, without downloading; only source files that store no hash, such as exported documents, are downloaded to hash.",
+            serverSideCopy(ctx.config)
+              ? "Files copy server side inside one Workspace as the destination's delegated account, which already reads the source; the read-only source account never writes. A file that changed since an earlier pass is copied again as a new file, and its earlier copy goes to the destination drive's trash with its revisions and per-file sharing."
+              : "Files stream through this host from the read-only source credential to the separate destination credential.",
           ]
-        : []),
+        : [
+            "Listing verification compares paths and sizes, folders included; it compares no content.",
+            ...(ctx.config.options?.verificationMode === "hash"
+              ? [
+                  "Hash verification is enabled: rclone downloads source content to compare the destination's stored hash type.",
+                ]
+              : []),
+          ]),
       "Version history, list-item fields, retention labels and permissions are not copied. OneNote notebooks are copied as their section files.",
       ...(fileProviderPair(ctx.config).source.sourceDisclosures ?? []),
       ...(ctx.config.options?.mirror
@@ -2698,7 +2782,21 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         ? `Acting account: ${ctx.actingGoogleAccount} (service account; impersonation off).`
         : "The service-account address was not recorded in this plan (impersonation off).",
   };
-  if (ctx.config.impersonate)
+  if (sameProviderPair(pair) && pair.source.id === "google_shared_drive")
+    yield {
+      title: "Read-only Google source account",
+      format: "text",
+      body: ctx.config.sourceImpersonate
+        ? `Source account: ${ctx.config.sourceSubject} (domain-wide delegation, drive.readonly).`
+        : "Source account: the separate read-only service account (drive.readonly; impersonation off).",
+    };
+  if (sameProviderPair(pair))
+    yield {
+      title: "Copy method",
+      format: "text",
+      body: JSON.stringify({ copyMethod: serverSideCopy(ctx.config) ? "server_side" : "streamed" }),
+    };
+  if (ctx.config.impersonate || ctx.config.sourceImpersonate)
     yield {
       title: "Open cleanup items",
       format: "text",

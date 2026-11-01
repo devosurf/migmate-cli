@@ -127,6 +127,8 @@ import {
   credentialBindings,
   fileProviderPair,
   historicalProviderPair,
+  pairRemoteKeys,
+  sameProviderPair,
   type FileProviderId,
 } from "./providers/adapters/capabilities.ts";
 import { teamsArchiveDriver } from "./drivers/teams-archive.ts";
@@ -236,12 +238,15 @@ type FileConfig = CommonConfig & {
   mappings: Mapping[];
   impersonate?: boolean;
   subject?: string;
+  sourceImpersonate?: boolean;
+  sourceSubject?: string;
   options: NonNullable<FileMigrationConfig["options"]>;
   manifestDigest?: string;
   rclone?: {
     config: FileReference;
     sourceRemote?: string;
     destinationRemote: string;
+    googleSourceRemote?: string;
     sharepointDestinationRemote?: string;
     dropboxRemote?: string;
     dropboxDestinationRemote?: string;
@@ -333,6 +338,8 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           "rclone",
           "impersonate",
           "subject",
+          "sourceImpersonate",
+          "sourceSubject",
         ]
       : [
           ...commonKeys,
@@ -417,21 +424,31 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         "memberGrants",
         "consistencyIntervalMs",
         "settleMaxPasses",
+        "serverSideCopy",
       ],
       "options",
     );
     if (options.verificationMode !== undefined && options.verificationMode !== "hash")
       configError("options.verificationMode");
+    const sameProvider = sameProviderPair(pair);
+    // ADR-0018 D6: same-provider routes verify the hashes both sides store by default.
+    const verificationMode = options.verificationMode ?? (sameProvider ? "hash" : undefined);
     const config: FileConfig = {
       sourceProvider: pair.source.id,
       destinationProvider: pair.destination.id,
       ...common,
       mappings: parsedMappings,
-      options:
-        options.verificationMode === undefined
-          ? {}
-          : { verificationMode: options.verificationMode },
+      options: verificationMode === undefined ? {} : { verificationMode },
     };
+    if (options.serverSideCopy !== undefined) {
+      // D10: Dropbox and SharePoint would need write scopes on the read-only source app.
+      if (
+        typeof options.serverSideCopy !== "boolean" ||
+        (options.serverSideCopy && !(sameProvider && pair.source.id === "google_shared_drive"))
+      )
+        configError("options.serverSideCopy");
+      config.options.serverSideCopy = options.serverSideCopy;
+    }
     if (options.mirror !== undefined) {
       if (typeof options.mirror !== "boolean") configError("options.mirror");
       config.options.mirror = options.mirror;
@@ -473,6 +490,22 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
       config.subject = subject;
     }
     if (config.impersonate && !config.subject) configError("subject");
+    // Google → Google reads with its own read-only account, never the writing one.
+    const separateGoogleSource = sameProvider && pair.source.id === "google_shared_drive";
+    for (const [flag, field] of [["sourceImpersonate", "sourceSubject"]] as const) {
+      if (!separateGoogleSource && (input[flag] !== undefined || input[field] !== undefined))
+        configError(input[flag] !== undefined ? flag : field);
+      if (input[flag] !== undefined) {
+        if (typeof input[flag] !== "boolean") configError(flag);
+        config[flag] = input[flag];
+      }
+      if (input[field] !== undefined) {
+        const subject = text(input[field], field);
+        if (!/^[^\s@]+@[^\s@]+$/u.test(subject)) configError(field);
+        config[field] = subject;
+      }
+      if (config[flag] && !config[field]) configError(field);
+    }
     for (const name of ["mappingsInFlight", "transfersPerMapping"] as const) {
       const value = options[name];
       if (value === undefined) continue;
@@ -491,10 +524,8 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
         ],
         "rclone",
       );
-      const required = [
-        pair.source.credentials.remoteKey.source,
-        pair.destination.credentials.remoteKey.destination,
-      ];
+      const remoteKeys = pairRemoteKeys(pair);
+      const required = [remoteKeys.source, remoteKeys.destination];
       const remotes: Record<string, string> = {};
       for (const binding of credentialBindings) {
         const needed = required.includes(binding.key);
@@ -2772,6 +2803,14 @@ function makeWriter(
         }));
         validateMirrorDestinations(pending, base.options.mirror);
         validateMappingDirections(pending, base.sourceProvider);
+        // Same-provider rows parse as a valid pair, so the destination side is checked too.
+        for (const [index, mapping] of manifest.mappings.entries())
+          if (mapping.destination.type !== base.destinationProvider)
+            throw new ManifestError(
+              index + 1,
+              "destination.type",
+              "Mapping direction does not match the job provider pair",
+            );
         const p =
           deps.provider ??
           createProductionProvider({
@@ -2830,7 +2869,12 @@ function makeWriter(
             mappings.push({ ...mapping, sourceItemId: root.id, destFolderId: folder.id });
           } else mappings.push({ ...mapping, sourceItemId: root.id });
         }
-        await validateMappingTrees(p, resolvedMappings(mappings));
+        await validateMappingTrees(
+          p,
+          resolvedMappings(mappings),
+          undefined,
+          sameProviderPair(fileProviderPair(base)),
+        );
         const previousRevision = job().planRevision;
         store.atomic(() => {
           store.writeMappings({ mappings, digest: manifest.digest });

@@ -9,7 +9,6 @@ import {
   FakeFileMigrationPort,
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
-import { ProviderFault } from "../src/engine/providers/fault.ts";
 import { parseManifest } from "../src/engine/manifest.ts";
 import { approve, closeDecision, fileFixture, value } from "./engine-fixture.ts";
 
@@ -99,10 +98,6 @@ test("Dropbox → SharePoint is a supported pair and its manifest names a namesp
     folderPath: "",
   });
   assert.deepEqual(parsed.mappings[0]?.destination, manifest().mappings[0]!.destination);
-  assert.throws(
-    () => fileProviderPair({ sourceProvider: "dropbox", destinationProvider: "dropbox" }),
-    (error: unknown) => error instanceof ProviderFault && error.code === "unsupported_route",
-  );
 });
 
 test("Dropbox → SharePoint creates a library, encodes names with disclosure and verifies clean", async (t) => {
