@@ -481,7 +481,9 @@ export async function validateMappingTrees(
           throw new ManifestError(index + 1, side, "Folder ancestry is not a tree");
         seen.add(key);
         const other = roots.get(key);
-        if (other !== undefined && other !== index)
+        // ADR-0020 D4: a files-only root covers only its direct files, so another root
+        // may sit beneath it; the walk goes on, so a recursive ancestor still refuses.
+        if (other !== undefined && other !== index && !mappings[other]!.filesOnly)
           throw new ManifestError(index + 1, side, "Mapping trees overlap");
         if (!parents.has(key)) {
           const entry =
