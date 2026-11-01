@@ -224,8 +224,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async resolveDestinationPath(value) {
       return (await files()).resolveDestinationPath(value);
     },
-    async readSharedDrive(driveId, signal) {
-      return (await files()).readSharedDrive(driveId, signal);
+    async readSharedDrive(driveId, signal, side) {
+      return (await files()).readSharedDrive(driveId, signal, side);
     },
     async resolveSourceRoot(value) {
       return (await files()).resolveSourceRoot(value);
@@ -278,8 +278,8 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async stopCopyPass(value) {
       await (await state()).worker.stopCopyPass(value);
     },
-    async googleAbout(signal) {
-      return (await files()).googleAbout(signal);
+    async googleAbout(signal, side) {
+      return (await files()).googleAbout(signal, side);
     },
     async destinationCreator() {
       return (await files()).destinationCreator();

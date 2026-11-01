@@ -159,11 +159,16 @@ export class GoogleAdapter implements FileAdapter {
   readonly #destinationRoots: DestinationRoot[];
   readonly #session: CredentialSession;
   readonly #destDrive = new Map<string, string>();
+  /** Google → Google sources read with their own read-only account (ADR-0018 D4). */
+  readonly #separateSource: boolean;
+  readonly #serverSideCopy: boolean;
 
   constructor(input: AdapterInput) {
     this.mappings = input.mappings;
     this.#destinationRoots = input.destinationRoots;
     this.#session = input.session;
+    this.#separateSource = input.role === "source" && Boolean(input.session.googleSourceRemote);
+    this.#serverSideCopy = input.role === "destination" && input.serverSideCopy === true;
     for (const root of this.#destinationRoots)
       this.#destDrive.set(root.destFolderId, root.destDriveId);
   }
@@ -225,13 +230,28 @@ export class GoogleAdapter implements FileAdapter {
     };
   }
 
+  #token(signal?: AbortSignal): Promise<string> {
+    return this.#separateSource
+      ? this.#session.googleSourceToken!(signal)
+      : this.#session.googleToken(signal);
+  }
+
+  /** The rclone remote of this side, impersonating its own delegated account. */
+  #remote(driveId: string, folderId: string, extra = ""): string {
+    const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    const remote = this.#separateSource
+      ? this.#session.googleSourceRemote
+      : this.#session.destinationRemote;
+    const subject = this.#separateSource
+      ? this.#session.googleSourceDelegatedSubject
+      : this.#session.delegatedSubject;
+    return `${remote},team_drive=${quote(driveId)},root_folder_id=${quote(folderId)}${subject ? `,impersonate=${quote(subject)}` : ""}${extra}:`;
+  }
+
   async #google(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
     init.signal?.throwIfAborted();
-    headers.set(
-      "Authorization",
-      `Bearer ${await this.#session.googleToken(init.signal ?? undefined)}`,
-    );
+    headers.set("Authorization", `Bearer ${await this.#token(init.signal ?? undefined)}`);
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     return fetchProvider(googleUrl(path), { ...init, headers });
   }
@@ -399,18 +419,23 @@ export class GoogleAdapter implements FileAdapter {
     const source = await this.resolveSourceRoot(input);
     if (!source || source.kind !== "folder")
       throw new ProviderFault("unsupported_route", "The source root is not an ordinary folder.");
-    const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
     return {
-      fs: `${this.#session.destinationRemote},team_drive=${quote(input.sourceDriveId)},root_folder_id=${quote(input.sourceItemId)}${this.#session.delegatedSubject ? `,impersonate=${quote(this.#session.delegatedSubject)}` : ""}:`,
+      fs: this.#remote(input.sourceDriveId, input.sourceItemId),
       kind: "google_drive" as const,
     };
   }
 
   async resolveDestinationPass(input: FilePassInput): Promise<FilePassRoot> {
-    const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    // Server-side copies run as the destination's delegated account, which must already
+    // read the source; the read-only source account never writes (ADR-0018 D10).
     return {
-      fs: `${this.#session.destinationRemote},team_drive=${quote(input.destDriveId)},root_folder_id=${quote(input.destFolderId)}${this.#session.delegatedSubject ? `,impersonate=${quote(this.#session.delegatedSubject)}` : ""}:`,
+      fs: this.#remote(
+        input.destDriveId,
+        input.destFolderId,
+        this.#serverSideCopy ? ",server_side_across_configs=true" : "",
+      ),
       kind: "google_drive" as const,
+      ...(this.#serverSideCopy ? { serverSideCopy: true } : {}),
     };
   }
 
@@ -504,7 +529,7 @@ export class GoogleAdapter implements FileAdapter {
       googleUrl(
         `/drive/v3/files/${encodeURIComponent(sourceItemId)}?alt=media&supportsAllDrives=true`,
       ),
-      await this.#session.googleToken(),
+      await this.#token(),
     );
     const after = await this.readSourceItem({ driveId, itemId: sourceItemId });
     if (!after || after.etag !== before.etag || after.size !== before.size)
@@ -752,7 +777,7 @@ export class GoogleAdapter implements FileAdapter {
       );
     yield* authenticatedStream(
       googleUrl(`/drive/v3/files/${encodeURIComponent(objectId)}?alt=media&supportsAllDrives=true`),
-      await this.#session.googleToken(signal),
+      await this.#token(signal),
       signal,
     );
   }

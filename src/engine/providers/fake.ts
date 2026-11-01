@@ -162,6 +162,8 @@ export interface FakeFileMigrationFixture {
   effects?: FakeEffectRule[];
   applicationIdentity?: string;
   googleAbout?: GoogleAbout | Error;
+  /** Google → Google: the separate read-only source account, asked for by side. */
+  googleSourceAbout?: GoogleAbout | Error;
   destinationProvider?: "google_shared_drive" | "sharepoint" | "dropbox";
   inheritedSiteMembers?: Record<string, DriveMembership[]>;
   destinationContainers?: FakeDestinationContainerFixture[];
@@ -171,6 +173,8 @@ export interface FakeFileMigrationFixture {
   /** Observed app/system grants installed by breaking inheritance, if any. */
   implicitLibraryMembers?: DriveMembership[];
   unreadableSourceDrives?: string[];
+  /** Source Shared Drives the destination account cannot read (server-side copy). */
+  destinationUnreadableSourceDrives?: string[];
   now?: () => Date;
   checks?: CheckResult[];
   archive?: FakeArchiveFixture;
@@ -361,6 +365,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly destinationChildrenByParent: Record<string, string[]> = Object.create(null);
   private readonly retryAfterRules: FakeRetryRule[];
   private readonly withheldChecksums = new Set<string>();
+  private readonly unstoredHashes = new Set<string>();
   private readonly effects: FakeEffectRule[];
   private readonly reservedDestinationIds: string[];
   private readonly reservedIds = new Set<string>();
@@ -368,7 +373,9 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly checks: CheckResult[];
   private applicationId: string;
   private readonly about: GoogleAbout | Error;
+  private readonly sourceAbout: GoogleAbout | Error | undefined;
   private readonly unreadableSourceDrives: Set<string>;
+  private readonly destinationUnreadableSourceDrives: Set<string>;
   private readonly now: () => Date;
   private readonly sharedDrives = new Map<string, DestinationContainer>();
   private readonly destinationProvider: "google_shared_drive" | "sharepoint" | "dropbox";
@@ -400,6 +407,10 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.dropboxTeamSpace = fixture.dropboxTeamSpace ?? false;
     this.implicitLibraryMembers = structuredClone(fixture.implicitLibraryMembers ?? []);
     this.unreadableSourceDrives = new Set(fixture.unreadableSourceDrives);
+    this.destinationUnreadableSourceDrives = new Set(
+      fixture.destinationUnreadableSourceDrives ?? [],
+    );
+    this.sourceAbout = fixture.googleSourceAbout;
     this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
     this.sourceDriveId = fixture.sourceDriveId;
     this.sourceRootId = fixture.sourceRootId;
@@ -455,6 +466,11 @@ export class FakeFileMigrationPort implements ProviderPort {
     }
   }
 
+  /** A source or destination item that stores no hash of its own, such as an exported document. */
+  withholdStoredHashes(objectId: string): void {
+    this.unstoredHashes.add(objectId);
+  }
+
   allowDestinationChecksum(objectId: string): void {
     this.withheldChecksums.delete(objectId);
     const entry = this.destinationById[objectId];
@@ -501,9 +517,10 @@ export class FakeFileMigrationPort implements ProviderPort {
     return this.applicationId;
   }
 
-  async googleAbout(): Promise<GoogleAbout> {
-    if (this.about instanceof Error) throw this.about;
-    return structuredClone(this.about);
+  async googleAbout(_signal?: AbortSignal, side?: "source" | "destination"): Promise<GoogleAbout> {
+    const about = side === "source" && this.sourceAbout ? this.sourceAbout : this.about;
+    if (about instanceof Error) throw about;
+    return structuredClone(about);
   }
 
   async destinationCreator(): Promise<string> {
@@ -910,8 +927,18 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.unreadableSourceDrives.add(driveId);
   }
 
-  async readSharedDrive(driveId: string): Promise<SharedDrive | null> {
-    if (this.unreadableSourceDrives.has(driveId)) return null;
+  async readSharedDrive(
+    driveId: string,
+    _signal?: AbortSignal,
+    side?: "source" | "destination",
+  ): Promise<SharedDrive | null> {
+    if (
+      (side === "destination"
+        ? this.destinationUnreadableSourceDrives
+        : this.unreadableSourceDrives
+      ).has(driveId)
+    )
+      return null;
     const root = Object.values(this.sourceById).find(
       (item) => item.driveId === driveId && item.parentId === null,
     );
@@ -1470,7 +1497,8 @@ export class FakeFileMigrationPort implements ProviderPort {
         !supported ||
         unreadable ||
         entry.content === null ||
-        (!input.download && input.hashType === "sha256" && this.withheldChecksums.has(entry.id))
+        (!input.download && input.hashType === "sha256" && this.withheldChecksums.has(entry.id)) ||
+        (!input.download && this.unstoredHashes.has(entry.id))
           ? null
           : !input.download && input.hashType === "sha256" && "reportedChecksum" in entry
             ? entry.reportedChecksum
