@@ -642,7 +642,8 @@ a `shared` facet in a `Prefer: hierarchicalsharing` delta walk, as a nested boun
 It requires `Sites.Read.All`; scoped discovery refuses with detail check
 `discovery_requires_sites_read_all`. Untrusted responses refuse
 `discovery_response_invalid` and failed requests `discovery_request_failed`, naming
-the object, field, route and container they were reading.
+the object, field, route and container they were reading. Throttling, server errors and
+lost responses are retried, honouring `Retry-After`, before a request counts as failed.
 
 **Partition.** Boundaries with identical membership and target share a container, each
 in its own folder; unreadable membership never shares. A boundary over its target, or
