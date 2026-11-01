@@ -1,11 +1,12 @@
 # Release limits
 
-This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots and Dropbox shared namespaces to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders and Dropbox shared namespaces to SharePoint document libraries or folders, including libraries created inside existing sites. Teams archives remain local packages with optional Shared Drive cold storage.
+This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots and Dropbox shared namespaces to existing Google Shared Drive folders or to Shared Drives created from the manifest, Google Shared Drive folders and Dropbox shared namespaces to SharePoint document libraries or folders, including libraries created inside existing sites, and Google Shared Drive folders and SharePoint libraries to Dropbox team folders, including team folders created from the manifest. Teams archives remain local packages with optional Shared Drive cold storage.
 
 File configuration selects top-level `sourceProvider = "sharepoint"` and
 `destinationProvider = "google_shared_drive"`, or the reversed pair, or
 `sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"` or
-`"sharepoint"`. Dropbox destinations and same-provider pairs refuse `unsupported_route`. Empty config defaults to the forward
+`"sharepoint"`, or `destinationProvider = "dropbox"` from Google or SharePoint.
+Same-provider pairs, Dropbox → Dropbox included, refuse `unsupported_route`. Empty config defaults to the forward
 pair; saved file configs name both providers. An explicit `route` in a new file
 config refuses `configuration_invalid`: replace it with the two provider fields
 above (swap the values for reverse jobs). Historical persisted file routes are
@@ -528,13 +529,37 @@ Graph probes and disposable local rclone probes in
 settling latency or substitute for an operator-approved live cutover rehearsal.
 See README's **Staged cutover: keep one job open** for the operator sequence.
 
+**Dropbox destination boundary.** Writes use a separate Dropbox app with its own PKCE
+scope proof (`files.metadata.read`, `files.content.write`, `team_data.member`,
+`team_data.content.read`, `team_data.content.write`, `sharing.read`, `sharing.write`,
+`team_info.read`); a read grant refuses as a writer and a write grant as a source.
+`creds init` records each Dropbox app key's direction in the engine home and refuses
+an app onboarded for the other direction. Jobs in other engine homes are not seen.
+Destinations are team-folder namespaces only. Created team folders come from
+`team/team_folder/create`, which documents no request key and leaves no marker: a lost
+response or any visible same-name team folder refuses `drive_creation_ambiguous`,
+never adoption. Team-space teams (`has_team_shared_dropbox`) refuse creation before
+any effect, because new top-level folders there are visible to the whole team. An
+API-created team folder shares with no one, so it is fenced until go-live; members
+are groups by group ID with `viewer` or `editor`. Whether the selected administrator
+can write into a team folder with no members, and what `list_folder_members` returns
+for it, are unverified against a live team. Name findings mirror rclone v1.75.0's
+Dropbox backend: case-insensitive collisions, its six reserved names and components
+over 255 characters block; a trailing space is encoded with disclosure. Uploads use
+`batch_mode=sync`. The monthly team upload-call allowance (403
+`invalid_account_type/feature`) is detected in rclone's running error text, because
+rclone retries it; the job blocks with `uploadQuota.limit =
+"dropbox_team_monthly_upload_calls"` and an estimated resume on the first of the next
+month in UTC (Dropbox names no time zone). No authenticated Dropbox destination run has
+been performed.
+
 ## 2. Mapping recovery is durable; rclone jobs are not
 
 Job `[options]` settings `mappingsInFlight` (default **2**) and `transfersPerMapping` (default **4**) are positive safe integers and appear in the immutable plan and report. These conservative defaults allow up to eight simultaneous file transfers, not a promised throughput under tenant throttling. Set `mappingsInFlight = 1` for serial mappings. At most the configured number of passes run inside one worker; a freed slot admits the next mapping without a batch barrier. One writer commits observations serially.
 
 `status.mappingPasses` records revision, mapping ID, pass number, mode, nullable rclone handle (`executeId`, `jobid`, stats group), status, start/end timestamps, last stats and error. States are pending, running, completed, failed or interrupted. rclone's pacer absorbs throttling within a pass. An ordinary failed pass retains rclone's error and counts against the run's retry budget without stopping other active or queued mappings; a run with failures remains blocked.
 
-**Drive upload quota blocks the whole job.** File uploads into Google Drive enable rclone's `--drive-stop-on-upload-limit`. The first detected daily-upload failure cooperatively stops other active passes and admits no queued mapping: all mappings use the same acting account. Execute returns the existing `blocked` outcome (exit 5), with `uploadQuota` evidence also retained on the failed pass in `status.mappingPasses[].uploadQuota` and the terminal event: `code = "upload_quota_exceeded"`, `hitAt`, `actingGoogleAccount`, `earliestResumeAt`, and `resumeTimeIsEstimate = true`. Account identity comes from the approved plan, falling back to the impersonation subject; old non-impersonated plans without that identity report `null`. No store schema version or outcome/exit-code change is required.
+**Drive upload quota blocks the whole job.** File uploads into Google Drive enable rclone's `--drive-stop-on-upload-limit`. The first detected daily-upload failure cooperatively stops other active passes and admits no queued mapping: all mappings use the same acting account. Execute returns the existing `blocked` outcome (exit 5), with `uploadQuota` evidence also retained on the failed pass in `status.mappingPasses[].uploadQuota` and the terminal event: `code = "upload_quota_exceeded"`, `hitAt`, `actingGoogleAccount`, `earliestResumeAt`, and `resumeTimeIsEstimate = true`. Account identity comes from the approved plan, falling back to the impersonation subject; old non-impersonated plans without that identity report `null`. No store schema version or outcome/exit-code change is required. Dropbox destinations reuse this outcome with `actingGoogleAccount = null` and `limit = "dropbox_team_monthly_upload_calls"`; see the Dropbox destination boundary above.
 
 [Google documents 750 GB per user per day](https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints), not a reset clock. The resume estimate is 24 hours after Migmate observes the failure; wait until then and re-run `execute` on the same job. Earlier manual retries are allowed, not refused by a cooldown fence. Quota stops bypass the ordinary failure budget. On that pass, `lastStats.errors` and terminal mapping-progress `errors` become `null` because rclone cannot separate quota errors from real file failures; `rcloneErrors` preserves the unclassified aggregate. This is not a zero-error claim. Detection follows v1.75.0's exact lower-case `User rate limit exceeded.` message with `userRateLimitExceeded` or `rateLimitExceeded`, or its `quotaExceeded` reason. Its fatal wrapper preserves the Google error text in RC job status; the “Received upload limit error” prefix exists only in logs. Storage quota, Shared Drive file count, ordinary API rate limits and download limits are not classified as daily-upload quota. No download-limit flag is enabled; the reverse route is unaffected. Trailing-24-hour observed-byte accounting is informational and discloses gaps; plan-time allowance warnings and automatic quota resume are not implemented.
 

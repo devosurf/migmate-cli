@@ -4,7 +4,7 @@ Finite, one-way movement or preservation of organizational content. The authorit
 
 Two job types:
 
-- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder, and Google Shared Drive folder or Dropbox shared namespace to a SharePoint document library or folder, including libraries created inside existing sites.
+- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder; Google Shared Drive folder or Dropbox shared namespace to a SharePoint document library or folder, including libraries created inside existing sites; and Google Shared Drive folder or SharePoint library to a Dropbox team folder, including team folders it creates.
 - **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package, optionally retained as conversation ZIPs in a Google Shared Drive folder.
 
 `CONTEXT.md` is the glossary. It is the authority on what each term means; this README assumes it.
@@ -311,8 +311,9 @@ destinationProvider = "google_shared_drive"
 For the reverse direction, use `sourceProvider = "google_shared_drive"` and
 `destinationProvider = "sharepoint"`. Dropbox team content uses
 `sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"` or
-`destinationProvider = "sharepoint"`. Dropbox destinations and same-provider copies
-refuse `unsupported_route`.
+`destinationProvider = "sharepoint"`. Google and SharePoint content copies into
+Dropbox team folders with `destinationProvider = "dropbox"`. Same-provider copies,
+Dropbox → Dropbox included, refuse `unsupported_route`.
 An empty config defaults to the forward pair; saved file configs name both providers.
 New file configs containing `route` refuse `configuration_invalid`: replace that
 field with `sourceProvider` and `destinationProvider` as shown above, rather than
@@ -391,6 +392,66 @@ reflects that evidence rather than rechecking. This feature describes the user's
 creation model: `true` still does not prove pre-migration legacy documents are absent.
 This route never guarantees Paper parity; teams needing legacy content require an
 explicit legacy document scope or a separate member/Paper discovery workflow.
+
+### Dropbox team folders as destinations
+
+Google Shared Drives and SharePoint libraries copy into Dropbox with
+`destinationProvider = "dropbox"`. Writes use their own Dropbox app, never the
+read-only source app: onboard it with `creds init` like the source app, naming its
+remote under `[rclone]` as `dropboxDestinationRemote`. Its grant must hold exactly
+`files.metadata.read`, `files.content.write`, `team_data.member`,
+`team_data.content.read`, `team_data.content.write`, `sharing.read`, `sharing.write`
+and `team_info.read` (identity reads `account_info.read`, `members.read` and
+`groups.read` are tolerated). An app key already onboarded in this engine home for
+the other direction refuses `credential_permissions_invalid`.
+
+Mappings either create a team folder or name an existing one by namespace ID:
+
+```json
+{
+  "version": 1,
+  "mappings": [
+    {
+      "id": "finance",
+      "source": { "type": "google_shared_drive", "driveId": "0Aa…", "folderId": "0Aa…" },
+      "destination": { "type": "dropbox", "create": "Finance" },
+      "members": [{ "groupId": "g:1a2b3c…", "type": "group", "role": "writer" }]
+    },
+    {
+      "id": "archive",
+      "source": { "type": "sharepoint", "driveId": "b!…", "folderPath": "" },
+      "destination": { "type": "dropbox", "namespaceId": "987654", "folderPath": "Archive" }
+    }
+  ]
+}
+```
+
+Team folders are shared with groups only, by Dropbox group ID; `reader` maps to
+`viewer` and `writer` to `editor`. Dropbox cannot grant `owner`, so `manager` refuses.
+A team folder created through the API gives access to no one, which is the go-live
+fence: groups are granted at go-live after verification, and membership checks before
+and after the grant compare the folder's groups, users and invitees to the manifest.
+Team folders have no request key or description field, so a lost creation response,
+or any visible same-name team folder (compared case-insensitively, archived ones
+included), blocks `drive_creation_ambiguous` instead of adopting it. Teams that use a
+Dropbox team space refuse creation at manifest load, because a new top-level folder
+there is visible to the whole team at once; copy into an existing team folder instead.
+Existing destinations must be team folders, never member homes or shared folders.
+
+Names follow rclone's Dropbox encoding: a trailing space is encoded with a
+nonblocking `destination_name_encoded` notice. Case-insensitive sibling collisions,
+the reserved names `desktop.ini`, `thumbs.db`, `.ds_store`, `icon\r`, `.dropbox` and
+`.dropbox.attr`, and path components over 255 characters are blocking findings
+listing each path. Uploads run with rclone's `batch_mode=sync`, committing up to
+`transfersPerMapping` files per batch. Verification compares Dropbox's content hash.
+
+Dropbox counts upload calls per team per month. When the allowance runs out
+(HTTP 403 `invalid_account_type/feature`), Migmate stops every pass instead of
+letting rclone retry: execute returns `blocked` with `uploadQuota.limit =
+"dropbox_team_monthly_upload_calls"` and an `earliestResumeAt` estimate of the first
+of the next month (UTC). For existing team-folder destinations, doctor records the
+team's `upload_api_rate_limit` ceiling.
+No authenticated Dropbox destination run has been performed.
 
 ### Mapping manifests
 

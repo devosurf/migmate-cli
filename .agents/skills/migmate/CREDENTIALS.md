@@ -93,6 +93,30 @@ and export-hiding overrides also refuse. Already-proven credentials can onboard
 without another browser prompt; first authorization without a terminal refuses
 `credential_interaction_required`.
 
+### Dropbox destination write app
+
+Google → Dropbox and SharePoint → Dropbox write with their own scoped **Full Dropbox**
+team app, never the source app. Request exactly `files.metadata.read`,
+`files.content.write`, `team_data.member`, `team_data.content.read`,
+`team_data.content.write`, `sharing.read`, `sharing.write` and `team_info.read`.
+Content reads, metadata writes and membership or governance writes refuse
+`credential_permissions_invalid`. Seed the remote like the source one:
+
+```ini
+[dropbox-destination]
+type = dropbox
+client_id = DROPBOX_WRITE_APP_KEY
+impersonate_admin = dbmid:ADMIN_TEAM_MEMBER_ID
+```
+
+Name it under `[rclone]` as `dropboxDestinationRemote = "dropbox-destination"`, beside
+the source remote, and run `creds init` as for the source app; the browser prompt
+names the destination write app. `creds init` records each app key's direction in the
+engine home: an app key already onboarded for the other direction refuses with
+`detail.reason` `destination_reuses_source_app` or `source_reuses_destination_app`.
+Created team folders need a team without a team space; manifest members are Dropbox
+groups by `groupId` (`g:…`).
+
 ### SharePoint source discovery
 
 Use exactly one source-app grant: `Sites.Selected` with a read grant per site for
