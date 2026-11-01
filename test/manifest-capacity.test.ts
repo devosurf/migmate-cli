@@ -131,3 +131,12 @@ test("files-only mappings and container folders round-trip through CSV", () => {
     field: "filesOnly",
   });
 });
+
+test("Dropbox CSV headers load with or without the filesOnly column", () => {
+  const header =
+    "id,source.type,source.namespaceId,source.folderPath,destination.type,destination.driveId,destination.folderId,destination.create,members,source.folderId,destination.folderPath,destination.siteId";
+  const row = "m1,dropbox,123,Team,google_shared_drive,,,Team,[],,,";
+  const twelve = parseManifest(`${header}\n${row}\n`, "csv");
+  const thirteen = parseManifest(`${header},filesOnly\n${row},\n`, "csv");
+  assert.deepEqual(twelve.mappings, thirteen.mappings);
+});

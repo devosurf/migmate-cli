@@ -120,7 +120,8 @@ function csv(text: string): unknown {
     JSON.stringify(header) !== JSON.stringify(columns.slice(0, 11)) &&
     JSON.stringify(header) !== JSON.stringify(columns.slice(0, 7)) &&
     JSON.stringify(header) !== JSON.stringify(columns.slice(0, 9)) &&
-    JSON.stringify(header) !== JSON.stringify(namespaceHeader)
+    JSON.stringify(header) !== JSON.stringify(namespaceHeader) &&
+    JSON.stringify(header) !== JSON.stringify(namespaceHeader.slice(0, 12))
   )
     throw new ManifestError(0, "header");
   return {
