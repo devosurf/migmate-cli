@@ -33,6 +33,8 @@ import {
   cursorPages,
 } from "../http.ts";
 import type { SharePointDiscovery } from "../discovery.ts";
+import type { SourceDiscovery } from "../../partition.ts";
+import { discoverSharedDrives } from "./google-discovery.ts";
 
 interface GoogleFile {
   id: string;
@@ -433,6 +435,10 @@ export class GoogleAdapter implements FileAdapter {
       "unsupported_route",
       "Discovery requires a SharePoint source file job.",
     );
+  }
+
+  async discoverSource(signal?: AbortSignal): Promise<SourceDiscovery> {
+    return discoverSharedDrives((path, signal) => this.#google(path, { signal }), signal);
   }
 
   async resolveSourceRoot(
