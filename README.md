@@ -4,7 +4,7 @@ Finite, one-way movement or preservation of organizational content. The authorit
 
 Two job types:
 
-- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder; Google Shared Drive folder or Dropbox shared namespace to a SharePoint document library or folder, including libraries created inside existing sites; and Google Shared Drive folder or SharePoint library to a Dropbox team folder, including team folders it creates.
+- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder; Google Shared Drive folder or Dropbox shared namespace to a SharePoint document library or folder, including libraries created inside existing sites; Google Shared Drive folder or SharePoint library to a Dropbox team folder, including team folders it creates; and same-provider copies (Google → Google, Dropbox → Dropbox, SharePoint → SharePoint), within one tenant or between two.
 - **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package, optionally retained as conversation ZIPs in a Google Shared Drive folder.
 
 `CONTEXT.md` is the glossary. It is the authority on what each term means; this README assumes it.
@@ -13,7 +13,7 @@ Two job types:
 
 Pre-release. Releases are GitHub Releases cut from `v*` tags by `.github/workflows/release.yml`; nothing is published to npm, and merging to `main` does not release.
 
-Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. File migrations approve mapping roots and options, execute rclone copy passes, and verify listings by path and size, including folders; content hashing is opt-in. Archives verify their local package and any uploaded copy. Blocking findings require repair or, where supported, explicit acceptance before `close`; blocking destination name/path constraints require repair and re-check, never acceptance. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on all four platforms. Unsupported shapes refuse with `unsupported_route` (exit 4). Historical live observations and their limits are recorded in `docs/release-limits.md`; they do not prove the new rclone-executed file route.
+Two job types: file migration, and Teams archive with or without a Shared Drive destination. Archives support `retainedHistory`, `transcripts`, and `attachmentBytes`. File migrations approve mapping roots and options, execute rclone copy passes, and verify listings by path and size, including folders; content hashing is opt-in, except on same-provider routes, which compare stored hashes by default. Archives verify their local package and any uploaded copy. Blocking findings require repair or, where supported, explicit acceptance before `close`; blocking destination name/path constraints require repair and re-check, never acceptance. There is no per-route evidence gate ([ADR-0009](docs/adr/0009-per-job-verification-replaces-route-qualification.md)), so supported configurations run on all four platforms. Unsupported shapes refuse with `unsupported_route` (exit 4). Historical live observations and their limits are recorded in `docs/release-limits.md`; they do not prove the new rclone-executed file route.
 
 ## Requirements
 
@@ -121,7 +121,7 @@ Both existing file routes, SharePoint → Shared Drive and Shared Drive → Shar
 - `plan` resolves each mapping's source and destination roots, drives to create, members and options. Approval binds that map, not a file list. Destination name/path checks walk source names and disclose constraints and encoding notices as planning observations, not a frozen per-file approval inventory. There is no file/deletion preview or inventory-freshness gate.
 - rclone selects files by size and modification time and checks upload size.
 - Default verification compares rclone listings by relative path and size, including folders and empty folders. It does not compare content bytes, and this disclosed limitation raises no degraded-content finding. Each verification covers whole mappings.
-- Set `[options] verificationMode = "hash"` to opt into content verification. It downloads source bytes to compute the destination's hash type and compares with stored destination hashes, without a Graph inventory or destination download.
+- Set `[options] verificationMode = "hash"` to opt into content verification. It downloads source bytes to compute the destination's hash type and compares with stored destination hashes, without a Graph inventory or destination download. Same-provider routes default to it and compare the hashes both sides already store, downloading only source files that store none (see [Same-provider routes](#same-provider-routes)).
 - On Shared Drive → SharePoint, size differences for PDF, Office and HTML files raise `destination_rewrote_file`; other size differences raise `size_mismatch`. On SharePoint → Shared Drive, served-size rewrites can still cause copy failures and `size_mismatch`.
 - Final execution settles by comparing file and folder listings until nothing remains to copy or delete, within the configured catch-up bound.
 - Mirror requires job-created-drive provenance and `deleteLimit`. File/folder listings of both sides immediately before every pass record deletion candidates as execute-phase `to_be_deleted` rows. The limit counts files, with folder removals recorded separately, and is enforced at execution rather than approval.
@@ -312,8 +312,8 @@ For the reverse direction, use `sourceProvider = "google_shared_drive"` and
 `destinationProvider = "sharepoint"`. Dropbox team content uses
 `sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"` or
 `destinationProvider = "sharepoint"`. Google and SharePoint content copies into
-Dropbox team folders with `destinationProvider = "dropbox"`. Same-provider copies,
-Dropbox → Dropbox included, refuse `unsupported_route`.
+Dropbox team folders with `destinationProvider = "dropbox"`. Same-provider copies
+name one provider on both sides; see [Same-provider routes](#same-provider-routes).
 An empty config defaults to the forward pair; saved file configs name both providers.
 New file configs containing `route` refuse `configuration_invalid`: replace that
 field with `sourceProvider` and `destinationProvider` as shown above, rather than
@@ -323,6 +323,44 @@ close authorizations and go-live acknowledgments retain the frozen plan's origin
 digest encoding. Equivalent provider-pair spelling preserves those bindings; changing
 the current authority-bearing settings does not.
 Teams archives retain `route = "teams_global_archive"`.
+
+### Same-provider routes
+
+Google → Google, Dropbox → Dropbox and SharePoint → SharePoint copy files only, within
+one tenant or between two; identity, mailbox and domain cutover are out of scope
+([ADR-0018 D10](docs/adr/0018-provider-pair-file-routes.md)). Each side keeps its own
+credential, even inside one tenant: a read-only source and a separate write
+destination, so the source proof stays the same as on every other route.
+
+- **Google → Google** names the source remote as `[rclone] googleSourceRemote` beside
+  the writing `destinationRemote`. The source remote must say `scope = drive.readonly`,
+  and Google must grant only that scope. It uses a different service account from the
+  writer; reusing one refuses `credential_permissions_invalid` with
+  `reason: destination_reuses_source_app`. `sourceImpersonate` and `sourceSubject`
+  name the source's acting Google account, as `impersonate` and `subject` name the
+  writer's; the plan shows both. These fields refuse `configuration_invalid` on any
+  other provider pair.
+- **Dropbox → Dropbox** onboards the read-only team app and the separate write app with
+  one `creds init`; one app key cannot be both.
+- **SharePoint → SharePoint** uses the read `sourceRemote` and the
+  `sharepointDestinationRemote` write application; one client ID cannot be both. The
+  SharePoint destination rules still apply: PDF, Office and HTML size differences raise
+  `destination_rewrote_file`, other size differences `size_mismatch`.
+
+Copies stream through the host by default. Google → Google inside one Workspace may
+copy server side instead with `[options] serverSideCopy = true`: the destination's
+acting account then copies inside Google, and no bytes pass through the host. Preflight
+check `google.server_side_copy` passes only when both acting accounts share one email
+domain and the destination account can already read every source drive; Migmate never
+grants that access. The read-only source account still lists and verifies the source.
+Dropbox and SharePoint always stream, because server-side copy would need write scopes
+on the source app; `serverSideCopy = true` refuses `configuration_invalid` there. The
+plan's **Copy method** section shows `server_side` or `streamed`.
+
+Verification defaults to `hash`: both sides store the same hash type, so verification
+compares the stored hashes without downloading. Google Drive falls back to stored MD5
+when SHA-256 is missing. Source files with no stored hash are downloaded and hashed.
+These routes have no path-and-size-only mode.
 
 ### Dropbox shared namespaces
 

@@ -32,9 +32,14 @@ reserved names, case collisions and long paths). Google → Dropbox and SharePoi
 Dropbox use `destinationProvider = "dropbox"`: team folders created or named by
 `namespaceId`, groups-only members by `groupId`, a separate write app (see
 [CREDENTIALS.md](CREDENTIALS.md#dropbox-destination-write-app)) and blocking
-case-collision, reserved-name and 255-character findings. Same-provider copies,
-Dropbox → Dropbox included, refuse
-`unsupported_route`. Empty config defaults to the forward pair; saved file configs
+case-collision, reserved-name and 255-character findings. Same-provider copies
+(Google → Google, Dropbox → Dropbox, SharePoint → SharePoint) copy files only; never
+promise identity, mailbox or domain cutover. They keep separate read and write
+credentials per side even inside one tenant (see
+[CREDENTIALS.md](CREDENTIALS.md#same-provider-credentials)) and verify by stored hashes
+by default. Offer `[options] serverSideCopy = true` only for Google → Google inside one
+Workspace, and only when the writing account can already read the source drives; the
+other same-provider routes stream through the host. Empty config defaults to the forward pair; saved file configs
 name both providers. Explicit `route` in a new file config refuses
 `configuration_invalid`: replace `route` with `sourceProvider` and
 `destinationProvider` using this example or its reverse. Historical persisted

@@ -6,7 +6,11 @@ File configuration selects top-level `sourceProvider = "sharepoint"` and
 `destinationProvider = "google_shared_drive"`, or the reversed pair, or
 `sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"` or
 `"sharepoint"`, or `destinationProvider = "dropbox"` from Google or SharePoint.
-Same-provider pairs, Dropbox → Dropbox included, refuse `unsupported_route`. Empty config defaults to the forward
+Same-provider pairs (Google → Google, Dropbox → Dropbox, SharePoint → SharePoint)
+copy files only, with a read-only source credential and a separate write credential
+even inside one tenant. They verify by stored hashes by default. Only Google → Google
+inside one Workspace may copy server side (`serverSideCopy = true`); the others stream
+through the host. Same-provider routes have no live observation yet. Empty config defaults to the forward
 pair; saved file configs name both providers. An explicit `route` in a new file
 config refuses `configuration_invalid`: replace it with the two provider fields
 above (swap the values for reverse jobs). Historical persisted file routes are
