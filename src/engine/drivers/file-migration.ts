@@ -550,8 +550,10 @@ export function destinationDigest(
  * every sharing mapping's folder included; for a mapping at the root it is the mapping's.
  */
 async function containerPass(ctx: FileContext, mapping: FileMappingConfig, drive: CreatedDrive) {
+  // A files-only scope would stop the listing at the root's own files.
+  const { filesOnly: _, ...whole } = mapping;
   return ctx.provider.resolveFilePass({
-    ...mapping,
+    ...whole,
     destDriveId: drive.driveId!,
     destFolderId: containerRootId(drive)!,
   });
@@ -2040,7 +2042,9 @@ async function goLiveBaseline(
   // A new verification must never erase the original go-live content fence.
   if (drive.goLive) return undefined;
   const sharing = sharingMappings(ctx.resume.createdDrives, ctx.config.mappings, mapping);
-  const wholeContainer = sharing.length === 1 && !mapping.createDrive?.folderPath;
+  // A files-only mapping's own listing omits the container's folders, so it never stands in.
+  const wholeContainer =
+    sharing.length === 1 && !mapping.createDrive?.folderPath && !mapping.filesOnly;
   if (!wholeContainer && sharing.at(-1)?.id !== mapping.id) return undefined;
   drive.verifiedDestination = {
     revision: ctx.revision,

@@ -42,6 +42,7 @@ interface Row {
   source: string;
   folderPath?: string;
   members?: typeof members;
+  filesOnly?: true;
 }
 
 type Destination = Extract<FileProviderId, "google_shared_drive" | "sharepoint" | "dropbox">;
@@ -68,6 +69,7 @@ function manifest(rows: Row[], destination: Destination = "google_shared_drive")
         (destination === "dropbox"
           ? [{ groupId: "g:1a2b3c", type: "group", role: "editor" }]
           : members),
+      ...(row.filesOnly ? { filesOnly: true } : {}),
     })),
   });
 }
@@ -192,6 +194,44 @@ async function sharedLifecycle(t: TestContext, destination: Destination) {
 for (const destination of ["google_shared_drive", "sharepoint", "dropbox"] as const)
   it(`two mappings share one created ${destination} container through copy, verify and close`, (t) =>
     sharedLifecycle(t, destination));
+
+// The draft discover proposes for a split boundary: its loose files at the container root,
+// files-only, beside a subfolder mapping. Go-live proof must still cover the whole container.
+for (const order of ["first", "last"] as const)
+  it(`staged close proves the whole container when its ${order} mapping is files-only`, async (t) => {
+    const rows: Row[] = [
+      { id: order === "first" ? "a-loose" : "z-loose", source: "", filesOnly: true },
+      { id: "m-alpha", source: "alpha", folderPath: "alpha" },
+    ];
+    const h = await harness(t, rows);
+    await approve(h);
+    await execute(h);
+    assert.equal(value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).clean, true);
+    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
+    assert.equal((await status(h)).state, "closed");
+  });
+
+it("staged close refuses drift in a subfolder of a container whose root mapping is files-only", async (t) => {
+  const h = await harness(t, [{ id: "loose", source: "", filesOnly: true }]);
+  await approve(h);
+  await execute(h);
+  assert.equal(value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).clean, true);
+  // A folder outside every mapping, yet inside the container members are about to see.
+  const drive = (await status(h)).createdDrives[0]!;
+  const root = drive.rootFolderId ?? drive.driveId!;
+  await h.port.createDestinationFolder({
+    parentFolderId: root,
+    name: "planted",
+    createdAt: now,
+    modifiedAt: now,
+  });
+  const closed = await h.engine.withWriterResult(h.ref, async (w) =>
+    w.close(await closeDecision(h)),
+  );
+  assert.equal(closed.ok, false);
+  assert.equal(!closed.ok && closed.refusal.detail?.check, "destination_drift");
+  assert.notEqual((await status(h)).state, "closed");
+});
 
 it("a crash after creating a mapping folder resumes without a duplicate", async (t) => {
   const h = await harness(t, shared);
