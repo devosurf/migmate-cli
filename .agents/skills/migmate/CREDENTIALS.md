@@ -119,6 +119,27 @@ older source job before onboarding its destination app.
 Created team folders need a team without a team space; manifest members are Dropbox
 groups by `groupId` (`g:…`).
 
+### Same-provider credentials
+
+Same-provider routes still use a read-only source credential and a separate write
+credential, even inside one tenant.
+
+- **Google → Google:** add a second service account for the source, with its own
+  delegation entry limited to `https://www.googleapis.com/auth/drive.readonly`. Name it
+  in a separate rclone section with `scope = drive.readonly`, and bind it as
+  `[rclone] googleSourceRemote`; the writer stays `destinationRemote`. Set
+  `sourceImpersonate = true` and `sourceSubject` for the source's acting account. The
+  same service account on both sides refuses `destination_reuses_source_app`.
+- **Dropbox → Dropbox:** bind `dropboxRemote` to the read-only app and
+  `dropboxDestinationRemote` to the write app. `creds init` authorizes the source first,
+  then the destination.
+- **SharePoint → SharePoint:** bind `sourceRemote` to the read application and
+  `sharepointDestinationRemote` to the `Sites.ReadWrite.All` write application. They
+  need different client IDs.
+
+For server-side Google copy, the destination's acting account must already read every
+source drive; `doctor` reports `google.server_side_copy` and names the unreadable drives.
+
 ### SharePoint source discovery
 
 Use exactly one source-app grant: `Sites.Selected` with a read grant per site for

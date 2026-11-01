@@ -9,6 +9,8 @@ export interface CredentialMaterial {
   graph?: GraphCredential;
   graphDestination?: GraphCredential;
   google?: GoogleCredential;
+  /** Google → Google only: the read-only source credential, never the write credential. */
+  googleSource?: GoogleCredential;
   dropbox?: DropboxCredential;
   dropboxDestination?: DropboxCredential;
 }
@@ -24,7 +26,8 @@ export interface FileCredentialAdapter {
   mappingSourceType?: FileProviderId;
   /** Validate a persisted source root identity using this provider's immutable-ID syntax. */
   sourceItemId(value: unknown): string;
-  remoteKey: { source: string; destination: string };
+  /** `sameProviderSource` names a separate read-only source remote for same-provider pairs. */
+  remoteKey: { source: string; destination: string; sameProviderSource?: string };
   bindings: readonly {
     key: string;
     allowUnused: boolean;

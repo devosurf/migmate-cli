@@ -18,6 +18,8 @@ import {
 import type { CredentialFileReader, FileCredentialAdapter, Token } from "./shared.ts";
 
 export interface GoogleCredential {
+  /** The only scope this credential requests; Google → Google sources are read-only. */
+  scope: typeof GOOGLE_SCOPE | typeof GOOGLE_READONLY_SCOPE;
   clientId: string;
   subject: string;
   keyId: string;
@@ -26,9 +28,13 @@ export interface GoogleCredential {
 }
 
 const GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive";
+const GOOGLE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
-function googleCredential(bytes: Buffer): GoogleCredential {
+function googleCredential(
+  bytes: Buffer,
+  scope: GoogleCredential["scope"] = GOOGLE_SCOPE,
+): GoogleCredential {
   try {
     const value = record(JSON.parse(decodeUtf8(bytes)));
     allowedKeys(value, [
@@ -68,7 +74,7 @@ function googleCredential(bytes: Buffer): GoogleCredential {
     ) {
       throw refused("credential_secret_invalid");
     }
-    return { subject, clientId, keyId, privateKey };
+    return { scope, subject, clientId, keyId, privateKey };
   } catch (error) {
     if (error instanceof ProviderFault) throw error;
     throw refused("credential_secret_invalid");
@@ -80,7 +86,9 @@ async function loadGoogleRemote(
   input: Record<string, unknown>,
   jobDirectory: string,
   readCredentialFile: CredentialFileReader,
+  role: "shared" | "source" = "shared",
 ): Promise<GoogleCredential> {
+  const source = role === "source";
   iniKeys(destination, [
     "type",
     "service_account_file",
@@ -95,7 +103,9 @@ async function loadGoogleRemote(
     "metadata_labels",
   ]);
   setting(destination, "type", "drive", true);
-  setting(destination, "scope", "drive");
+  // A separate Google → Google source proves read-only access by the scope it holds.
+  if (source) setting(destination, "scope", "drive.readonly", true);
+  else setting(destination, "scope", "drive");
   setting(destination, "skip_gdocs", "true");
   setting(destination, "skip_shortcuts", "true");
   setting(destination, "import_formats", "");
@@ -108,12 +118,14 @@ async function loadGoogleRemote(
     jobDirectory,
   );
   let google: GoogleCredential;
+  const impersonate = source ? input.sourceImpersonate : input.impersonate;
+  const subject = source ? input.sourceSubject : input.subject;
   try {
-    google = googleCredential(serviceAccount.bytes);
-    if (input.impersonate === true) {
-      if (typeof input.subject !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(input.subject))
+    google = googleCredential(serviceAccount.bytes, source ? GOOGLE_READONLY_SCOPE : GOOGLE_SCOPE);
+    if (impersonate === true) {
+      if (typeof subject !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(subject))
         throw refused("credential_config_invalid");
-      google.delegatedSubject = input.subject;
+      google.delegatedSubject = subject;
     }
   } finally {
     serviceAccount.bytes.fill(0);
@@ -153,7 +165,7 @@ export async function requestGoogleToken(
       JSON.stringify({
         iss: credential.subject,
         ...(credential.delegatedSubject ? { sub: credential.delegatedSubject } : {}),
-        scope: GOOGLE_SCOPE,
+        scope: credential.scope,
         aud: GOOGLE_TOKEN_ENDPOINT,
         iat: issuedAt,
         exp: issuedAt + 3600,
@@ -174,9 +186,9 @@ export async function requestGoogleToken(
     );
     const token = parseToken(response, requestedAt);
     // RFC 6749 §5.1: absent scope means the granted scope equals the request.
-    if (response.scope !== undefined && response.scope !== GOOGLE_SCOPE)
+    if (response.scope !== undefined && response.scope !== credential.scope)
       throw refused("credential_permissions_invalid");
-    token.permissions = [GOOGLE_SCOPE];
+    token.permissions = [credential.scope];
     return token;
   } catch (error) {
     if (error instanceof ProviderFault) throw error;
@@ -187,8 +199,13 @@ export async function requestGoogleToken(
 export const googleCredentialAdapter: FileCredentialAdapter = {
   mappingSourceType: "google_shared_drive",
   sourceItemId: stableId,
-  // This existing credential key names the Google remote in either direction.
-  remoteKey: { source: "destinationRemote", destination: "destinationRemote" },
+  // This existing credential key names the Google remote in either direction; only
+  // Google → Google gives its source a separate read-only remote.
+  remoteKey: {
+    source: "destinationRemote",
+    destination: "destinationRemote",
+    sameProviderSource: "googleSourceRemote",
+  },
   bindings: [
     {
       key: "destinationRemote",
@@ -204,5 +221,32 @@ export const googleCredentialAdapter: FileCredentialAdapter = {
         };
       },
     },
+    {
+      key: "googleSourceRemote",
+      allowUnused: false,
+      async load(section, context) {
+        return {
+          googleSource: await loadGoogleRemote(
+            section,
+            context.input,
+            context.jobDirectory,
+            context.readCredentialFile,
+            "source",
+          ),
+        };
+      },
+    },
   ],
 };
+
+/** ADR-0018 D4: a Google → Google job never writes with its read-only source account. */
+export function assertSeparateGoogleAccounts(
+  source: GoogleCredential | undefined,
+  destination: GoogleCredential | undefined,
+): void {
+  if (source && destination && source.clientId === destination.clientId)
+    throw refused("credential_permissions_invalid", {
+      provider: "google",
+      reason: "destination_reuses_source_app",
+    });
+}

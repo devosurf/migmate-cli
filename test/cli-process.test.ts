@@ -371,6 +371,63 @@ for (const [direction, config] of [
   });
 }
 
+for (const [provider, source, destination] of [
+  [
+    "google_shared_drive",
+    { type: "google_shared_drive", driveId: "src-drive", folderId: "src-root" },
+    { type: "google_shared_drive", driveId: "dst-drive", folderId: "dst-root" },
+  ],
+  [
+    "dropbox",
+    { type: "dropbox", namespaceId: "123456", folderPath: "" },
+    { type: "dropbox", namespaceId: "dst-drive", folderPath: "" },
+  ],
+  [
+    "sharepoint",
+    { type: "sharepoint", driveId: "src-drive", folderPath: "" },
+    { type: "sharepoint", driveId: "dst-drive", folderPath: "" },
+  ],
+] as const) {
+  it(`runs the real CLI through close on the same-provider ${provider} route`, async (t) => {
+    const h = setup(
+      t,
+      "file_migration",
+      t.signal,
+      {
+        sourceProvider: provider,
+        destinationProvider: provider,
+        options: { consistencyIntervalMs: 0 },
+      } as typeof CLI_REVERSE_JOB_CONFIG,
+      "home",
+      FIXTURE_TIME,
+      {
+        env: {
+          CLI_TEST_DESTINATION_PROVIDER: provider,
+          ...(provider === "dropbox" ? { CLI_TEST_SOURCE_PROVIDER: "dropbox" } : {}),
+        },
+        manifest: { version: 1, mappings: [{ id: "same", source, destination }] },
+      },
+    );
+    const id = await h.approve();
+    await h.command(["execute", "--job", id]);
+    await h.command(["verify", "--job", id]);
+    const ready = await h.command<JobStatus>(["status", "--job", id]);
+    assert.ok(ready.value.closeReview);
+    await h.command([
+      "close",
+      "--job",
+      id,
+      "--close-digest",
+      ready.value.closeReview.evidenceDigest,
+      "--approver",
+      "ci:process-contract",
+    ]);
+    const closed = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(closed.value.state, "closed");
+    assert.equal(h.destinationRecords().filter((item) => item.kind === "file").length, 8);
+  });
+}
+
 for (const sourceProvider of ["google_shared_drive", "sharepoint"] as const) {
   it(`runs the real CLI into a fenced Dropbox team folder from ${sourceProvider}`, async (t) => {
     const group = { groupId: "g:c1a0", type: "group", role: "writer" };

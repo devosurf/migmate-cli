@@ -37,15 +37,15 @@ const mapping = {
   destFolderId: "1XYZdestinationFolder",
 };
 
-function serviceAccount(): string {
+function serviceAccount(clientId = "123456789012345678901", name = "migmate"): string {
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   return JSON.stringify({
     type: "service_account",
     project_id: "migmate-test",
     private_key_id: "a".repeat(40),
     private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-    client_email: "migmate@migmate-test.iam.gserviceaccount.com",
-    client_id: "123456789012345678901",
+    client_email: `${name}@migmate-test.iam.gserviceaccount.com`,
+    client_id: clientId,
     token_uri: "https://oauth2.googleapis.com/token",
   });
 }
@@ -1090,22 +1090,221 @@ test("Dropbox destinations load a separate write app and refuse the source app's
     `[dropbox-source]\n${reader}\n\n[dropbox-destination]\n${writer("dropbox-app", await dropboxFields(t, "destination"))}\n`,
     { mode: 0o600 },
   );
+  const sameTeam = {
+    sourceProvider: "dropbox",
+    destinationProvider: "dropbox",
+    rclone: {
+      config: { resolver: "file", path, mode: "0600" },
+      dropboxRemote: "dropbox-source",
+      dropboxDestinationRemote: "dropbox-destination",
+    },
+  };
+  await assert.rejects(
+    createCredentialSession({ jobType: "file_migration", jobDirectory, config: sameTeam }),
+    (error: unknown) =>
+      error instanceof ProviderFault &&
+      error.code === "credential_permissions_invalid" &&
+      error.evidence.reason === "destination_reuses_source_app",
+  );
+  // ADR-0018 D10: Dropbox → Dropbox inside one team still reads and writes as separate apps.
+  await writeFile(
+    path,
+    `[dropbox-source]\n${reader}\n\n[dropbox-destination]\n${writer("dropbox-writer", await dropboxFields(t, "destination", "dropbox-writer"))}\n`,
+    { mode: 0o600 },
+  );
+  const same = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config: sameTeam,
+  });
+  t.after(() => same.dispose());
+  assert.equal(same.dropboxRemote, "dropbox-source");
+  assert.equal(same.dropboxDestinationRemote, "dropbox-destination");
+  assert.notEqual(same.dropboxAdminId, undefined);
+  assert.equal(same.dropboxDestinationAdminId, "dbmid:writer");
+});
+
+async function googleToGoogleFiles(
+  t: TestContext,
+  input: { sourceScope?: string; sameAccount?: boolean } = {},
+) {
+  const directory = await mkdtemp(join(tmpdir(), "migmate-credentials-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const readerKey = join(directory, "reader.json");
+  const writerKey = join(directory, "writer.json");
+  await writeFile(readerKey, serviceAccount("223456789012345678901", "reader"), { mode: 0o600 });
+  await writeFile(writerKey, serviceAccount(), { mode: 0o600 });
+  const configPath = join(directory, "rclone.conf");
+  await writeFile(
+    configPath,
+    `[google-source]\ntype = drive\nscope = ${input.sourceScope ?? "drive.readonly"}\nservice_account_file = ${input.sameAccount ? writerKey : readerKey}\n\n[google-destination]\ntype = drive\nscope = drive\nservice_account_file = ${writerKey}\n`,
+    { mode: 0o600 },
+  );
+  const jobDirectory = await mkdtemp(join(tmpdir(), "migmate-job-"));
+  t.after(() => rm(jobDirectory, { recursive: true, force: true }));
+  return {
+    jobDirectory,
+    config: {
+      sourceProvider: "google_shared_drive",
+      destinationProvider: "google_shared_drive",
+      impersonate: true,
+      subject: "writer@example.com",
+      sourceImpersonate: true,
+      sourceSubject: "reader@example.com",
+      mappings: [{ ...mapping, sourceType: "google_shared_drive" }],
+      rclone: {
+        config: { resolver: "file", path: configPath, mode: "0600" },
+        googleSourceRemote: "google-source",
+        destinationRemote: "google-destination",
+      },
+    },
+  };
+}
+
+function googleClaims(init?: RequestInit): Record<string, unknown> {
+  assert.ok(init?.body instanceof URLSearchParams);
+  const assertion = String(init.body.get("assertion"));
+  return JSON.parse(Buffer.from(assertion.split(".")[1]!, "base64url").toString("utf8"));
+}
+
+test("Google → Google reads with a separate drive.readonly account and writes with its own", async (t) => {
+  const { jobDirectory, config } = await googleToGoogleFiles(t);
+  const requests: Record<string, unknown>[] = [];
+  t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
+    assert.equal(String(target), "https://oauth2.googleapis.com/token");
+    const claims = googleClaims(init);
+    requests.push(claims);
+    return Response.json({
+      access_token: `token-for-${String(claims.sub)}`,
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: claims.scope,
+    });
+  });
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config,
+  });
+  t.after(() => session.dispose());
+  assert.equal(session.googleSourceRemote, "google-source");
+  assert.equal(session.googleSourceDelegatedSubject, "reader@example.com");
+  assert.equal(session.destinationRemote, "google-destination");
+  assert.equal(session.delegatedSubject, "writer@example.com");
+  assert.equal(await session.googleSourceToken!(), "token-for-reader@example.com");
+  assert.equal(await session.googleToken(), "token-for-writer@example.com");
+  assert.deepEqual(
+    requests.map((claims) => [claims.iss, claims.sub, claims.scope]),
+    [
+      [
+        "reader@migmate-test.iam.gserviceaccount.com",
+        "reader@example.com",
+        "https://www.googleapis.com/auth/drive.readonly",
+      ],
+      [
+        "migmate@migmate-test.iam.gserviceaccount.com",
+        "writer@example.com",
+        "https://www.googleapis.com/auth/drive",
+      ],
+    ],
+  );
+  const evidence = await session.evidence();
+  assert.deepEqual((evidence.googleSource as { grantedScopes: string[] }).grantedScopes, [
+    "https://www.googleapis.com/auth/drive.readonly",
+  ]);
+  assert.deepEqual((evidence.google as { grantedScopes: string[] }).grantedScopes, [
+    "https://www.googleapis.com/auth/drive",
+  ]);
+  // The read-only account is part of the approved identity; replacing it needs a new plan.
+  const other = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config: { ...config, sourceSubject: "other-reader@example.com" },
+  });
+  t.after(() => other.dispose());
+  assert.match(await session.identity(), /^sha256:[0-9a-f]{64}$/u);
+  assert.notEqual(await other.identity(), await session.identity());
+});
+
+test("Google → Google refuses a writable, reused or missing source account", async (t) => {
+  for (const [input, expected] of [
+    [{ sourceScope: "drive" }, "credential_backend_unsupported"],
+    [{ sameAccount: true }, "credential_permissions_invalid"],
+  ] as const) {
+    const { jobDirectory, config } = await googleToGoogleFiles(t, input);
+    await assert.rejects(
+      createCredentialSession({ jobType: "file_migration", jobDirectory, config }),
+      (error: unknown) =>
+        error instanceof ProviderFault &&
+        error.code === expected &&
+        (expected !== "credential_permissions_invalid" ||
+          error.evidence.reason === "destination_reuses_source_app"),
+    );
+  }
+  const { jobDirectory, config } = await googleToGoogleFiles(t);
+  const { googleSourceRemote: _source, ...shared } = config.rclone;
   await assert.rejects(
     createCredentialSession({
       jobType: "file_migration",
       jobDirectory,
-      config: {
-        sourceProvider: "dropbox",
-        destinationProvider: "dropbox",
-        rclone: {
-          config: { resolver: "file", path, mode: "0600" },
-          dropboxRemote: "dropbox-source",
-          dropboxDestinationRemote: "dropbox-destination",
-        },
-      },
+      config: { ...config, rclone: shared },
     }),
-    { code: "unsupported_route" },
+    { code: "credential_config_invalid" },
   );
+  // A token granted beyond drive.readonly is not a read-only source.
+  t.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      access_token: "token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "https://www.googleapis.com/auth/drive",
+    }),
+  );
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config,
+  });
+  t.after(() => session.dispose());
+  await assert.rejects(session.googleSourceToken!(), { code: "credential_permissions_invalid" });
+});
+
+test("SharePoint → SharePoint inside one tenant needs a separate write app", async (t) => {
+  const jobDirectory = await mkdtemp(join(tmpdir(), "migmate-job-"));
+  t.after(() => rm(jobDirectory, { recursive: true, force: true }));
+  const directory = await mkdtemp(join(tmpdir(), "migmate-credentials-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "rclone.conf");
+  const sharepoint = source.filter((line) => !line.startsWith("root_folder_id"));
+  const writerApp = "33333333-3333-3333-3333-333333333333";
+  const writeSections = (app: string) =>
+    `[sharepoint-source]\n${sharepoint.join("\n")}\n\n[sharepoint-destination]\n${sharepoint
+      .map((line) => (line.startsWith("client_id") ? `client_id = ${app}` : line))
+      .join("\n")}\n`;
+  const pair = {
+    sourceProvider: "sharepoint",
+    destinationProvider: "sharepoint",
+    mappings: [mapping],
+    rclone: {
+      config: { resolver: "file", path, mode: "0600" },
+      sourceRemote: "sharepoint-source",
+      sharepointDestinationRemote: "sharepoint-destination",
+    },
+  };
+  await writeFile(path, writeSections(clientId), { mode: 0o600 });
+  await assert.rejects(
+    createCredentialSession({ jobType: "file_migration", jobDirectory, config: pair }),
+    { code: "credential_permissions_invalid" },
+  );
+  await writeFile(path, writeSections(writerApp), { mode: 0o600 });
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config: pair,
+  });
+  t.after(() => session.dispose());
+  assert.equal(session.sourceRemote, "sharepoint-source");
+  assert.equal(session.sharepointDestinationRemote, "sharepoint-destination");
 });
 
 async function persistedDropboxCredentials(t: TestContext) {

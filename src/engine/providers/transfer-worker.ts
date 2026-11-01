@@ -1204,6 +1204,8 @@ export function createTransferSupervisor(options: {
           _config: {
             Transfers: input.transfers,
             Metadata: true,
+            // Only a destination root's own backend option may copy server side (ADR-0018 D10).
+            ServerSideAcrossConfigs: false,
             ...(input.mode === "mirror" ? { MaxDelete: input.deleteLimit } : {}),
             ...(input.destination.ignoreSizeAndChecksum
               ? { IgnoreSize: true, IgnoreChecksum: true }

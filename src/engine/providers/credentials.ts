@@ -9,6 +9,7 @@ import {
   fileProviderPair,
   fileProvider,
   credentialBindings,
+  pairRemoteKeys,
   type FileProviderId,
 } from "./adapters/capabilities.ts";
 import {
@@ -20,7 +21,11 @@ import {
   sharepointOrigin,
 } from "./adapters/credentials/sharepoint.ts";
 import type { GraphCredential, SharePointCertificate } from "./adapters/credentials/sharepoint.ts";
-import { loadArchiveGoogle, requestGoogleToken } from "./adapters/credentials/google.ts";
+import {
+  assertSeparateGoogleAccounts,
+  loadArchiveGoogle,
+  requestGoogleToken,
+} from "./adapters/credentials/google.ts";
 import type { GoogleCredential } from "./adapters/credentials/google.ts";
 import { requestDropboxToken } from "./adapters/credentials/dropbox.ts";
 import type { DropboxCredential } from "./adapters/credentials/dropbox.ts";
@@ -46,6 +51,10 @@ export interface CredentialSession {
   graphDestinationToken(signal?: AbortSignal): Promise<string>;
   sharepointDestinationToken?(siteUrl: string, signal?: AbortSignal): Promise<string>;
   googleToken(signal?: AbortSignal): Promise<string>;
+  /** Google → Google only: the separate read-only source account; never used to write. */
+  googleSourceToken?(signal?: AbortSignal): Promise<string>;
+  readonly googleSourceRemote?: string | null;
+  readonly googleSourceDelegatedSubject?: string | undefined;
   dropboxToken(signal?: AbortSignal): Promise<string>;
   readonly dropboxAdminId?: string | undefined;
   readonly dropboxRemote?: string | null;
@@ -264,6 +273,8 @@ interface CredentialState {
   sharepointDestinationRemote?: string;
   sharepointCertificateRef?: FileCredentialReference;
   google: GoogleCredential | undefined;
+  googleSource?: GoogleCredential;
+  googleSourceRemote?: string;
   dropbox?: DropboxCredential;
   dropboxRemote?: string;
   dropboxDestination?: DropboxCredential;
@@ -309,10 +320,8 @@ async function loadCredentials(
       "sharepointDestinationCertificate",
       ...credentialBindings.map((binding) => binding.key),
     ]);
-    const required = [
-      pair.source.credentials.remoteKey.source,
-      pair.destination.credentials.remoteKey.destination,
-    ];
+    const keys = pairRemoteKeys(pair);
+    const required = [keys.source, keys.destination];
     const remotes = new Map<string, string>();
     for (const binding of credentialBindings) {
       const value = rclone[binding.key];
@@ -349,6 +358,7 @@ async function loadCredentials(
         );
       }
       assertSeparateSharePointApplications(material.graph, material.graphDestination);
+      assertSeparateGoogleAccounts(material.googleSource, material.google);
       // D4: writes never reuse the read-only source app, even on another team.
       if (
         material.dropbox &&
@@ -374,6 +384,10 @@ async function loadCredentials(
           ? { sharepointDestinationRemote: remotes.get("sharepointDestinationRemote")! }
           : {}),
         google: material.google,
+        ...(material.googleSource ? { googleSource: material.googleSource } : {}),
+        ...(remotes.has("googleSourceRemote")
+          ? { googleSourceRemote: remotes.get("googleSourceRemote")! }
+          : {}),
         ...(material.dropbox ? { dropbox: material.dropbox } : {}),
         ...(remotes.has("dropboxRemote") ? { dropboxRemote: remotes.get("dropboxRemote")! } : {}),
         ...(material.dropboxDestination ? { dropboxDestination: material.dropboxDestination } : {}),
@@ -418,6 +432,8 @@ export async function createCredentialSession(input: {
   let destinationPending: Promise<string> | undefined;
   let graphPending: Promise<string> | undefined;
   let googlePending: Promise<string> | undefined;
+  let googleSourceCache: Token | undefined;
+  let googleSourcePending: Promise<string> | undefined;
   let dropboxCache: Token | undefined;
   let dropboxPending: Promise<string> | undefined;
   let dropboxDestinationCache: Token | undefined;
@@ -554,6 +570,30 @@ export async function createCredentialSession(input: {
     }
   }
 
+  async function googleSourceToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    const credential = active().googleSource;
+    if (!credential) throw refused("credential_google_unavailable");
+    if (googleSourceCache && googleSourceCache.expiresAt > Date.now() + 60_000)
+      return googleSourceCache.value;
+    if (googleSourcePending) return googleSourcePending;
+    googleSourceCache = undefined;
+    googleSourcePending = (async () => {
+      const token = await requestGoogleToken(
+        credential,
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+      );
+      active();
+      googleSourceCache = token;
+      return token.value;
+    })();
+    try {
+      return await googleSourcePending;
+    } finally {
+      googleSourcePending = undefined;
+    }
+  }
+
   async function dropboxToken(signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const credential = active().dropbox;
@@ -607,6 +647,7 @@ export async function createCredentialSession(input: {
       ...(current.graph ? [graphToken(signal)] : []),
       ...(current.graphDestination ? [graphDestinationToken(signal)] : []),
       ...(current.google ? [googleToken(signal)] : []),
+      ...(current.googleSource ? [googleSourceToken(signal)] : []),
       ...(current.dropbox ? [dropboxToken(signal)] : []),
       ...(current.dropboxDestination ? [dropboxDestinationToken(signal)] : []),
     ]);
@@ -621,6 +662,13 @@ export async function createCredentialSession(input: {
       return active().google?.delegatedSubject;
     },
     googleToken,
+    googleSourceToken,
+    get googleSourceRemote() {
+      return active().googleSourceRemote ?? null;
+    },
+    get googleSourceDelegatedSubject() {
+      return active().googleSource?.delegatedSubject;
+    },
     dropboxToken,
     get dropboxAdminId() {
       return active().dropbox?.adminId;
@@ -679,6 +727,17 @@ export async function createCredentialSession(input: {
                 : {}),
             }
           : null,
+        ...(current.googleSource
+          ? {
+              googleSource: {
+                clientId: current.googleSource.clientId,
+                subject: current.googleSource.subject,
+                ...(current.googleSource.delegatedSubject
+                  ? { delegatedSubject: current.googleSource.delegatedSubject }
+                  : {}),
+              },
+            }
+          : {}),
       };
       return `sha256:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
     },
@@ -762,6 +821,20 @@ export async function createCredentialSession(input: {
               },
             }
           : {}),
+        ...(current.googleSource
+          ? {
+              googleSource: {
+                clientId: current.googleSource.clientId,
+                subject: current.googleSource.subject,
+                ...(current.googleSource.delegatedSubject
+                  ? { delegatedSubject: current.googleSource.delegatedSubject }
+                  : {}),
+                grantedScopes: [...googleSourceCache!.permissions],
+                scopeEvidence: "oauth_token_exchange",
+                authenticatedAt: googleSourceCache!.authenticatedAt,
+              },
+            }
+          : {}),
         mappings: current.mappings.map((mapping) => ({ ...mapping })),
         credentialFiles: {
           resolver: "file",
@@ -801,8 +874,10 @@ export async function createCredentialSession(input: {
       state = undefined;
       graphCache = undefined;
       googleCache = undefined;
+      googleSourceCache = undefined;
       graphPending = undefined;
       googlePending = undefined;
+      googleSourcePending = undefined;
     },
   };
 }

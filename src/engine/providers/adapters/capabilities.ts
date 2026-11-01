@@ -144,13 +144,45 @@ export function fileProviderPair(config: unknown): {
     input.destinationProvider ??
       (source.id === "sharepoint" ? "google_shared_drive" : "sharepoint"),
   );
-  if (source.id === destination.id)
-    throw new ProviderFault(
-      "unsupported_route",
-      "The requested provider pair is not implemented.",
-      { sourceProvider: source.id, destinationProvider: destination.id },
-    );
   return { source, destination };
+}
+
+/** ADR-0018 D10: a same-provider route copies files only, within one tenant or between two. */
+export function sameProviderPair(pair: {
+  source: FileProviderCapabilities;
+  destination: FileProviderCapabilities;
+}): boolean {
+  return pair.source.id === pair.destination.id;
+}
+
+/**
+ * The credential keys a pair needs. Same-provider pairs keep a separate source key even
+ * where cross-provider routes name one remote in either direction (ADR-0018 D4).
+ */
+export function pairRemoteKeys(pair: {
+  source: FileProviderAdapter;
+  destination: FileProviderAdapter;
+}): { source: string; destination: string } {
+  const source = pair.source.credentials.remoteKey;
+  return {
+    source: sameProviderPair(pair) ? (source.sameProviderSource ?? source.source) : source.source,
+    destination: pair.destination.credentials.remoteKey.destination,
+  };
+}
+
+/**
+ * ADR-0018 D10: only Google → Google inside one Workspace may copy server side, with the
+ * destination's delegated identity. Every other pair streams through this host.
+ */
+export function serverSideCopy(config: unknown): boolean {
+  const input = config && typeof config === "object" ? (config as Record<string, unknown>) : {};
+  const options =
+    input.options && typeof input.options === "object"
+      ? (input.options as Record<string, unknown>)
+      : {};
+  if (options.serverSideCopy !== true) return false;
+  const pair = fileProviderPair(config);
+  return pair.source.id === "google_shared_drive" && sameProviderPair(pair);
 }
 
 /** Decode historical stores only. New operator configurations must not name a route. */

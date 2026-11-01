@@ -92,16 +92,12 @@ async function harness(
   return h;
 }
 
-test("Google and SharePoint copy into Dropbox; Dropbox never copies into itself", () => {
-  for (const source of ["google_shared_drive", "sharepoint"] as const) {
+test("Google, SharePoint and Dropbox copy into Dropbox", () => {
+  for (const source of ["google_shared_drive", "sharepoint", "dropbox"] as const) {
     const pair = fileProviderPair({ sourceProvider: source, destinationProvider: "dropbox" });
     assert.equal(pair.destination.id, "dropbox");
     assert.equal(pair.destination.idempotentCreation, false);
   }
-  assert.throws(
-    () => fileProviderPair({ sourceProvider: "dropbox", destinationProvider: "dropbox" }),
-    (error: unknown) => error instanceof ProviderFault && error.code === "unsupported_route",
-  );
 });
 
 test("Dropbox destinations name team folders by namespace and members by group ID", () => {
