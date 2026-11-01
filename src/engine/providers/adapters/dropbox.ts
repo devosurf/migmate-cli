@@ -24,6 +24,8 @@ import {
   dropboxDestinationName,
   dropboxDestinationNameToStandard,
 } from "./rclone-name-encoding.ts";
+import { discoverDropbox } from "./dropbox-discovery.ts";
+import type { SourceDiscovery } from "../../partition.ts";
 
 interface Namespace {
   namespace_id: string;
@@ -110,10 +112,12 @@ export class DropboxAdapter implements FileAdapter {
     signal?: AbortSignal,
     content = false,
     selectUser = false,
-    role: "source" | "destination" = "source",
+    role: "source" | "destination" | "discovery" = "source",
   ): Promise<Response> {
     const host = content ? "content.dropboxapi.com" : "api.dropboxapi.com";
     const destination = role === "destination";
+    // Discovery reads as the source app but keeps error tags and acts as the admin.
+    const tagged = destination || role === "discovery";
     const adminId = destination
       ? this.#session.dropboxDestinationAdminId
       : this.#session.dropboxAdminId;
@@ -135,7 +139,7 @@ export class DropboxAdapter implements FileAdapter {
         ".tag": "namespace_id",
         namespace_id: namespace,
       });
-    } else if (destination && !endpoint.startsWith("team/")) {
+    } else if (tagged && !endpoint.startsWith("team/")) {
       // Sharing calls act in team-admin mode; team endpoints take the team token itself.
       headers["Dropbox-API-Select-Admin"] = requireAdmin();
     }
@@ -165,7 +169,7 @@ export class DropboxAdapter implements FileAdapter {
           : "";
       if (status === 409 && summary.startsWith("path/not_found/"))
         throw new HttpProviderFault(404, retryAfter);
-      throw destination
+      throw tagged
         ? new DropboxApiFault(status, retryAfter, summary, host)
         : new HttpProviderFault(status, retryAfter, undefined, host);
     }
@@ -495,6 +499,19 @@ export class DropboxAdapter implements FileAdapter {
       exportFormat: "html",
       recursiveListing: "folder_walk",
     };
+  }
+
+  async discoverSource(signal?: AbortSignal): Promise<SourceDiscovery> {
+    const evidence = await this.#session.evidence(signal);
+    const dropbox = evidence.dropbox as { grantedScopes?: unknown } | undefined;
+    return discoverDropbox({
+      grantedScopes: dropbox?.grantedScopes,
+      request: async <T>(endpoint: string, body: unknown, namespace?: string) =>
+        responseJson<T>(
+          await this.#response(endpoint, body, namespace, signal, false, false, "discovery"),
+        ),
+      ...(signal ? { signal } : {}),
+    });
   }
 
   async sourcePlanningEvidence(signal?: AbortSignal) {
