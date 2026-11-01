@@ -173,6 +173,34 @@ function provisionUnit(ctx: FileContext, owner: string, key: string): CommitUnit
 
 /** ADR-0020 D5: each container is created and proven once, then each mapping gets its folder. */
 async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
+  // Rows loaded before containers were shared may name one creation without being
+  // valid sharers; joining them would let two mappings write, or mirror, one tree.
+  for (const group of createdContainers(ctx.resume.createdDrives, ctx.config.mappings)) {
+    if (group.mappings.length < 2) continue;
+    const members = new Set(
+      group.mappings.map((m) =>
+        canonicalJson(
+          m
+            .createDrive!.members.map((member) => ({
+              ...member,
+              email: member.email.toLowerCase(),
+            }))
+            .sort((a, b) => (a.email < b.email ? -1 : a.email > b.email ? 1 : 0)),
+        ),
+      ),
+    );
+    if (members.size > 1 || group.mappings.some((m) => !m.createDrive!.folderPath && !m.filesOnly))
+      throw Object.assign(
+        new Error("Mappings naming one created container cannot share it: reload the manifest."),
+        {
+          code: "drive_creation_ambiguous",
+          detail: {
+            reason: "container_not_shareable",
+            mappingIds: group.mappings.map((m) => m.id),
+          },
+        },
+      );
+  }
   const validated = new Set<string>();
   const provisioned = new Set<string>();
   for (const planned of ctx.config.mappings) {
