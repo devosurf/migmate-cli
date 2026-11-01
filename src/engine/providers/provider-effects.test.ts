@@ -937,10 +937,6 @@ test("reverse mappings read Google bytes as the actor and address SharePoint des
       "/v1.0/drives/shared-drive/root:/Parent%EF%BC%9Afolder/Sub%20%EF%BC%9Ffolder:/",
     ),
   );
-  await assert.rejects(files.discoverSharePoint(), {
-    code: "unsupported_route",
-    message: "Discovery requires a SharePoint source file job.",
-  });
   const file = await files.readSourceItem({ driveId: "source-drive", itemId: "source-file" });
   assert.equal(file?.driveId, "source-drive");
   assert.equal(

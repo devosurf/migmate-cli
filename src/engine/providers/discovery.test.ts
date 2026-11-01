@@ -1,10 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ProviderFault } from "./fault.ts";
-import { discoverSharePoint } from "./discovery.ts";
+import { discoverSharePointSource } from "./discovery.ts";
 import { HttpProviderFault, type GraphTransport } from "./http.ts";
 
-test("discovery follows site, subsite and library pages and drafts every library once", async () => {
+const DELTA =
+  "root/delta?$select=id,name,root,folder,file,package,remoteItem,deleted,parentReference,shared";
+
+/** The per-library requests of an empty library with no permissions. */
+function emptyLibraries(...driveIds: string[]): Record<string, unknown> {
+  return Object.fromEntries(
+    driveIds.flatMap((driveId) => [
+      [`/v1.0/drives/${driveId}/root?$select=id`, { id: `root-${driveId}` }],
+      [`/v1.0/drives/${driveId}/${DELTA}`, { value: [] }],
+      [`/v1.0/drives/${driveId}/root/permissions`, { value: [] }],
+    ]),
+  );
+}
+
+/** A library-root boundary as discovery proposes it, without its counts or members. */
+function library(id: string, name: string) {
+  return {
+    id,
+    kind: "sharepoint_library",
+    name,
+    root: { type: "sharepoint", driveId: id, folderPath: "" },
+  };
+}
+
+function proposed(
+  boundaries: readonly { id: string; kind: string; name: string; root: unknown }[],
+) {
+  return boundaries.map(({ id, kind, name, root }) => ({ id, kind, name, root }));
+}
+
+test("discovery follows site, subsite and library pages and proposes every library once", async () => {
   const pages: Record<string, unknown> = {
     "/v1.0/sites/getAllSites": {
       value: [
@@ -90,6 +120,7 @@ test("discovery follows site, subsite and library pages and drafts every library
     "/v1.0/sites/site-f/drives": {
       value: [{ id: "drive-f", name: "Documents", driveType: "documentLibrary" }],
     },
+    ...emptyLibraries("drive-a", "drive-b", "drive-c", "drive-d", "drive-e", "drive-f"),
   };
   const graph: GraphTransport = {
     async request<T>(path: string): Promise<T> {
@@ -103,80 +134,17 @@ test("discovery follows site, subsite and library pages and drafts every library
       return { grantedPermissions: ["Sites.Read.All"] };
     },
   };
-  const result = await discoverSharePoint(graph);
-  assert.deepEqual(result.sites, [
-    {
-      id: "site-a",
-      name: "Research",
-      libraries: [
-        { id: "drive-a", name: "Documents" },
-        { id: "drive-b", name: "Evidence" },
-      ],
-    },
-    { id: "site-d", name: "Research", libraries: [{ id: "drive-d", name: "Documents" }] },
-    { id: "site-f", name: "Archive", libraries: [{ id: "drive-f", name: "Documents" }] },
-    { id: "site-e", name: "Research", libraries: [{ id: "drive-e", name: "Documents" }] },
-    { id: "site-b", name: "Operations", libraries: [{ id: "drive-c", name: "Documents" }] },
+  const result = await discoverSharePointSource(graph);
+  assert.equal(result.sourceProvider, "sharepoint");
+  assert.deepEqual(proposed(result.boundaries), [
+    library("drive-a", "Research (tenant.sharepoint.com/sites/research) - Documents"),
+    library("drive-b", "Research (tenant.sharepoint.com/sites/research) - Evidence"),
+    library("drive-c", "Operations (tenant.sharepoint.com/sites/Försäljning/Team A) - Documents"),
+    library("drive-d", "Research (tenant.sharepoint.com/sites/research/labs) - Documents"),
+    library("drive-e", "Research (tenant.sharepoint.com/sites/research/team) - Documents"),
+    library("drive-f", "Archive (tenant.sharepoint.com/sites/research/labs/archive) - Documents"),
   ]);
-  assert.deepEqual(result.manifest, {
-    version: 1,
-    mappings: [
-      {
-        id: "drive-a",
-        source: { type: "sharepoint", driveId: "drive-a", folderPath: "" },
-        destination: {
-          type: "google_shared_drive",
-          create: "Research (tenant.sharepoint.com/sites/research) - Documents",
-        },
-        members: [],
-      },
-      {
-        id: "drive-b",
-        source: { type: "sharepoint", driveId: "drive-b", folderPath: "" },
-        destination: {
-          type: "google_shared_drive",
-          create: "Research (tenant.sharepoint.com/sites/research) - Evidence",
-        },
-        members: [],
-      },
-      {
-        id: "drive-d",
-        source: { type: "sharepoint", driveId: "drive-d", folderPath: "" },
-        destination: {
-          type: "google_shared_drive",
-          create: "Research (tenant.sharepoint.com/sites/research/labs) - Documents",
-        },
-        members: [],
-      },
-      {
-        id: "drive-f",
-        source: { type: "sharepoint", driveId: "drive-f", folderPath: "" },
-        destination: {
-          type: "google_shared_drive",
-          create: "Archive (tenant.sharepoint.com/sites/research/labs/archive) - Documents",
-        },
-        members: [],
-      },
-      {
-        id: "drive-e",
-        source: { type: "sharepoint", driveId: "drive-e", folderPath: "" },
-        destination: {
-          type: "google_shared_drive",
-          create: "Research (tenant.sharepoint.com/sites/research/team) - Documents",
-        },
-        members: [],
-      },
-      {
-        id: "drive-c",
-        source: { type: "sharepoint", driveId: "drive-c", folderPath: "" },
-        destination: {
-          type: "google_shared_drive",
-          create: "Operations (tenant.sharepoint.com/sites/Försäljning/Team A) - Documents",
-        },
-        members: [],
-      },
-    ],
-  });
+  assert.deepEqual(result.notices, []);
 });
 
 function fakeGraph(pages: Record<string, unknown>): GraphTransport {
@@ -196,7 +164,7 @@ function fakeGraph(pages: Record<string, unknown>): GraphTransport {
 }
 
 test("discovery labels sites and libraries Graph returns without a usable name", async () => {
-  const result = await discoverSharePoint(
+  const result = await discoverSharePointSource(
     fakeGraph({
       "/v1.0/sites/getAllSites": {
         value: [
@@ -232,48 +200,21 @@ test("discovery labels sites and libraries Graph returns without a usable name",
       "/v1.0/sites/site-hr/sites": { value: [] },
       "/v1.0/sites/site-root/sites": { value: [] },
       "/v1.0/sites/site-marketing/sites": { value: [] },
+      ...emptyLibraries("drive-search", "drive-hr", "drive-root", "drive-marketing"),
     }),
   );
-  assert.deepEqual(result.sites, [
-    { id: "site-search", name: "search", libraries: [{ id: "drive-search", name: "Documents" }] },
-    { id: "site-hr", name: "Human Resources", libraries: [{ id: "drive-hr", name: "drive-hr" }] },
-    {
-      id: "site-root",
-      name: "contoso.sharepoint.com",
-      libraries: [{ id: "drive-root", name: "Documents" }],
-    },
-    {
-      id: "site-marketing",
-      name: "Marketing",
-      libraries: [{ id: "drive-marketing", name: "Documents" }],
-    },
+  // Boundaries sort by id; each name carries the site label or its fallback.
+  assert.deepEqual(proposed(result.boundaries), [
+    library("drive-hr", "Human Resources (contoso.sharepoint.com/sites/hr) - drive-hr"),
+    library("drive-marketing", "Marketing (contoso.sharepoint.com/sites/Marketing) - Documents"),
+    library("drive-root", "contoso.sharepoint.com (contoso.sharepoint.com/) - Documents"),
+    library("drive-search", "search (contoso.sharepoint.com/search) - Documents"),
   ]);
-  assert.deepEqual(
-    result.manifest.mappings.map((mapping) => mapping.destination),
-    [
-      {
-        type: "google_shared_drive",
-        create: "search (contoso.sharepoint.com/search) - Documents",
-      },
-      {
-        type: "google_shared_drive",
-        create: "Human Resources (contoso.sharepoint.com/sites/hr) - drive-hr",
-      },
-      {
-        type: "google_shared_drive",
-        create: "contoso.sharepoint.com (contoso.sharepoint.com/) - Documents",
-      },
-      {
-        type: "google_shared_drive",
-        create: "Marketing (contoso.sharepoint.com/sites/Marketing) - Documents",
-      },
-    ],
-  );
 });
 
 test("discovery refuses a site Graph returns without a URL, naming the site and field", async () => {
   await assert.rejects(
-    discoverSharePoint(
+    discoverSharePointSource(
       fakeGraph({
         "/v1.0/sites/getAllSites": { value: [{ id: "site-a", displayName: "Research" }] },
       }),
@@ -364,7 +305,7 @@ test("discovery refuses identifiers and pages it cannot trust, naming the object
     ],
   ];
   for (const [pages, evidence] of cases)
-    await assert.rejects(discoverSharePoint(fakeGraph(pages)), {
+    await assert.rejects(discoverSharePointSource(fakeGraph(pages)), {
       code: "preflight_failed",
       evidence,
     });
@@ -372,7 +313,7 @@ test("discovery refuses identifiers and pages it cannot trust, naming the object
 
 test("discovery requests nothing from personal OneDrive sites", async () => {
   // fakeGraph rejects any request outside these pages, so a visited personal site fails.
-  const result = await discoverSharePoint(
+  const result = await discoverSharePointSource(
     fakeGraph({
       "/v1.0/sites/getAllSites": {
         value: [
@@ -399,15 +340,15 @@ test("discovery requests nothing from personal OneDrive sites", async () => {
         value: [{ id: "drive-a", name: "Documents", driveType: "documentLibrary" }],
       },
       "/v1.0/sites/site-a/sites": { value: [] },
+      ...emptyLibraries("drive-a"),
     }),
   );
-  assert.deepEqual(result.sites, [
-    { id: "site-a", name: "Research", libraries: [{ id: "drive-a", name: "Documents" }] },
+  assert.deepEqual(proposed(result.boundaries), [
+    library("drive-a", "Research (contoso.sharepoint.com/sites/research) - Documents"),
   ]);
-  assert.deepEqual(
-    result.manifest.mappings.map((mapping) => mapping.id),
-    ["drive-a"],
-  );
+  assert.deepEqual(result.notices, [
+    "3 personal OneDrive sites were skipped; discovery covers SharePoint document libraries only.",
+  ]);
 });
 
 test("discovery refuses a failed Graph request with its status and the request it was reading", async () => {
@@ -438,7 +379,8 @@ test("discovery refuses a failed Graph request with its status and the request i
       {
         "/v1.0/sites/getAllSites": sites,
         "/v1.0/sites/site-a/drives": { value: [] },
-        "/v1.0/sites/site-a/sites": new HttpProviderFault(429, "5"),
+        // A throttle that persists past the retries, with Retry-After 0 so they wait nothing.
+        "/v1.0/sites/site-a/sites": new HttpProviderFault(429, "0"),
       },
       {
         check: "discovery_request_failed",
@@ -458,7 +400,7 @@ test("discovery refuses a failed Graph request with its status and the request i
     ],
   ];
   for (const [pages, evidence] of cases)
-    await assert.rejects(discoverSharePoint(fakeGraph(pages)), {
+    await assert.rejects(discoverSharePointSource(fakeGraph(pages)), {
       code: "preflight_failed",
       evidence,
     });
@@ -476,7 +418,7 @@ test("site-scoped discovery refuses with the missing tenant-wide grant before en
       return { grantedPermissions: ["Sites.Selected"] };
     },
   };
-  await assert.rejects(discoverSharePoint(graph), {
+  await assert.rejects(discoverSharePointSource(graph), {
     code: "preflight_failed",
     evidence: { check: "discovery_requires_sites_read_all", requiredGrant: "Sites.Read.All" },
   });

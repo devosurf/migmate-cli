@@ -32,7 +32,7 @@ import {
 } from "../src/engine/index.ts";
 import { FakeFileMigrationPort, type FakeSourceItemFixture } from "../src/engine/providers/fake.ts";
 import { cliFixture, CLI_JOB_CONFIG } from "./cli-fixture.ts";
-import { discoverSharePoint, type SharePointDiscovery } from "../src/engine/providers/discovery.ts";
+import { discoverSharePointSource } from "../src/engine/providers/discovery.ts";
 import type { DiscoverResult } from "../src/engine/partition.ts";
 import type { GraphTransport } from "../src/engine/providers/http.ts";
 import { createProductionProvider } from "../src/engine/providers/production.ts";
@@ -341,6 +341,13 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
             ],
           }),
         );
+      // The fetch mock passes only the path, so library routes arrive without a query.
+      if (path === "/v1.0/drives/src-drive/root") return JSON.parse('{"id":"src-root"}');
+      if (
+        path === "/v1.0/drives/src-drive/root/delta" ||
+        path === "/v1.0/drives/src-drive/root/permissions"
+      )
+        return JSON.parse('{"value":[]}');
       assert.equal(path, "/v1.0/sites/team/drives");
       return JSON.parse(
         JSON.stringify({
@@ -437,7 +444,9 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
     jobDirectory: join(h.home, "jobs", id),
   });
   t.after(() => discovery.close?.());
-  Object.assign(h.provider, { discoverSharePoint: () => discovery.discoverSharePoint!() });
+  Object.assign(h.provider, {
+    discoverSource: (signal?: AbortSignal) => discovery.discoverSource!(signal),
+  });
   const onboard = await invoke(
     ["creds", "init", "--job", id, "--config", configPath, "--output", "json"],
     h.engine(),
@@ -456,14 +465,14 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
     h.engine(),
   );
   assert.equal(capture.code, 0);
-  const result = document<SharePointDiscovery>(capture);
+  const result = document<DiscoverResult>(capture);
   assert.equal(result.command, "discover");
   assert.equal(result.ok, true);
   assert.deepEqual(result.value.manifest, {
     version: 1,
     mappings: [
       {
-        id: "src-drive",
+        id: "team-tenant-sharepoint-com-sites-operati-e080f35286",
         source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
         destination: {
           type: "google_shared_drive",
@@ -476,7 +485,11 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), result.value.manifest);
   const envelopeOnly = await invoke(["discover", "--job", id, "--output", "json"], h.engine());
   assert.equal(envelopeOnly.code, 0);
-  assert.deepEqual(document<SharePointDiscovery>(envelopeOnly).value, result.value);
+  // A second discovery observes again; only its observation time differs.
+  assert.deepEqual(
+    { ...document<DiscoverResult>(envelopeOnly).value, observedAt: "" },
+    { ...result.value, observedAt: "" },
+  );
   const after = await h.engine().reader({ id }).status();
   assert.ok(after.ok);
   const { uploadActivity: _afterActivity, ...afterDurable } = after.value;
@@ -637,7 +650,7 @@ it("discover refuses site-scoped access in the JSON envelope without writing a d
       throw new Error("Discovery cannot read bytes");
     },
   };
-  Object.assign(h.provider, { discoverSharePoint: () => discoverSharePoint(graph) });
+  Object.assign(h.provider, { discoverSource: () => discoverSharePointSource(graph) });
   const initialized = await h.engine().initJob({ type: "file_migration", config: CLI_JOB_CONFIG });
   assert.ok(initialized.ok);
   const file = join(h.home, "refused-draft.json");
