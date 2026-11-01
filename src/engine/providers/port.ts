@@ -232,7 +232,11 @@ export interface ProviderPort extends FilePassProvider {
   destinationCreator(): Promise<string>;
   /** Read-only provider prerequisites, before any creation or permission mutation. */
   validateDestinationCreation?(input: { siteId?: string; members: DriveMember[] }): Promise<void>;
-  /** A conflict returns null: the caller must reconcile by exact name and scope. */
+  /**
+   * A conflict returns null: the caller must reconcile by exact name and scope.
+   * A non-idempotent provider returns null or throws a fault marked by
+   * `markCreationRejected` only when the provider definitely created nothing.
+   */
   createDestinationContainer(input: {
     name: string;
     requestId: string;
@@ -343,4 +347,17 @@ export interface ProviderPort extends FilePassProvider {
   stopTransferWorker(input: { socketPath: string }): Promise<void>;
   terminateTransferWorker(input: { socketPath: string }): Promise<void>;
   transferWorkerVersion(input: { socketPath: string }): Promise<string | null>;
+}
+
+/** Marks a creation fault as a definite refusal: the provider created nothing. */
+export function markCreationRejected<T extends object>(error: T): T {
+  return Object.assign(error, { creationRejected: true as const });
+}
+
+export function isCreationRejected(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { creationRejected?: unknown }).creationRejected === true
+  );
 }

@@ -1509,6 +1509,13 @@ export class FakeFileMigrationPort implements ProviderPort {
       if (jobid === undefined || pass.handle.jobid === jobid) pass.release?.();
   }
 
+  /** An operator renaming a conflicting destination container. */
+  renameDestinationContainer(id: string, name: string): void {
+    const container = this.sharedDrives.get(id);
+    if (!container) throw new Error(`Unknown destination container ${id}`);
+    this.sharedDrives.set(id, { ...container, name });
+  }
+
   removeDestinationItem(id: string): void {
     const entry = this.destinationById[id];
     if (!entry) return;

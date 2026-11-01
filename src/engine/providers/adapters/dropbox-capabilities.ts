@@ -24,8 +24,9 @@ export const dropboxCapabilities: FileProviderCapabilities = {
   idempotentCreation: false,
   sourceName: dropboxSourceName,
   destinationName: dropboxDestinationName,
-  // Dropbox paths are case-insensitive and case-preserving.
-  destinationSiblingKey: (name) => name.toLowerCase(),
+  // Dropbox paths are case-insensitive and case-preserving; rclone's march folds
+  // NFC before case, so NFC/NFD twins collide too.
+  destinationSiblingKey: (name) => name.normalize("NFC").toLowerCase(),
   destinationNameFindings: nameFindings,
   // rclone's Dropbox hash: SHA-256 over the SHA-256 of each 4 MiB block.
   hashType: "dropbox",
@@ -94,9 +95,10 @@ function monthlyUploadStop(ctx: FileContext, error: string | null): UploadQuotaS
     hitAt: hitAt.toISOString(),
     actingGoogleAccount: null,
     limit: "dropbox_team_monthly_upload_calls",
-    // The allowance resets on the first of the month; Dropbox names no time zone.
+    // The allowance resets on the first of the month; Dropbox names no time zone,
+    // so estimate the latest plausible midnight, US Pacific standard time (08:00 UTC).
     earliestResumeAt: new Date(
-      Date.UTC(hitAt.getUTCFullYear(), hitAt.getUTCMonth() + 1, 1),
+      Date.UTC(hitAt.getUTCFullYear(), hitAt.getUTCMonth() + 1, 1, 8),
     ).toISOString(),
     resumeTimeIsEstimate: true,
   };

@@ -10,6 +10,8 @@ import {
   type FakeFileMigrationFixture,
 } from "../src/engine/providers/fake.ts";
 import { ProviderFault } from "../src/engine/providers/fault.ts";
+import { HttpProviderFault } from "../src/engine/providers/http.ts";
+import { markCreationRejected } from "../src/engine/providers/port.ts";
 import { parseManifest } from "../src/engine/manifest.ts";
 import { approve, closeDecision, fileFixture, value } from "./engine-fixture.ts";
 
@@ -237,7 +239,7 @@ for (const source of ["google_shared_drive", "sharepoint"] as const) {
       hitAt: now,
       actingGoogleAccount: null,
       limit: "dropbox_team_monthly_upload_calls",
-      earliestResumeAt: "2026-12-01T00:00:00.000Z",
+      earliestResumeAt: "2026-12-01T08:00:00.000Z",
       resumeTimeIsEstimate: true,
     };
     assert.deepEqual(result.uploadQuota, quota);
@@ -310,7 +312,78 @@ test("an existing same-name Dropbox team folder blocks creation, case-insensitiv
   const result = await h.engine.withWriterResult(h.ref, (w) => w.execute());
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.refusal.code, "drive_creation_ambiguous");
-  assert.equal(value(await h.engine.reader(h.ref).status()).createdDrives[0]?.driveId, null);
+  const refused = value(await h.engine.reader(h.ref).status()).createdDrives[0]!;
+  assert.equal(refused.driveId, null);
+  // The conflict proves nothing was created, so the attempt does not linger.
+  assert.equal(refused.creationAttemptedAt, undefined);
+  assert.deepEqual(refused.rejectedCreationAttempts, [now]);
+  h.port.renameDestinationContainer("drive-9", "Finance (old)");
+  value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+  const created = value(await h.engine.reader(h.ref).status()).createdDrives[0]!;
+  assert.notEqual(created.driveId, null);
+  assert.notEqual(created.driveId, "drive-9");
+  assert.deepEqual(created.provenance, { kind: "create_response" });
+});
+
+test("a rate-limited Dropbox creation clears its attempt and creates on retry", async (t) => {
+  const h = await harness(t, "sharepoint");
+  h.port.scriptEffect({
+    method: "createDestinationContainer",
+    count: 1,
+    error: markCreationRejected(new HttpProviderFault(429, "1", "too_many_requests")),
+  });
+  // The transient refusal is retried within execute: a lingering attempt would refuse it.
+  value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+  const drive = value(await h.engine.reader(h.ref).status()).createdDrives[0]!;
+  assert.deepEqual(drive.rejectedCreationAttempts, [now]);
+  assert.deepEqual(drive.provenance, { kind: "create_response" });
+  assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 1);
+  assert.equal(
+    h.port.calls.filter((call) => call.startsWith("createDestinationContainer:")).length,
+    2,
+  );
+});
+
+test("a Dropbox monthly-limit pass that fails outright also blocks with quota evidence", async (t) => {
+  const h = await harness(t, "google_shared_drive", {
+    fixture: {
+      copyPasses: [{ error: "upload failed: invalid_account_type/feature/..." }],
+    },
+  });
+  const result = value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.uploadQuota?.limit, "dropbox_team_monthly_upload_calls");
+  assert.equal(result.budget?.failedAttempts, 0);
+});
+
+test("a failed stop keeps the Dropbox monthly-limit evidence", async (t) => {
+  const h = await harness(t, "sharepoint", {
+    fixture: { copyPasses: [{ retryingError: "upload failed: invalid_account_type/feature/" }] },
+  });
+  const stop = h.port.stopCopyPass.bind(h.port);
+  h.port.stopCopyPass = async (reference) => {
+    await stop(reference);
+    throw new Error("stop acknowledgement lost");
+  };
+  const result = value(
+    await h.engine.withWriterResult(h.ref, (w) => w.execute({ signal: AbortSignal.timeout(5000) })),
+  );
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.uploadQuota?.limit, "dropbox_team_monthly_upload_calls");
+  const pass = value(await h.engine.reader(h.ref).status()).mappingPasses[0]!;
+  assert.equal(pass.status, "failed");
+  assert.equal("lastError" in (pass.lastStats ?? {}), false);
+});
+
+test("only Dropbox destinations stop a pass on its running error text", () => {
+  for (const [sourceProvider, destinationProvider] of [
+    ["sharepoint", "google_shared_drive"],
+    ["google_shared_drive", "sharepoint"],
+    ["dropbox", "sharepoint"],
+  ])
+    assert.ok(
+      !fileProviderPair({ sourceProvider, destinationProvider }).destination.quotaWhileRunning,
+    );
 });
 
 test("Dropbox team-space teams refuse creation before any team folder exists", async (t) => {

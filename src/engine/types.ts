@@ -72,6 +72,8 @@ export interface CreatedDrive {
   intentAt?: string;
   /** Recorded before a non-idempotent provider call; absence means it was not attempted. */
   creationAttemptedAt?: string;
+  /** Attempts the provider definitely refused, so nothing was created by them. */
+  rejectedCreationAttempts?: string[];
   provenance?:
     | { kind: "create_response" }
     | { kind: "name_recovery"; createdTime: string }

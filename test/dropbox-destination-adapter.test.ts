@@ -278,7 +278,7 @@ test("Dropbox's monthly limit is recognised only by its error tag and resumes on
     hitAt: "2026-12-31T23:30:00.000Z",
     actingGoogleAccount: null,
     limit: "dropbox_team_monthly_upload_calls",
-    earliestResumeAt: "2027-01-01T00:00:00.000Z",
+    earliestResumeAt: "2027-01-01T08:00:00.000Z",
     resumeTimeIsEstimate: true,
   });
   for (const other of [null, "too_many_write_operations", "path/insufficient_space/"])

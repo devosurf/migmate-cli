@@ -11,6 +11,7 @@ import type {
   ProviderPort,
   SourceEntry,
 } from "../port.ts";
+import { markCreationRejected } from "../port.ts";
 import type {
   AdapterInput,
   DestinationRoot,
@@ -726,14 +727,22 @@ export class DropboxAdapter implements FileAdapter {
       if (error instanceof DropboxApiFault && error.status === 409) {
         if (error.summary.startsWith("folder_name_already_used")) return null;
         if (error.summary.startsWith("folder_name_reserved"))
-          throw new ProviderFault("destination_invalid_name", "Dropbox reserves this name.");
+          throw markCreationRejected(
+            new ProviderFault("destination_invalid_name", "Dropbox reserves this name."),
+          );
         if (error.summary.startsWith("team_shared_dropbox_error"))
-          throw new ProviderFault(
-            "preflight_failed",
-            "This Dropbox team uses a team space; team folders cannot be created.",
-            { check: "dropbox_team_space_unfenced" },
+          throw markCreationRejected(
+            new ProviderFault(
+              "preflight_failed",
+              "This Dropbox team uses a team space; team folders cannot be created.",
+              { check: "dropbox_team_space_unfenced" },
+            ),
           );
       }
+      // Any 4xx, 409 route errors and 429 included, is refused before the folder exists;
+      // only a lost response or 5xx leaves the outcome unknown.
+      if (error instanceof HttpProviderFault && error.status >= 400 && error.status < 500)
+        throw markCreationRejected(error);
       throw error;
     }
   }
