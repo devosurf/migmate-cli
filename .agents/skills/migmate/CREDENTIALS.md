@@ -27,9 +27,12 @@ that is present must still be a stable ID or onboarding refuses
 
 For Dropbox → Shared Drives, hand app creation and consent to a Dropbox team
 administrator. Use a scoped **Full Dropbox** app, with only these permissions:
-`account_info.read`, `files.metadata.read`, `files.content.read`, `team_data.member`.
-These are the requested minimum. Existing grants may additionally contain the known
-read-only scopes `sharing.read`, `team_info.read`, `team_data.content.read`, and
+`account_info.read`, `files.metadata.read`, `files.content.read`, `team_data.member`,
+`sharing.read`. Migmate requests all five. Migrations need only the first four;
+`migmate discover` also reads folder membership with `sharing.read` and refuses
+(`discovery_requires_sharing_read`) on a grant without it, so an older grant keeps
+migrating but must be re-authorized to discover. Existing grants may additionally
+contain the known read-only scopes `team_info.read`, `team_data.content.read`, and
 `members.read`; Migmate does not request those unnecessary permissions.
 Full Dropbox selects the accessible content; these scopes constrain operations.
 Use the administrator's **team-member ID** (`dbmid:…`), not their email.

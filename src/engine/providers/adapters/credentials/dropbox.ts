@@ -29,6 +29,11 @@ export const DROPBOX_READ_SCOPES = [
   "files.content.read",
   "team_data.member",
 ] as const;
+/**
+ * Requested, not required: `migmate discover` reads folder membership with sharing.read
+ * (ADR-0020 D2), and migrations keep working on grants made before discovery existed.
+ */
+export const DROPBOX_REQUESTED_READ_SCOPES = [...DROPBOX_READ_SCOPES, "sharing.read"] as const;
 const ALLOWED_READ_SCOPES: Record<string, true> = {
   "account_info.read": true,
   "files.metadata.read": true,
@@ -183,7 +188,7 @@ export function beginDropboxAuthorization(
     token_access_type: "offline",
     code_challenge_method: "S256",
     code_challenge: createHash("sha256").update(verifier).digest("base64url"),
-    scope: (role === "source" ? DROPBOX_READ_SCOPES : DROPBOX_WRITE_SCOPES).join(" "),
+    scope: (role === "source" ? DROPBOX_REQUESTED_READ_SCOPES : DROPBOX_WRITE_SCOPES).join(" "),
   }).toString();
   return {
     url: url.href,
