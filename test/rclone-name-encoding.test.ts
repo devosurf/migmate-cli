@@ -7,6 +7,10 @@ import {
   sharepointDestinationName,
   sharepointDestinationNameToStandard,
   sharepointSourceName,
+  DROPBOX_ENCODING,
+  dropboxDestinationName,
+  dropboxDestinationNameToStandard,
+  dropboxSourceName,
 } from "../src/engine/providers/adapters/rclone-name-encoding.ts";
 
 // Golden cases derived from the pinned encoder's Encode/Decode branches, not from
@@ -143,4 +147,42 @@ test("destination decoding refuses unrepresentable UTF-8 instead of lossy root a
   for (const name of ["‛FF", "‛C3", "‛C0‛AF", "‛ED‛A0‛80", "\ud800.txt"]) {
     assert.equal(sharepointDestinationNameToStandard(name), null);
   }
+});
+
+test("pins the Dropbox default flags: no LeftSpace, no RightPeriod, no Windows punctuation", () => {
+  assert.equal(DROPBOX_ENCODING, "Slash,BackSlash,Del,Ctl,RightSpace,InvalidUtf8,Dot");
+  for (const [native, encoded] of [
+    ["a\\z", "a＼z"],
+    ["a／＼z", "a‛／‛＼z"],
+    ["a\0\x01\x7fz", "a␀␁␡z"],
+    ["trailing ", "trailing␠"],
+    ["trailing␠", "trailing‛␠"],
+    ["trailing.", "trailing."],
+    [" leading", " leading"],
+    ["~leading", "~leading"],
+    ['a<>":?*|z', 'a<>":?*|z'],
+    [".", "．"],
+    ["..", "．．"],
+    ["literal‛quote", "literal‛‛quote"],
+  ] as const) {
+    const standard = googleSourceName(native);
+    assert.notEqual(standard, null);
+    assert.equal(dropboxDestinationName(standard!), encoded, native);
+    assert.equal(dropboxDestinationNameToStandard(encoded), standard, native);
+  }
+});
+
+test("Dropbox source names reach SharePoint with that destination's encoding", () => {
+  for (const [native, sharepoint] of [
+    ["report?.txt", "report？.txt"],
+    ["report？.txt", "report‛？.txt"],
+    ["notes ", "notes␠"],
+    [" notes", "␠notes"],
+    ["résumé-😀.txt", "résumé-😀.txt"],
+  ] as const) {
+    const standard = dropboxSourceName(native);
+    assert.notEqual(standard, null);
+    assert.equal(sharepointDestinationName(standard!), sharepoint, native);
+  }
+  assert.equal(dropboxSourceName("‛FF"), null);
 });

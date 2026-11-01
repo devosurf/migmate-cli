@@ -92,7 +92,7 @@ test("Dropbox engine config refuses unknown, wrong, duplicate and unsafe credent
 test("engine refuses unsupported provider pairs even with valid remote names", async (t) => {
   const { engine, reference } = await fixture(t);
   for (const [sourceProvider, destinationProvider] of [
-    ["dropbox", "sharepoint"],
+    ["sharepoint", "sharepoint"],
     ["google_shared_drive", "dropbox"],
     ["dropbox", "dropbox"],
     ["unknown", "google_shared_drive"],

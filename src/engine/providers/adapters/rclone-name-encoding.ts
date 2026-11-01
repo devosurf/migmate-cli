@@ -9,18 +9,41 @@ export const SHAREPOINT_DESTINATION_ENCODING =
 const quote = "‛";
 const fullOffset = 0xfee0;
 const symbolOffset = 0x2400;
-type Encoding = "standard" | "google" | "sharepoint-source" | "sharepoint-destination";
+// Dropbox is Base (Zero, Slash, Ctl, Dot) plus BackSlash, Del, RightSpace and InvalidUtf8:
+// https://github.com/rclone/rclone/blob/v1.75.0/backend/dropbox/dropbox.go#L310-L318
+export const DROPBOX_ENCODING = "Slash,BackSlash,Del,Ctl,RightSpace,InvalidUtf8,Dot";
+type Encoding = "standard" | "google" | "sharepoint-source" | "sharepoint-destination" | "dropbox";
 const punctuation: Record<Encoding, string> = {
   standard: "/",
   google: "",
   "sharepoint-source": "/",
   "sharepoint-destination": '/<>":?*|\\',
+  dropbox: "/\\",
 };
+interface Edges {
+  leftSpace?: true;
+  leftTilde?: true;
+  rightSpace?: true;
+  rightPeriod?: true;
+}
+const edges: Partial<Record<Encoding, Edges>> = {
+  "sharepoint-destination": {
+    leftSpace: true,
+    leftTilde: true,
+    rightSpace: true,
+    rightPeriod: true,
+  },
+  dropbox: { rightSpace: true },
+};
+const standardFlags = (encoding: Encoding) =>
+  encoding === "standard" || encoding === "sharepoint-destination" || encoding === "dropbox";
+const invalidUtf8Flag = (encoding: Encoding) =>
+  encoding === "google" || encoding === "sharepoint-destination" || encoding === "dropbox";
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Encode a raw Unicode basename, including literal replacement glyphs and QuoteRune. */
 function encode(name: string, encoding: Encoding): string {
-  const standard = encoding === "standard" || encoding === "sharepoint-destination";
+  const standard = standardFlags(encoding);
   if (standard) {
     if (name === ".") return "．";
     if (name === "..") return "．．";
@@ -29,15 +52,22 @@ function encode(name: string, encoding: Encoding): string {
   }
   let prefix = "";
   let suffix = "";
-  if (encoding === "sharepoint-destination") {
+  const edge = edges[encoding];
+  if (edge) {
     // rclone replaces only the first/last rune, not the entire run of spaces/dots.
     const first = name[0];
-    if (first === " " || first === "~" || first === "␠" || first === "～") {
+    if (
+      (edge.leftSpace && (first === " " || first === "␠")) ||
+      (edge.leftTilde && (first === "~" || first === "～"))
+    ) {
       prefix = first === " " ? "␠" : first === "~" ? "～" : quote + first;
       name = name.slice(1);
     }
     const last = name.at(-1);
-    if (last === " " || last === "." || last === "␠" || last === "．") {
+    if (
+      (edge.rightSpace && (last === " " || last === "␠")) ||
+      (edge.rightPeriod && (last === "." || last === "．"))
+    ) {
       suffix = last === " " ? "␠" : last === "." ? "．" : quote + last;
       name = name.slice(0, -1);
     }
@@ -63,8 +93,8 @@ function encode(name: string, encoding: Encoding): string {
 
 /** Undefined means InvalidUtf8.Decode produced bytes that cannot cross a JSON listing. */
 function decode(name: string, encoding: Encoding): string | undefined {
-  const standard = encoding === "standard" || encoding === "sharepoint-destination";
-  const invalidUtf8 = encoding === "google" || encoding === "sharepoint-destination";
+  const standard = standardFlags(encoding);
+  const invalidUtf8 = invalidUtf8Flag(encoding);
   if (invalidUtf8 && !name.isWellFormed()) return undefined;
   if (standard) {
     if (name === "．") return ".";
@@ -74,18 +104,21 @@ function decode(name: string, encoding: Encoding): string | undefined {
   }
   let prefix = "";
   let suffix = "";
-  if (encoding === "sharepoint-destination") {
+  const edge = edges[encoding];
+  if (edge) {
     // Decode edge substitutions before processing quotes in the remaining body.
     // In particular, a suffix consumes its immediately preceding QuoteRune.
-    if (name[0] === "␠" || name[0] === "～") {
+    const left = (rune: string | undefined) =>
+      (edge.leftSpace && rune === "␠") || (edge.leftTilde && rune === "～");
+    if (left(name[0])) {
       prefix = name[0] === "␠" ? " " : "~";
       name = name.slice(1);
-    } else if (name[0] === quote && (name[1] === "␠" || name[1] === "～")) {
+    } else if (name[0] === quote && left(name[1])) {
       prefix = name[1]!;
       name = name.slice(2);
     }
     const last = name.at(-1);
-    if (last === "␠" || last === "．") {
+    if ((edge.rightSpace && last === "␠") || (edge.rightPeriod && last === "．")) {
       name = name.slice(0, -1);
       if (name.at(-1) === quote) {
         suffix = last;
@@ -174,4 +207,20 @@ export function sharepointDestinationNameToStandard(nativeName: string): string 
 /** Drive destination behavior remains its pinned InvalidUtf8 default. */
 export function googleDestinationName(standardName: string): string {
   return encode(decode(standardName, "standard")!, "google");
+}
+
+/** Dropbox source listings use the pinned backend default, never a source-side option. */
+export function dropboxSourceName(nativeName: string): string | null {
+  const raw = decode(nativeName, "dropbox");
+  return raw === undefined ? null : encode(raw, "standard");
+}
+
+/** FromStandardName for Dropbox destinations: Dropbox.Encode(Standard.Decode(name)). */
+export function dropboxDestinationName(standardName: string): string {
+  return encode(decode(standardName, "standard")!, "dropbox");
+}
+
+/** ToStandardName for Dropbox destination listings and roots. */
+export function dropboxDestinationNameToStandard(nativeName: string): string | null {
+  return dropboxSourceName(nativeName);
 }

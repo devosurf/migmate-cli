@@ -12,6 +12,7 @@ import { sharepointCredentialAdapter } from "./credentials/sharepoint.ts";
 import type { FileCredentialAdapter } from "./credentials/shared.ts";
 import type { AdapterInput, FileAdapter } from "./effects.ts";
 import { DropboxAdapter } from "./dropbox.ts";
+import { dropboxSourceName } from "./rclone-name-encoding.ts";
 import { dropboxCredentialAdapter } from "./credentials/dropbox.ts";
 
 export type FileProviderId = "sharepoint" | "google_shared_drive" | "dropbox";
@@ -98,6 +99,7 @@ const providers: Record<FileProviderId, FileProviderAdapter> = {
     ignoreSizeAndChecksum: false,
     uploadQuota: false,
     ledgerAccountedUploads: false,
+    sourceName: dropboxSourceName,
     creatorRole: "owner",
     memberRole: () => undefined,
     rewritesPath: () => false,
@@ -151,11 +153,7 @@ export function fileProviderPair(config: unknown): {
     input.destinationProvider ??
       (source.id === "sharepoint" ? "google_shared_drive" : "sharepoint"),
   );
-  if (
-    source.id === destination.id ||
-    destination.id === "dropbox" ||
-    (source.id === "dropbox" && destination.id !== "google_shared_drive")
-  )
+  if (source.id === destination.id || destination.id === "dropbox")
     throw new ProviderFault(
       "unsupported_route",
       "The requested provider pair is not implemented.",

@@ -1,11 +1,11 @@
 # Release limits
 
-This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots and Dropbox shared namespaces to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders to SharePoint document libraries or folders, including libraries created inside existing sites. Teams archives remain local packages with optional Shared Drive cold storage.
+This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots and Dropbox shared namespaces to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders and Dropbox shared namespaces to SharePoint document libraries or folders, including libraries created inside existing sites. Teams archives remain local packages with optional Shared Drive cold storage.
 
 File configuration selects top-level `sourceProvider = "sharepoint"` and
 `destinationProvider = "google_shared_drive"`, or the reversed pair, or
-`sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"`.
-Dropbox destinations, Dropbox → SharePoint, and same-provider pairs refuse `unsupported_route`. Empty config defaults to the forward
+`sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"` or
+`"sharepoint"`. Dropbox destinations and same-provider pairs refuse `unsupported_route`. Empty config defaults to the forward
 pair; saved file configs name both providers. An explicit `route` in a new file
 config refuses `configuration_invalid`: replace it with the two provider fields
 above (swap the values for reverse jobs). Historical persisted file routes are

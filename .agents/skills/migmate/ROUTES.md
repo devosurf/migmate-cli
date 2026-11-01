@@ -25,8 +25,11 @@ destinationProvider = "google_shared_drive"
 ```
 
 For Google → SharePoint, swap the two values. Dropbox → Google uses
-`sourceProvider = "dropbox"` and `destinationProvider = "google_shared_drive"`.
-Dropbox destinations, Dropbox → SharePoint and same-provider copies refuse
+`sourceProvider = "dropbox"` and `destinationProvider = "google_shared_drive"`;
+Dropbox → SharePoint uses `destinationProvider = "sharepoint"` with the same
+SharePoint destination rules as Google → SharePoint (encoding notices, blocking
+reserved names, case collisions and long paths). Dropbox destinations and
+same-provider copies refuse
 `unsupported_route`. Empty config defaults to the forward pair; saved file configs
 name both providers. Explicit `route` in a new file config refuses
 `configuration_invalid`: replace `route` with `sourceProvider` and
