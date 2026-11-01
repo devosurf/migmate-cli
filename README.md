@@ -353,6 +353,11 @@ acting account then copies inside Google, and no bytes pass through the host. Pr
 check `google.server_side_copy` passes only when both acting accounts share one email
 domain and the destination account can already read every source drive; Migmate never
 grants that access. The read-only source account still lists and verifies the source.
+A file that changed since an earlier pass is copied again as a new file: its earlier
+copy goes to the destination drive's trash, with its revisions and per-file sharing,
+where a streamed pass updates it in place. Files whose copying is restricted
+(`copyRequiresWriterPermission`, download restrictions) still fail the copy. Subjects on
+two domains of one Workspace refuse; stream those instead.
 Dropbox and SharePoint always stream, because server-side copy would need write scopes
 on the source app; `serverSideCopy = true` refuses `configuration_invalid` there. The
 plan's **Copy method** section shows `server_side` or `streamed`.
