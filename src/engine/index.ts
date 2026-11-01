@@ -2789,7 +2789,12 @@ function makeWriter(
             mappings.push({ ...mapping, sourceItemId: root.id, destFolderId: folder.id });
           } else mappings.push({ ...mapping, sourceItemId: root.id });
         }
-        await validateMappingTrees(p, resolvedMappings(mappings));
+        await validateMappingTrees(
+          p,
+          resolvedMappings(mappings),
+          undefined,
+          sameProviderPair(fileProviderPair(base)),
+        );
         const previousRevision = job().planRevision;
         store.atomic(() => {
           store.writeMappings({ mappings, digest: manifest.digest });

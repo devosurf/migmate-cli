@@ -1105,6 +1105,7 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     ctx.provider,
     ctx.config.mappings.map((mapping) => provisionedMapping(ctx, mapping)),
     ctx.signal,
+    sameProviderPair(fileProviderPair(ctx.config)),
   );
   let done = 0;
   const sourcePlanning = await ctx.provider.sourcePlanningEvidence?.(ctx.signal);
@@ -2466,7 +2467,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
             "Same-provider route: files only. Identities, mailboxes and domain cutover are outside this job.",
             "Hash verification compares the hashes both sides store, folders by path, without downloading; only source files that store no hash, such as exported documents, are downloaded to hash.",
             serverSideCopy(ctx.config)
-              ? "Files copy server side inside one Workspace as the destination's delegated account, which already reads the source; the read-only source account never writes."
+              ? "Files copy server side inside one Workspace as the destination's delegated account, which already reads the source; the read-only source account never writes. A file that changed since an earlier pass is copied again as a new file, and its earlier copy goes to the destination drive's trash with its revisions and per-file sharing."
               : "Files stream through this host from the read-only source credential to the separate destination credential.",
           ]
         : [

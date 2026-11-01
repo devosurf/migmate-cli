@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -363,6 +364,7 @@ test("Google → Google compares stored MD5 where Drive stores no SHA-256, still
   const calls = hashListings(t, h.port);
   await execute(h);
   // An older Drive file has no stored SHA-256 on the source; both sides store MD5.
+  // The fake withholds SHA-256 by object ID on either side's listing: here the source file.
   h.port.withholdDestinationChecksum("file");
   assert.equal((await verify(h)).clean, true);
   assert.deepEqual(
@@ -393,4 +395,82 @@ test("Dropbox → Dropbox downloads only source files that store no hash, such a
     calls.filter((call) => call.download),
     [{ download: true, paths: ["notes.html"] }],
   );
+});
+
+test("a same-provider destination inside, on or above its source tree refuses", async (t) => {
+  for (const [name, source, destination, refused] of [
+    ["inside", "source-root", "inner", true],
+    ["on", "source-root", "source-root", true],
+    ["above", "sub", "source-root", true],
+    ["beside", "sub", "inner", false],
+  ] as const) {
+    const home = await mkdtemp(join(tmpdir(), "migmate-same-overlap-"));
+    t.after(() => rm(home, { recursive: true, force: true }));
+    const port = new FakeFileMigrationPort({
+      ...fileFixture([{ id: "sub", parentId: "source-root", name: "sub", kind: "folder" }]),
+      // One Shared Drive is both sides: provider IDs are global, so they name one folder.
+      destinationDriveId: "source-drive",
+      destinationRootId: "source-root",
+      destinationItems: [
+        { id: "source-root", parentId: null, name: "root", kind: "folder" },
+        { id: "inner", parentId: "source-root", name: "inner", kind: "folder" },
+      ],
+      destinationProvider: "google_shared_drive",
+      googleAbout: { user: { emailAddress: "writer@example.com" }, canCreateDrives: true },
+      googleSourceAbout: { user: { emailAddress: "reader@example.com" }, canCreateDrives: false },
+    });
+    const engine = openEngine({ home, provider: port, now: () => new Date(now) });
+    t.after(() => engine.close());
+    const ref = value(
+      await engine.initJob({
+        type: "file_migration",
+        config: {
+          sourceProvider: "google_shared_drive",
+          destinationProvider: "google_shared_drive",
+          ...delegation,
+        },
+      }),
+    );
+    const result = await engine.withWriterResult(ref, (writer) =>
+      writer.loadManifest({
+        format: "json",
+        content: JSON.stringify({
+          version: 1,
+          mappings: [
+            {
+              id: "files",
+              source: { type: "google_shared_drive", driveId: "source-drive", folderId: source },
+              destination: {
+                type: "google_shared_drive",
+                driveId: "source-drive",
+                folderId: destination,
+              },
+            },
+          ],
+        }),
+      }),
+    );
+    assert.equal(!result.ok, refused, name);
+    if (!result.ok) {
+      assert.equal(result.refusal.code, "configuration_invalid", name);
+      assert.match(result.refusal.message, /Source and destination trees overlap/u, name);
+    }
+  }
+});
+
+// The source account is bound through the credential identity instead (credentials.test.ts).
+test("changing the copy method after approval needs a new plan", async (t) => {
+  const h = await harness(t, "google_shared_drive");
+  const path = join(h.home, "jobs", h.ref.id, "job.toml");
+  const settings = parseToml(await readFile(path, "utf8"));
+  await writeFile(
+    path,
+    stringifyToml({
+      ...settings,
+      options: { ...(settings.options as object), serverSideCopy: true },
+    }),
+  );
+  const result = await h.engine.withWriterResult(h.ref, (writer) => writer.execute());
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.refusal.code, "plan_revision_required");
 });

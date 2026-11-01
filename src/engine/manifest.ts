@@ -361,14 +361,25 @@ export function validateMappingDirections(
       );
 }
 
-/** Compare stable ancestor identities, not display names or string prefixes. */
+/**
+ * Compare stable ancestor identities, not display names or string prefixes. A
+ * same-provider route also compares the two sides: provider IDs are global, so a shared
+ * identity is the same folder, and a destination inside, on or above any source root would
+ * write into the source with the destination's credential (ADR-0018 D10).
+ */
 export async function validateMappingTrees(
   provider: ProviderPort,
   mappings: FileMappingConfig[],
   signal?: AbortSignal,
+  sameProvider = false,
 ): Promise<void> {
+  const sides = { source: new Map<string, number>(), destination: new Map<string, number>() };
+  const ancestry = {
+    source: new Map<number, string[]>(),
+    destination: new Map<number, string[]>(),
+  };
   for (const side of ["source", "destination"] as const) {
-    const roots = new Map<string, number>();
+    const roots = sides[side];
     for (const [index, m] of mappings.entries()) {
       if (side === "destination" && m.createDrive && !m.destDriveId) continue;
       const key = JSON.stringify(
@@ -389,6 +400,11 @@ export async function validateMappingTrees(
         if (seen.has(key))
           throw new ManifestError(index + 1, side, "Folder ancestry is not a tree");
         seen.add(key);
+        if (sameProvider) {
+          const keys = ancestry[side].get(index);
+          if (keys) keys.push(key);
+          else ancestry[side].set(index, [key]);
+        }
         const other = roots.get(key);
         if (other !== undefined && other !== index)
           throw new ManifestError(index + 1, side, "Mapping trees overlap");
@@ -433,4 +449,16 @@ export async function validateMappingTrees(
       }
     }
   }
+  if (!sameProvider) return;
+  for (const [from, to] of [
+    ["destination", "source"],
+    ["source", "destination"],
+  ] as const)
+    for (const [index, keys] of ancestry[from])
+      if (keys.some((key) => sides[to].has(key)))
+        throw new ManifestError(
+          index + 1,
+          "destination",
+          "Source and destination trees overlap on a same-provider route",
+        );
 }
