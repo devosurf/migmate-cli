@@ -402,15 +402,24 @@ async function* provisionFolder(
   const parts = path.split("/");
   for (const [index, name] of parts.entries()) {
     const prefix = parts.slice(0, index + 1).join("/");
+    ctx.signal?.throwIfAborted();
+    // Listing each level, recorded ones too, is what lets a fresh Dropbox or SharePoint
+    // adapter address the next: they know only folder IDs they have seen listed.
+    const children = await ctx.provider.listDestinationChildren(parent, ctx.signal);
     const known = drive.folders?.[prefix];
     if (known) {
+      if (!children.some((child) => child.id === known && child.kind === "folder"))
+        throw Object.assign(
+          new Error("A mapping folder this job created is gone from its container."),
+          {
+            code: "drive_creation_ambiguous",
+            detail: { mappingId: mapping.id, reason: "mapping_folder_missing", folderPath: prefix },
+          },
+        );
       parent = known;
       continue;
     }
-    ctx.signal?.throwIfAborted();
-    const matches = (await ctx.provider.listDestinationChildren(parent, ctx.signal)).filter(
-      (child) => sibling(child.name) === sibling(name),
-    );
+    const matches = children.filter((child) => sibling(child.name) === sibling(name));
     if (
       matches.length > 1 ||
       matches.some((child) => child.kind !== "folder") ||

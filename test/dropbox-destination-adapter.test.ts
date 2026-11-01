@@ -351,3 +351,27 @@ test("Dropbox mapping folders in a created team folder never autorename", async 
     (fault: unknown) => fault instanceof ProviderFault && fault.code === "unsupported_route",
   );
 });
+
+test("a fresh Dropbox adapter creates beneath a recorded folder once it has listed it", async (t) => {
+  // The driver lists every level of a mapping folder's path before creating below it.
+  serve(t, {
+    "team/namespaces/list": () => Response.json(teamFolders),
+    "files/list_folder": () =>
+      Response.json({
+        entries: [{ ".tag": "folder", id: "id:nested", name: "Nested", path_display: "/Nested" }],
+        has_more: false,
+        cursor: "c1",
+      }),
+    "files/create_folder_v2": (body) =>
+      Response.json({ metadata: { id: "id:new", name: "New", path_display: body.path } }),
+  });
+  const dropbox = adapter();
+  const [nested] = await dropbox.listDestinationChildren("ns:555");
+  const created = await dropbox.createDestinationFolder({
+    parentFolderId: nested!.id,
+    name: "New",
+    createdAt: "",
+    modifiedAt: "",
+  });
+  assert.equal(created.parentId, "id:nested");
+});
