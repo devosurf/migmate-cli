@@ -264,10 +264,32 @@ test("unreadable or unmappable membership is null, deleted accounts are left out
   );
 });
 
+test("a transient fault is retried, honouring Retry-After", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/drive/v3/drives" && calls++ === 0)
+      return Response.json(
+        { error: { code: 503 } },
+        { status: 503, headers: { "Retry-After": "0" } },
+      );
+    if (url.pathname === "/drive/v3/drives") return Response.json({ drives: [] });
+    throw new Error(`unexpected ${url.pathname}`);
+  });
+  const discovery = await adapter().discoverSource();
+  assert.equal(calls, 2);
+  assert.deepEqual(discovery.boundaries, []);
+});
+
 test("a refused or incomplete listing ends discovery with a named refusal", async (t) => {
-  t.mock.method(globalThis, "fetch", async () =>
-    Response.json({ error: { code: 429 } }, { status: 429 }),
-  );
+  let throttled = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    throttled++;
+    return Response.json(
+      { error: { code: 429 } },
+      { status: 429, headers: { "Retry-After": "0" } },
+    );
+  });
   await assert.rejects(adapter().discoverSource(), (error: any) => {
     assert.equal(error.code, "preflight_failed");
     assert.equal(error.message, "Google did not complete a discovery request.");
@@ -275,6 +297,8 @@ test("a refused or incomplete listing ends discovery with a named refusal", asyn
     assert.equal(error.evidence.object, "drives");
     return true;
   });
+  // Throttling that outlasts every retry still ends the scan.
+  assert.equal(throttled, 5);
   t.mock.restoreAll();
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const url = new URL(String(input));

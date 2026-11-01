@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { ProviderFault } from "../fault.ts";
 import { cursorPages, HttpProviderFault, responseJson } from "../http.ts";
 import type {
@@ -42,6 +43,8 @@ function invalid(message: string, field: string, context: Record<string, string>
   });
 }
 
+const ATTEMPTS = 5;
+
 /** Code-unit order, so the result never depends on the host's locale. */
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -56,15 +59,36 @@ export async function discoverSharedDrives(
   signal?: AbortSignal,
 ): Promise<SourceDiscovery> {
   const notices: string[] = [];
+  // A large source takes thousands of pages, so one throttled or lost response must not
+  // end the scan: retry transient faults, honouring Retry-After. Every call is a read.
+  async function read<T>(path: string): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      signal?.throwIfAborted();
+      try {
+        return await responseJson<T>(await request(path, signal ?? null));
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (error instanceof HttpProviderFault && error.transient && attempt < ATTEMPTS) {
+          await delay(
+            error.retryAfterMs ?? Math.min(30_000, 1000 * 2 ** (attempt - 1)),
+            undefined,
+            signal ? { signal } : {},
+          );
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
   async function page<T>(path: string, context: Record<string, string>): Promise<T> {
     signal?.throwIfAborted();
     try {
-      return await responseJson<T>(await request(path, signal ?? null));
+      return await read<T>(path);
     } catch (error) {
       // An abort surfaces from fetch as a transport fault; keep it a cancellation.
       signal?.throwIfAborted();
-      // Nothing here retries, so one throttled or refused request ends the scan.
-      // Name it instead of surfacing an unattributed internal defect.
+      // A refusal, or a fault that outlasted its retries, ends the scan. Name it
+      // instead of surfacing an unattributed internal defect.
       if (
         error instanceof HttpProviderFault ||
         (error instanceof ProviderFault && error.code === "provider_request_failed")
@@ -159,11 +183,8 @@ export async function discoverSharedDrives(
           if (cursor) query.set("pageToken", cursor);
           let result: { permissions?: unknown; nextPageToken?: unknown };
           try {
-            result = await responseJson<typeof result>(
-              await request(
-                `/drive/v3/files/${encodeURIComponent(drive.id)}/permissions?${query}`,
-                signal ?? null,
-              ),
+            result = await read<typeof result>(
+              `/drive/v3/files/${encodeURIComponent(drive.id)}/permissions?${query}`,
             );
           } catch (error) {
             signal?.throwIfAborted();
