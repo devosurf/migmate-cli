@@ -4,6 +4,7 @@ import type { Store, FindingRecord, AcceptanceRecord } from "./store/store.ts";
 import type { ApprovalRecord, VerificationRevision } from "./types.ts";
 import { goLiveAcknowledgment } from "./go-live.ts";
 import { fileProviderPair } from "./providers/adapters/capabilities.ts";
+import { createdDriveFor } from "./drivers/created-containers.ts";
 
 interface CsvEvidence {
   store: Store;
@@ -135,14 +136,17 @@ export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
   const acknowledgments = store.readGoLiveAcknowledgments();
   const pair = fileProviderPair(config);
   for (const mapping of config?.mappings ?? []) {
-    const drive = resume.createdDrives.find((entry) => entry.mappingId === mapping.id);
+    // ADR-0020 D5: each row carries its container's evidence, shared by its other mappings.
+    const drive = createdDriveFor(resume.createdDrives, mapping);
     const pass = resume.mappingPasses.findLast(
       (entry) => entry.mappingId === mapping.id && entry.status === "completed",
     );
     const count = counts.get(mapping.id) ?? { outstanding: 0, accepted: 0 };
-    const grants = resume.memberGrants.filter(
-      (entry) => entry.mappingId === mapping.id && entry.at !== undefined,
-    );
+    const grants = drive
+      ? resume.memberGrants.filter(
+          (entry) => entry.driveId === drive.driveId && entry.at !== undefined,
+        )
+      : [];
     yield* csvRow([
       mapping.id,
       pair.source.id,
@@ -169,9 +173,10 @@ export function* mappingsCsv(evidence: CsvEvidence): Generator<string> {
       drive?.goLive?.destinationCheck,
       acknowledgments.filter((record) =>
         record.checks.some(
-          (check) => check.mappingId === mapping.id && check.driveId === drive?.driveId,
+          (check) => check.mappingId === drive?.mappingId && check.driveId === drive?.driveId,
         ),
       ),
+      mapping.createDrive?.folderPath ?? mapping.destFolderPath,
     ]);
   }
 }
@@ -218,6 +223,7 @@ export const mappingColumns = [
   "go_live_check",
   "go_live_destination_check",
   "go_live_acknowledgments",
+  "destination_folder_path",
 ];
 export const exceptionColumns = [
   "mapping_id",

@@ -104,10 +104,16 @@ import {
   probeWorker,
   stopOrphanWorker,
 } from "./store/lease.ts";
-import type { ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
+import type { DriveMember, ProviderPort, TransferWorkerHandle } from "./providers/port.ts";
 import { createProductionProvider } from "./providers/production.ts";
 import { ProviderFault } from "./providers/fault.ts";
 import { reclaimListingScratch, type ListingScratch } from "./providers/listing.ts";
+import {
+  containerKey,
+  createdContainers,
+  createdDriveFor,
+  provisionedDestination,
+} from "./drivers/created-containers.ts";
 import {
   fileMigrationDriver,
   goLive,
@@ -1001,13 +1007,13 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
                       "mappings" in config &&
                       config.mappings
                         .filter((mapping) => managesCreatedAccess(config, mapping))
-                        .every((mapping) =>
-                          status.createdDrives.some(
-                            (drive) =>
-                              drive.mappingId === mapping.id &&
-                              goLiveCheckSettled(drive, authority, acknowledgments),
-                          ),
-                        ),
+                        .every((mapping) => {
+                          const drive = createdDriveFor(status.createdDrives, mapping);
+                          return (
+                            drive !== undefined &&
+                            goLiveCheckSettled(drive, authority, acknowledgments)
+                          );
+                        }),
                   },
                 }
               : {}),
@@ -1576,10 +1582,11 @@ function closeReview(store: Store, config: JobConfig) {
             inheritedMappings.length
               ? "Grant the approved destination members access. Managed destination transfers become permanently fenced."
               : "Grant the approved destination members access. Transfers become permanently fenced.",
-            ...managedMappings.flatMap((mapping) =>
-              mapping.createDrive!.members.map(
+            // Grants belong to a container: each is listed once, naming every mapping in it.
+            ...createdContainers(store.readCreatedDrives(), managedMappings).flatMap((group) =>
+              group.mappings[0]!.createDrive!.members.map(
                 (member) =>
-                  `${mapping.id}: ${mapping.createDrive!.name} — ${member.email} (${member.type}), role ${member.role}, timing after_verification.`,
+                  `${group.mappings.map((mapping) => mapping.id).join(", ")}: ${group.mappings[0]!.createDrive!.name} — ${member.email} (${member.type}), role ${member.role}, timing after_verification.`,
               ),
             ),
             `${inheritedMappings.length ? "Every managed destination" : "Every affected destination"} must pass drift checking before any new fence or grant. Post-grant checks must pass or be explicitly acknowledged, and the final report must succeed. Access is never revoked automatically.`,
@@ -1609,20 +1616,20 @@ function currentGoLiveReview(store: Store, config: JobConfig) {
     !review?.authorized
   )
     return null;
-  const mappings = new Set(
+  const created = store.readCreatedDrives();
+  // One review entry per container, whichever of its mappings are managed.
+  const managed = new Set(
     config.mappings
       .filter((mapping) => managesCreatedAccess(config, mapping))
-      .map((mapping) => mapping.id),
+      .map((mapping) => createdDriveFor(created, mapping)),
   );
   return reviewGoLiveFailures(
-    store
-      .readCreatedDrives()
-      .filter(
-        (drive) =>
-          mappings.has(drive.mappingId) &&
-          drive.goLive?.revision === plan.revision &&
-          drive.goLive.verificationAt === verification.at,
-      ),
+    created.filter(
+      (drive) =>
+        managed.has(drive) &&
+        drive.goLive?.revision === plan.revision &&
+        drive.goLive.verificationAt === verification.at,
+    ),
     review.evidenceDigest,
     store.readGoLiveAcknowledgments(),
   );
@@ -1958,22 +1965,32 @@ function makeWriter(
       }
     }
   }
-  function resolvedMappings<T extends { id: string; createDrive?: unknown }>(mappings: T[]): T[] {
-    const drives = new Map(store.readCreatedDrives().map((drive) => [drive.mappingId, drive]));
-    return mappings.map((mapping) => {
-      const drive = mapping.createDrive ? drives.get(mapping.id) : undefined;
-      return drive?.driveId
-        ? {
-            ...mapping,
-            destDriveId: drive.driveId,
-            destFolderId: drive.rootFolderId ?? drive.driveId,
-          }
-        : mapping;
-    });
+  function resolvedMappings<
+    T extends { id: string; createDrive?: { name: string; siteId?: string; folderPath?: string } },
+  >(mappings: T[]): T[] {
+    // ADR-0020 D5: a mapping resolves to its container and its own folder inside it.
+    const drives = store.readCreatedDrives();
+    return mappings.map((mapping) => provisionedDestination(drives, mapping));
   }
   function provider(config: JobConfig, archiveVerification = false): ProviderPort {
     const resolved =
-      "mappings" in config ? { ...config, mappings: resolvedMappings(config.mappings) } : config;
+      "mappings" in config
+        ? {
+            ...config,
+            mappings: resolvedMappings(config.mappings),
+            // Provider-only: lets adapters reach a created container before its folders exist.
+            createdContainerRoots: store.readCreatedDrives().flatMap((drive) =>
+              drive.driveId
+                ? [
+                    {
+                      destDriveId: drive.driveId,
+                      destFolderId: drive.rootFolderId ?? drive.driveId,
+                    },
+                  ]
+                : [],
+            ),
+          }
+        : config;
     const p = providerFor(deps, paths, job().type, resolved, archiveVerification);
     providers.add(p);
     return p;
@@ -2653,16 +2670,31 @@ function makeWriter(
         if (job().type !== "file_migration")
           return refuse("unsupported_route", "Mapping manifests require a file migration job.");
         const manifest = parseManifest(input.content, input.format);
-        const creations = new Map(
-          store.readCreatedDrives().map((drive) => [drive.mappingId, drive]),
-        );
+        const base = existsSync(paths.configPath)
+          ? readConfig(paths, job().type, store)
+          : parseConfig({}, job().type, paths);
+        if (!("mappings" in base)) throw new Error("Expected file configuration");
+        const created = store.readCreatedDrives();
+        const creating = (m: (typeof manifest.mappings)[number]) =>
+          "create" in m.destination
+            ? {
+                id: m.id,
+                createDrive: {
+                  name: m.destination.create,
+                  ...(m.destination.siteId ? { siteId: m.destination.siteId } : {}),
+                },
+              }
+            : { id: m.id };
+        // The container each mapping already writes into, whether it created or joined it.
+        const previousContainer = (id: string) =>
+          created.find((drive) => drive.mappingId === id) ??
+          createdDriveFor(created, base.mappings.find((m) => m.id === id) ?? { id });
         for (const [index, mapping] of manifest.mappings.entries()) {
-          const previous = creations.get(mapping.id);
+          const previous = previousContainer(mapping.id);
           if (
             previous &&
             "create" in mapping.destination &&
-            (previous.name !== mapping.destination.create ||
-              previous.siteId !== mapping.destination.siteId)
+            containerKey(previous) !== containerKey(creating(mapping).createDrive!)
           )
             throw new ManifestError(
               index + 1,
@@ -2670,10 +2702,29 @@ function makeWriter(
               "A submitted creation name and parent are immutable; use the existing container id",
             );
         }
-        const base = existsSync(paths.configPath)
-          ? readConfig(paths, job().type, store)
-          : parseConfig({}, job().type, paths);
-        if (!("mappings" in base)) throw new Error("Expected file configuration");
+        // ADR-0020 D5: a mapping joining a created container names the members it already
+        // has; rows that keep using it are bound together by the manifest instead.
+        const memberKey = (members: DriveMember[] = []) =>
+          JSON.stringify(members.map((m) => JSON.stringify([m.email, m.type, m.role])).sort());
+        for (const drive of created) {
+          const rows = manifest.mappings.flatMap((mapping, index) =>
+            createdDriveFor(created, creating(mapping)) === drive ? [{ mapping, index }] : [],
+          );
+          if (!rows.length || rows.some(({ mapping }) => previousContainer(mapping.id) === drive))
+            continue;
+          const prior = base.mappings.find(
+            (mapping) => mapping.createDrive && createdDriveFor(created, mapping) === drive,
+          );
+          if (
+            prior &&
+            memberKey(prior.createDrive!.members) !== memberKey(rows[0]!.mapping.members)
+          )
+            throw new ManifestError(
+              rows[0]!.index + 1,
+              "members",
+              "Mappings joining a created container must name its members",
+            );
+        }
         const pending = manifest.mappings.map((m) => ({
           id: m.id,
           ...(m.filesOnly ? { filesOnly: true as const } : {}),
@@ -2689,7 +2740,9 @@ function makeWriter(
                   members: m.members ?? [],
                   ...(m.destination.siteId ? { siteId: m.destination.siteId } : {}),
                   ...(m.destination.folderPath ? { folderPath: m.destination.folderPath } : {}),
-                  ...(creations.get(m.id)?.managedAccess ? { manageAccess: true as const } : {}),
+                  ...(createdDriveFor(created, creating(m))?.managedAccess
+                    ? { manageAccess: true as const }
+                    : {}),
                 },
               }
             : "folderPath" in m.destination
@@ -2706,8 +2759,12 @@ function makeWriter(
             jobDirectory: paths.dir,
           });
         providers.add(p);
+        const validated = new Set<string>();
         for (const mapping of pending)
-          if ("createDrive" in mapping) await p.validateDestinationCreation?.(mapping.createDrive);
+          if ("createDrive" in mapping && !validated.has(containerKey(mapping.createDrive))) {
+            validated.add(containerKey(mapping.createDrive));
+            await p.validateDestinationCreation?.(mapping.createDrive);
+          }
         // Name every source drive the acting account cannot read, not just the first bad row.
         const unreadable =
           (await fileProviderPair(base).source.unreadableSources?.(p, pending)) ?? [];
@@ -3066,16 +3123,17 @@ function makeWriter(
           }
           const configured = readConfig(paths, job().type, store);
           if ("mappings" in configured) {
-            const fenced = store
-              .readCreatedDrives()
-              .filter(
-                (drive) =>
-                  drive.goLive &&
-                  configured.mappings.some(
-                    (mapping) =>
-                      mapping.id === drive.mappingId || mapping.destDriveId === drive.driveId,
-                  ),
-              );
+            const created = store.readCreatedDrives();
+            const fenced = created.filter(
+              (drive) =>
+                drive.goLive &&
+                configured.mappings.some(
+                  (mapping) =>
+                    mapping.id === drive.mappingId ||
+                    mapping.destDriveId === drive.driveId ||
+                    createdDriveFor(created, mapping) === drive,
+                ),
+            );
             if (fenced.length)
               return refuse(
                 "go_live_started",
@@ -3563,7 +3621,7 @@ function makeWriter(
           "mappings" in config &&
           config.mappings.some((mapping) => {
             if (!mapping.createDrive || !managesCreatedAccess(config, mapping)) return false;
-            const drive = closeDrives.find((item) => item.mappingId === mapping.id);
+            const drive = createdDriveFor(closeDrives, mapping);
             return (
               !drive ||
               drive.goLive?.revision !== revision ||
@@ -3573,7 +3631,6 @@ function makeWriter(
                 (member) =>
                   !grants.some(
                     (grant) =>
-                      grant.mappingId === mapping.id &&
                       grant.driveId === drive.driveId &&
                       grant.member.email === member.email &&
                       grant.member.type === member.type &&

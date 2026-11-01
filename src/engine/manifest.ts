@@ -322,7 +322,8 @@ export function parseManifest(
       throw new ManifestError(row, `source.${invalidSourceField}`);
     const invalidDestinationField =
       pair.destination.rootField === "folderId" ? "folderPath" : "folderId";
-    if (d[invalidDestinationField] !== undefined)
+    // A created container takes a folder path whatever its provider's existing-root field.
+    if (d.create === undefined && d[invalidDestinationField] !== undefined)
       throw new ManifestError(row, `destination.${invalidDestinationField}`);
     if (d.create !== undefined) {
       if (pair.destination.creationParent === "siteId") stable(d.siteId, "destination.siteId");
