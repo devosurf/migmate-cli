@@ -1137,6 +1137,8 @@ export class FakeFileMigrationPort implements ProviderPort {
       reportedChecksum: null,
       provenance: input.marker ? { ...input.marker } : null,
       content: null,
+      // SharePoint folders carry their own URL, as Graph's driveItem.webUrl does.
+      ...(parent.webUrl ? { webUrl: `${parent.webUrl}/${encodeURIComponent(input.name)}` } : {}),
     };
     this.insertDestinationEntry(entry);
     this.reservedIds.delete(id);

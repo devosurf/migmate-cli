@@ -316,7 +316,18 @@ export class GoogleAdapter implements FileAdapter {
       await response.body?.cancel();
       return null;
     }
-    return responseJson<SharedDrive>(response);
+    return this.#known(await responseJson<SharedDrive>(response));
+  }
+
+  /**
+   * A drive created or recovered in this run is addressable before any new provider
+   * knows it; the engine only writes into drives it has proven are the job's.
+   */
+  #known(drive: SharedDrive): SharedDrive {
+    if (!this.#destinationRoots.some((root) => root.destDriveId === drive.id))
+      this.#destinationRoots.push({ destDriveId: drive.id, destFolderId: drive.id });
+    this.#destDrive.set(drive.id, drive.id);
+    return drive;
   }
 
   async findDestinationContainers({
@@ -339,7 +350,7 @@ export class GoogleAdapter implements FileAdapter {
       },
       () => new ProviderFault("provider_request_failed", "Drive listing cursor repeated."),
     ))
-      found.push(...drives.filter((drive) => drive.name === name));
+      found.push(...drives.filter((drive) => drive.name === name).map((d) => this.#known(d)));
     return found;
   }
 

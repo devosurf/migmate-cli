@@ -527,7 +527,10 @@ Without `folderPath` a row uses the container's root. Rows sharing a container m
 name the same `members`, since membership applies to the whole container; otherwise
 load refuses `members`. Their folders may not be equal or nested, except beneath a
 files-only row's folder, and refuse `destination.folderPath` otherwise. The container
-is created, fenced, granted and checked once.
+is created, granted, fenced and checked at go-live once. Migmate creates each folder
+once and records its ID, so a resumed run never duplicates one; a same-named folder it
+finds is adopted only while empty. A later manifest may add a mapping to an existing
+container if it names that container's members.
 
 **Files-only mappings.** `"filesOnly": true` beside `source` limits a mapping to the
 files directly inside its source root, not its subfolders. It carries the loose files

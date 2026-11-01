@@ -3,6 +3,7 @@ import type { ApprovalAuthority } from "./types.ts";
 import type { PlanRevisionRecord } from "./store/store.ts";
 import { canonicalJson } from "./store/digest.ts";
 import { mappingSourceProvider } from "./providers/adapters/capabilities.ts";
+import { containerKey } from "./drivers/created-containers.ts";
 
 function roots(mapping: FileMappingConfig): string {
   return canonicalJson({
@@ -17,6 +18,8 @@ function roots(mapping: FileMappingConfig): string {
     filesOnly: mapping.filesOnly,
     createDrive: mapping.createDrive?.name,
     creationSiteId: mapping.createDrive?.siteId,
+    // A move to another folder of the same created container is a new root.
+    creationFolderPath: mapping.createDrive?.folderPath,
   });
 }
 const roles: Record<string, number> = {
@@ -38,6 +41,15 @@ export function approvalAuthority(
   const next: Partial<FileMigrationConfig> = JSON.parse(plan?.inputs.configuration ?? "{}");
   const previous: Partial<FileMigrationConfig> = JSON.parse(baseline?.inputs.configuration ?? "{}");
   const result: ApprovalAuthority = { mirrorChanges: [], accessChanges: [] };
+  // ADR-0020 D5: access belongs to a created container, so each change is reviewed once.
+  const sharing = (mapping: FileMappingConfig) =>
+    (next.mappings ?? []).filter(
+      (candidate) =>
+        mapping.createDrive &&
+        candidate.createDrive &&
+        containerKey(candidate.createDrive) === containerKey(mapping.createDrive),
+    );
+  const reviewed = new Set<string>();
   for (const mapping of next.mappings ?? []) {
     const previousMapping = previous.mappings?.find((candidate) => candidate.id === mapping.id);
     const old =
@@ -56,24 +68,44 @@ export function approvalAuthority(
         previousDeleteLimit: previousLimit,
       });
     // Access belongs to the destination, independently of the source mirrored into it.
+    const shared = sharing(mapping);
     const previousAccess =
-      previousMapping &&
+      (previousMapping &&
       previousMapping.destDriveId === mapping.destDriveId &&
       previousMapping.destFolderId === mapping.destFolderId &&
       previousMapping.destFolderPath === mapping.destFolderPath &&
       previousMapping.createDrive?.name === mapping.createDrive?.name &&
       previousMapping.createDrive?.siteId === mapping.createDrive?.siteId
         ? previousMapping.createDrive
-        : undefined;
+        : undefined) ??
+      // A mapping joining a container still held by an approved mapping inherits its access;
+      // a renamed sole mapping is a new creation identity and is reviewed afresh.
+      (mapping.createDrive
+        ? previous.mappings?.find(
+            (candidate) =>
+              candidate.createDrive &&
+              containerKey(candidate.createDrive) === containerKey(mapping.createDrive!) &&
+              shared.some((kept) => kept.id === candidate.id),
+          )?.createDrive
+        : undefined);
     for (const member of mapping.createDrive?.members ?? []) {
       const prior = previousAccess?.members.find(
         (candidate) =>
           candidate.email.toLowerCase() === member.email.toLowerCase() &&
           candidate.type === member.type,
       );
+      const key = JSON.stringify([
+        containerKey(mapping.createDrive!),
+        member.email.toLowerCase(),
+        member.type,
+        member.role,
+      ]);
+      if (reviewed.has(key)) continue;
+      reviewed.add(key);
       if (!prior || (roles[member.role] ?? Infinity) > (roles[prior.role] ?? -1))
         result.accessChanges.push({
           mappingId: mapping.id,
+          ...(shared.length > 1 ? { mappingIds: shared.map((candidate) => candidate.id) } : {}),
           ...member,
           previousRole: prior?.role ?? null,
           timing:

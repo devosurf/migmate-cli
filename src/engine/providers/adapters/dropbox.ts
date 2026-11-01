@@ -940,6 +940,32 @@ export class DropboxAdapter implements FileAdapter {
     return items;
   }
 
+  /** ADR-0020 D5: a mapping's folder inside a team folder this job created. */
+  async createDestinationFolder(
+    input: Parameters<ProviderPort["createDestinationFolder"]>[0],
+  ): Promise<DestinationEntry> {
+    if (input.destinationId !== undefined || input.marker !== undefined)
+      throw new ProviderFault(
+        "unsupported_route",
+        "Dropbox folders take neither reserved IDs nor markers.",
+      );
+    const { namespace, path } = this.#folderNamespace(input.parentFolderId);
+    await this.#destinationNamespace(namespace);
+    // autorename false: a same-named entry refuses with a path conflict, never a renamed copy.
+    // https://www.dropbox.com/developers/documentation/http/documentation#files-create_folder_v2
+    const result = await this.#write<{ metadata: Omit<DropboxItem, ".tag"> }>(
+      "files/create_folder_v2",
+      { path: `${path}/${input.name}`, autorename: false },
+      namespace,
+    );
+    // The result carries FolderMetadata, not the tagged Metadata union.
+    return this.#destinationEntry(
+      { ...result.metadata, ".tag": "folder" },
+      namespace,
+      input.parentFolderId,
+    );
+  }
+
   async resolveDestinationPass(input: FilePassInput): Promise<FilePassRoot> {
     const destination = await this.resolveDestinationFolder(input);
     if (
