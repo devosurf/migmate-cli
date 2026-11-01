@@ -1216,8 +1216,14 @@ test("Google → Google reads with a separate drive.readonly account and writes 
     "https://www.googleapis.com/auth/drive",
   ]);
   // The read-only account is part of the approved identity; replacing it needs a new plan.
-  const identity = await session.identity();
-  assert.match(identity, /^sha256:[0-9a-f]{64}$/u);
+  const other = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config: { ...config, sourceSubject: "other-reader@example.com" },
+  });
+  t.after(() => other.dispose());
+  assert.match(await session.identity(), /^sha256:[0-9a-f]{64}$/u);
+  assert.notEqual(await other.identity(), await session.identity());
 });
 
 test("Google → Google refuses a writable, reused or missing source account", async (t) => {
