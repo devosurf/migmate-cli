@@ -33,7 +33,7 @@ function reviewTable(page: RowPage | null, query: ViewQuery): string {
   const cells = (row: Row): string => {
     const identity =
       row.jobType === "file_migration"
-        ? `<strong>${escapeHtml(row.relativePath)}</strong><small>Mapping ${escapeHtml(row.mappingId)} · Source ${escapeHtml(row.sourceItemId)}<br>Destination ${escapeHtml(row.destinationFileId ?? "not committed")}</small>${row.sourcePackageSections !== null && row.kind === "planned_omission" ? sourceLink(row.sourceWebUrl) : ""}`
+        ? `<strong>${escapeHtml(row.relativePath)}</strong><small>Mapping ${escapeHtml(row.mappingId)}${row.filesOnly || row.mapping?.filesOnly ? " · files only" : ""} · Source ${escapeHtml(row.sourceItemId)}<br>Destination ${escapeHtml(row.destinationFileId ?? "not committed")}</small>${row.sourcePackageSections !== null && row.kind === "planned_omission" ? sourceLink(row.sourceWebUrl) : ""}`
         : `<strong>${escapeHtml(row.conversationId)}</strong><small>Scope entry ${escapeHtml(row.scopeEntryId)}</small>`;
     const evidence =
       row.jobType === "file_migration"

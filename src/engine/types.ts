@@ -474,6 +474,8 @@ export interface FileItemRow extends RowBase {
   provenanceState: "none" | "marked" | "verified" | "drifted";
   mapping?: FileMappingConfig;
   mappingPass?: MappingPass;
+  /** The plan row of a mapping that covers only its root's direct files (ADR-0020 D4). */
+  filesOnly?: true;
   sourceDisclosures?: readonly string[];
   sourceObservation?: Record<string, unknown>;
   destinationConstraint?: DestinationConstraintEvidence;

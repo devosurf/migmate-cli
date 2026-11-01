@@ -52,6 +52,8 @@ export interface FileMarker extends ProvenanceRecord {
 
 export interface FileScope {
   mapOnly: true;
+  /** ADR-0020 D4: the mapping covers only its root's direct files. */
+  filesOnly?: true;
   sourceDisclosures?: readonly string[];
   sourceObservation?: Record<string, unknown>;
   verification?: {
