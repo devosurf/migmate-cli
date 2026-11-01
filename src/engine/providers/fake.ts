@@ -1236,6 +1236,8 @@ export class FakeFileMigrationPort implements ProviderPort {
       for (const childId of children[id] ?? []) {
         const child = entries[childId];
         if (!child) continue;
+        // Like rclone's subdirectory exclusion: a files-only root has no folders.
+        if (root.filesOnly && sourceDirectory(child)) continue;
         const name = standardName(child.name);
         if (name === null) throw destinationFault("path_unrepresentable", 400);
         const path = `${prefix}${name}`;
@@ -1498,9 +1500,11 @@ export class FakeFileMigrationPort implements ProviderPort {
       : input.sourceType === "google_shared_drive"
         ? ("sharepoint" as const)
         : ("google_drive" as const);
+    const scope = input.filesOnly ? { filesOnly: true as const } : {};
     return {
       socketPath: this.workerState.socketPath,
       source: {
+        ...scope,
         fs: input.sourceItemId,
         kind:
           input.sourceType === "google_shared_drive"
@@ -1513,6 +1517,7 @@ export class FakeFileMigrationPort implements ProviderPort {
         fs: input.destFolderId,
         ignoreSizeAndChecksum: destinationKind === "sharepoint",
         kind: destinationKind,
+        ...scope,
       },
     };
   }

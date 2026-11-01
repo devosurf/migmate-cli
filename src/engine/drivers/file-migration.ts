@@ -823,7 +823,15 @@ async function destinationFolderDepth(
   return depth;
 }
 
-/** Provider-native inventory finds exceptional content omitted by transfer listings. */
+/** What the transfer backend lists as a directory: folders and OneNote notebooks. */
+function transferDirectory(entry: SourceEntry): boolean {
+  return entry.kind === "folder" || (entry.kind === "package" && entry.packageSections !== null);
+}
+
+/**
+ * Provider-native inventory finds exceptional content omitted by transfer listings.
+ * A files-only root's folders are outside its mapping, so they raise nothing.
+ */
 async function* sourceContentFindings(
   ctx: FileContext,
   mapping: FileMappingConfig,
@@ -853,6 +861,7 @@ async function* sourceContentFindings(
     );
     for (const child of children.uniqueValues()) {
       ctx.signal?.throwIfAborted();
+      if (mapping.filesOnly && transferDirectory(child)) continue;
       const previous = names.get(child.name);
       if (!previous) names.add({ name: child.name, first: child.id });
       else if (previous.first !== child.id && previous.second === undefined) {
@@ -862,6 +871,7 @@ async function* sourceContentFindings(
     }
     for (const child of children.uniqueValues()) {
       ctx.signal?.throwIfAborted();
+      if (mapping.filesOnly && transferDirectory(child)) continue;
       const path = parent.path ? `${parent.path}/${child.name}` : child.name;
       if (child.kind === "folder" && !folders.has(child.id)) folders.add({ id: child.id, path });
       const collision = names.get(child.name);
@@ -1118,6 +1128,8 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     evidence.destinationFileId = mapping.destFolderId ?? null;
     evidence.fileScope = {
       mapOnly: true,
+      // The plan binds the narrower scope, so changing it is a new plan.
+      ...(mapping.filesOnly ? { filesOnly: true } : {}),
       ...(sourceDisclosures.length ? { sourceDisclosures } : {}),
       ...(sourcePlanning && Object.keys(sourcePlanning.evidence).length
         ? { sourceObservation: sourcePlanning.evidence }
@@ -1263,6 +1275,7 @@ async function destinationConstraints(
     checkPaths: !planning || !pendingCreation,
     sourceDriveId: mapping.sourceDriveId,
     sourceItemId: mapping.sourceItemId,
+    ...(mapping.filesOnly ? { filesOnly: true } : {}),
     root: {
       ...(root?.webUrl ? { webUrl: root.webUrl } : {}),
       ...(mapping.createDrive
@@ -1901,7 +1914,11 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
       yield membership;
     }
     const planRow = plannedScope(ctx, mapping);
-    if (planRow?.jobType !== "file_migration" || !planRow.fileScope?.mapOnly)
+    if (
+      planRow?.jobType !== "file_migration" ||
+      !planRow.fileScope?.mapOnly ||
+      Boolean(planRow.fileScope.filesOnly) !== Boolean(mapping.filesOnly)
+    )
       throw new FilePlanRevisionRequiredError();
     const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
     const hash = ctx.config.options?.verificationMode === "hash";
@@ -2387,12 +2404,18 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
 
 async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
   yield { title: "Migration stage", format: "text", body: ctx.stage ?? "unstaged" };
+  const filesOnly = ctx.config.mappings.filter((m) => m.filesOnly).map((m) => m.id);
   yield {
     title: "Approval and verification",
     format: "text",
     body: [
       "Approval binds mapping roots, drives, members and options, not a per-file inventory.",
       "Listing verification compares paths and sizes, folders included; it compares no content.",
+      ...(filesOnly.length
+        ? [
+            `Files-only mappings (${filesOnly.join(", ")}) copy, verify and mirror only the files directly inside their roots; folders on either side are outside them and never created, compared or deleted.`,
+          ]
+        : []),
       ...(ctx.config.options?.verificationMode === "hash"
         ? [
             "Hash verification is enabled: rclone downloads source content to compare the destination's stored hash type.",
@@ -2667,6 +2690,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
             sourceItemId: mapping.sourceItemId,
             destDriveId: mapping.destDriveId,
             destFolderId: mapping.destFolderId,
+            scope: mapping.filesOnly ? "files_only" : "recursive",
             revision: ctx.revision,
             ...(sourcePlanning?.sourceObservation
               ? { sourceObservation: sourcePlanning.sourceObservation }

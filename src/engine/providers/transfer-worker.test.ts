@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { ProviderFault } from "./fault.ts";
-import { createTransferSupervisor } from "./transfer-worker.ts";
+import { createTransferSupervisor, passScope } from "./transfer-worker.ts";
 import { withSocketPath } from "./socket-path.ts";
 import { openEngine } from "../index.ts";
 import { FakeFileMigrationPort } from "./fake.ts";
@@ -51,6 +51,24 @@ function fault(code: string, reason?: string) {
     error.code === code &&
     (reason === undefined || error.evidence.reason === reason);
 }
+
+describe("files-only pass scope", () => {
+  it("adds nothing to a recursive root but keeps its selection", () => {
+    assert.deepEqual(passScope({}), {});
+    assert.deepEqual(passScope({}, ["/a.txt"]), { _filter: { IncludeRule: ["/a.txt"] } });
+  });
+
+  it("stops a files-only root at its direct files and excludes every subdirectory", () => {
+    assert.deepEqual(passScope({ filesOnly: true }), {
+      _config: { MaxDepth: 1 },
+      _filter: { ExcludeRule: ["/*/**"], DeleteExcluded: false },
+    });
+    assert.deepEqual(passScope({ filesOnly: true }, ["/a.txt"]), {
+      _config: { MaxDepth: 1 },
+      _filter: { IncludeRule: ["/a.txt"], ExcludeRule: ["/*/**"], DeleteExcluded: false },
+    });
+  });
+});
 
 describe("real rclone transfer supervisor", { skip: !enabled }, () => {
   it("enables fast-list for rooted Drive traversal and preserves unsupported backend fallback", async () => {

@@ -13,6 +13,8 @@ function roots(mapping: FileMappingConfig): string {
     destDriveId: mapping.destDriveId,
     destFolderId: mapping.destFolderId,
     destFolderPath: mapping.destFolderPath,
+    // Widening a files-only mapping widens what mirror may delete.
+    filesOnly: mapping.filesOnly,
     createDrive: mapping.createDrive?.name,
     creationSiteId: mapping.createDrive?.siteId,
   });
@@ -46,7 +48,7 @@ export function approvalAuthority(
     if (next.options?.mirror && (previousLimit === null || deleteLimit > previousLimit))
       result.mirrorChanges.push({
         mappingId: mapping.id,
-        source: `${mapping.sourceDriveId}/${mapping.sourceFolderPath ?? mapping.sourceItemId}`,
+        source: `${mapping.sourceDriveId}/${mapping.sourceFolderPath ?? mapping.sourceItemId}${mapping.filesOnly ? " (files only)" : ""}`,
         destination:
           mapping.createDrive?.name ??
           `${mapping.destDriveId}/${mapping.destFolderPath ?? mapping.destFolderId ?? ""}`,

@@ -1284,3 +1284,113 @@ it(
     }
   },
 );
+
+it(
+  "confines a files-only pass, its mirror and its listings to the root's direct files",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-files-only-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(join(source, "sub", "deep"), { recursive: true });
+      await mkdir(join(source, "empty source"), { recursive: true });
+      await mkdir(join(source, "[glob]"), { recursive: true });
+      // Other mappings' folders beneath the files-only destination root, one still empty.
+      await mkdir(join(destination, "other", "inner"), { recursive: true });
+      await mkdir(join(destination, "empty other"), { recursive: true });
+      await writeFile(join(source, "a.txt"), "a");
+      await writeFile(join(source, "[b].txt"), "b");
+      await writeFile(join(source, "sub", "s.txt"), "s");
+      await writeFile(join(source, "sub", "deep", "d.txt"), "d");
+      await writeFile(join(source, "[glob]", "g.txt"), "g");
+      await writeFile(join(destination, "stale.txt"), "x");
+      await writeFile(join(destination, "other", "o.txt"), "o");
+      await writeFile(join(destination, "other", "inner", "i.txt"), "i");
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: source, kind: "local" as const, filesOnly: true as const },
+        destination: { fs: destination, kind: "local" as const, filesOnly: true as const },
+      };
+      const listed = async (root: typeof input.source) => {
+        const files = await supervisor.listFileHashes({
+          socketPath: worker.socketPath,
+          root,
+          hashType: "sha256",
+          download: false,
+        });
+        const folders = await supervisor.listFolders({ socketPath: worker.socketPath, root });
+        try {
+          return { files: [...files].map((file) => file.path).sort(), folders: [...folders] };
+        } finally {
+          disposeListing(files);
+          disposeListing(folders);
+        }
+      };
+      assert.deepEqual(await listed(input.source), { files: ["[b].txt", "a.txt"], folders: [] });
+      // A nested selection stays outside the root's scope.
+      const selected = await supervisor.listFileHashes({
+        socketPath: worker.socketPath,
+        root: input.source,
+        hashType: "sha256",
+        download: true,
+        paths: ["a.txt", "sub/s.txt"],
+      });
+      try {
+        assert.deepEqual(
+          [...selected].map((file) => file.path),
+          ["a.txt"],
+        );
+      } finally {
+        disposeListing(selected);
+      }
+      const before = comparisonArrays(
+        await supervisor.compareFileListings({ ...input, mode: "mirror" }),
+      );
+      assert.deepEqual(
+        { new: before.new.map((e) => e.path).sort(), deleted: before.deleted.map((e) => e.path) },
+        { new: ["[b].txt", "a.txt"], deleted: ["stale.txt"] },
+      );
+      for (const mode of ["copy", "mirror"] as const) {
+        const pass = await supervisor.startCopyPass({
+          ...input,
+          ...(mode === "mirror" ? { mode, deleteLimit: 1 } : { mode }),
+          transfers: 2,
+        });
+        const status = await finish(supervisor, { socketPath: worker.socketPath, pass });
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        const expected = mode === "copy" ? ["[b].txt", "a.txt", "stale.txt"] : ["[b].txt", "a.txt"];
+        // No source folder is created, and no destination folder is touched.
+        assert.deepEqual(
+          (await readdir(destination, { recursive: true })).sort(),
+          [
+            ...expected,
+            "empty other",
+            "other",
+            "other/inner",
+            "other/inner/i.txt",
+            "other/o.txt",
+          ].sort(),
+        );
+      }
+      assert.deepEqual(await listed(input.destination), {
+        files: ["[b].txt", "a.txt"],
+        folders: [],
+      });
+      const after = comparisonArrays(
+        await supervisor.compareFileListings({ ...input, mode: "mirror" }),
+      );
+      assert.deepEqual([after.new, after.changed, after.deleted], [[], [], []]);
+      assert.equal(after.unchanged.length, 2);
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
