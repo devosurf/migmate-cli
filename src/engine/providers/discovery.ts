@@ -1,5 +1,4 @@
 import { setTimeout as delay } from "node:timers/promises";
-import type { ManifestMapping } from "../manifest.ts";
 import type {
   BoundaryMember,
   DiscoveredBoundary,
@@ -10,16 +9,9 @@ import { ProviderFault } from "./fault.ts";
 import { cursorPages, graphUrl, HttpProviderFault, type GraphTransport } from "./http.ts";
 import { DiskListing } from "./listing.ts";
 
-export interface SharePointDiscovery {
-  sites: { id: string; name: string; libraries: { id: string; name: string }[] }[];
-  manifest: { version: 1; mappings: ManifestMapping[] };
-}
-
 interface Walk {
   graph: GraphTransport;
   signal?: AbortSignal;
-  /** Retry transient faults: a counting walk spans thousands of requests. */
-  retry: boolean;
 }
 
 type Raw = Record<string, unknown>;
@@ -75,7 +67,8 @@ async function request<T>(
     } catch (error) {
       // An aborted fetch surfaces as a network fault; report the abort instead.
       walk.signal?.throwIfAborted();
-      if (walk.retry && attempt < 5 && error instanceof HttpProviderFault && error.transient) {
+      // Retry transient faults: a counting walk spans thousands of requests.
+      if (attempt < 5 && error instanceof HttpProviderFault && error.transient) {
         // The transport holds later requests until a 429's Retry-After has passed.
         await delay(
           error.retryAfterMs ?? Math.min(30_000, 1000 * 2 ** attempt),
@@ -84,7 +77,7 @@ async function request<T>(
         );
         continue;
       }
-      // Without retries one throttled or denied request ends the scan. Name it
+      // An exhausted or permanent failure ends the scan. Name it
       // instead of surfacing an unattributed internal defect.
       if (
         error instanceof HttpProviderFault ||
@@ -149,13 +142,14 @@ async function requireTenantRead(graph: GraphTransport, signal?: AbortSignal): P
     );
 }
 
-type DiscoveredSite = SharePointDiscovery["sites"][number];
+interface DiscoveredSite {
+  id: string;
+  name: string;
+}
 
 interface LibraryVisitor {
   /** A document library, with its site's label and URL path for proposed names. */
   library(site: DiscoveredSite, library: { id: string; name: string }, siteName: string): void;
-  /** A site, after its libraries and before its subsites. */
-  site?(site: DiscoveredSite): void;
   personalSite?(): void;
 }
 
@@ -200,7 +194,7 @@ async function enumerateLibraries(walk: Walk, visitor: LibraryVisitor): Promise<
       path.split("/").findLast(Boolean),
       url.hostname,
     ].find(usable);
-    const site: DiscoveredSite = { id, name: siteLabel ?? id, libraries: [] };
+    const site: DiscoveredSite = { id, name: siteLabel ?? id };
     const siteName = `${site.name} (${url.hostname}${path})`;
     for await (const rawDrive of entries(walk, `/v1.0/sites/${encodeURIComponent(id)}/drives`, {
       siteId: id,
@@ -212,39 +206,14 @@ async function enumerateLibraries(walk: Walk, visitor: LibraryVisitor): Promise<
           siteId: id,
         });
       const library = { id: driveId, name: usable(rawDrive.name) ? rawDrive.name : driveId };
-      site.libraries.push(library);
       visitor.library(site, library, siteName);
     }
-    visitor.site?.(site);
     for await (const child of entries(walk, `/v1.0/sites/${encodeURIComponent(id)}/sites`, {
       siteId: id,
     }))
       await visit(child);
   }
   for await (const rawSite of entries(walk, "/v1.0/sites/getAllSites")) await visit(rawSite);
-}
-
-/** Read-only tenant enumeration. The returned manifest is a proposal, never job state. */
-export async function discoverSharePoint(graph: GraphTransport): Promise<SharePointDiscovery> {
-  await requireTenantRead(graph);
-  const result: SharePointDiscovery = { sites: [], manifest: { version: 1, mappings: [] } };
-  await enumerateLibraries(
-    { graph, retry: false },
-    {
-      library(_site, library, siteName) {
-        result.manifest.mappings.push({
-          id: library.id,
-          source: { type: "sharepoint", driveId: library.id, folderPath: "" },
-          destination: { type: "google_shared_drive", create: `${siteName} - ${library.name}` },
-          members: [],
-        });
-      },
-      site(site) {
-        result.sites.push(site);
-      },
-    },
-  );
-  return result;
 }
 
 function byText(a: string, b: string): number {
@@ -575,7 +544,7 @@ export async function discoverSharePointSource(
 ): Promise<SourceDiscovery> {
   const observedAt = new Date().toISOString();
   await requireTenantRead(graph, signal);
-  const walk: Walk = { graph, retry: true, ...(signal ? { signal } : {}) };
+  const walk: Walk = { graph, ...(signal ? { signal } : {}) };
   const libraries = new Map<string, Library>();
   let personal = 0;
   await enumerateLibraries(walk, {
