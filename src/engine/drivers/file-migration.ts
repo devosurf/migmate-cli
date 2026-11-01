@@ -57,10 +57,14 @@ export interface FileMappingConfig {
   destDriveId?: string;
   destFolderId?: string;
   destFolderPath?: string;
+  /** ADR-0020 D4: the pass covers only the files directly inside the source root. */
+  filesOnly?: true;
   createDrive?: {
     name: string;
     members: DriveMember[];
     siteId?: string;
+    /** ADR-0020 D5: the mapping's folder inside a container it may share; absent is the root. */
+    folderPath?: string;
     /** Once access management starts, removing members never restores inheritance. */
     manageAccess?: true;
   };

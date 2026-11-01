@@ -2676,6 +2676,7 @@ function makeWriter(
         if (!("mappings" in base)) throw new Error("Expected file configuration");
         const pending = manifest.mappings.map((m) => ({
           id: m.id,
+          ...(m.filesOnly ? { filesOnly: true as const } : {}),
           sourceType: m.source.type,
           sourceDriveId: m.source.driveId,
           ...("folderPath" in m.source
@@ -2687,6 +2688,7 @@ function makeWriter(
                   name: m.destination.create,
                   members: m.members ?? [],
                   ...(m.destination.siteId ? { siteId: m.destination.siteId } : {}),
+                  ...(m.destination.folderPath ? { folderPath: m.destination.folderPath } : {}),
                   ...(creations.get(m.id)?.managedAccess ? { manageAccess: true as const } : {}),
                 },
               }
@@ -2736,7 +2738,7 @@ function makeWriter(
               "Source folder does not resolve",
             );
           const destination = manifest.mappings[index]!.destination;
-          if ("folderPath" in destination) {
+          if ("folderPath" in destination && !("create" in destination)) {
             const folder = await p.resolveDestinationPath({
               driveId: destination.driveId,
               folderPath: destination.folderPath,
