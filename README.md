@@ -519,6 +519,14 @@ certificate setup below; libraries without members inherit site access without i
 `anyone` and `domain` refuse at load, naming the row and `members.N.type`.
 Emails are case-insensitive and duplicates refuse.
 
+**Shared created containers.** Mappings with the same `create` name (and `siteId` for
+SharePoint) share one container: it is created once, granted once, fenced once and
+checked once at go-live. Give each a `destination.folderPath` inside it; leave it out
+for the container root. Sharing mappings must name the same members, and their folders
+may not nest. Migmate creates each folder once and records its ID, so a resumed run
+never duplicates one; a same-named folder it finds is adopted only while empty. A later
+manifest may add a mapping to an existing container if it names that container's members.
+
 **Member grant timing.**
 
 File jobs bind `[options] memberGrants` into the approved plan. Unstaged jobs

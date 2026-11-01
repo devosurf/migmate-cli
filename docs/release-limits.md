@@ -236,6 +236,14 @@ legacy schema-5 records; it never infers ownership solely from the manifest's
 `create` label. These optional evidence fields live in the existing JSON payload;
 no schema migration fabricates proof for legacy drives.
 
+Mappings naming the same creation (ADR-0020 D5) share one container record, keyed by
+the mapping that created it, which also holds each mapping folder's ID. Creation,
+recovery, member grants, the fence and both go-live checks run once per container; the
+go-live checks list the whole container, every mapping's folder included. A mapping
+folder found without its committed ID is adopted only when empty; otherwise execute
+refuses `drive_creation_ambiguous` with reason `mapping_folder_taken`. This is tested
+with the fake provider for Google, SharePoint and Dropbox destinations, not live.
+
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. Mirror lists files and folders on both sides immediately before every pass, records execute-phase `to_be_deleted` evidence and enforces `deleteLimit` at execution rather than approval. The limit counts files; folder removals are recorded separately.
 
 **Acting account.** File jobs may set top-level `impersonate = true` and `subject`.
