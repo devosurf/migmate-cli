@@ -306,7 +306,7 @@ test("Dropbox discovery counts each shared namespace once, splits nested mounts 
   );
 });
 
-test("Dropbox discovery leaves out mounts of namespaces it cannot name", async (t) => {
+test("Dropbox discovery splits around mounts of namespaces it cannot name", async (t) => {
   serve(t, (call) => {
     if (call.endpoint === "team/namespaces/list")
       return Response.json({
@@ -325,10 +325,16 @@ test("Dropbox discovery leaves out mounts of namespaces it cannot name", async (
     return undefined;
   });
   const discovery = await adapter().discoverSource();
-  assert.deepEqual(discovery.boundaries[0]?.tree, { name: "", files: 1, folders: [] });
+  // Still nested, so the parent never maps whole over the mount.
+  assert.deepEqual(discovery.boundaries[0]?.tree, {
+    name: "",
+    files: 1,
+    folders: [],
+    nested: ["777"],
+  });
   assert.equal(discovery.boundaries[0]?.parent, undefined);
   assert.deepEqual(discovery.notices, [
-    "1 mounted folder belongs to namespaces outside this discovery and is excluded from the counts: 777.",
+    "1 mounted folder belongs to namespaces outside this discovery and is left out of the counts and the draft; map them by hand if they belong in this migration: 777.",
   ]);
 });
 

@@ -59,8 +59,9 @@ export interface DiscoveredFolder {
   /** Subfolders inside the same boundary. */
   folders: DiscoveredFolder[];
   /**
-   * Subfolders that are access boundaries of their own. They are neither counted nor
-   * listed in `folders`, and no mapping of this boundary may cover them.
+   * Subfolders with access of their own: boundaries, or Dropbox mounts of namespaces
+   * outside discovery. They are neither counted nor listed in `folders`, and no mapping
+   * of this boundary may cover them.
    */
   nested?: string[];
   /**

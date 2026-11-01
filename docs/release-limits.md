@@ -245,7 +245,9 @@ the mapping that created it, which also holds each mapping folder's ID. Creation
 recovery, member grants, the fence and both go-live checks run once per container; the
 go-live checks list the whole container, every mapping's folder included. A mapping
 folder found without its committed ID is adopted only when empty; otherwise execute
-refuses `drive_creation_ambiguous` with reason `mapping_folder_taken`. This is tested
+refuses `drive_creation_ambiguous` with reason `mapping_folder_taken`. Every run lists
+each level of a mapping folder's path, so a recorded folder that is gone refuses with
+reason `mapping_folder_missing`. This is tested
 with the fake provider for Google, SharePoint and Dropbox destinations, not live.
 
 Approval binds each root's identity, drive and folder type, not an inventory of unrelated destination content. Mirror lists files and folders on both sides immediately before every pass, records execute-phase `to_be_deleted` evidence and enforces `deleteLimit` at execution rather than approval. The limit counts files; folder removals are recorded separately.
@@ -631,7 +633,8 @@ manifest. It is read-only: no load, provisioning or access translation.
 
 **Boundaries.** Dropbox: team folders and shared folders from `team/namespaces/list`,
 each namespace ID once; a mount of another namespace inside one is a nested boundary,
-excluded from its parent. Member and app folders are skipped with a notice. The
+excluded from its parent, which splits around it. A mount of a namespace discovery
+did not find is split around too, and named in a notice for the operator to map. Member and app folders are skipped with a notice. The
 source app needs `sharing.read` for members and refuses `preflight_failed`
 (`discovery_requires_sharing_read`) without it. Google: the Shared Drives the acting
 account belongs to (`drives.list` without domain-admin access); untrashed items count,

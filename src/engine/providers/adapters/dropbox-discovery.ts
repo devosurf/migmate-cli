@@ -232,12 +232,13 @@ export async function discoverDropbox(input: DropboxDiscoveryInput): Promise<Sou
       tree: tree.root,
     });
   }
-  // A mount of a namespace that is no boundary here stays excluded, but cannot be named.
+  // A mount of a namespace that is no boundary here stays in `nested`, so the parent
+  // still splits around it: a recursive mapping of the parent would copy its content,
+  // whose audience differs, into the parent's container.
   for (const [nested, parents] of nestedIn) {
     const boundary = boundaries.get(nested);
     if (!boundary) {
       foreignMounts.push(nested);
-      prune(parents, nested);
       continue;
     }
     parents.sort(order);
@@ -257,7 +258,7 @@ export async function discoverDropbox(input: DropboxDiscoveryInput): Promise<Sou
     );
   if (foreignMounts.length)
     notices.push(
-      `${foreignMounts.length} mounted folder${foreignMounts.length === 1 ? "" : "s"} belong${foreignMounts.length === 1 ? "s" : ""} to namespaces outside this discovery and ${foreignMounts.length === 1 ? "is" : "are"} excluded from the counts: ${foreignMounts.sort(order).join(", ")}.`,
+      `${foreignMounts.length} mounted folder${foreignMounts.length === 1 ? "" : "s"} belong${foreignMounts.length === 1 ? "s" : ""} to namespaces outside this discovery and ${foreignMounts.length === 1 ? "is" : "are"} left out of the counts and the draft; map them by hand if they belong in this migration: ${foreignMounts.sort(order).join(", ")}.`,
     );
   return {
     sourceProvider: "dropbox",
@@ -265,23 +266,6 @@ export async function discoverDropbox(input: DropboxDiscoveryInput): Promise<Sou
     boundaries: [...boundaries.values()],
     notices,
   };
-
-  function prune(parents: string[], nested: string) {
-    // Only boundary IDs may appear in `nested`; drop the reference, keep the exclusion.
-    for (const parent of parents) {
-      const boundary = boundaries.get(parent);
-      if (!boundary) continue;
-      const stack: DiscoveredFolder[] = [boundary.tree];
-      while (stack.length) {
-        const folder = stack.pop()!;
-        if (folder.nested) {
-          folder.nested = folder.nested.filter((id) => id !== nested);
-          if (!folder.nested.length) delete folder.nested;
-        }
-        stack.push(...folder.folders);
-      }
-    }
-  }
 
   async function listMembers(id: string): Promise<BoundaryMember[] | null> {
     // Users by lowercased email, as listDriveMembers names them; groups by group_id.
