@@ -12,6 +12,7 @@ import type {
   CopyPassHandle,
   CopyPassReference,
   FilePassProvider,
+  FilePassRoot,
   FileHashEntry,
   ProviderPort,
   TransferWorkerHandle,
@@ -399,6 +400,29 @@ function literalFilterPath(path: string): string {
   return path
     .replace(/[\\*?[\]{}]/g, "\\$&")
     .replace(/\s/g, (character) => `{{\\x{${character.codePointAt(0)!.toString(16)}}}}`);
+}
+
+/**
+ * rc options confining a call to a files-only root's direct files (ADR-0020 D4).
+ * MaxDepth 1 alone stops the walk but still lets a sync create the source's
+ * subfolders and remove empty destination folders, which other mappings own.
+ * Excluding every subdirectory stops both: without DeleteExcluded, an excluded
+ * directory is never deleted. Include rules are matched first, so MaxDepth is what
+ * keeps a nested selection out. Measured against the pinned rclone v1.75.0.
+ */
+export function passScope(
+  root: Pick<FilePassRoot, "filesOnly">,
+  include?: string[],
+): {
+  _config?: { MaxDepth: 1 };
+  _filter?: { IncludeRule?: string[]; ExcludeRule?: string[]; DeleteExcluded?: false };
+} {
+  const selection = include ? { IncludeRule: include } : {};
+  if (!root.filesOnly) return include ? { _filter: selection } : {};
+  return {
+    _config: { MaxDepth: 1 },
+    _filter: { ...selection, ExcludeRule: ["/*/**"], DeleteExcluded: false },
+  };
 }
 
 function modTimeNs(value: unknown): bigint {
@@ -996,15 +1020,16 @@ export function createTransferSupervisor(options: {
         durationNs(main.ModifyWindow),
       ].reduce((largest, value) => (value > largest ? value : largest));
       using temporary = new DisposableStack();
-      const list = async (fs: string): Promise<DiskListing<ListedFile>> => {
+      const list = async (root: FilePassRoot): Promise<DiskListing<ListedFile>> => {
         const result = temporary.use(track(new DiskListing<ListedFile>()));
         await longCall(
           worker,
           "operations/list",
           {
-            fs,
+            fs: root.fs,
             remote: "",
             opt: { recurse: true, filesOnly: true, noMimeType: true },
+            ...passScope(root),
           },
           (file) => {
             if (!record(file) || typeof file.Path !== "string" || typeof file.Size !== "number")
@@ -1015,8 +1040,8 @@ export function createTransferSupervisor(options: {
         );
         return result;
       };
-      const source = await list(input.source.fs);
-      const destination = await list(input.destination.fs);
+      const source = await list(input.source);
+      const destination = await list(input.destination);
       const hashes = async (
         side: "source" | "destination",
         paths: string[],
@@ -1037,7 +1062,10 @@ export function createTransferSupervisor(options: {
                 showHash: true,
                 hashTypes: [commonHash],
               },
-              _filter: { IncludeRule: paths.map((path) => `/${literalFilterPath(path)}`) },
+              ...passScope(
+                input[side],
+                paths.map((path) => `/${literalFilterPath(path)}`),
+              ),
             },
             (file) => {
               if (!record(file) || typeof file.Path !== "string" || !record(file.Hashes))
@@ -1094,6 +1122,7 @@ export function createTransferSupervisor(options: {
           fs: root.fs,
           remote: "",
           opt: { recurse: true, dirsOnly: true, noModTime: true, noMimeType: true },
+          ...passScope(root),
         },
         (folder) => {
           if (!record(folder) || typeof folder.Path !== "string" || folder.IsDir !== true)
@@ -1123,16 +1152,10 @@ export function createTransferSupervisor(options: {
         // retaining the unfiltered single-pass path for a whole inventory.
         const pages = paths === undefined ? 1 : Math.ceil(paths.length / 256);
         for (let page = 0; page < pages; page++) {
-          const filter =
-            paths === undefined
-              ? {}
-              : {
-                  _filter: {
-                    IncludeRule: paths
-                      .slice(page * 256, (page + 1) * 256)
-                      .map((path) => `/${literalFilterPath(path)}`),
-                  },
-                };
+          const filter = passScope(
+            root,
+            paths?.slice(page * 256, (page + 1) * 256).map((path) => `/${literalFilterPath(path)}`),
+          );
           await longCall(
             worker,
             "operations/list",
@@ -1192,6 +1215,10 @@ export function createTransferSupervisor(options: {
         throw fail("provider_failed", "copy_pass_delete_limit_invalid");
       const worker = owned(input.socketPath);
       const group = `${worker.group}-${randomBytes(16).toString("hex")}`;
+      // Both roots of a pass share the mapping's scope; either one confines the pass.
+      const scope = passScope({
+        ...(input.source.filesOnly || input.destination.filesOnly ? { filesOnly: true } : {}),
+      });
       const result = await authenticated(
         worker,
         input.mode === "mirror" ? "sync/sync" : "sync/copy",
@@ -1201,7 +1228,9 @@ export function createTransferSupervisor(options: {
           createEmptySrcDirs: true,
           _async: true,
           _group: group,
+          ...(scope._filter ? { _filter: scope._filter } : {}),
           _config: {
+            ...scope._config,
             Transfers: input.transfers,
             Metadata: true,
             // Only a destination root's own backend option may copy server side (ADR-0018 D10).

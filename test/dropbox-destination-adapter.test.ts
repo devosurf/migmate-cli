@@ -309,3 +309,69 @@ test("Dropbox destination names block reserved names and long components", () =>
   assert.deepEqual(destination.destinationNameFindings?.("x".repeat(255), "folder"), []);
   assert.equal(destination.destinationSiblingKey?.("Report.TXT"), "report.txt");
 });
+
+test("Dropbox mapping folders in a created team folder never autorename", async (t) => {
+  const calls = serve(t, {
+    "team/namespaces/list": () => Response.json(teamFolders),
+    "files/create_folder_v2": (body) =>
+      Response.json({
+        metadata: { id: `id:${String(body.path).length}`, name: "Beta", path_display: body.path },
+      }),
+  });
+  const dropbox = adapter();
+  const nested = await dropbox.createDestinationFolder({
+    parentFolderId: "ns:555",
+    name: "Nested",
+    createdAt: "",
+    modifiedAt: "",
+  });
+  const beta = await dropbox.createDestinationFolder({
+    parentFolderId: nested.id,
+    name: "Beta",
+    createdAt: "",
+    modifiedAt: "",
+  });
+  assert.deepEqual(
+    calls.filter((call) => call.endpoint === "files/create_folder_v2").map((call) => call.body),
+    [
+      { path: "/Nested", autorename: false },
+      { path: "/Nested/Beta", autorename: false },
+    ],
+  );
+  assert.equal(beta.kind, "folder");
+  assert.equal(beta.driveId, "555");
+  assert.equal(beta.parentId, nested.id);
+  await assert.rejects(
+    dropbox.createDestinationFolder({
+      parentFolderId: "id:unknown",
+      name: "Gamma",
+      createdAt: "",
+      modifiedAt: "",
+    }),
+    (fault: unknown) => fault instanceof ProviderFault && fault.code === "unsupported_route",
+  );
+});
+
+test("a fresh Dropbox adapter creates beneath a recorded folder once it has listed it", async (t) => {
+  // The driver lists every level of a mapping folder's path before creating below it.
+  serve(t, {
+    "team/namespaces/list": () => Response.json(teamFolders),
+    "files/list_folder": () =>
+      Response.json({
+        entries: [{ ".tag": "folder", id: "id:nested", name: "Nested", path_display: "/Nested" }],
+        has_more: false,
+        cursor: "c1",
+      }),
+    "files/create_folder_v2": (body) =>
+      Response.json({ metadata: { id: "id:new", name: "New", path_display: body.path } }),
+  });
+  const dropbox = adapter();
+  const [nested] = await dropbox.listDestinationChildren("ns:555");
+  const created = await dropbox.createDestinationFolder({
+    parentFolderId: nested!.id,
+    name: "New",
+    createdAt: "",
+    modifiedAt: "",
+  });
+  assert.equal(created.parentId, "id:nested");
+});

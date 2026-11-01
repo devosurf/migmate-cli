@@ -66,6 +66,8 @@ export async function collectDestinationConstraints(input: {
   sourceItemId: string;
   root?: DestinationConstraintRoot;
   checkPaths?: boolean;
+  /** ADR-0020 D4: walk only the root's direct files; its folders are other mappings'. */
+  filesOnly?: boolean;
   signal?: AbortSignal;
 }): Promise<DiskListing<DestinationConstraint>> {
   const { provider, destination, source, sourceDriveId, sourceItemId, root, signal } = input;
@@ -148,6 +150,11 @@ export async function collectDestinationConstraints(input: {
         signal?.throwIfAborted();
         for (const child of children) {
           signal?.throwIfAborted();
+          // OneNote packages are directories in the transfer backend, including
+          // their nested section groups; other package kinds remain files.
+          const kind =
+            child.kind === "package" && child.packageSections !== null ? "folder" : child.kind;
+          if (input.filesOnly && kind === "folder") continue;
           const standardName = !child.name.isWellFormed()
             ? null
             : source?.sourceName
@@ -166,10 +173,7 @@ export async function collectDestinationConstraints(input: {
           projected.add({
             id: child.id,
             name: child.name,
-            // OneNote packages are directories in the transfer backend, including
-            // their nested section groups; other package kinds remain files.
-            kind:
-              child.kind === "package" && child.packageSections !== null ? "folder" : child.kind,
+            kind,
             encodedName,
             key,
           });

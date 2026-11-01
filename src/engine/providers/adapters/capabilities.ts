@@ -37,6 +37,11 @@ export interface FileProviderCapabilities {
   sourceDisclosures?: readonly string[];
   sourceEntryFindings?(entry: SourceEntry): readonly string[];
   creationParent?: "siteId";
+  /**
+   * ADR-0020 D3: the hard item limit of one created container, counting files and
+   * folders. Absent where the provider's limit is not established.
+   */
+  containerItemLimit?: number;
   /** True only when replaying the durable request ID cannot create a second container. */
   idempotentCreation: boolean;
   /** Empty member manifests leave site access outside Migmate's go-live lifecycle. */

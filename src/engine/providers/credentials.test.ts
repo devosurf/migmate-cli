@@ -685,7 +685,7 @@ test("Dropbox offline authorization uses single-use S256 PKCE and records only t
   assert.equal(url.searchParams.get("response_type"), "code");
   assert.equal(url.searchParams.get("token_access_type"), "offline");
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
-  assert.equal(url.searchParams.get("scope"), DROPBOX_READ_SCOPES.join(" "));
+  assert.equal(url.searchParams.get("scope"), [...DROPBOX_READ_SCOPES, "sharing.read"].join(" "));
   assert.equal(url.searchParams.has("redirect_uri"), false);
   assert.equal(url.searchParams.has("include_granted_scopes"), false);
   const other = beginDropboxAuthorization("dropbox-app");

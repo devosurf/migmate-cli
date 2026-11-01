@@ -25,7 +25,7 @@ import type {
 } from "../port.ts";
 import { markCreationRejected } from "../port.ts";
 import { sharepointOrigin } from "./credentials/sharepoint.ts";
-import { discoverSharePoint } from "../discovery.ts";
+import { discoverSharePointSource } from "../discovery.ts";
 import {
   sourceKey,
   type AdapterInput,
@@ -123,6 +123,10 @@ export class SharePointAdapter implements FileAdapter {
     if (!drive.id || !root.id || !library.displayName)
       throw new ProviderFault("provider_request_failed", "Library identity is incomplete.");
     this.#destDrive.set(root.id, drive.id);
+    // A container created or recovered in this run is writable before any new provider
+    // knows it; the engine only writes into containers it has proven are the job's.
+    if (!this.#destinationRoots.some((known) => known.destDriveId === drive.id))
+      this.#destinationRoots.push({ destDriveId: drive.id, destFolderId: root.id });
     const requestId =
       typeof library.description === "string" &&
       library.description.startsWith(CREATION_REQUEST_PREFIX)
@@ -762,8 +766,8 @@ export class SharePointAdapter implements FileAdapter {
     };
   }
 
-  async discoverSharePoint() {
-    return discoverSharePoint(this.#graph);
+  async discoverSource(signal?: AbortSignal) {
+    return discoverSharePointSource(this.#graph, signal);
   }
 
   async resolveSourceFolder(input: {
@@ -955,6 +959,41 @@ export class SharePointAdapter implements FileAdapter {
     ))
       for (const raw of page) items.push(this.#sharepointDestination(raw, driveId));
     return items;
+  }
+
+  /** ADR-0020 D5: a mapping's folder inside a library this job created. */
+  async createDestinationFolder(
+    input: Parameters<ProviderPort["createDestinationFolder"]>[0],
+  ): Promise<DestinationEntry> {
+    if (input.destinationId !== undefined || input.marker !== undefined)
+      throw new ProviderFault(
+        "unsupported_route",
+        "SharePoint folders take neither reserved IDs nor markers.",
+      );
+    const driveId = this.#destDrive.get(input.parentFolderId);
+    if (!driveId || !this.#destinationRoots.some((root) => root.destDriveId === driveId))
+      throw new ProviderFault(
+        "unsupported_route",
+        "The destination parent is not in a configured library.",
+      );
+    // conflictBehavior fail refuses a same-named item rather than renaming or replacing it.
+    // https://learn.microsoft.com/graph/api/driveitem-post-children
+    // https://learn.microsoft.com/graph/api/resources/driveitem#instance-attributes
+    const raw = await this.#graphDestination.request<GraphItem>(
+      `/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(input.parentFolderId)}/children`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: input.name,
+          folder: {},
+          "@microsoft.graph.conflictBehavior": "fail",
+        }),
+      },
+    );
+    const folder = this.#sharepointDestination(raw, driveId);
+    if (folder.kind !== "folder")
+      throw new ProviderFault("provider_request_failed", "The created item is not a folder.");
+    return folder;
   }
 
   async preflightSource(mapping: Mapping, signal?: AbortSignal): Promise<Record<string, unknown>> {

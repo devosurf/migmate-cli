@@ -536,7 +536,8 @@ slashes, empty segments, `.` or `..`. IDs are stable provider IDs, not URLs or t
 alias `root`; mapping IDs must be unique. Both roots must be ordinary folders.
 Mappings overlap if their source roots in the same drive are equal or one is an
 ancestor of the other, **or** their destination roots in the same Shared Drive are
-equal or nested. Sibling trees are allowed; mapping roots alone define scope.
+equal or nested. A root may sit beneath a files-only mapping's root (below), never
+equal to it. Sibling trees are allowed; mapping roots alone define scope.
 
 For a new Shared Drive, replace `destination` with
 `{ "type": "google_shared_drive", "create": "Finance" }` and optionally add
@@ -561,6 +562,26 @@ Created SharePoint libraries with named members require the optional scoped
 certificate setup below; libraries without members inherit site access without it.
 `anyone` and `domain` refuse at load, naming the row and `members.N.type`.
 Emails are case-insensitive and duplicates refuse.
+
+**Shared created containers.** Rows whose `create` name, type and `siteId` are
+equal share one created container, each in its own folder:
+`{ "type": "google_shared_drive", "create": "Finance", "folderPath": "Payroll" }`.
+Without `folderPath` a row uses the container's root. Rows sharing a container must
+name the same `members`, since membership applies to the whole container; otherwise
+load refuses `members`. Their folders may not be equal or nested, except beneath a
+files-only row's folder, and refuse `destination.folderPath` otherwise. The container
+is created, granted, fenced and checked at go-live once. Migmate creates each folder
+once and records its ID, so a resumed run never duplicates one; a same-named folder it
+finds is adopted only while empty. A later manifest may add a mapping to an existing
+container if it names that container's members.
+
+**Files-only mappings.** `"filesOnly": true` beside `source` limits a mapping to the
+files directly inside its source root, not its subfolders. It carries the loose files
+of a folder whose subfolders map elsewhere, so other mappings' roots may sit beneath a
+files-only root, on either side. Its copy, verification and mirror never reach below
+its root. A OneNote notebook directly inside a files-only root is a folder to the
+transfer, so it is neither copied nor reported: map it, or its folder, separately.
+In CSV, the optional last column `filesOnly` takes `true` or stays empty.
 
 **Member grant timing.**
 
@@ -1069,33 +1090,8 @@ refuse credential preflight. Replace the grant rather than adding the second one
 The optional rclone `access_scopes` must likewise name exactly one of these grants.
 Migmate never upgrades permissions on the operator's behalf.
 
-After configuring a SharePoint-source file job, draft the tenant's document libraries.
-No seed `[[mappings]]` row is needed: keep the route, options and `[rclone]` references
-in `job.toml`, then onboard and discover:
-
-```sh
-migmate creds init --job "$ID" --config job.toml --output json
-migmate discover --job "$ID" --file draft.json --output json
-# Review draft.json: remove unwanted mappings, edit drive names, fill in members.
-migmate manifest load --job "$ID" --file draft.json --output json
-```
-
-Discovery follows Graph's site, subsite and library pages, descending into every
-subsite and listing each site once. It skips personal OneDrive sites
-(`isPersonalSite`, or a `-my.sharepoint.com` host) without requesting anything from
-them: their own drive is never a document library. The envelope's `value.sites` lists sites and
-libraries; `value.manifest` proposes one new Shared Drive per library, named
-`Site name (site URL host and path) - Library name` so equally named subsites stay
-distinct, with `members: []` for operator review. A site Graph returns without a
-usable `displayName` or `name` (the classic Search Center at `/search`, for one) is
-labelled from the last segment of its URL path, then its host; a library without a
-usable name is labelled with its drive ID. Mapping
-IDs use stable library drive IDs, not display names. No permissions are translated.
-The optional `--file` writes **only the manifest**, creates a private new file, and
-refuses to overwrite an existing path. Omit it to receive just the envelope.
-Discovery never loads mappings, creates drives, or changes the plan. Loading,
-planning and human approval remain explicit. A tenant without libraries yields an
-empty draft; `manifest load` still requires at least one mapping.
+Discovery (below, [Discover and partition](#discover-and-partition)) needs
+`Sites.Read.All` on a SharePoint source.
 
 With `Sites.Selected`, discovery returns `preflight_failed` (exit 4) with
 `refusal.detail.check: "discovery_requires_sites_read_all"` and
@@ -1109,6 +1105,71 @@ library without an `id`, a malformed, off-Graph or repeating page) also refuses
 throttling, an outage) refuses `preflight_failed` with
 `refusal.detail.check: "discovery_request_failed"`, the HTTP `status`, Graph's
 `providerCode` when it is a known one, and the `route` and `siteId`.
+
+### Discover and partition
+
+`discover` counts the source and proposes a draft manifest sized to the destination
+([ADR-0020](docs/adr/0020-capacity-aware-discovery-and-partitioning.md)). It works for
+every source provider. No seed `[[mappings]]` row is needed: keep the provider pair,
+options and `[rclone]` references in `job.toml`, then onboard and discover:
+
+```sh
+migmate creds init --job "$ID" --config job.toml --output json
+migmate discover --job "$ID" --file draft.json --output json
+# Review draft.json: container names, folders, and the members of each container.
+migmate manifest load --job "$ID" --file draft.json --output json
+```
+
+It counts files and folders per **access boundary**, source content that shares one
+membership:
+
+- **Dropbox:** team folders and shared folders from the team's namespace list, each
+  namespace once. A shared folder mounted inside another is its own boundary.
+  Member folders and app folders are skipped and counted in a notice. The source app
+  needs `sharing.read` to read folder members.
+- **Google:** every Shared Drive the acting account belongs to. Members come from the
+  drive's permissions.
+- **SharePoint:** every document library, plus every folder with unique permissions,
+  which becomes its own boundary inside its library. Discovery requires `Sites.Read.All`.
+
+The draft partitions by boundary first and size second. A container's **capacity
+target** defaults to 80% of the destination's hard item limit, counting files and
+folders: 400,000 for a Shared Drive. Dropbox team folders and SharePoint libraries
+have no established limit yet, so without a target they split only by boundary.
+`--capacity-target ITEMS` sets the target for every boundary, and
+`--capacity-target BOUNDARY_ID=ITEMS` sets it for one boundary's containers; repeat
+it for several. Lower a target where people will sync the destination to their desktops.
+
+- A boundary that fits maps whole into a container.
+- Boundaries with **identical membership** and target share a created container,
+  each as its own folder named after the boundary.
+- A boundary over its target, or one around a nested boundary, **splits by
+  subfolder** across containers. A files-only mapping carries the files directly
+  inside each split folder.
+- A folder whose own files exceed the target cannot split further: its container is
+  flagged `overTarget`, and a notice names it. Neither can a folder holding a OneNote
+  notebook, since a files-only mapping copies no subfolders and rclone lists
+  notebooks as folders.
+
+The envelope's `value` holds `boundaries` (counts, members as source identities,
+parent boundary), `containers` (planned item counts, target, boundaries, mappings and
+`sourceMembers`), `manifest` and `notices`. Mapping IDs are stable across reruns:
+a boundary-name slug plus a digest of the boundary, folder and scope. Members stay
+empty: translate each container's `sourceMembers` into destination `members` on
+every row of that container before loading. SharePoint destinations also need each
+row's `destination.siteId`. The optional `--file` writes **only the manifest**,
+creates a private new file, and refuses to overwrite an existing path.
+
+Discovery is read-only. It never loads mappings, creates containers, translates
+access or changes the plan, and its counts are a point-in-time observation.
+Onboarding, `doctor` and discovery accept a job with no mappings; `plan` refuses
+`configuration_invalid` with `detail.field: "mappings"` until a manifest is loaded.
+A source without boundaries yields an empty draft, which `manifest load` refuses.
+Every container in a job is one destination type, so the job-wide target is the
+per-destination override; per-boundary targets refine it. A target
+naming a boundary discovery did not find refuses `configuration_invalid` with
+`detail.field: "--capacity-target"` and the `boundaryIds`. Discovery holds the
+source's folder tree, not its files, in memory.
 
 ### Teams retained history
 

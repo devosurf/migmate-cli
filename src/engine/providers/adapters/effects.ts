@@ -66,7 +66,7 @@ export interface FileAdapter
         | "uploadDestinationContent"
         | "readDestinationMarker"
         | "streamDestinationContent"
-        | "discoverSharePoint"
+        | "discoverSource"
         | "sourcePlanningEvidence"
       >
     > {

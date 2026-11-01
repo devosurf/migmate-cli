@@ -32,7 +32,8 @@ import {
 } from "../src/engine/index.ts";
 import { FakeFileMigrationPort, type FakeSourceItemFixture } from "../src/engine/providers/fake.ts";
 import { cliFixture, CLI_JOB_CONFIG } from "./cli-fixture.ts";
-import { discoverSharePoint, type SharePointDiscovery } from "../src/engine/providers/discovery.ts";
+import { discoverSharePointSource } from "../src/engine/providers/discovery.ts";
+import type { DiscoverResult } from "../src/engine/partition.ts";
 import type { GraphTransport } from "../src/engine/providers/http.ts";
 import { createProductionProvider } from "../src/engine/providers/production.ts";
 
@@ -340,6 +341,33 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
             ],
           }),
         );
+      if (path === "/v1.0/drives/src-drive/root") return JSON.parse('{"id":"library-root"}');
+      if (path === "/v1.0/drives/src-drive/root/delta")
+        return JSON.parse(
+          JSON.stringify({
+            value: [
+              { id: "library-root", name: "root", root: {}, folder: { childCount: 1 } },
+              {
+                id: "report",
+                name: "report.txt",
+                file: {},
+                parentReference: { id: "library-root" },
+              },
+            ],
+          }),
+        );
+      if (path === "/v1.0/drives/src-drive/root/permissions")
+        return JSON.parse(
+          JSON.stringify({
+            value: [
+              {
+                id: "owners",
+                roles: ["owner"],
+                grantedToV2: { group: { id: "owners-group", displayName: "Owners" } },
+              },
+            ],
+          }),
+        );
       assert.equal(path, "/v1.0/sites/team/drives");
       return JSON.parse(
         JSON.stringify({
@@ -436,7 +464,9 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
     jobDirectory: join(h.home, "jobs", id),
   });
   t.after(() => discovery.close?.());
-  Object.assign(h.provider, { discoverSharePoint: () => discovery.discoverSharePoint!() });
+  Object.assign(h.provider, {
+    discoverSource: (signal?: AbortSignal) => discovery.discoverSource!(signal),
+  });
   const onboard = await invoke(
     ["creds", "init", "--job", id, "--config", configPath, "--output", "json"],
     h.engine(),
@@ -454,20 +484,30 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
     ["discover", "--job", id, "--file", file, "--output", "json"],
     h.engine(),
   );
-  assert.equal(capture.code, 0);
-  const result = document<SharePointDiscovery>(capture);
+  assert.equal(capture.code, 0, capture.stdout);
+  const result = document<DiscoverResult>(capture);
   assert.equal(result.command, "discover");
   assert.equal(result.ok, true);
+  const name = "Team (tenant.sharepoint.com/sites/operations/team) - Documents";
+  assert.deepEqual(result.value.boundaries, [
+    {
+      id: "src-drive",
+      kind: "sharepoint_library",
+      name,
+      files: 1,
+      folders: 0,
+      members: [{ id: "owners-group", type: "group", role: "owner" }],
+    },
+  ]);
+  const [mapping] = result.value.manifest.mappings;
+  assert.match(mapping!.id, /^team-tenant-sharepoint-com-sites-operat[a-z-]*-[0-9a-f]{10}$/u);
   assert.deepEqual(result.value.manifest, {
     version: 1,
     mappings: [
       {
-        id: "src-drive",
-        source: { type: "sharepoint", driveId: "src-drive", folderPath: "" },
-        destination: {
-          type: "google_shared_drive",
-          create: "Team (tenant.sharepoint.com/sites/operations/team) - Documents",
-        },
+        id: mapping!.id,
+        source: { type: "sharepoint", folderPath: "", driveId: "src-drive" },
+        destination: { type: "google_shared_drive", create: name },
         members: [],
       },
     ],
@@ -475,7 +515,11 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), result.value.manifest);
   const envelopeOnly = await invoke(["discover", "--job", id, "--output", "json"], h.engine());
   assert.equal(envelopeOnly.code, 0);
-  assert.deepEqual(document<SharePointDiscovery>(envelopeOnly).value, result.value);
+  // A second, equal observation differs only in when it was made.
+  assert.deepEqual(
+    { ...document<DiscoverResult>(envelopeOnly).value, observedAt: result.value.observedAt },
+    result.value,
+  );
   const after = await h.engine().reader({ id }).status();
   assert.ok(after.ok);
   const { uploadActivity: _afterActivity, ...afterDurable } = after.value;
@@ -501,6 +545,168 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
   assert.match(proposal.value.planDigest, /^[a-f0-9]{64}$/u);
 });
 
+it("discovers boundaries, partitions them to a capacity target, and runs the draft", async (t) => {
+  const file = (id: string, parentId: string, driveId: string): FakeSourceItemFixture => ({
+    id,
+    parentId,
+    driveId,
+    name: `${id}.txt`,
+    kind: "file",
+    content: id,
+  });
+  const fixture = cliFixture(0);
+  fixture.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: true };
+  fixture.sourceItems.push(
+    file("loose-1", "src-root", "src-drive"),
+    file("loose-2", "src-root", "src-drive"),
+    { id: "big", parentId: "src-root", name: "Big", kind: "folder" },
+    ...[1, 2, 3, 4, 5].map((n) => file(`big-${n}`, "big", "src-drive")),
+    { id: "small", parentId: "src-root", name: "Small", kind: "folder" },
+    file("small-1", "small", "src-drive"),
+    { id: "other-root", parentId: null, driveId: "other-drive", name: "root", kind: "folder" },
+    file("other-1", "other-root", "other-drive"),
+    file("other-2", "other-root", "other-drive"),
+    { id: "legal-root", parentId: null, driveId: "legal-drive", name: "root", kind: "folder" },
+    file("legal-1", "legal-root", "legal-drive"),
+  );
+  const finance = [{ id: "finance@example.com", type: "group" as const, role: "write" }];
+  fixture.sourceBoundaries = [
+    { id: "src-drive", name: "Projects", rootId: "src-root", members: finance },
+    { id: "other-drive", name: "Budgets", rootId: "other-root", members: finance },
+    {
+      id: "legal-drive",
+      name: "Legal",
+      rootId: "legal-root",
+      members: [{ id: "legal@example.com", type: "group", role: "read" }],
+    },
+  ];
+  const h = harness(t, fixture);
+  const initialized = await h.engine().initJob({
+    type: "file_migration",
+    config: { sourceProvider: "sharepoint", destinationProvider: "google_shared_drive" },
+  });
+  assert.ok(initialized.ok);
+  const id = initialized.value.id;
+  const draft = join(h.home, "draft.json");
+  const capture = await invoke(
+    ["discover", "--job", id, "--capacity-target", "8", "--file", draft, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(capture.code, 0, capture.stdout);
+  const result = document<DiscoverResult>(capture).value;
+  assert.deepEqual(result.capacity, { hardLimit: 500_000, defaultTarget: 8, targets: {} });
+  assert.deepEqual(
+    result.boundaries.map((b) => [b.id, b.files, b.folders]),
+    [
+      ["legal-drive", 1, 0],
+      ["other-drive", 2, 0],
+      ["src-drive", 8, 2],
+    ],
+  );
+  const rows = result.manifest.mappings.map((m) => {
+    const destination = m.destination as { create: string; folderPath?: string };
+    return [
+      (m.source as { driveId: string; folderPath: string }).driveId,
+      (m.source as { folderPath: string }).folderPath,
+      destination.create,
+      destination.folderPath ?? "",
+      m.filesOnly === true,
+    ];
+  });
+  assert.deepEqual(rows, [
+    ["legal-drive", "", "Legal", "", false],
+    ["other-drive", "", "Budgets and 1 more", "Budgets", false],
+    ["src-drive", "", "Budgets and 1 more", "Projects", true],
+    ["src-drive", "Small", "Budgets and 1 more", "Projects/Small", false],
+    ["src-drive", "Big", "Projects (part 2 of 2)", "Big", false],
+  ]);
+  assert.deepEqual(
+    result.containers.map((c) => [c.name, c.items, c.boundaries, c.sourceMembers?.[0]?.id]),
+    [
+      ["Legal", 1, ["legal-drive"], "legal@example.com"],
+      ["Budgets and 1 more", 8, ["other-drive", "src-drive"], "finance@example.com"],
+      ["Projects (part 2 of 2)", 6, ["src-drive"], "finance@example.com"],
+    ],
+  );
+  assert.deepEqual(JSON.parse(readFileSync(draft, "utf8")), result.manifest);
+  const unknown = await invoke(
+    ["discover", "--job", id, "--capacity-target", "nowhere=5", "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(unknown.code, 2);
+  assert.deepEqual(document<never>(unknown).refusal.detail, {
+    field: "--capacity-target",
+    boundaryIds: ["nowhere"],
+  });
+  // The operator translates each container's source access into destination members.
+  const reviewed = {
+    ...result.manifest,
+    mappings: result.manifest.mappings.map((mapping) => ({
+      ...mapping,
+      members: [
+        {
+          email:
+            (mapping.destination as { create: string }).create === "Legal"
+              ? "legal@example.com"
+              : "finance@example.com",
+          type: "group",
+          role: "writer",
+        },
+      ],
+    })),
+  };
+  writeFileSync(draft, JSON.stringify(reviewed));
+  const loaded = await invoke(
+    ["manifest", "load", "--job", id, "--file", draft, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(loaded.code, 0, loaded.stdout);
+  assert.equal(document<{ mappingCount: number }>(loaded).value.mappingCount, 5);
+  const plan = await invoke(["plan", "--job", id, "--output", "json"], h.engine());
+  assert.equal(plan.code, 0, plan.stdout);
+  const planDigest = document<PlanRevision>(plan).value.planDigest;
+  assert.match(planDigest, /^[a-f0-9]{64}$/u);
+
+  // The draft runs: three containers, the shared one holding both boundaries' folders,
+  // and the split boundary's loose files beside its kept subfolder.
+  const approve = ["approve", "--job", id, "--approver", "ci", "--plan-digest", planDigest];
+  assert.equal((await invoke(approve, h.engine())).code, 0);
+  const executed = await invoke(["execute", "--job", id, "--output", "json"], h.engine());
+  assert.equal(executed.code, 0, executed.stdout);
+  const verified = await invoke(["verify", "--job", id, "--output", "json"], h.engine());
+  assert.equal(verified.code, 0, verified.stdout);
+  const { createdDrives } = document<JobStatus>(
+    await invoke(["status", "--job", id, "--output", "json"], h.engine()),
+  ).value;
+  assert.deepEqual(createdDrives.map((d) => d.name).sort(), [
+    "Budgets and 1 more",
+    "Legal",
+    "Projects (part 2 of 2)",
+  ]);
+  const contents = (name: string) => {
+    const drive = createdDrives.find((d) => d.name === name)!;
+    return h.provider
+      .snapshotDestination(drive.rootFolderId ?? drive.driveId!)
+      .map((item) => item.path)
+      .filter((path) => path !== ".")
+      .sort();
+  };
+  assert.deepEqual(contents("Budgets and 1 more"), [
+    "Budgets",
+    "Budgets/other-1.txt",
+    "Budgets/other-2.txt",
+    "Projects",
+    "Projects/Small",
+    "Projects/Small/small-1.txt",
+    "Projects/loose-1.txt",
+    "Projects/loose-2.txt",
+  ]);
+  assert.deepEqual(contents("Projects (part 2 of 2)"), [
+    "Big",
+    ...[1, 2, 3, 4, 5].map((n) => `Big/big-${n}.txt`),
+  ]);
+});
+
 it("discover refuses site-scoped access in the JSON envelope without writing a draft", async (t) => {
   const h = harness(t);
   const graph: GraphTransport = {
@@ -514,7 +720,9 @@ it("discover refuses site-scoped access in the JSON envelope without writing a d
       throw new Error("Discovery cannot read bytes");
     },
   };
-  Object.assign(h.provider, { discoverSharePoint: () => discoverSharePoint(graph) });
+  Object.assign(h.provider, {
+    discoverSource: (signal?: AbortSignal) => discoverSharePointSource(graph, signal),
+  });
   const initialized = await h.engine().initJob({ type: "file_migration", config: CLI_JOB_CONFIG });
   assert.ok(initialized.ok);
   const file = join(h.home, "refused-draft.json");

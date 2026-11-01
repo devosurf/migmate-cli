@@ -7,7 +7,7 @@
 
 Destination containers have hard item limits. A Shared Drive holds 500,000 items, counting folders, shortcuts and trash, and Google refuses further items with `teamDriveFileLimitExceeded`. Migmate counts nothing at planning (ADR-0014 binds only the map) and treats that refusal as an ordinary failed pass. A 17M-file source needs at least 34 Shared Drives. We make `discover` count the source and propose a partitioned draft manifest for the operator to review; the plan still binds only the reviewed map.
 
-This records an accepted decision, not shipped behavior. Commands, runtime and operator documentation stay unchanged until it is implemented.
+Implemented in [#114](https://github.com/devosurf/migmate-cli/issues/114). Files-only roots may hold other mappings' roots beneath them on either side, since they cover only their own files; equal roots, and roots beneath a recursive root, still overlap. Dropbox team folders and SharePoint libraries have no established hard limit yet, so their containers split by size only when the operator gives a capacity target.
 
 ## Decisions
 

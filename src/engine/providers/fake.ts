@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setImmediate } from "node:timers/promises";
 import type { CheckResult } from "../types.ts";
+import type {
+  BoundaryKind,
+  BoundaryMember,
+  DiscoveredBoundary,
+  DiscoveredFolder,
+  SourceDiscovery,
+} from "../partition.ts";
 import { ProviderFault } from "./fault.ts";
 import {
   googleSourceName,
@@ -144,7 +151,20 @@ export interface FakeDestinationContainerFixture {
   inheritsPermissions?: boolean;
 }
 
+/** An access boundary rooted at a source folder, for fake discovery. */
+export interface FakeSourceBoundaryFixture {
+  id: string;
+  kind?: BoundaryKind;
+  name?: string;
+  rootId: string;
+  members?: BoundaryMember[] | null;
+}
+
 export interface FakeFileMigrationFixture {
+  /** The source provider fake discovery reports; manifest roots follow its root field. */
+  sourceProvider?: "google_shared_drive" | "sharepoint" | "dropbox";
+  /** Defaults to one boundary per source drive, at the drive's root. */
+  sourceBoundaries?: FakeSourceBoundaryFixture[];
   sourceDriveId: string;
   sourceRootId: string;
   destinationDriveId: string;
@@ -397,8 +417,18 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly passes = new Map<number, FakeCopyPass>();
   private passSeed = 0;
   private readonly copyPassScenarios: FakeCopyPassScenario[];
+  private readonly discoveryFixture: Pick<
+    FakeFileMigrationFixture,
+    "sourceProvider" | "sourceBoundaries"
+  >;
 
   constructor(fixture: FakeFileMigrationFixture) {
+    this.discoveryFixture = {
+      ...(fixture.sourceProvider ? { sourceProvider: fixture.sourceProvider } : {}),
+      ...(fixture.sourceBoundaries
+        ? { sourceBoundaries: structuredClone(fixture.sourceBoundaries) }
+        : {}),
+    };
     this.now = fixture.now ?? (() => new Date());
     this.destinationProvider = fixture.destinationProvider ?? "google_shared_drive";
     this.explicitDestinationProvider = fixture.destinationProvider !== undefined;
@@ -927,6 +957,59 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.unreadableSourceDrives.add(driveId);
   }
 
+  async discoverSource(): Promise<SourceDiscovery> {
+    this.callLog.push("discoverSource");
+    const provider = this.discoveryFixture.sourceProvider ?? "sharepoint";
+    const roots = Object.values(this.sourceById).filter((item) => item.parentId === null);
+    const fixtures: FakeSourceBoundaryFixture[] =
+      this.discoveryFixture.sourceBoundaries ??
+      roots.map((root) => ({ id: root.driveId, rootId: root.id, members: [] }));
+    const byRoot = new Map(fixtures.map((boundary) => [boundary.rootId, boundary]));
+    const parentOf = (rootId: string): string | undefined => {
+      for (let id = this.sourceById[rootId]?.parentId; id; id = this.sourceById[id]?.parentId)
+        if (byRoot.has(id)) return byRoot.get(id)!.id;
+      return undefined;
+    };
+    const walk = (folder: MutableSourceEntry, name: string): DiscoveredFolder => {
+      const node: DiscoveredFolder = { name, files: 0, folders: [] };
+      if (provider === "google_shared_drive") node.id = folder.id;
+      for (const id of this.sourceChildrenByParent[folder.id] ?? []) {
+        const child = this.sourceById[id]!;
+        if (child.kind !== "folder") node.files++;
+        else if (byRoot.has(child.id)) (node.nested ??= []).push(byRoot.get(child.id)!.id);
+        else node.folders.push(walk(child, child.name));
+      }
+      node.folders.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      return node;
+    };
+    const boundaries = fixtures.map((fixture): DiscoveredBoundary => {
+      const root = this.sourceById[fixture.rootId]!;
+      const path: string[] = [];
+      for (let item = root; item.parentId; item = this.sourceById[item.parentId]!)
+        path.unshift(item.name);
+      const parent = parentOf(root.id);
+      return {
+        id: fixture.id,
+        kind: fixture.kind ?? "sharepoint_library",
+        name: fixture.name ?? root.name,
+        root:
+          provider === "google_shared_drive"
+            ? { type: provider, driveId: root.driveId, folderId: root.id }
+            : { type: provider, driveId: root.driveId, folderPath: path.join("/") },
+        ...(parent ? { parent } : {}),
+        members: fixture.members === undefined ? [] : structuredClone(fixture.members),
+        tree: walk(root, ""),
+      };
+    });
+    boundaries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return {
+      sourceProvider: provider,
+      observedAt: this.now().toISOString(),
+      boundaries,
+      notices: [],
+    };
+  }
+
   async readSharedDrive(
     driveId: string,
     _signal?: AbortSignal,
@@ -1081,6 +1164,8 @@ export class FakeFileMigrationPort implements ProviderPort {
       reportedChecksum: null,
       provenance: input.marker ? { ...input.marker } : null,
       content: null,
+      // SharePoint folders carry their own URL, as Graph's driveItem.webUrl does.
+      ...(parent.webUrl ? { webUrl: `${parent.webUrl}/${encodeURIComponent(input.name)}` } : {}),
     };
     this.insertDestinationEntry(entry);
     this.reservedIds.delete(id);
@@ -1180,6 +1265,8 @@ export class FakeFileMigrationPort implements ProviderPort {
       for (const childId of children[id] ?? []) {
         const child = entries[childId];
         if (!child) continue;
+        // Like rclone's subdirectory exclusion: a files-only root has no folders.
+        if (root.filesOnly && sourceDirectory(child)) continue;
         const name = standardName(child.name);
         if (name === null) throw destinationFault("path_unrepresentable", 400);
         const path = `${prefix}${name}`;
@@ -1442,9 +1529,11 @@ export class FakeFileMigrationPort implements ProviderPort {
       : input.sourceType === "google_shared_drive"
         ? ("sharepoint" as const)
         : ("google_drive" as const);
+    const scope = input.filesOnly ? { filesOnly: true as const } : {};
     return {
       socketPath: this.workerState.socketPath,
       source: {
+        ...scope,
         fs: input.sourceItemId,
         kind:
           input.sourceType === "google_shared_drive"
@@ -1457,6 +1546,7 @@ export class FakeFileMigrationPort implements ProviderPort {
         fs: input.destFolderId,
         ignoreSizeAndChecksum: destinationKind === "sharepoint",
         kind: destinationKind,
+        ...scope,
       },
     };
   }

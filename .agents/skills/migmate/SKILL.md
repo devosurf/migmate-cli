@@ -33,9 +33,9 @@ Read [ROUTES.md](ROUTES.md) for runtime, workspace, command and route boundaries
 
 ## 1 — Scope
 
-Read [CREDENTIALS.md](CREDENTIALS.md) for discovery. Decide the file provider pair or archive scope, retained sites/libraries, destination creation versus existing roots, and names. Gather counts and sizes read-only; present every discovered library with a keep/drop recommendation and reasons for system-site exclusions. If discovery lacks prerequisites, perform phase 3's credential work first, then return here before loading a manifest. Read [ROUTES.md](ROUTES.md)'s provider pairs and roles, plus its reverse-route and Teams branches when applicable.
+Read [CREDENTIALS.md](CREDENTIALS.md) for discovery. Decide the file provider pair or archive scope, retained sites/libraries, destination creation versus existing roots, and names. Gather counts read-only with `discover`; present every discovered boundary and proposed container with a keep/drop recommendation and reasons for system-site exclusions. If discovery lacks prerequisites, perform phase 3's credential work first, then return here before loading a manifest. Read [ROUTES.md](ROUTES.md)'s provider pairs and roles, plus its reverse-route and Teams branches when applicable.
 
-**Complete when:** the human confirms a scope in which every discovered library is keep or drop and every retained scope has a destination decision.
+**Complete when:** the human confirms a scope in which every discovered boundary is keep or drop and every retained scope has a destination decision.
 
 ## 2 — Strategy
 

@@ -42,6 +42,24 @@ function readMappings(config: unknown): Mapping[] {
   });
 }
 
+/**
+ * ADR-0020 D5: roots of the containers this job created, so a resumed run can create a
+ * mapping's folder in one before any mapping resolves to it.
+ */
+function readContainerRoots(config: unknown): DestinationRoot[] {
+  const raw =
+    config && typeof config === "object" && "createdContainerRoots" in config
+      ? config.createdContainerRoots
+      : undefined;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((root: unknown) => {
+    const record = root && typeof root === "object" ? (root as Record<string, unknown>) : {};
+    return typeof record.destDriveId === "string" && typeof record.destFolderId === "string"
+      ? [{ destDriveId: record.destDriveId, destFolderId: record.destFolderId }]
+      : [];
+  });
+}
+
 /** Compose provider effects without owning provider implementation or lifecycle decisions. */
 export class FileEffects {
   readonly mappings: Mapping[];
@@ -60,11 +78,14 @@ export class FileEffects {
     this.mappings = input.destination ? [] : readMappings(input.config);
     this.#destinationRoots = input.destination
       ? [input.destination]
-      : this.mappings.flatMap((m) =>
-          m.destDriveId && m.destFolderId
-            ? [{ destDriveId: m.destDriveId, destFolderId: m.destFolderId }]
-            : [],
-        );
+      : [
+          ...this.mappings.flatMap((m) =>
+            m.destDriveId && m.destFolderId
+              ? [{ destDriveId: m.destDriveId, destFolderId: m.destFolderId }]
+              : [],
+          ),
+          ...readContainerRoots(input.config),
+        ];
     const pair = fileProviderPair(input.config);
     const adapterInput = {
       ...input,
@@ -97,9 +118,11 @@ export class FileEffects {
   async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
     if (input.sourceType !== undefined && input.sourceType !== this.#sourceProvider)
       throw new ProviderFault("unsupported_route", "The pass direction differs from its mapping.");
+    // The scope is the mapping's, not the backend's: adapters resolve whole roots.
+    const scope = input.filesOnly ? { filesOnly: true as const } : {};
     return {
-      source: await this.#source.resolveSourcePass(input),
-      destination: await this.#destination.resolveDestinationPass(input),
+      source: { ...(await this.#source.resolveSourcePass(input)), ...scope },
+      destination: { ...(await this.#destination.resolveDestinationPass(input)), ...scope },
     };
   }
 
@@ -112,8 +135,8 @@ export class FileEffects {
     return this.#effect(adapter, "readSharedDrive").call(adapter, ...input);
   }
 
-  async discoverSharePoint() {
-    return this.#effect(this.#source, "discoverSharePoint").call(this.#source);
+  async discoverSource(signal?: AbortSignal) {
+    return this.#effect(this.#source, "discoverSource").call(this.#source, signal);
   }
   async sourcePlanningEvidence(signal?: AbortSignal) {
     return this.#source.sourcePlanningEvidence?.(signal) ?? { evidence: {}, notices: [] };

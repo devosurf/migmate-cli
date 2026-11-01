@@ -5,6 +5,14 @@ import { CODE_BY_NAME } from "../codes.ts";
 import { canonicalJson } from "../store/digest.ts";
 import { validateMappingTrees } from "../manifest.ts";
 import {
+  containerKey,
+  containerRootId,
+  createdContainers,
+  createdDriveFor,
+  provisionedDestination,
+  sharingMappings,
+} from "./created-containers.ts";
+import {
   fileProviderPair,
   sameProviderPair,
   serverSideCopy,
@@ -59,10 +67,14 @@ export interface FileMappingConfig {
   destDriveId?: string;
   destFolderId?: string;
   destFolderPath?: string;
+  /** ADR-0020 D4: the pass covers only the files directly inside the source root. */
+  filesOnly?: true;
   createDrive?: {
     name: string;
     members: DriveMember[];
     siteId?: string;
+    /** ADR-0020 D5: the mapping's folder inside a container it may share; absent is the root. */
+    folderPath?: string;
     /** Once access management starts, removing members never restores inheritance. */
     manageAccess?: true;
   };
@@ -132,247 +144,370 @@ function destinationMapping(
   return { ...mapping, destDriveId: mapping.destDriveId, destFolderId: mapping.destFolderId };
 }
 
+type CreatingMapping = FileMappingConfig & {
+  createDrive: NonNullable<FileMappingConfig["createDrive"]>;
+};
+
 function provisionedMapping(ctx: FileContext, mapping: FileMappingConfig): FileMappingConfig {
-  if (!mapping.createDrive) return mapping;
-  const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
-  return drive?.driveId
-    ? {
-        ...mapping,
-        destDriveId: drive.driveId,
-        destFolderId: drive.rootFolderId ?? drive.driveId,
-      }
-    : mapping;
+  return provisionedDestination(ctx.resume.createdDrives, mapping);
 }
 
+/** Later mappings sharing a container find the record this run has just committed. */
+function remember(ctx: FileContext, drive: CreatedDrive): void {
+  ctx.resume.createdDrives = [
+    ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== drive.mappingId),
+    drive,
+  ];
+}
+
+function provisionUnit(ctx: FileContext, owner: string, key: string): CommitUnit {
+  return {
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["provision", owner, key]),
+    checkpoint: owner,
+    rows: [],
+    findings: [],
+  };
+}
+
+/** ADR-0020 D5: each container is created and proven once, then each mapping gets its folder. */
 async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
-  for (const mapping of ctx.config.mappings) {
-    if (!mapping.createDrive) continue;
-    await ctx.provider.validateDestinationCreation?.(mapping.createDrive);
-    let drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
-    const recovering = drive !== undefined;
-    const unit = (key: string): CommitUnit => ({
-      rev: ctx.revision,
-      phase: "execute",
-      unitKey: JSON.stringify(["provision", mapping.id, key]),
-      checkpoint: mapping.id,
-      rows: [],
-      findings: [],
-    });
-    if (!drive) {
-      drive = {
-        mappingId: mapping.id,
-        requestId: digest([basename(ctx.jobDirectory), mapping.id]),
-        name: mapping.createDrive.name,
-        driveId: null,
-        creatorEmail: await ctx.provider.destinationCreator(),
-        ...(mapping.createDrive.siteId ? { siteId: mapping.createDrive.siteId } : {}),
-        managedAccess: managesCreatedAccess(ctx.config, mapping),
-        intentAt: ctx.now().toISOString(),
-      };
-      yield { ...unit("intent"), createdDrive: drive };
-    }
-    if (!drive.driveId) {
-      const idempotent = fileProviderPair(ctx.config).destination.idempotentCreation;
-      const recover = async () => {
-        const matches = await ctx.provider.findDestinationContainers({
-          name: drive!.name,
-          ...(drive!.siteId ? { siteId: drive!.siteId } : {}),
-        });
-        if (matches.length > 1)
-          throw Object.assign(new Error("Several destination containers match the planned name."), {
-            code: "drive_creation_ambiguous",
-            detail: { mappingId: mapping.id, name: drive!.name, candidates: matches },
-          });
-        const match = matches[0];
-        if (
-          match &&
-          (idempotent
-            ? !(
-                drive!.intentAt &&
-                match.createdTime &&
-                Date.parse(match.createdTime) >= Date.parse(drive!.intentAt)
-              )
-            : !drive!.creationAttemptedAt || match.creationRequestId !== drive!.requestId)
-        )
-          throw Object.assign(
-            new Error("The matching container has no job-specific creation proof."),
-            {
-              code: "drive_creation_ambiguous",
-              detail: {
-                mappingId: mapping.id,
-                name: drive!.name,
-                intentAt: drive!.intentAt ?? null,
-                candidates: matches,
-              },
-            },
-          );
-        if (match)
-          drive = {
-            ...drive!,
-            provenance: idempotent
-              ? { kind: "name_recovery", createdTime: match.createdTime! }
-              : { kind: "request_marker", requestId: drive!.requestId },
-          };
-        return matches[0] ?? null;
-      };
-      let created = recovering ? await recover() : null;
-      if (!created) {
-        if (!idempotent) {
-          if (drive.creationAttemptedAt)
-            throw Object.assign(
-              new Error(
-                "A prior container creation attempt is not visible; refusing to create a duplicate.",
-              ),
-              {
-                code: "drive_creation_ambiguous",
-                detail: { mappingId: mapping.id, reason: "creation_outcome_unknown" },
-              },
-            );
-          drive = { ...drive, creationAttemptedAt: ctx.now().toISOString() };
-          const attempt = drive.rejectedCreationAttempts?.length ?? 0;
-          // Commit keys are idempotent, so each attempt after a rejection needs its own.
-          yield {
-            ...unit(attempt ? `creation-attempt:${attempt}` : "creation-attempt"),
-            createdDrive: drive,
-          };
-        }
-        let rejection: unknown = null;
-        try {
-          created = await ctx.provider.createDestinationContainer({
-            name: drive.name,
-            requestId: drive.requestId,
-            ...(drive.siteId ? { siteId: drive.siteId } : {}),
-          });
-          if (created) drive = { ...drive, provenance: { kind: "create_response" } };
-          else if (!idempotent) rejection = "conflict";
-        } catch (error) {
-          if (!idempotent && isCreationRejected(error)) rejection = error;
-          else if (
-            !(error instanceof TypeError) &&
-            !(error instanceof HttpProviderFault && retryableStatus(error.status))
-          )
-            throw error;
-        }
-        if (rejection) {
-          // The provider created nothing, so a later run may create once the cause is gone.
-          const { creationAttemptedAt, ...cleared } = drive;
-          drive = {
-            ...cleared,
-            rejectedCreationAttempts: [
-              ...(drive.rejectedCreationAttempts ?? []),
-              creationAttemptedAt!,
-            ],
-          };
-          yield {
-            ...unit(`creation-rejected:${drive.rejectedCreationAttempts!.length}`),
-            createdDrive: drive,
-          };
-          if (rejection !== "conflict") throw rejection;
-          // A conflict names a container without this job's proof: recovery refuses it.
-          await recover();
-          throw Object.assign(
-            new Error("The provider reported a name conflict that is not yet visible; retry."),
-            { code: "provider_request_failed", transient: true },
-          );
-        }
-        if (!created) created = await recover();
-        if (!created) {
-          if (!idempotent)
-            throw Object.assign(
-              new Error(
-                "The container creation response was lost and no candidate is visible; retry recovery, not creation.",
-              ),
-              {
-                code: "drive_creation_ambiguous",
-                detail: { mappingId: mapping.id, reason: "creation_outcome_unknown" },
-              },
-            );
-          created = await ctx.provider.createDestinationContainer({
-            name: drive.name,
-            requestId: drive.requestId,
-            ...(drive.siteId ? { siteId: drive.siteId } : {}),
-          });
-          if (created) drive = { ...drive, provenance: { kind: "create_response" } };
-        }
-        if (!created)
-          throw Object.assign(
-            new Error("Drive creation is not yet visible; retry the same request."),
-            {
-              code: "provider_request_failed",
-              transient: true,
-            },
-          );
-      }
-      drive = {
-        ...drive,
-        driveId: created.id,
-        ...(created.rootFolderId ? { rootFolderId: created.rootFolderId } : {}),
-      };
-      // The engine commits this yield before requesting the first permission.
-      yield { ...unit("created"), createdDrive: drive };
-    }
-    if (managesCreatedAccess(ctx.config, mapping) && !drive.managedAccess) {
-      drive = { ...drive, managedAccess: true };
-      yield { ...unit("managed-access"), createdDrive: drive };
-    }
-    if (managesCreatedAccess(ctx.config, mapping) && !drive.creatorEmail && !drive.initialMembers) {
-      await ctx.provider.prepareDestinationMembers(drive.driveId!);
-      const initialMembers = await ctx.provider.listDriveMembers(drive.driveId!);
-      // An observed ACL is not identity proof. Without a known creator, never
-      // bless arbitrary inherited/implicit grants as the pre-copy baseline.
-      if (initialMembers.length > 0)
-        throw new ProviderFault(
-          "preflight_failed",
-          "Initial destination access cannot be attributed to the migration identity. See CREDENTIALS.md.",
-          {
-            check: "destination_initial_access_unproven",
-            mappingId: mapping.id,
-            actual: initialMembers,
+  // Rows loaded before containers were shared may name one creation without being
+  // valid sharers; joining them would let two mappings write, or mirror, one tree.
+  for (const group of createdContainers(ctx.resume.createdDrives, ctx.config.mappings)) {
+    if (group.mappings.length < 2) continue;
+    const members = new Set(
+      group.mappings.map((m) =>
+        canonicalJson(
+          m
+            .createDrive!.members.map((member) => ({
+              ...member,
+              email: member.email.toLowerCase(),
+            }))
+            .sort((a, b) => (a.email < b.email ? -1 : a.email > b.email ? 1 : 0)),
+        ),
+      ),
+    );
+    if (members.size > 1 || group.mappings.some((m) => !m.createDrive!.folderPath && !m.filesOnly))
+      throw Object.assign(
+        new Error("Mappings naming one created container cannot share it: reload the manifest."),
+        {
+          code: "drive_creation_ambiguous",
+          detail: {
+            reason: "container_not_shareable",
+            mappingIds: group.mappings.map((m) => m.id),
           },
-        );
-      drive = { ...drive, initialMembers };
-      yield { ...unit("initial-members"), createdDrive: drive };
+        },
+      );
+  }
+  const validated = new Set<string>();
+  const provisioned = new Set<string>();
+  for (const planned of ctx.config.mappings) {
+    if (!planned.createDrive) continue;
+    const mapping = planned as CreatingMapping;
+    const key = containerKey(mapping.createDrive);
+    if (!validated.has(key)) {
+      validated.add(key);
+      await ctx.provider.validateDestinationCreation?.(mapping.createDrive);
     }
-    ctx.resume.createdDrives = [
-      ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== mapping.id),
-      drive,
-    ];
-    if (memberGrantTiming(ctx.config.options) === "before_copy")
-      yield* grantMembers(ctx, [mapping]);
+    let drive = createdDriveFor(ctx.resume.createdDrives, mapping);
+    if (!drive || !provisioned.has(drive.mappingId)) {
+      drive = yield* provisionContainer(ctx, mapping, drive);
+      provisioned.add(drive.mappingId);
+      if (memberGrantTiming(ctx.config.options) === "before_copy")
+        yield* grantMembers(ctx, [mapping]);
+    }
+    yield* provisionFolder(ctx, mapping, drive);
   }
 }
 
+async function* provisionContainer(
+  ctx: FileContext,
+  mapping: CreatingMapping,
+  found: CreatedDrive | undefined,
+): AsyncGenerator<CommitUnit, CreatedDrive> {
+  let drive = found;
+  const recovering = drive !== undefined;
+  // Units stay keyed by the creating mapping, as they were before containers were shared.
+  const owner = drive?.mappingId ?? mapping.id;
+  const unit = (key: string): CommitUnit => provisionUnit(ctx, owner, key);
+  if (!drive) {
+    drive = {
+      mappingId: mapping.id,
+      requestId: digest([basename(ctx.jobDirectory), mapping.id]),
+      name: mapping.createDrive.name,
+      driveId: null,
+      creatorEmail: await ctx.provider.destinationCreator(),
+      ...(mapping.createDrive.siteId ? { siteId: mapping.createDrive.siteId } : {}),
+      managedAccess: managesCreatedAccess(ctx.config, mapping),
+      intentAt: ctx.now().toISOString(),
+    };
+    yield { ...unit("intent"), createdDrive: drive };
+  }
+  if (!drive.driveId) {
+    const idempotent = fileProviderPair(ctx.config).destination.idempotentCreation;
+    const recover = async () => {
+      const matches = await ctx.provider.findDestinationContainers({
+        name: drive!.name,
+        ...(drive!.siteId ? { siteId: drive!.siteId } : {}),
+      });
+      if (matches.length > 1)
+        throw Object.assign(new Error("Several destination containers match the planned name."), {
+          code: "drive_creation_ambiguous",
+          detail: { mappingId: mapping.id, name: drive!.name, candidates: matches },
+        });
+      const match = matches[0];
+      if (
+        match &&
+        (idempotent
+          ? !(
+              drive!.intentAt &&
+              match.createdTime &&
+              Date.parse(match.createdTime) >= Date.parse(drive!.intentAt)
+            )
+          : !drive!.creationAttemptedAt || match.creationRequestId !== drive!.requestId)
+      )
+        throw Object.assign(
+          new Error("The matching container has no job-specific creation proof."),
+          {
+            code: "drive_creation_ambiguous",
+            detail: {
+              mappingId: mapping.id,
+              name: drive!.name,
+              intentAt: drive!.intentAt ?? null,
+              candidates: matches,
+            },
+          },
+        );
+      if (match)
+        drive = {
+          ...drive!,
+          provenance: idempotent
+            ? { kind: "name_recovery", createdTime: match.createdTime! }
+            : { kind: "request_marker", requestId: drive!.requestId },
+        };
+      return matches[0] ?? null;
+    };
+    let created = recovering ? await recover() : null;
+    if (!created) {
+      if (!idempotent) {
+        if (drive.creationAttemptedAt)
+          throw Object.assign(
+            new Error(
+              "A prior container creation attempt is not visible; refusing to create a duplicate.",
+            ),
+            {
+              code: "drive_creation_ambiguous",
+              detail: { mappingId: mapping.id, reason: "creation_outcome_unknown" },
+            },
+          );
+        drive = { ...drive, creationAttemptedAt: ctx.now().toISOString() };
+        const attempt = drive.rejectedCreationAttempts?.length ?? 0;
+        // Commit keys are idempotent, so each attempt after a rejection needs its own.
+        yield {
+          ...unit(attempt ? `creation-attempt:${attempt}` : "creation-attempt"),
+          createdDrive: drive,
+        };
+      }
+      let rejection: unknown = null;
+      try {
+        created = await ctx.provider.createDestinationContainer({
+          name: drive.name,
+          requestId: drive.requestId,
+          ...(drive.siteId ? { siteId: drive.siteId } : {}),
+        });
+        if (created) drive = { ...drive, provenance: { kind: "create_response" } };
+        else if (!idempotent) rejection = "conflict";
+      } catch (error) {
+        if (!idempotent && isCreationRejected(error)) rejection = error;
+        else if (
+          !(error instanceof TypeError) &&
+          !(error instanceof HttpProviderFault && retryableStatus(error.status))
+        )
+          throw error;
+      }
+      if (rejection) {
+        // The provider created nothing, so a later run may create once the cause is gone.
+        const { creationAttemptedAt, ...cleared } = drive;
+        drive = {
+          ...cleared,
+          rejectedCreationAttempts: [
+            ...(drive.rejectedCreationAttempts ?? []),
+            creationAttemptedAt!,
+          ],
+        };
+        yield {
+          ...unit(`creation-rejected:${drive.rejectedCreationAttempts!.length}`),
+          createdDrive: drive,
+        };
+        if (rejection !== "conflict") throw rejection;
+        // A conflict names a container without this job's proof: recovery refuses it.
+        await recover();
+        throw Object.assign(
+          new Error("The provider reported a name conflict that is not yet visible; retry."),
+          { code: "provider_request_failed", transient: true },
+        );
+      }
+      if (!created) created = await recover();
+      if (!created) {
+        if (!idempotent)
+          throw Object.assign(
+            new Error(
+              "The container creation response was lost and no candidate is visible; retry recovery, not creation.",
+            ),
+            {
+              code: "drive_creation_ambiguous",
+              detail: { mappingId: mapping.id, reason: "creation_outcome_unknown" },
+            },
+          );
+        created = await ctx.provider.createDestinationContainer({
+          name: drive.name,
+          requestId: drive.requestId,
+          ...(drive.siteId ? { siteId: drive.siteId } : {}),
+        });
+        if (created) drive = { ...drive, provenance: { kind: "create_response" } };
+      }
+      if (!created)
+        throw Object.assign(
+          new Error("Drive creation is not yet visible; retry the same request."),
+          {
+            code: "provider_request_failed",
+            transient: true,
+          },
+        );
+    }
+    drive = {
+      ...drive,
+      driveId: created.id,
+      ...(created.rootFolderId ? { rootFolderId: created.rootFolderId } : {}),
+    };
+    // The engine commits this yield before requesting the first permission.
+    yield { ...unit("created"), createdDrive: drive };
+  }
+  if (managesCreatedAccess(ctx.config, mapping) && !drive.managedAccess) {
+    drive = { ...drive, managedAccess: true };
+    yield { ...unit("managed-access"), createdDrive: drive };
+  }
+  if (managesCreatedAccess(ctx.config, mapping) && !drive.creatorEmail && !drive.initialMembers) {
+    await ctx.provider.prepareDestinationMembers(drive.driveId!);
+    const initialMembers = await ctx.provider.listDriveMembers(drive.driveId!);
+    // An observed ACL is not identity proof. Without a known creator, never
+    // bless arbitrary inherited/implicit grants as the pre-copy baseline.
+    if (initialMembers.length > 0)
+      throw new ProviderFault(
+        "preflight_failed",
+        "Initial destination access cannot be attributed to the migration identity. See CREDENTIALS.md.",
+        {
+          check: "destination_initial_access_unproven",
+          mappingId: mapping.id,
+          actual: initialMembers,
+        },
+      );
+    drive = { ...drive, initialMembers };
+    yield { ...unit("initial-members"), createdDrive: drive };
+  }
+  remember(ctx, drive);
+  return drive;
+}
+
+/**
+ * Create the mapping's folder chain inside its container. Each folder is committed before
+ * the next is looked up, so an uncommitted same-named folder is one whose commit was lost:
+ * it is adopted only while empty, since members of a live container may have made it.
+ */
+async function* provisionFolder(
+  ctx: FileContext,
+  mapping: CreatingMapping,
+  container: CreatedDrive,
+): AsyncGenerator<CommitUnit, void> {
+  const path = mapping.createDrive.folderPath;
+  if (!path) return;
+  let drive = container;
+  // Siblings a case-insensitive destination cannot hold apart are one folder.
+  const sibling = fileProviderPair(ctx.config).destination.destinationSiblingKey ?? ((n) => n);
+  let parent = containerRootId(drive)!;
+  const parts = path.split("/");
+  for (const [index, name] of parts.entries()) {
+    const prefix = parts.slice(0, index + 1).join("/");
+    ctx.signal?.throwIfAborted();
+    // Listing each level, recorded ones too, is what lets a fresh Dropbox or SharePoint
+    // adapter address the next: they know only folder IDs they have seen listed.
+    const children = await ctx.provider.listDestinationChildren(parent, ctx.signal);
+    const known = drive.folders?.[prefix];
+    if (known) {
+      if (!children.some((child) => child.id === known && child.kind === "folder"))
+        throw Object.assign(
+          new Error("A mapping folder this job created is gone from its container."),
+          {
+            code: "drive_creation_ambiguous",
+            detail: { mappingId: mapping.id, reason: "mapping_folder_missing", folderPath: prefix },
+          },
+        );
+      parent = known;
+      continue;
+    }
+    const matches = children.filter((child) => sibling(child.name) === sibling(name));
+    if (
+      matches.length > 1 ||
+      matches.some((child) => child.kind !== "folder") ||
+      (matches[0] && (await ctx.provider.listDestinationChildren(matches[0].id, ctx.signal)).length)
+    )
+      throw Object.assign(
+        new Error("The mapping folder's name is already taken inside its created container."),
+        {
+          code: "drive_creation_ambiguous",
+          detail: {
+            mappingId: mapping.id,
+            reason: "mapping_folder_taken",
+            folderPath: prefix,
+            candidates: matches.length,
+          },
+        },
+      );
+    const at = ctx.now().toISOString();
+    const folder =
+      matches[0] ??
+      (await ctx.provider.createDestinationFolder({
+        parentFolderId: parent,
+        name,
+        createdAt: at,
+        modifiedAt: at,
+      }));
+    drive = { ...drive, folders: { ...drive.folders, [prefix]: folder.id } };
+    remember(ctx, drive);
+    yield { ...provisionUnit(ctx, drive.mappingId, `folder:${prefix}`), createdDrive: drive };
+    parent = folder.id;
+  }
+}
+
+/** Grants belong to a container: each is granted once, whichever mappings share it. */
 async function* grantMembers(
   ctx: FileContext,
   mappings = ctx.config.mappings,
 ): AsyncIterable<CommitUnit> {
+  const granted = new Set<string>();
   for (const mapping of mappings) {
     if (!mapping.createDrive || !managesCreatedAccess(ctx.config, mapping)) continue;
-    const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
+    const drive = createdDriveFor(ctx.resume.createdDrives, mapping);
     if (!drive?.driveId) throw new Error("Member grants require a durable created drive");
-    const unit = (key: string): CommitUnit => ({
-      rev: ctx.revision,
-      phase: "execute",
-      unitKey: JSON.stringify(["provision", mapping.id, key]),
-      checkpoint: mapping.id,
-      rows: [],
-      findings: [],
-    });
+    if (granted.has(drive.mappingId)) continue;
+    granted.add(drive.mappingId);
+    const unit = (key: string): CommitUnit => provisionUnit(ctx, drive.mappingId, key);
     if (mapping.createDrive.members.length)
       await ctx.provider.prepareDestinationMembers(drive.driveId);
     for (const member of mapping.createDrive.members) {
       if (
         ctx.resume.memberGrants?.some(
           (grant) =>
-            grant.mappingId === mapping.id &&
-            grant.driveId === drive!.driveId &&
+            grant.driveId === drive.driveId &&
             grant.member.email === member.email &&
             grant.member.type === member.type &&
             grant.member.role === member.role,
         )
       )
         continue;
-      const members = await ctx.provider.listDriveMembers(drive.driveId!);
+      const members = await ctx.provider.listDriveMembers(drive.driveId);
       if (
         !members.some(
           (m) =>
@@ -381,12 +516,12 @@ async function* grantMembers(
             m.role === member.role,
         )
       )
-        await ctx.provider.addDriveMember(drive.driveId!, member);
+        await ctx.provider.addDriveMember(drive.driveId, member);
       yield {
         ...unit(`member:${digest(member)}`),
         memberGrant: {
-          mappingId: mapping.id,
-          driveId: drive.driveId!,
+          mappingId: drive.mappingId,
+          driveId: drive.driveId,
           member,
           ...(memberGrantTiming(ctx.config.options) === "after_verification"
             ? { at: ctx.now().toISOString() }
@@ -447,29 +582,50 @@ export function destinationDigest(
   return hash.update("]").digest("hex");
 }
 
-async function destinationCheck(
+/**
+ * The container root as a pass destination. Go-live proof covers the whole container,
+ * every sharing mapping's folder included; for a mapping at the root it is the mapping's.
+ */
+async function containerPass(ctx: FileContext, mapping: FileMappingConfig, drive: CreatedDrive) {
+  // A files-only scope would stop the listing at the root's own files.
+  const { filesOnly: _, ...whole } = mapping;
+  return ctx.provider.resolveFilePass({
+    ...whole,
+    destDriveId: drive.driveId!,
+    destFolderId: containerRootId(drive)!,
+  });
+}
+
+/** One digest of the container's listing; md5 undefined lists it where sha256 is missing. */
+async function containerDigest(
   ctx: FileContext,
   mapping: FileMappingConfig,
   drive: CreatedDrive,
-): Promise<GoLiveCheck> {
-  const baseline = drive.verifiedDestination;
-  const pass = await ctx.provider.resolveFilePass(
-    destinationMapping(provisionedMapping(ctx, mapping)),
-  );
+  hashType: "sha256" | "quickxor" | "dropbox",
+  md5?: boolean,
+): Promise<{ digest: string; md5: boolean }> {
+  const pass = await containerPass(ctx, mapping, drive);
   const resources: Disposable[] = [];
   try {
     const files = indexListing(
       await ctx.provider.listFileHashes({
         socketPath: pass.socketPath,
         root: pass.destination,
-        hashType: baseline?.hashType ?? "sha256",
+        hashType,
         download: false,
         ...abortable(ctx),
       }),
     );
     resources.push(files);
-    const md5 = indexListing(
-      baseline?.md5
+    let needsMd5 = md5 ?? false;
+    if (md5 === undefined && hashType === "sha256")
+      for (const entry of files)
+        if (entry.hash === null) {
+          needsMd5 = true;
+          break;
+        }
+    const md5Listing = indexListing(
+      needsMd5
         ? await ctx.provider.listFileHashes({
             socketPath: pass.socketPath,
             root: pass.destination,
@@ -479,7 +635,7 @@ async function destinationCheck(
           })
         : [],
     );
-    resources.push(md5);
+    resources.push(md5Listing);
     const folders = indexListing(
       await ctx.provider.listFolders({
         socketPath: pass.socketPath,
@@ -489,20 +645,35 @@ async function destinationCheck(
       (path) => path,
     );
     resources.push(folders);
-    const observed = destinationDigest(files, md5, folders);
-    const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
-    return {
-      at: ctx.now().toISOString(),
-      status: matches ? "passed" : "failed",
-      check: matches ? "destination" : "destination_drift",
-      evidence: {
-        expectedDestinationDigest: baseline?.digest ?? null,
-        observedDestinationDigest: observed,
-      },
-    };
+    return { digest: destinationDigest(files, md5Listing, folders), md5: needsMd5 };
   } finally {
     for (const resource of resources) resource[Symbol.dispose]();
   }
+}
+
+async function destinationCheck(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  drive: CreatedDrive,
+): Promise<GoLiveCheck> {
+  const baseline = drive.verifiedDestination;
+  const { digest: observed } = await containerDigest(
+    ctx,
+    mapping,
+    drive,
+    baseline?.hashType ?? "sha256",
+    baseline?.md5 ?? false,
+  );
+  const matches = baseline?.revision === ctx.revision && baseline.digest === observed;
+  return {
+    at: ctx.now().toISOString(),
+    status: matches ? "passed" : "failed",
+    check: matches ? "destination" : "destination_drift",
+    evidence: {
+      expectedDestinationDigest: baseline?.digest ?? null,
+      observedDestinationDigest: observed,
+    },
+  };
 }
 
 function unavailableGoLiveCheck(
@@ -527,28 +698,64 @@ function unavailableGoLiveCheck(
   };
 }
 
+/** The members a created container should have now, its creator included. */
+function expectedMembers(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  drive: CreatedDrive,
+  granted: boolean,
+): DriveMembership[] {
+  const expected: DriveMembership[] = granted
+    ? [
+        ...(mapping.createDrive!.members.length
+          ? mapping.createDrive!.members
+          : (drive.initialMembers ?? [])),
+      ]
+    : [...(drive.initialMembers ?? [])];
+  if (
+    drive.creatorEmail &&
+    !expected.some(
+      (member) =>
+        member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
+    )
+  )
+    expected.push({
+      email: drive.creatorEmail,
+      type: "user",
+      role: fileProviderPair(ctx.config).destination.creatorRole,
+    });
+  return expected;
+}
+
+/** Shared containers name every mapping in them; a container of one keeps its old evidence. */
+function sharedBy(mappings: FileMappingConfig[]): Record<string, unknown> {
+  return mappings.length > 1 ? { mappingIds: mappings.map((mapping) => mapping.id) } : {};
+}
+
 /** Close checks the whole unfenced batch before authorizing any new access. */
 export async function* goLive(
   ctx: FileContext,
   verificationAt: string,
   recovery: { authorityDigest: string; acknowledgments: GoLiveAcknowledgment[] },
 ): AsyncIterable<CommitUnit> {
-  const affected = ctx.config.mappings.filter((mapping) =>
-    managesCreatedAccess(ctx.config, mapping),
-  );
-  const unit = (mapping: FileMappingConfig, drive: CreatedDrive, key: string): CommitUnit => ({
+  // One fence, one pre-grant check and one go-live check per container.
+  const affected = createdContainers(ctx.resume.createdDrives, ctx.config.mappings)
+    .filter((group) => group.mappings.some((m) => managesCreatedAccess(ctx.config, m)))
+    .map((group) => {
+      if (!group.drive?.driveId) throw new Error("Go-live requires a durable created drive");
+      return { mapping: group.mappings[0]!, drive: group.drive, mappings: group.mappings };
+    });
+  const unit = (drive: CreatedDrive, key: string): CommitUnit => ({
     rev: ctx.revision,
     phase: "execute",
     unitKey: key,
-    checkpoint: mapping.id,
+    checkpoint: drive.mappingId,
     rows: [],
     findings: [],
     createdDrive: drive,
   });
   const failures: Record<string, unknown>[] = [];
-  for (const mapping of affected) {
-    const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
-    if (!drive?.driveId) throw new Error("Go-live requires a durable created drive");
+  for (const { mapping, drive, mappings } of affected) {
     if (drive.goLive) continue;
     let check: GoLiveCheck;
     try {
@@ -559,13 +766,13 @@ export async function* goLive(
     // Always observe again on a fresh attempt: repair may have changed even a prior pass.
     drive.preGrantCheck = { revision: ctx.revision, verificationAt, check };
     yield unit(
-      mapping,
       drive,
       JSON.stringify(["pre-grant-check", drive.driveId, digest(drive.preGrantCheck)]),
     );
     if (check.status === "failed")
       failures.push({
-        mappingId: mapping.id,
+        mappingId: drive.mappingId,
+        ...sharedBy(mappings),
         driveId: drive.driveId,
         check: check.check,
         ...check.evidence,
@@ -579,19 +786,17 @@ export async function* goLive(
     });
 
   // Persist every fence before the first request, including later drives in a crash.
-  for (const mapping of affected) {
-    const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+  for (const { drive } of affected) {
     if (drive.goLive) continue;
     drive.goLive = { startedAt: ctx.now().toISOString(), revision: ctx.revision, verificationAt };
-    yield unit(mapping, drive, JSON.stringify(["go-live-fence", drive.driveId]));
+    yield unit(drive, JSON.stringify(["go-live-fence", drive.driveId]));
   }
   // Settled checks never substitute for missing or ambiguous grant checkpoints.
   yield* grantMembers({
     ...ctx,
     now: () => new Date(Math.max(ctx.now().getTime(), Date.parse(verificationAt) + 1)),
   });
-  for (const mapping of affected) {
-    const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+  for (const { mapping, drive, mappings } of affected) {
     const unsettled =
       drive.goLive?.revision === ctx.revision && drive.goLive.verificationAt === verificationAt
         ? unsettledGoLiveCheck(drive, recovery.authorityDigest, recovery.acknowledgments)
@@ -607,24 +812,7 @@ export async function* goLive(
       }
       drive.goLive = { ...drive.goLive!, destinationCheck: check };
     } else {
-      const expected = [
-        ...(mapping.createDrive!.members.length
-          ? mapping.createDrive!.members
-          : (drive.initialMembers ?? [])),
-      ];
-      if (
-        drive.creatorEmail &&
-        !expected.some(
-          (member) =>
-            member.type === "user" &&
-            member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
-        )
-      )
-        expected.push({
-          email: drive.creatorEmail,
-          type: "user",
-          role: fileProviderPair(ctx.config).destination.creatorRole,
-        });
+      const expected = expectedMembers(ctx, mapping, drive, true);
       const membershipOnly = checkedBeforeGrant(drive);
       try {
         const actual = await ctx.provider.listDriveMembers(drive.driveId!);
@@ -666,7 +854,6 @@ export async function* goLive(
       drive.goLive = { ...live, check };
     }
     yield unit(
-      mapping,
       drive,
       JSON.stringify([
         unsettled === "check" ? "go-live-check" : "go-live-destination-check",
@@ -676,7 +863,8 @@ export async function* goLive(
     );
     if (check.status === "failed")
       failures.push({
-        mappingId: mapping.id,
+        mappingId: drive.mappingId,
+        ...sharedBy(mappings),
         driveId: drive.driveId,
         check: check.check,
         ...check.evidence,
@@ -826,7 +1014,15 @@ async function destinationFolderDepth(
   return depth;
 }
 
-/** Provider-native inventory finds exceptional content omitted by transfer listings. */
+/** What the transfer backend lists as a directory: folders and OneNote notebooks. */
+function transferDirectory(entry: SourceEntry): boolean {
+  return entry.kind === "folder" || (entry.kind === "package" && entry.packageSections !== null);
+}
+
+/**
+ * Provider-native inventory finds exceptional content omitted by transfer listings.
+ * A files-only root's folders are outside its mapping, so they raise nothing.
+ */
 async function* sourceContentFindings(
   ctx: FileContext,
   mapping: FileMappingConfig,
@@ -856,6 +1052,7 @@ async function* sourceContentFindings(
     );
     for (const child of children.uniqueValues()) {
       ctx.signal?.throwIfAborted();
+      if (mapping.filesOnly && transferDirectory(child)) continue;
       const previous = names.get(child.name);
       if (!previous) names.add({ name: child.name, first: child.id });
       else if (previous.first !== child.id && previous.second === undefined) {
@@ -865,6 +1062,7 @@ async function* sourceContentFindings(
     }
     for (const child of children.uniqueValues()) {
       ctx.signal?.throwIfAborted();
+      if (mapping.filesOnly && transferDirectory(child)) continue;
       const path = parent.path ? `${parent.path}/${child.name}` : child.name;
       if (child.kind === "folder" && !folders.has(child.id)) folders.add({ id: child.id, path });
       const collision = names.get(child.name);
@@ -1122,6 +1320,8 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
     evidence.destinationFileId = mapping.destFolderId ?? null;
     evidence.fileScope = {
       mapOnly: true,
+      // The plan binds the narrower scope, so changing it is a new plan.
+      ...(mapping.filesOnly ? { filesOnly: true } : {}),
       ...(sourceDisclosures.length ? { sourceDisclosures } : {}),
       ...(sourcePlanning && Object.keys(sourcePlanning.evidence).length
         ? { sourceObservation: sourcePlanning.evidence }
@@ -1267,10 +1467,15 @@ async function destinationConstraints(
     checkPaths: !planning || !pendingCreation,
     sourceDriveId: mapping.sourceDriveId,
     sourceItemId: mapping.sourceItemId,
+    ...(mapping.filesOnly ? { filesOnly: true } : {}),
     root: {
       ...(root?.webUrl ? { webUrl: root.webUrl } : {}),
       ...(mapping.createDrive
-        ? { folderDepth: 0 }
+        ? {
+            folderDepth: mapping.createDrive.folderPath
+              ? mapping.createDrive.folderPath.split("/").length
+              : 0,
+          }
         : mapping.destFolderPath !== undefined
           ? { folderDepth: mapping.destFolderPath ? mapping.destFolderPath.split("/").length : 0 }
           : {}),
@@ -1585,7 +1790,8 @@ async function* copyPass(
   try {
     ctx.signal?.throwIfAborted();
     if (ctx.config.options?.mirror) {
-      const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
+      // Provenance is the container's; the pass itself deletes only inside this mapping's folder.
+      const drive = createdDriveFor(ctx.resume.createdDrives, mapping);
       const proven =
         drive?.provenance?.kind === "create_response" ||
         (drive?.provenance?.kind === "request_marker" &&
@@ -1805,6 +2011,9 @@ async function* copyPass(
   }
 }
 
+/** Containers whose membership this verification run has observed, so each is checked once. */
+const membershipChecked = new WeakMap<FileContext, Set<string>>();
+
 /** A created drive whose actual members differ from those due at this point. */
 async function membershipUnit(
   ctx: FileContext,
@@ -1813,28 +2022,18 @@ async function membershipUnit(
   done: number,
 ): Promise<CommitUnit | undefined> {
   if (!mapping.createDrive || !managesCreatedAccess(ctx.config, mapping)) return undefined;
-  const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
+  const drive = createdDriveFor(ctx.resume.createdDrives, mapping);
   if (!drive?.driveId) throw new Error("Verification requires the durable created drive");
-  const expected: DriveMembership[] =
-    memberGrantTiming(ctx.config.options) === "before_copy" || drive.goLive
-      ? [
-          ...(mapping.createDrive.members.length
-            ? mapping.createDrive.members
-            : (drive.initialMembers ?? [])),
-        ]
-      : [...(drive.initialMembers ?? [])];
-  if (
-    drive.creatorEmail &&
-    !expected.some(
-      (member) =>
-        member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
-    )
-  )
-    expected.push({
-      email: drive.creatorEmail,
-      type: "user",
-      role: fileProviderPair(ctx.config).destination.creatorRole,
-    });
+  const checked = membershipChecked.get(ctx) ?? new Set<string>();
+  membershipChecked.set(ctx, checked);
+  if (checked.has(drive.mappingId)) return undefined;
+  checked.add(drive.mappingId);
+  const expected = expectedMembers(
+    ctx,
+    mapping,
+    drive,
+    memberGrantTiming(ctx.config.options) === "before_copy" || Boolean(drive.goLive),
+  );
   const actual = await ctx.provider.listDriveMembers(drive.driveId);
   if (
     JSON.stringify(membershipIdentities(expected)) === JSON.stringify(membershipIdentities(actual))
@@ -1850,6 +2049,7 @@ async function membershipUnit(
     [
       finding(ctx, "verify", "drive_membership_mismatch", mapping.id, {
         mappingId: mapping.id,
+        ...sharedBy(sharingMappings(ctx.resume.createdDrives, ctx.config.mappings, mapping)),
         driveId: drive.driveId,
         expected,
         actual,
@@ -1860,26 +2060,43 @@ async function membershipUnit(
   );
 }
 
-/** A1/A4 before A6: the destination listing a deferred go-live is later checked against. */
-function goLiveBaseline(
+/**
+ * A1/A4 before A6: the destination listing a deferred go-live is later checked against.
+ * A container shared by several mappings, or holding one in a folder, is listed whole
+ * once its last mapping is verified, exactly as go-live will list it.
+ */
+async function goLiveBaseline(
   ctx: FileContext,
   mapping: FileMappingConfig,
   observed: { hashType: "sha256" | "quickxor" | "dropbox"; md5: boolean; digest: string },
-): CommitUnit | undefined {
+): Promise<CommitUnit | undefined> {
   if (
     !managesCreatedAccess(ctx.config, mapping) ||
     memberGrantTiming(ctx.config.options) !== "after_verification"
   )
     return undefined;
-  const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
+  const drive = createdDriveFor(ctx.resume.createdDrives, mapping)!;
   // A new verification must never erase the original go-live content fence.
   if (drive.goLive) return undefined;
-  drive.verifiedDestination = { revision: ctx.revision, ...observed };
+  const sharing = sharingMappings(ctx.resume.createdDrives, ctx.config.mappings, mapping);
+  // A files-only mapping's own listing omits the container's folders, so it never stands in.
+  const wholeContainer =
+    sharing.length === 1 && !mapping.createDrive?.folderPath && !mapping.filesOnly;
+  if (!wholeContainer && sharing.at(-1)?.id !== mapping.id) return undefined;
+  drive.verifiedDestination = {
+    revision: ctx.revision,
+    ...(wholeContainer
+      ? observed
+      : {
+          hashType: observed.hashType,
+          ...(await containerDigest(ctx, mapping, drive, observed.hashType)),
+        }),
+  };
   return {
     rev: ctx.revision,
     phase: "verify",
-    unitKey: JSON.stringify(["verified-destination", mapping.id]),
-    checkpoint: mapping.id,
+    unitKey: JSON.stringify(["verified-destination", drive.mappingId]),
+    checkpoint: drive.mappingId,
     rows: [],
     findings: [],
     createdDrive: drive,
@@ -1907,7 +2124,11 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
       yield membership;
     }
     const planRow = plannedScope(ctx, mapping);
-    if (planRow?.jobType !== "file_migration" || !planRow.fileScope?.mapOnly)
+    if (
+      planRow?.jobType !== "file_migration" ||
+      !planRow.fileScope?.mapOnly ||
+      Boolean(planRow.fileScope.filesOnly) !== Boolean(mapping.filesOnly)
+    )
       throw new FilePlanRevisionRequiredError();
     const pass = await ctx.provider.resolveFilePass(destinationMapping(mapping));
     const sameProvider = sameProviderPair({
@@ -2402,7 +2623,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           ++done,
         );
       }
-      const baseline = goLiveBaseline(ctx, mapping, {
+      const baseline = await goLiveBaseline(ctx, mapping, {
         hashType: primaryHash,
         md5: needsMd5,
         digest: destinationDigest(destinations, destinationMd5, destinationFolders),
@@ -2457,11 +2678,17 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
 
 async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
   yield { title: "Migration stage", format: "text", body: ctx.stage ?? "unstaged" };
+  const filesOnly = ctx.config.mappings.filter((m) => m.filesOnly).map((m) => m.id);
   yield {
     title: "Approval and verification",
     format: "text",
     body: [
       "Approval binds mapping roots, drives, members and options, not a per-file inventory.",
+      ...(filesOnly.length
+        ? [
+            `Files-only mappings (${filesOnly.join(", ")}) copy, verify and mirror only the files directly inside their roots; folders on either side are outside them and never created, compared or deleted.`,
+          ]
+        : []),
       ...(sameProviderPair(fileProviderPair(ctx.config))
         ? [
             "Same-provider route: files only. Identities, mailboxes and domain cutover are outside this job.",
@@ -2546,7 +2773,15 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       title: "Created destination containers and members",
       format: "text",
       body: JSON.stringify({
-        drives: ctx.resume.createdDrives,
+        // A container shared by several mappings names them all; its folders map each one.
+        drives: ctx.resume.createdDrives.map((drive) => ({
+          ...drive,
+          ...sharedBy(
+            ctx.config.mappings.filter(
+              (mapping) => createdDriveFor(ctx.resume.createdDrives, mapping) === drive,
+            ),
+          ),
+        })),
         grants: ctx.resume.memberGrants ?? [],
       }),
     };
@@ -2625,7 +2860,9 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
   const mirrorWarnings = [];
   if (ctx.config.options?.mirror)
     for (const mapping of ctx.config.mappings) {
-      const driveId = provisionedMapping(ctx, mapping).destDriveId;
+      const driveId =
+        createdDriveFor(ctx.resume.createdDrives, mapping)?.driveId ??
+        provisionedMapping(ctx, mapping).destDriveId;
       const members = new Map(
         (ctx.resume.memberGrants ?? [])
           .filter((grant) => grant.mappingId === mapping.id || grant.driveId === driveId)
@@ -2702,6 +2939,11 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
           "Before go-live, failed or unavailable destination checks require repair and reverification; they cannot be acknowledged. After access starts, retry or explicitly acknowledge reviewed failed checks, then retry close; do not run another copy or mirror pass. Acknowledgment preserves failures, and unavailable checks remain unverified.",
         drives: goLiveDrives.map((drive) => ({
           mappingId: drive.mappingId,
+          ...sharedBy(
+            ctx.config.mappings.filter(
+              (mapping) => createdDriveFor(ctx.resume.createdDrives, mapping) === drive,
+            ),
+          ),
           driveId: drive.driveId,
           ...drive.goLive,
           ...([drive.goLive?.check, drive.goLive?.destinationCheck].some(
@@ -2746,6 +2988,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
   };
   for (const mapping of ctx.config.mappings) {
     const planned = plannedScope(ctx, mapping);
+    const folder = provisionedMapping(ctx, mapping);
     const sourcePlanning = ctx.reportEvidence
       ? ctx.reportEvidence.sourcePlanning(mapping.id)
       : planned?.jobType === "file_migration"
@@ -2761,6 +3004,16 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
             sourceItemId: mapping.sourceItemId,
             destDriveId: mapping.destDriveId,
             destFolderId: mapping.destFolderId,
+            scope: mapping.filesOnly ? "files_only" : "recursive",
+            // ADR-0020 D5: a mapping in a folder of its created container names both.
+            ...(mapping.createDrive?.folderPath
+              ? {
+                  destDriveId: folder.destDriveId,
+                  destFolderId: folder.destFolderId,
+                  destinationContainer: mapping.createDrive.name,
+                  destinationFolderPath: mapping.createDrive.folderPath,
+                }
+              : {}),
             revision: ctx.revision,
             ...(sourcePlanning?.sourceObservation
               ? { sourceObservation: sourcePlanning.sourceObservation }

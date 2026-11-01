@@ -56,12 +56,18 @@ export interface GoLiveCheck {
 }
 
 export interface CreatedDrive {
+  /** The mapping that created it; mappings sharing it find it by name and parent. */
   mappingId: string;
   requestId: string;
   name: string;
   driveId: string | null;
   /** Container identity and root item identity differ on SharePoint. */
   rootFolderId?: string;
+  /**
+   * ADR-0020 D5: folders created for mappings sharing this container, by container-relative
+   * path (every ancestor included), so a resumed run never creates one twice.
+   */
+  folders?: Record<string, string>;
   siteId?: string;
   /** Monotonic: clearing a manifest's members never restores inherited access. */
   managedAccess?: boolean;
@@ -105,6 +111,7 @@ export interface CreatedDrive {
   };
 }
 export interface MemberGrant {
+  /** The container's creating mapping: grants belong to the container, not each mapping. */
   mappingId: string;
   driveId: string;
   member: DriveMember;
@@ -389,6 +396,8 @@ export interface ApprovalAuthority {
   }[];
   accessChanges: {
     mappingId: string;
+    /** Every mapping sharing the created container whose access this is. */
+    mappingIds?: string[];
     email: string;
     type: string;
     role: string;
@@ -474,6 +483,8 @@ export interface FileItemRow extends RowBase {
   provenanceState: "none" | "marked" | "verified" | "drifted";
   mapping?: FileMappingConfig;
   mappingPass?: MappingPass;
+  /** The plan row of a mapping that covers only its root's direct files (ADR-0020 D4). */
+  filesOnly?: true;
   sourceDisclosures?: readonly string[];
   sourceObservation?: Record<string, unknown>;
   destinationConstraint?: DestinationConstraintEvidence;

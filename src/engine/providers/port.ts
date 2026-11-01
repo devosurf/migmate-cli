@@ -1,6 +1,6 @@
 import type { CheckResult, JobType } from "../types.ts";
 import type { ArchiveProvider } from "./archive.ts";
-import type { SharePointDiscovery } from "./discovery.ts";
+import type { SourceDiscovery } from "../partition.ts";
 
 export type SourceItemKind = "file" | "folder" | "package" | "reference" | "undownloadable";
 export type DestinationItemKind = "file" | "folder" | "shortcut" | "document";
@@ -78,6 +78,12 @@ export interface FilePassRoot {
   kind: "local" | "sharepoint" | "google_drive" | "dropbox";
   /** Backend compares timestamps because upload can rewrite size/checksum. */
   ignoreSizeAndChecksum?: boolean;
+  /**
+   * ADR-0020 D4: only the root's direct files. Its folders are outside the mapping:
+   * on the source they are split into other mappings, on the destination they belong
+   * to them. Listings, copies and mirror deletions never see them.
+   */
+  filesOnly?: true;
   /** Destination copies server side from a same-provider source (ADR-0018 D10). */
   serverSideCopy?: boolean;
 }
@@ -264,9 +270,12 @@ export interface ProviderPort extends FilePassProvider {
     sourceItemId: string;
     destDriveId: string;
     destFolderId: string;
+    /** Marks both resolved roots files-only (ADR-0020 D4). */
+    filesOnly?: true;
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
-  discoverSharePoint?(): Promise<SharePointDiscovery>;
+  /** ADR-0020 D1: read-only count of the source per access boundary; never job state. */
+  discoverSource?(signal?: AbortSignal): Promise<SourceDiscovery>;
   sourcePlanningEvidence?(signal?: AbortSignal): Promise<{
     evidence: Record<string, unknown>;
     notices: readonly string[];

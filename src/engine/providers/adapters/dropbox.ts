@@ -24,6 +24,8 @@ import {
   dropboxDestinationName,
   dropboxDestinationNameToStandard,
 } from "./rclone-name-encoding.ts";
+import { discoverDropbox } from "./dropbox-discovery.ts";
+import type { SourceDiscovery } from "../../partition.ts";
 
 interface Namespace {
   namespace_id: string;
@@ -110,10 +112,12 @@ export class DropboxAdapter implements FileAdapter {
     signal?: AbortSignal,
     content = false,
     selectUser = false,
-    role: "source" | "destination" = "source",
+    role: "source" | "destination" | "discovery" = "source",
   ): Promise<Response> {
     const host = content ? "content.dropboxapi.com" : "api.dropboxapi.com";
     const destination = role === "destination";
+    // Discovery reads as the source app but keeps error tags and acts as the admin.
+    const tagged = destination || role === "discovery";
     const adminId = destination
       ? this.#session.dropboxDestinationAdminId
       : this.#session.dropboxAdminId;
@@ -135,7 +139,7 @@ export class DropboxAdapter implements FileAdapter {
         ".tag": "namespace_id",
         namespace_id: namespace,
       });
-    } else if (destination && !endpoint.startsWith("team/")) {
+    } else if (tagged && !endpoint.startsWith("team/")) {
       // Sharing calls act in team-admin mode; team endpoints take the team token itself.
       headers["Dropbox-API-Select-Admin"] = requireAdmin();
     }
@@ -165,7 +169,7 @@ export class DropboxAdapter implements FileAdapter {
           : "";
       if (status === 409 && summary.startsWith("path/not_found/"))
         throw new HttpProviderFault(404, retryAfter);
-      throw destination
+      throw tagged
         ? new DropboxApiFault(status, retryAfter, summary, host)
         : new HttpProviderFault(status, retryAfter, undefined, host);
     }
@@ -495,6 +499,19 @@ export class DropboxAdapter implements FileAdapter {
       exportFormat: "html",
       recursiveListing: "folder_walk",
     };
+  }
+
+  async discoverSource(signal?: AbortSignal): Promise<SourceDiscovery> {
+    const evidence = await this.#session.evidence(signal);
+    const dropbox = evidence.dropbox as { grantedScopes?: unknown } | undefined;
+    return discoverDropbox({
+      grantedScopes: dropbox?.grantedScopes,
+      request: async <T>(endpoint: string, body: unknown, namespace?: string) =>
+        responseJson<T>(
+          await this.#response(endpoint, body, namespace, signal, false, false, "discovery"),
+        ),
+      ...(signal ? { signal } : {}),
+    });
   }
 
   async sourcePlanningEvidence(signal?: AbortSignal) {
@@ -921,6 +938,32 @@ export class DropboxAdapter implements FileAdapter {
       cursors.add(cursor);
     }
     return items;
+  }
+
+  /** ADR-0020 D5: a mapping's folder inside a team folder this job created. */
+  async createDestinationFolder(
+    input: Parameters<ProviderPort["createDestinationFolder"]>[0],
+  ): Promise<DestinationEntry> {
+    if (input.destinationId !== undefined || input.marker !== undefined)
+      throw new ProviderFault(
+        "unsupported_route",
+        "Dropbox folders take neither reserved IDs nor markers.",
+      );
+    const { namespace, path } = this.#folderNamespace(input.parentFolderId);
+    await this.#destinationNamespace(namespace);
+    // autorename false: a same-named entry refuses with a path conflict, never a renamed copy.
+    // https://www.dropbox.com/developers/documentation/http/documentation#files-create_folder_v2
+    const result = await this.#write<{ metadata: Omit<DropboxItem, ".tag"> }>(
+      "files/create_folder_v2",
+      { path: `${path}/${input.name}`, autorename: false },
+      namespace,
+    );
+    // The result carries FolderMetadata, not the tagged Metadata union.
+    return this.#destinationEntry(
+      { ...result.metadata, ".tag": "folder" },
+      namespace,
+      input.parentFolderId,
+    );
   }
 
   async resolveDestinationPass(input: FilePassInput): Promise<FilePassRoot> {

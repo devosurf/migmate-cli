@@ -33,7 +33,7 @@ function reviewTable(page: RowPage | null, query: ViewQuery): string {
   const cells = (row: Row): string => {
     const identity =
       row.jobType === "file_migration"
-        ? `<strong>${escapeHtml(row.relativePath)}</strong><small>Mapping ${escapeHtml(row.mappingId)} · Source ${escapeHtml(row.sourceItemId)}<br>Destination ${escapeHtml(row.destinationFileId ?? "not committed")}</small>${row.sourcePackageSections !== null && row.kind === "planned_omission" ? sourceLink(row.sourceWebUrl) : ""}`
+        ? `<strong>${escapeHtml(row.relativePath)}</strong><small>Mapping ${escapeHtml(row.mappingId)}${row.filesOnly || row.mapping?.filesOnly ? " · files only" : ""} · Source ${escapeHtml(row.sourceItemId)}<br>Destination ${escapeHtml(row.destinationFileId ?? "not committed")}</small>${row.sourcePackageSections !== null && row.kind === "planned_omission" ? sourceLink(row.sourceWebUrl) : ""}`
         : `<strong>${escapeHtml(row.conversationId)}</strong><small>Scope entry ${escapeHtml(row.scopeEntryId)}</small>`;
     const evidence =
       row.jobType === "file_migration"
@@ -86,7 +86,7 @@ function authorityConfirmations(snapshot: WebSnapshot): string {
   const mirror = authority?.mirrorChanges ?? [];
   const access = authority?.accessChanges ?? [];
   return `${mirror.length ? `<section><h3>Changed mirror deletion authority</h3><ul>${mirror.map((change) => `<li>${escapeHtml(change.mappingId)}: ${escapeHtml(change.source)} → ${escapeHtml(change.destination)}; delete limit ${change.deleteLimit} (previous ${change.previousDeleteLimit ?? "none"})</li>`).join("")}</ul><p>These are authority limits, not predicted deletions. Actual deletions remain unknown until execution.</p><label class="confirmation"><input type="checkbox" name="confirmMirror" required>I confirm this changed set of mirror deletion authority and limits.</label></section>` : ""}
-    ${access.length ? `<section><h3>Changed access authority</h3><ul>${access.map((change) => `<li>${escapeHtml(change.mappingId)}: ${escapeHtml(change.email)} (${escapeHtml(change.type)}), ${escapeHtml(change.previousRole ?? "no approved role")} → ${escapeHtml(change.role)}; grant timing: ${escapeHtml(change.timing)}</li>`).join("")}</ul><p>These identities have no verified internal/external classification.</p><label class="confirmation"><input type="checkbox" name="confirmAccess" required>I confirm this changed set of member grants and roles.</label></section>` : ""}`;
+    ${access.length ? `<section><h3>Changed access authority</h3><ul>${access.map((change) => `<li>${escapeHtml(change.mappingIds?.join(", ") ?? change.mappingId)}: ${escapeHtml(change.email)} (${escapeHtml(change.type)}), ${escapeHtml(change.previousRole ?? "no approved role")} → ${escapeHtml(change.role)}; grant timing: ${escapeHtml(change.timing)}</li>`).join("")}</ul><p>These identities have no verified internal/external classification.</p><label class="confirmation"><input type="checkbox" name="confirmAccess" required>I confirm this changed set of member grants and roles.</label></section>` : ""}`;
 }
 
 function decisionRecords(snapshot: WebSnapshot): string {
