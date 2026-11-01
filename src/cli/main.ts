@@ -857,8 +857,16 @@ async function executeCommand(
                   message:
                     error.code === "credential_interaction_required"
                       ? "Dropbox authorization requires a terminal: rerun creds init and paste the browser authorization code."
-                      : "Dropbox credential onboarding did not satisfy credential requirements.",
-                  detail: { check: error.code },
+                      : error.evidence.reason === "destination_reuses_source_app" ||
+                          error.evidence.reason === "source_reuses_destination_app"
+                        ? "This Dropbox app is already registered for the other direction; use a separate app for reads and writes."
+                        : "Dropbox credential onboarding did not satisfy credential requirements.",
+                  detail: {
+                    check: error.code,
+                    ...(typeof error.evidence.reason === "string"
+                      ? { reason: error.evidence.reason }
+                      : {}),
+                  },
                 },
               };
             throw error;

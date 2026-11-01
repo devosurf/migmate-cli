@@ -71,9 +71,10 @@ function setup(
   t: TestContext,
   type: JobType = "file_migration",
   signal = t.signal,
-  fileConfig: typeof CLI_JOB_CONFIG | typeof CLI_REVERSE_JOB_CONFIG = CLI_JOB_CONFIG,
+  fileConfig: { sourceProvider: string; destinationProvider: string } = CLI_JOB_CONFIG,
   homeName = "home",
   initialTime = FIXTURE_TIME,
+  route: { manifest?: unknown; env?: Record<string, string> } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), "migmate-cli-process-"));
   const home = join(root, homeName);
@@ -132,6 +133,7 @@ function setup(
           CLI_TEST_NOW: new Date(now).toISOString(),
           CLI_TEST_BLOCK_ON_ABORT: blockOnAbort ? "1" : "",
           CLI_TEST_ADMISSION_MARKER: admissionMarker,
+          ...route.env,
         },
         stdio: ["pipe", "pipe", "pipe", "ipc"],
         detached: true,
@@ -271,9 +273,12 @@ function setup(
     const init = await command<{ id: string }>(["init", "--type", type, "--config", config]);
     assert.equal(init.ok, true);
     const id = init.value.id;
-    if (type === "file_migration" && fileConfig.sourceProvider === "google_shared_drive") {
+    if (
+      type === "file_migration" &&
+      (route.manifest || fileConfig.sourceProvider === "google_shared_drive")
+    ) {
       const manifest = join(root, "reverse.json");
-      writeFileSync(manifest, JSON.stringify(CLI_REVERSE_MANIFEST));
+      writeFileSync(manifest, JSON.stringify(route.manifest ?? CLI_REVERSE_MANIFEST));
       await command(["manifest", "load", "--job", id, "--file", manifest]);
     }
     const plan = await command<PlanRevision>(["plan", "--job", id]);
@@ -362,6 +367,65 @@ for (const [direction, config] of [
     ]);
     const closed = await h.command<JobStatus>(["status", "--job", id]);
     assert.equal(closed.value.state, "closed");
+    assert.equal(h.destinationRecords().filter((item) => item.kind === "file").length, 8);
+  });
+}
+
+for (const sourceProvider of ["google_shared_drive", "sharepoint"] as const) {
+  it(`runs the real CLI into a fenced Dropbox team folder from ${sourceProvider}`, async (t) => {
+    const group = { groupId: "g:c1a0", type: "group", role: "writer" };
+    const h = setup(
+      t,
+      "file_migration",
+      t.signal,
+      {
+        sourceProvider,
+        destinationProvider: "dropbox",
+        options: { memberGrants: "after_verification", consistencyIntervalMs: 0 },
+      } as typeof CLI_REVERSE_JOB_CONFIG,
+      "home",
+      FIXTURE_TIME,
+      {
+        env: { CLI_TEST_DESTINATION_PROVIDER: "dropbox" },
+        manifest: {
+          version: 1,
+          mappings: [
+            {
+              id: "team",
+              source:
+                sourceProvider === "sharepoint"
+                  ? { type: "sharepoint", driveId: "src-drive", folderPath: "" }
+                  : { type: "google_shared_drive", driveId: "src-drive", folderId: "src-root" },
+              destination: { type: "dropbox", create: "Finance" },
+              members: [group],
+            },
+          ],
+        },
+      },
+    );
+    const id = await h.approve();
+    await h.command(["execute", "--job", id]);
+    const executed = await h.command<JobStatus>(["status", "--job", id]);
+    assert.deepEqual(executed.value.memberGrants, []);
+    await h.command(["verify", "--job", id]);
+    const ready = await h.command<JobStatus>(["status", "--job", id]);
+    assert.ok(ready.value.closeReview);
+    await h.command([
+      "close",
+      "--job",
+      id,
+      "--close-digest",
+      ready.value.closeReview.evidenceDigest,
+      "--approver",
+      "ci:process-contract",
+    ]);
+    const closed = await h.command<JobStatus>(["status", "--job", id]);
+    assert.equal(closed.value.state, "closed");
+    assert.equal(closed.value.createdDrives[0]?.goLive?.check?.status, "passed");
+    assert.deepEqual(
+      closed.value.memberGrants.map((grant) => grant.member),
+      [{ email: "g:c1a0", type: "group", role: "editor" }],
+    );
     assert.equal(h.destinationRecords().filter((item) => item.kind === "file").length, 8);
   });
 }

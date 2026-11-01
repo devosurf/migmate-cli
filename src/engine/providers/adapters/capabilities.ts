@@ -12,7 +12,7 @@ import { sharepointCredentialAdapter } from "./credentials/sharepoint.ts";
 import type { FileCredentialAdapter } from "./credentials/shared.ts";
 import type { AdapterInput, FileAdapter } from "./effects.ts";
 import { DropboxAdapter } from "./dropbox.ts";
-import { dropboxSourceName } from "./rclone-name-encoding.ts";
+import { dropboxCapabilities } from "./dropbox-capabilities.ts";
 import { dropboxCredentialAdapter } from "./credentials/dropbox.ts";
 
 export type FileProviderId = "sharepoint" | "google_shared_drive" | "dropbox";
@@ -60,14 +60,18 @@ export interface FileProviderCapabilities {
   ): readonly DestinationPathFinding[];
   preflight?: typeof googlePreflight;
   unreadableSources?: typeof unreadableSourceDrives;
-  hashType: "quickxor" | "sha256";
+  hashType: "quickxor" | "sha256" | "dropbox";
   ignoreSizeAndChecksum: boolean;
   uploadQuota: boolean;
   /** Whether observed destination uploads contribute to the engine-home account ledger. */
   ledgerAccountedUploads: boolean;
   quotaStop?(ctx: FileContext, error: string | null): UploadQuotaStop | undefined;
+  /** rclone retries this quota error, so its running error text must stop the pass. */
+  quotaWhileRunning?: boolean;
   creatorRole: DriveMember["role"];
   memberRole(role: unknown): DriveMember["role"] | undefined;
+  /** How manifests name members; Dropbox team folders take groups by group ID. */
+  memberIdentity?: "email" | "dropbox_group";
   rewritesPath(path: string): boolean;
 }
 
@@ -89,20 +93,7 @@ const providers: Record<FileProviderId, FileProviderAdapter> = {
     createEffects: (input) => new GoogleAdapter(input),
   },
   dropbox: {
-    id: "dropbox",
-    rcloneBackend: "dropbox",
-    rootField: "folderPath",
-    containerField: "namespaceId",
-    // Dropbox is source-only today; team-folder creation has no replay-safe request key.
-    idempotentCreation: false,
-    hashType: "sha256",
-    ignoreSizeAndChecksum: false,
-    uploadQuota: false,
-    ledgerAccountedUploads: false,
-    sourceName: dropboxSourceName,
-    creatorRole: "owner",
-    memberRole: () => undefined,
-    rewritesPath: () => false,
+    ...dropboxCapabilities,
     sourceDisclosures: [
       "Dropbox Paper documents export as .html when available; pinned rclone falls back to Markdown (.md) when HTML is unavailable. Visible files without either supported export raise blocking findings. .web files copy as pointers, not their Google-hosted targets.",
       "Pinned rclone v1.75.0 has no Dropbox ListR; recursive listing walks folders individually.",
@@ -153,7 +144,7 @@ export function fileProviderPair(config: unknown): {
     input.destinationProvider ??
       (source.id === "sharepoint" ? "google_shared_drive" : "sharepoint"),
   );
-  if (source.id === destination.id || destination.id === "dropbox")
+  if (source.id === destination.id)
     throw new ProviderFault(
       "unsupported_route",
       "The requested provider pair is not implemented.",

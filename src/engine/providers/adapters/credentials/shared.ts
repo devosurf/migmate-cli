@@ -10,6 +10,7 @@ export interface CredentialMaterial {
   graphDestination?: GraphCredential;
   google?: GoogleCredential;
   dropbox?: DropboxCredential;
+  dropboxDestination?: DropboxCredential;
 }
 
 export interface CredentialLoadContext {

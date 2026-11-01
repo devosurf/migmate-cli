@@ -1,10 +1,12 @@
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, readFile, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { parseCredentialIni, readCredentialFile } from "../engine/providers/credentials.ts";
 import {
   beginDropboxAuthorization,
   dropboxRemoteSettings,
   loadDropboxCredential,
+  type DropboxRole,
 } from "../engine/providers/adapters/credentials/dropbox.ts";
 import {
   decodeUtf8,
@@ -23,9 +25,52 @@ export async function onboardDropboxCredentials(input: {
   signal: AbortSignal;
 }): Promise<void> {
   const config = record(input.config);
-  if (config.sourceProvider !== "dropbox") return;
+  // Source first: a write app must never be mistaken for the read-only source.
+  if (config.sourceProvider === "dropbox") await onboardDropboxRole(input, "source");
+  if (config.destinationProvider === "dropbox") await onboardDropboxRole(input, "destination");
+}
+
+/**
+ * ADR-0018 D4: one Dropbox app is either the read-only source or a write destination.
+ * Every Dropbox grant passes through creds init, so this engine-home registry sees each
+ * app key before its first authorization. Only app keys and roles are kept; no secret.
+ */
+export async function claimDropboxApp(
+  home: string,
+  clientId: string,
+  role: DropboxRole,
+): Promise<void> {
+  const path = join(home, "dropbox-app-roles.json");
+  let roles: Record<string, unknown> = {};
+  try {
+    roles = record(JSON.parse(await readFile(path, "utf8")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      throw refused("credential_config_invalid", { provider: "dropbox" });
+  }
+  const claimed = Object.hasOwn(roles, clientId) ? roles[clientId] : undefined;
+  if (claimed === role) return;
+  if (claimed !== undefined)
+    throw refused("credential_permissions_invalid", {
+      provider: "dropbox",
+      reason:
+        role === "destination" ? "destination_reuses_source_app" : "source_reuses_destination_app",
+    });
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify({ ...roles, [clientId]: role }, null, 2)}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  });
+  await rename(temporary, path);
+}
+
+async function onboardDropboxRole(
+  input: { config: unknown; storeDirectory: string; io: Io; signal: AbortSignal },
+  role: DropboxRole,
+): Promise<void> {
+  const config = record(input.config);
   const rclone = record(config.rclone);
-  const remote = text(rclone.dropboxRemote);
+  const remote = text(role === "source" ? rclone.dropboxRemote : rclone.dropboxDestinationRemote);
   const ref = fileReference(rclone.config);
   const loaded = await readCredentialFile(ref, input.storeDirectory);
   let sections: Map<string, Map<string, string>> | undefined;
@@ -35,17 +80,18 @@ export async function onboardDropboxCredentials(input: {
     const section = sections.get(remote);
     if (!section) throw refused("credential_config_invalid");
     const settings = dropboxRemoteSettings(section);
+    await claimDropboxApp(input.storeDirectory, settings.clientId, role);
     if (section.has("migmate_scope_proof")) {
-      const credential = loadDropboxCredential(section);
+      const credential = loadDropboxCredential(section, role);
       credential.refreshToken.fill(0);
       return;
     }
     if (!input.io.stdin.isTTY || !input.io.stderr.isTTY)
       throw refused("credential_interaction_required", { provider: "dropbox" });
     input.signal.throwIfAborted();
-    const authorization = beginDropboxAuthorization(settings.clientId);
+    const authorization = beginDropboxAuthorization(settings.clientId, role);
     await input.io.stderr.write(
-      `Open this Dropbox authorization URL in your browser and approve the read-only team app as a team administrator:\n${authorization.url}\nPaste the authorization code (blank cancels): `,
+      `Open this Dropbox authorization URL in your browser and approve the ${role === "source" ? "read-only team app" : "destination write app"} as a team administrator:\n${authorization.url}\nPaste the authorization code (blank cancels): `,
     );
     const code = (await input.io.stdin.readLine(input.signal))?.trim();
     if (!code || input.signal.aborted)

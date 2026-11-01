@@ -106,6 +106,8 @@ export interface CopyPassStats {
   transferringTotal?: number;
   /** Whether the persisted in-flight sample omits entries. */
   transferringTruncated?: boolean;
+  /** rclone's latest error text; only provider quota detection reads it, never evidence. */
+  lastError?: string;
 }
 
 export interface FileHashEntry {
@@ -163,7 +165,7 @@ export interface FilePassProvider {
   listFileHashes(input: {
     socketPath: string;
     root: FilePassRoot;
-    hashType: "sha256" | "md5" | "quickxor";
+    hashType: "sha256" | "md5" | "quickxor" | "dropbox";
     download: boolean;
     /** Exact relative files to list and hash; an empty selection reads no files. */
     paths?: string[];
@@ -192,7 +194,16 @@ export interface DriveMember {
   email: string;
   type: "user" | "group";
   role:
-    "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader" | "read" | "write" | "owner";
+    | "organizer"
+    | "fileOrganizer"
+    | "writer"
+    | "commenter"
+    | "reader"
+    | "read"
+    | "write"
+    | "owner"
+    | "viewer"
+    | "editor";
 }
 export interface SharedDrive {
   id: string;

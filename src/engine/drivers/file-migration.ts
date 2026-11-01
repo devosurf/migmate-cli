@@ -1672,9 +1672,20 @@ async function* copyPass(
     yield unit();
     for (;;) {
       ctx.signal?.throwIfAborted();
-      const status = await ctx.provider.copyPassStatus(reference);
-      const stats = await ctx.provider.copyPassStats(reference);
+      let status = await ctx.provider.copyPassStatus(reference);
+      const { lastError, ...stats } = await ctx.provider.copyPassStats(reference);
       lastObservation = { bytes: stats.bytes, at: ctx.now() };
+      // rclone retries quota errors it does not classify (Dropbox's monthly limit);
+      // a match in its running error stops the pass instead of retrying for hours.
+      if (
+        status.state === "running" &&
+        lastError &&
+        fileProviderPair(ctx.config).destination.quotaWhileRunning &&
+        fileProviderPair(ctx.config).destination.quotaStop?.(ctx, lastError)
+      ) {
+        await stopAndReconcile();
+        status = { state: "failed", error: lastError };
+      }
       const transferring = stats.transferring.slice(0, 5);
       const transferringTotal = stats.transferringTotal ?? stats.transferring.length;
       const lastStats = {
@@ -1807,7 +1818,7 @@ async function membershipUnit(
 function goLiveBaseline(
   ctx: FileContext,
   mapping: FileMappingConfig,
-  observed: { hashType: "sha256" | "quickxor"; md5: boolean; digest: string },
+  observed: { hashType: "sha256" | "quickxor" | "dropbox"; md5: boolean; digest: string },
 ): CommitUnit | undefined {
   if (
     !managesCreatedAccess(ctx.config, mapping) ||
@@ -1857,7 +1868,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
     try {
       const list = async (
         side: FilePassRoot,
-        hashType: "quickxor" | "sha256" | "md5",
+        hashType: "quickxor" | "sha256" | "md5" | "dropbox",
         download = false,
         paths?: string[],
       ) => {
