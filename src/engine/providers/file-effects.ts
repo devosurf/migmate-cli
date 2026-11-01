@@ -3,7 +3,7 @@ import { ProviderFault } from "./fault.ts";
 import type { GraphTransport } from "./http.ts";
 import type { CheckResult } from "../types.ts";
 import type { ProviderPort } from "./port.ts";
-import { fileProviderPair, serverSideCopy } from "./adapters/capabilities.ts";
+import { fileProviderPair, sameProviderPair, serverSideCopy } from "./adapters/capabilities.ts";
 import type { DestinationRoot, Mapping, SourceWorker, FileAdapter } from "./adapters/effects.ts";
 
 function readMappings(config: unknown): Mapping[] {
@@ -71,7 +71,11 @@ export class FileEffects {
       mappings: this.mappings,
       destinationRoots: this.#destinationRoots,
     };
-    this.#source = pair.source.createEffects({ ...adapterInput, role: "source" });
+    this.#source = pair.source.createEffects({
+      ...adapterInput,
+      role: "source",
+      sameProvider: sameProviderPair(pair),
+    });
     this.#destination = pair.destination.createEffects({
       ...adapterInput,
       role: "destination",

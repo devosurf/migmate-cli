@@ -24,6 +24,8 @@ export interface SourceWorker {
 export interface AdapterInput {
   /** Which side of the pair this adapter serves; same-provider pairs build one of each. */
   role?: "source" | "destination";
+  /** A same-provider source never reads with the destination's write credential. */
+  sameProvider?: boolean;
   /** ADR-0018 D10: Google → Google inside one Workspace copies server side. */
   serverSideCopy?: boolean;
   mappings: Mapping[];

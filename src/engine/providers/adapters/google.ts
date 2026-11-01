@@ -168,6 +168,12 @@ export class GoogleAdapter implements FileAdapter {
     this.#destinationRoots = input.destinationRoots;
     this.#session = input.session;
     this.#separateSource = input.role === "source" && Boolean(input.session.googleSourceRemote);
+    if (input.role === "source" && input.sameProvider && !this.#separateSource)
+      throw new ProviderFault(
+        "credential_config_invalid",
+        "Google → Google needs a separate read-only source remote.",
+        { provider: "google", field: "googleSourceRemote" },
+      );
     this.#serverSideCopy = input.role === "destination" && input.serverSideCopy === true;
     for (const root of this.#destinationRoots)
       this.#destDrive.set(root.destFolderId, root.destDriveId);

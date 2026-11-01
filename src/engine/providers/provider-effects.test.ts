@@ -1557,3 +1557,24 @@ test("only Google → Google with the option selects server-side copy", () => {
     assert.equal(serverSideCopy({ ...config, options: { serverSideCopy: true } }), expected);
   }
 });
+
+test("Google → Google never falls back to the writer for source reads", () => {
+  assert.throws(
+    () =>
+      new FileEffects({
+        config: {
+          sourceProvider: "google_shared_drive",
+          destinationProvider: "google_shared_drive",
+          mappings: [mapping],
+        },
+        session: { ...session, destinationRemote: "google-write" },
+        graph,
+        worker: {
+          async *read() {
+            throw new Error("No bytes expected");
+          },
+        },
+      }),
+    { code: "credential_config_invalid" },
+  );
+});
