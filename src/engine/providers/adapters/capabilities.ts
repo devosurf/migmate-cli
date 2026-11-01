@@ -16,14 +16,18 @@ import { dropboxCredentialAdapter } from "./credentials/dropbox.ts";
 
 export type FileProviderId = "sharepoint" | "google_shared_drive" | "dropbox";
 export interface DestinationConstraintRoot {
+  /** Observed URL of the actual target folder, including any mapping wrapper. */
   webUrl?: string;
+  /** Decoded server-relative path; never a mapping-relative path or an encoded URL. */
   serverRelativePath?: string;
+  /** Number of folders between the container root and the actual target folder. */
   folderDepth?: number;
 }
 export interface DestinationPathFinding {
   code: string;
   message: string;
 }
+
 export interface FileProviderCapabilities {
   id: FileProviderId;
   rcloneBackend: string;
@@ -31,6 +35,28 @@ export interface FileProviderCapabilities {
   containerField?: "namespaceId";
   sourceDisclosures?: readonly string[];
   sourceEntryFindings?(entry: SourceEntry): readonly string[];
+  creationParent?: "siteId";
+  /** True only when replaying the durable request ID cannot create a second container. */
+  idempotentCreation: boolean;
+  /** Empty member manifests leave site access outside Migmate's go-live lifecycle. */
+  inheritsSiteAccess?: boolean;
+  /** Native basename to rclone STANDARD; null means no lossless JSON representation. */
+  sourceName?(nativeName: string): string | null;
+  /** rclone STANDARD basename to the actual native destination basename. */
+  destinationName?(standardName: string): string;
+  /** Comparison key for siblings the destination cannot hold together; absent allows duplicates. */
+  destinationSiblingKey?(name: string): string;
+  destinationNameFindings?(
+    name: string,
+    kind: "file" | "folder",
+  ): readonly DestinationPathFinding[];
+  /** Empty path checks root proof; nonempty paths contain projected destination segments. */
+  destinationPathFindings?(
+    path: string,
+    kind: "file" | "folder",
+    root?: DestinationConstraintRoot,
+    options?: { checkPaths?: boolean },
+  ): readonly DestinationPathFinding[];
   preflight?: typeof googlePreflight;
   unreadableSources?: typeof unreadableSourceDrives;
   hashType: "quickxor" | "sha256";
@@ -42,11 +68,6 @@ export interface FileProviderCapabilities {
   creatorRole: DriveMember["role"];
   memberRole(role: unknown): DriveMember["role"] | undefined;
   rewritesPath(path: string): boolean;
-  destinationPathFindings?(
-    path: string,
-    kind: "file" | "folder",
-    root?: DestinationConstraintRoot,
-  ): readonly DestinationPathFinding[];
 }
 
 interface FileProviderAdapter extends FileProviderCapabilities {
@@ -71,6 +92,8 @@ const providers: Record<FileProviderId, FileProviderAdapter> = {
     rcloneBackend: "dropbox",
     rootField: "folderPath",
     containerField: "namespaceId",
+    // Dropbox is source-only today; team-folder creation has no replay-safe request key.
+    idempotentCreation: false,
     hashType: "sha256",
     ignoreSizeAndChecksum: false,
     uploadQuota: false,

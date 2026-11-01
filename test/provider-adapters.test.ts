@@ -100,7 +100,7 @@ test("shared roles become native Google grants while supported native roles reta
   );
   await approve(h);
   value(await h.engine.withWriterResult(h.ref, (writer) => writer.execute()));
-  const drives = await h.port.findSharedDrives("Adapter roles");
+  const drives = await h.port.findDestinationContainers({ name: "Adapter roles" });
   assert.equal(drives.length, 1);
   const members = await h.port.listDriveMembers(drives[0]!.id);
   for (const role of roles)

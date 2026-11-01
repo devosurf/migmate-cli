@@ -10,6 +10,10 @@ import {
   type FileProviderCapabilities,
 } from "../providers/adapters/capabilities.ts";
 import { UploadLedgerError, type UploadAttempt } from "../store/uploads.ts";
+import {
+  collectDestinationConstraints,
+  type DestinationConstraint,
+} from "../providers/destination-constraints.ts";
 import type {
   CheckResult,
   CreatedDrive,
@@ -20,6 +24,7 @@ import type {
 import { checkedBeforeGrant, goLiveCheckSettled, unsettledGoLiveCheck } from "../go-live.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
 import { DiskListing, indexListing, disposeListing } from "../providers/listing.ts";
+import { ProviderFault } from "../providers/fault.ts";
 import type {
   CopyPassReference,
   DestinationEntry,
@@ -51,7 +56,13 @@ export interface FileMappingConfig {
   destDriveId?: string;
   destFolderId?: string;
   destFolderPath?: string;
-  createDrive?: { name: string; members: DriveMember[] };
+  createDrive?: {
+    name: string;
+    members: DriveMember[];
+    siteId?: string;
+    /** Once access management starts, removing members never restores inheritance. */
+    manageAccess?: true;
+  };
 }
 
 export interface FileMigrationConfig {
@@ -83,6 +94,19 @@ export function memberGrantTiming(
   return options?.memberGrants ?? (options?.staged ? "after_verification" : "before_copy");
 }
 
+/** Inherited site access is deliberately unmanaged and never claimed as fenced or checked. */
+export function managesCreatedAccess(
+  config: FileMigrationConfig,
+  mapping: FileMappingConfig,
+): boolean {
+  return Boolean(
+    mapping.createDrive &&
+    (!fileProviderPair(config).destination.inheritsSiteAccess ||
+      mapping.createDrive.manageAccess ||
+      mapping.createDrive.members.length),
+  );
+}
+
 const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
 
 type Phase = "plan" | "execute" | "verify";
@@ -104,13 +128,18 @@ function provisionedMapping(ctx: FileContext, mapping: FileMappingConfig): FileM
   if (!mapping.createDrive) return mapping;
   const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
   return drive?.driveId
-    ? { ...mapping, destDriveId: drive.driveId, destFolderId: drive.driveId }
+    ? {
+        ...mapping,
+        destDriveId: drive.driveId,
+        destFolderId: drive.rootFolderId ?? drive.driveId,
+      }
     : mapping;
 }
 
 async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
   for (const mapping of ctx.config.mappings) {
     if (!mapping.createDrive) continue;
+    await ctx.provider.validateDestinationCreation?.(mapping.createDrive);
     let drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
     const recovering = drive !== undefined;
     const unit = (key: string): CommitUnit => ({
@@ -127,32 +156,38 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
         requestId: digest([basename(ctx.jobDirectory), mapping.id]),
         name: mapping.createDrive.name,
         driveId: null,
-        creatorEmail: (await ctx.provider.googleAbout()).user.emailAddress,
+        creatorEmail: await ctx.provider.destinationCreator(),
+        ...(mapping.createDrive.siteId ? { siteId: mapping.createDrive.siteId } : {}),
+        managedAccess: managesCreatedAccess(ctx.config, mapping),
         intentAt: ctx.now().toISOString(),
       };
       yield { ...unit("intent"), createdDrive: drive };
     }
     if (!drive.driveId) {
+      const idempotent = fileProviderPair(ctx.config).destination.idempotentCreation;
       const recover = async () => {
-        const matches = await ctx.provider.findSharedDrives(drive!.name);
+        const matches = await ctx.provider.findDestinationContainers({
+          name: drive!.name,
+          ...(drive!.siteId ? { siteId: drive!.siteId } : {}),
+        });
         if (matches.length > 1)
-          throw Object.assign(new Error("Several Shared Drives match the planned name."), {
+          throw Object.assign(new Error("Several destination containers match the planned name."), {
             code: "drive_creation_ambiguous",
             detail: { mappingId: mapping.id, name: drive!.name, candidates: matches },
           });
         const match = matches[0];
         if (
           match &&
-          !(
-            drive!.intentAt &&
-            match.createdTime &&
-            Date.parse(match.createdTime) >= Date.parse(drive!.intentAt)
-          )
+          (idempotent
+            ? !(
+                drive!.intentAt &&
+                match.createdTime &&
+                Date.parse(match.createdTime) >= Date.parse(drive!.intentAt)
+              )
+            : !drive!.creationAttemptedAt || match.creationRequestId !== drive!.requestId)
         )
           throw Object.assign(
-            new Error(
-              "The matching Shared Drive has no creation evidence after this job's intent.",
-            ),
+            new Error("The matching container has no job-specific creation proof."),
             {
               code: "drive_creation_ambiguous",
               detail: {
@@ -166,16 +201,33 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
         if (match)
           drive = {
             ...drive!,
-            provenance: { kind: "name_recovery", createdTime: match.createdTime! },
+            provenance: idempotent
+              ? { kind: "name_recovery", createdTime: match.createdTime! }
+              : { kind: "request_marker", requestId: drive!.requestId },
           };
         return matches[0] ?? null;
       };
       let created = recovering ? await recover() : null;
       if (!created) {
+        if (!idempotent) {
+          if (drive.creationAttemptedAt)
+            throw Object.assign(
+              new Error(
+                "A prior container creation attempt is not visible; refusing to create a duplicate.",
+              ),
+              {
+                code: "drive_creation_ambiguous",
+                detail: { mappingId: mapping.id, reason: "creation_outcome_unknown" },
+              },
+            );
+          drive = { ...drive, creationAttemptedAt: ctx.now().toISOString() };
+          yield { ...unit("creation-attempt"), createdDrive: drive };
+        }
         try {
-          created = await ctx.provider.createSharedDrive({
+          created = await ctx.provider.createDestinationContainer({
             name: drive.name,
             requestId: drive.requestId,
+            ...(drive.siteId ? { siteId: drive.siteId } : {}),
           });
           if (created) drive = { ...drive, provenance: { kind: "create_response" } };
         } catch (error) {
@@ -187,9 +239,20 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
         }
         if (!created) created = await recover();
         if (!created) {
-          created = await ctx.provider.createSharedDrive({
+          if (!idempotent)
+            throw Object.assign(
+              new Error(
+                "The container creation response was lost and no candidate is visible; retry recovery, not creation.",
+              ),
+              {
+                code: "drive_creation_ambiguous",
+                detail: { mappingId: mapping.id, reason: "creation_outcome_unknown" },
+              },
+            );
+          created = await ctx.provider.createDestinationContainer({
             name: drive.name,
             requestId: drive.requestId,
+            ...(drive.siteId ? { siteId: drive.siteId } : {}),
           });
           if (created) drive = { ...drive, provenance: { kind: "create_response" } };
         }
@@ -202,9 +265,35 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
             },
           );
       }
-      drive = { ...drive, driveId: created.id };
+      drive = {
+        ...drive,
+        driveId: created.id,
+        ...(created.rootFolderId ? { rootFolderId: created.rootFolderId } : {}),
+      };
       // The engine commits this yield before requesting the first permission.
       yield { ...unit("created"), createdDrive: drive };
+    }
+    if (managesCreatedAccess(ctx.config, mapping) && !drive.managedAccess) {
+      drive = { ...drive, managedAccess: true };
+      yield { ...unit("managed-access"), createdDrive: drive };
+    }
+    if (managesCreatedAccess(ctx.config, mapping) && !drive.creatorEmail && !drive.initialMembers) {
+      await ctx.provider.prepareDestinationMembers(drive.driveId!);
+      const initialMembers = await ctx.provider.listDriveMembers(drive.driveId!);
+      // An observed ACL is not identity proof. Without a known creator, never
+      // bless arbitrary inherited/implicit grants as the pre-copy baseline.
+      if (initialMembers.length > 0)
+        throw new ProviderFault(
+          "preflight_failed",
+          "Initial destination access cannot be attributed to the migration identity. See CREDENTIALS.md.",
+          {
+            check: "destination_initial_access_unproven",
+            mappingId: mapping.id,
+            actual: initialMembers,
+          },
+        );
+      drive = { ...drive, initialMembers };
+      yield { ...unit("initial-members"), createdDrive: drive };
     }
     ctx.resume.createdDrives = [
       ...(ctx.resume.createdDrives ?? []).filter((d) => d.mappingId !== mapping.id),
@@ -220,7 +309,7 @@ async function* grantMembers(
   mappings = ctx.config.mappings,
 ): AsyncIterable<CommitUnit> {
   for (const mapping of mappings) {
-    if (!mapping.createDrive) continue;
+    if (!mapping.createDrive || !managesCreatedAccess(ctx.config, mapping)) continue;
     const drive = ctx.resume.createdDrives?.find((item) => item.mappingId === mapping.id);
     if (!drive?.driveId) throw new Error("Member grants require a durable created drive");
     const unit = (key: string): CommitUnit => ({
@@ -231,6 +320,8 @@ async function* grantMembers(
       rows: [],
       findings: [],
     });
+    if (mapping.createDrive.members.length)
+      await ctx.provider.prepareDestinationMembers(drive.driveId);
     for (const member of mapping.createDrive.members) {
       if (
         ctx.resume.memberGrants?.some(
@@ -404,7 +495,9 @@ export async function* goLive(
   verificationAt: string,
   recovery: { authorityDigest: string; acknowledgments: GoLiveAcknowledgment[] },
 ): AsyncIterable<CommitUnit> {
-  const affected = ctx.config.mappings.filter((mapping) => mapping.createDrive);
+  const affected = ctx.config.mappings.filter((mapping) =>
+    managesCreatedAccess(ctx.config, mapping),
+  );
   const unit = (mapping: FileMappingConfig, drive: CreatedDrive, key: string): CommitUnit => ({
     rev: ctx.revision,
     phase: "execute",
@@ -476,8 +569,13 @@ export async function* goLive(
       }
       drive.goLive = { ...drive.goLive!, destinationCheck: check };
     } else {
-      const expected = [...mapping.createDrive!.members];
+      const expected = [
+        ...(mapping.createDrive!.members.length
+          ? mapping.createDrive!.members
+          : (drive.initialMembers ?? [])),
+      ];
       if (
+        drive.creatorEmail &&
         !expected.some(
           (member) =>
             member.type === "user" &&
@@ -998,6 +1096,9 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
       ctx.config.options?.mirror ? "mirror" : "copy",
     );
     yield unit;
+    // Encoding disclosures are observations, not a frozen per-file approval scope.
+    if (fileProviderPair(ctx.config).destination.destinationName)
+      yield* publishDestinationConstraints(ctx, mapping, "plan", true);
   }
 }
 
@@ -1095,6 +1196,146 @@ function cutoverIncomplete(): Error {
   );
 }
 
+/**
+ * Name rules need the native walk, because rclone's flattened listing hides them,
+ * and that walk then also applies the destination's path rules. Path-only limits
+ * (Shared Drive depth) are checked from rclone listings before copy and at
+ * verification, so map-only routes into Google take no native source walk.
+ */
+function walksNativeConstraints(destination: FileProviderCapabilities): boolean {
+  return Boolean(
+    destination.destinationNameFindings ||
+    destination.destinationSiblingKey ||
+    destination.destinationName,
+  );
+}
+
+async function destinationConstraints(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  planning = false,
+): Promise<Iterable<DestinationConstraint>> {
+  const { source, destination } = fileProviderPair(ctx.config);
+  if (!walksNativeConstraints(destination)) return [];
+  const pendingCreation = Boolean(mapping.createDrive && !mapping.destDriveId);
+  const root = pendingCreation
+    ? null
+    : await ctx.provider.resolveDestinationFolder(destinationMapping(mapping));
+  return collectDestinationConstraints({
+    provider: ctx.provider,
+    source,
+    destination,
+    checkPaths: !planning || !pendingCreation,
+    sourceDriveId: mapping.sourceDriveId,
+    sourceItemId: mapping.sourceItemId,
+    root: {
+      ...(root?.webUrl ? { webUrl: root.webUrl } : {}),
+      ...(mapping.createDrive
+        ? { folderDepth: 0 }
+        : mapping.destFolderPath !== undefined
+          ? { folderDepth: mapping.destFolderPath ? mapping.destFolderPath.split("/").length : 0 }
+          : {}),
+    },
+    ...abortable(ctx),
+  });
+}
+
+function constraintUnit(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  phase: Phase,
+  conflict: DestinationConstraint,
+): CommitUnit {
+  const view = listedItem(
+    mapping.sourceDriveId,
+    conflict.sourceId,
+    conflict.path,
+    conflict.kind,
+    null,
+  );
+  const evidence = row(ctx, phase, mapping, view, conflict.code);
+  evidence.id = JSON.stringify([mapping.id, conflict.sourceId, phase, conflict.code]);
+  evidence.destinationDriveId = mapping.destDriveId ?? null;
+  evidence.destinationConstraint = {
+    blocking: conflict.blocking,
+    originalPath: conflict.path,
+    ...(typeof conflict.detail.encodedPath === "string"
+      ? { encodedPath: conflict.detail.encodedPath }
+      : {}),
+    ...(typeof conflict.detail.originalName === "string"
+      ? { originalName: conflict.detail.originalName }
+      : {}),
+    ...(typeof conflict.detail.encodedName === "string"
+      ? { encodedName: conflict.detail.encodedName }
+      : {}),
+  };
+  evidence.nextStep = conflict.blocking
+    ? "Fix the source name or path, then re-check; this mapping cannot proceed."
+    : `Destination name encoding: ${JSON.stringify(conflict.detail.originalPath)} → ${JSON.stringify(conflict.detail.encodedPath)}. The source name is unchanged.`;
+  return commit(
+    ctx,
+    phase,
+    evidence,
+    [
+      finding(ctx, phase, conflict.code, JSON.stringify([mapping.id, conflict.sourceId]), {
+        mappingId: mapping.id,
+        path: conflict.path,
+        sourceItemId: conflict.sourceId,
+        ...conflict.detail,
+      }),
+    ],
+    "destination-constraint",
+    0,
+  );
+}
+
+async function* publishDestinationConstraints(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  phase: Phase,
+  planning = false,
+): AsyncGenerator<CommitUnit, boolean> {
+  const constraints = await destinationConstraints(ctx, mapping, planning);
+  let blocked = false;
+  try {
+    for (const constraint of constraints) {
+      blocked ||= constraint.blocking;
+      yield constraintUnit(ctx, mapping, phase, constraint);
+    }
+    return blocked;
+  } finally {
+    disposeListing(constraints);
+  }
+}
+
+async function* checkDestinationConstraints(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  passNumber: number,
+): AsyncGenerator<CommitUnit, boolean> {
+  if (!(yield* publishDestinationConstraints(ctx, mapping, "execute"))) return true;
+  yield {
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["destination-constraints", mapping.id, passNumber]),
+    checkpoint: mapping.id,
+    rows: [],
+    findings: [],
+    mappingPass: {
+      ...pendingPass(
+        ctx.revision,
+        mapping.id,
+        passNumber,
+        ctx.config.options?.mirror ? "mirror" : "copy",
+      ),
+      status: "failed",
+      endedAt: ctx.now().toISOString(),
+      error: "Destination name/path conflicts require source repair before copying or settling.",
+    },
+  };
+  return false;
+}
+
 async function* copyMapping(
   ctx: FileContext,
   mapping: FileMappingConfig,
@@ -1136,6 +1377,8 @@ async function* copyMapping(
       const passNumber =
         state?.copyPassNumber ??
         (previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1);
+      // Native identities are checked before each copy and after every consistency wait.
+      if (!(yield* checkDestinationConstraints(ctx, mapping, passNumber))) return;
       const authorized = yield* mirrorDeletions(
         ctx,
         mapping,
@@ -1162,6 +1405,8 @@ async function* copyMapping(
     if (ctx.waitForConsistency)
       await ctx.waitForConsistency(state.consistencyIntervalMs, ctx.signal);
     else await delay(state.consistencyIntervalMs, undefined, { signal: ctx.signal });
+    // Preserve the completed copy's statistics; a newly blocked catch-up is a separate attempt.
+    if (!(yield* checkDestinationConstraints(ctx, mapping, state.copyPassNumber + 1))) return;
     const pending = await rclonePending(ctx, mapping);
     try {
       state.outcome =
@@ -1302,7 +1547,11 @@ async function* copyPass(
       const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
       const proven =
         drive?.provenance?.kind === "create_response" ||
-        (drive?.provenance?.kind === "name_recovery" &&
+        (drive?.provenance?.kind === "request_marker" &&
+          drive.creationAttemptedAt &&
+          drive.provenance.requestId === drive.requestId) ||
+        (fileProviderPair(ctx.config).destination.idempotentCreation &&
+          drive?.provenance?.kind === "name_recovery" &&
           drive.intentAt &&
           Date.parse(drive.provenance.createdTime) >= Date.parse(drive.intentAt));
       if (!mapping.createDrive || drive?.driveId !== mapping.destDriveId || !proven)
@@ -1347,7 +1596,7 @@ async function* copyPass(
         return;
       }
     }
-    if (destinationAdapter.destinationPathFindings) {
+    if (destinationAdapter.destinationPathFindings && !walksNativeConstraints(destinationAdapter)) {
       const constraintRoot = { folderDepth: await destinationFolderDepth(ctx, mapping) };
       const folders = await ctx.provider.listFolders({
         socketPath: resolved.socketPath,
@@ -1506,14 +1755,19 @@ async function membershipUnit(
   root: SourceView,
   done: number,
 ): Promise<CommitUnit | undefined> {
-  if (!mapping.createDrive) return undefined;
+  if (!mapping.createDrive || !managesCreatedAccess(ctx.config, mapping)) return undefined;
   const drive = ctx.resume.createdDrives?.find((d) => d.mappingId === mapping.id);
   if (!drive?.driveId) throw new Error("Verification requires the durable created drive");
-  const expected =
+  const expected: DriveMembership[] =
     memberGrantTiming(ctx.config.options) === "before_copy" || drive.goLive
-      ? [...mapping.createDrive.members]
-      : [];
+      ? [
+          ...(mapping.createDrive.members.length
+            ? mapping.createDrive.members
+            : (drive.initialMembers ?? [])),
+        ]
+      : [...(drive.initialMembers ?? [])];
   if (
+    drive.creatorEmail &&
     !expected.some(
       (member) =>
         member.type === "user" && member.email.toLowerCase() === drive.creatorEmail.toLowerCase(),
@@ -1531,7 +1785,7 @@ async function membershipUnit(
     return undefined;
   const evidence = row(ctx, "verify", mapping, root, "drive_membership_mismatch");
   evidence.destinationDriveId = drive.driveId;
-  evidence.destinationFileId = drive.driveId;
+  evidence.destinationFileId = drive.rootFolderId ?? drive.driveId;
   return commit(
     ctx,
     "verify",
@@ -1555,7 +1809,10 @@ function goLiveBaseline(
   mapping: FileMappingConfig,
   observed: { hashType: "sha256" | "quickxor"; md5: boolean; digest: string },
 ): CommitUnit | undefined {
-  if (!mapping.createDrive || memberGrantTiming(ctx.config.options) !== "after_verification")
+  if (
+    !managesCreatedAccess(ctx.config, mapping) ||
+    memberGrantTiming(ctx.config.options) !== "after_verification"
+  )
     return undefined;
   const drive = ctx.resume.createdDrives!.find((item) => item.mappingId === mapping.id)!;
   // A new verification must never erase the original go-live content fence.
@@ -1581,6 +1838,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
   const { source: sourceAdapter, destination: destinationAdapter } = fileProviderPair(ctx.config);
   for (const planned of ctx.config.mappings) {
     const mapping = provisionedMapping(ctx, planned);
+    if (yield* publishDestinationConstraints(ctx, mapping, "verify")) continue;
     if (ctx.stage === "final" && settleState(ctx, mapping)?.outcome !== "settled")
       throw cutoverIncomplete();
     const root = await sourceRoot(ctx, mapping);
@@ -1712,7 +1970,10 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
           );
         }
       }
-      if (destinationAdapter.destinationPathFindings) {
+      if (
+        destinationAdapter.destinationPathFindings &&
+        !walksNativeConstraints(destinationAdapter)
+      ) {
         const constraintRoot = { folderDepth: await destinationFolderDepth(ctx, mapping) };
         for (const kind of ["file", "folder"] as const) {
           for (const entry of kind === "file" ? sources : sourceFolders) {
@@ -2037,7 +2298,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
 async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
   const pair = fileProviderPair(ctx.config);
   for (const adapter of [pair.source, pair.destination])
-    if (adapter.preflight && !(yield* adapter.preflight(ctx))) return;
+    if (adapter.preflight && !(yield* adapter.preflight(ctx, adapter === pair.destination))) return;
   const provider = ctx.provider;
   for (const mapping of ctx.config.mappings) {
     ctx.signal?.throwIfAborted();
@@ -2142,10 +2403,14 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       ...m.createDrive!,
     }));
   if (drives.length)
-    yield { title: "Shared Drives to create", format: "text", body: JSON.stringify(drives) };
+    yield {
+      title: "Destination containers to create",
+      format: "text",
+      body: JSON.stringify(drives),
+    };
   if (ctx.resume.createdDrives?.length)
     yield {
-      title: "Created Shared Drives and members",
+      title: "Created destination containers and members",
       format: "text",
       body: JSON.stringify({
         drives: ctx.resume.createdDrives,
@@ -2153,6 +2418,26 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       }),
     };
   const pair = fileProviderPair(ctx.config);
+  const inheritedAccess = ctx.config.mappings
+    .filter((mapping) => mapping.createDrive && !managesCreatedAccess(ctx.config, mapping))
+    .map((mapping) => ({
+      mappingId: mapping.id,
+      containerName: mapping.createDrive!.name,
+      siteId: mapping.createDrive!.siteId,
+      access: "inherited_site",
+      visibleToSiteMembersBeforeGoLive: true,
+      transfersFenced: false,
+      membershipManaged: false,
+      membershipProven: false,
+      disclosure:
+        "Inherits site access and is visible to site members before go-live. Migmate does not fence, manage or prove this library's membership.",
+    }));
+  if (inheritedAccess.length)
+    yield {
+      title: "Inherited site access",
+      format: "text",
+      body: JSON.stringify(inheritedAccess),
+    };
   yield {
     title: "Provider pair",
     format: "text",
@@ -2206,7 +2491,7 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         for (const member of mapping.createDrive?.members ?? [])
           members.set(JSON.stringify([member.email.toLowerCase(), member.type]), member);
       const writableMembers = [...members.values()].filter(
-        (member) => member.role !== "reader" && member.role !== "commenter",
+        (member) => !["reader", "read", "commenter"].includes(member.role),
       ).length;
       if (writableMembers)
         mirrorWarnings.push({
@@ -2236,8 +2521,9 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
       title: "Go-live",
       format: "text",
       body: JSON.stringify({
-        accessMayExist: goLiveDrives.length > 0,
+        accessMayExist: goLiveDrives.length > 0 || inheritedAccess.length > 0,
         transfersFenced: goLiveDrives.length > 0,
+        unmanagedLibraries: inheritedAccess.map((library) => library.mappingId),
         checksPassed:
           goLiveDrives.length > 0 &&
           goLiveDrives.every((drive) => drive.goLive?.check?.status === "passed"),
@@ -2259,7 +2545,11 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
           })),
         acknowledgments: ctx.resume.goLiveAcknowledgments ?? [],
         ...(!goLiveDrives.length
-          ? { status: "Go-live has not started. Migmate has granted no member access." }
+          ? {
+              status: inheritedAccess.length
+                ? "No managed go-live has started. Inherited libraries remain visible through site access; membership is neither managed nor proven."
+                : "Go-live has not started. Migmate has granted no member access.",
+            }
           : {}),
         resolution:
           "Before go-live, failed or unavailable destination checks require repair and reverification; they cannot be acknowledged. After access starts, retry or explicitly acknowledge reviewed failed checks, then retry close; do not run another copy or mirror pass. Acknowledgment preserves failures, and unavailable checks remain unverified.",

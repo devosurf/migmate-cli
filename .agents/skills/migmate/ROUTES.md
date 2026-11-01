@@ -37,9 +37,11 @@ reports remain readable. Teams retains `route = "teams_global_archive"`.
 Members remain limited to job-created destinations. Shared roles `reader`, `writer`,
 and `manager` map to Google `reader`, `writer`, and `organizer`; Google-native
 `organizer`, `fileOrganizer`, and `commenter` are also valid. The SharePoint role map
-is `reader` → `read`, `writer` → `write`, `manager` → `owner`, but SharePoint
-container creation and membership are unshipped. Use existing SharePoint roots
-without `create` or `members`; the role map does not enable those operations.
+is `reader` → `read`, `writer` → `write`, `manager` → `owner`.
+No-member created libraries inherit site access, visible before go-live and unfenced;
+Migmate neither manages nor proves their membership. Named members require optional
+certificate-backed SharePoint `Sites.Selected` plus per-site `fullcontrol`; see
+[CREDENTIALS.md](CREDENTIALS.md#optional-sharepoint-library-membership).
 
 ### Dropbox sources
 
@@ -105,9 +107,13 @@ in the operator TOML before loading; one job copies in one direction, so a row i
 direction (or a mixed manifest) refuses `configuration_invalid` with `field: "source.type"`.
 A mapping uses
 `source: { type: "google_shared_drive", driveId, folderId }` and
-`destination: { type: "sharepoint", driveId, folderPath }`; the library and folder must
-already exist, so `create`, `members` and mirror refuse. CSV uses README's eleven-column
-layout. The job's `[rclone]` needs `sharepointDestinationRemote`, a separate SharePoint
+`destination: { type: "sharepoint", driveId, folderPath }` for existing roots.
+To create a document library inside an existing site, use
+`destination: { type: "sharepoint", siteId, create: "Library name" }`.
+Migmate never creates sites. Existing libraries refuse mirror; created libraries
+require durable creation provenance before mirror can delete. CSV created-library
+rows append `destination.siteId` to README's eleven-column layout.
+The job's `[rclone]` needs `sharepointDestinationRemote`, a separate SharePoint
 app holding exactly `Sites.ReadWrite.All` (anything else returns `preflight_failed`
 with `detail.check: credential_permissions_invalid`). Before mappings exist, the reverse
 provider pair already requires this write remote and needs no `sourceRemote`; the
@@ -129,6 +135,27 @@ Version history, list-item fields, retention labels and permissions are omitted 
 
 **State compatibility:** opening an existing job upgrades it to schema 8 without rewriting historical evidence. Schema 6 first receives schema 7's control-request storage; schema 7 then receives the paged-evidence reader fence. Earlier builds refuse that store rather than misreading paged coverage. Preserve a backup before upgrade when rollback matters.
 
+SharePoint destinations use the pinned rclone OneDrive default encoding for invalid
+characters. Existing Google → SharePoint copies now use encoded destination names
+where invalid names previously caused copy failures or refusals; native source
+names are unchanged. Plan and report disclose every affected original → encoded
+path and both names in nonblocking `destination_name_encoded` notices, including
+descendants whose paths change through an encoded ancestor. Present these as
+planning observations, not a frozen per-file approval inventory or acceptance request.
+
+Before each copy pass, after each final consistency wait, and during verification,
+destination constraints check source identities and effective encoded names.
+Duplicate siblings (including collisions after encoding), unsupported reserved
+names/prefixes, excessive path length and folder depth block the mapping.
+Fix the source and re-check; acceptance, per-path exclusion and collision-resolving
+renames are unavailable. SharePoint's full 400-character decoded server-relative
+destination path limit is measured after encoding, including site/library prefixes;
+a desktop 255-character component limit is not a cloud-copy limit. Missing
+destination root URL proof blocks copying and requires readable metadata.
+Planning a not-yet-created root still checks names and duplicates and emits
+encoding notices, but defers path proof and length checks until the root exists.
+See [FINDINGS.md](FINDINGS.md) for evidence fields and blocking codes.
+
 ## Copy execution
 
 Read the plan's **Copy concurrency** before approval. Job `[options]` settings `mappingsInFlight` (default `2`) and `transfersPerMapping` (default `4`) accept positive safe integers; the conservative defaults allow eight file transfers across two mappings. Use `mappingsInFlight = 1` for serial mappings. Passes share one managed worker and one serial checkpoint writer; a freed slot starts the next queued mapping. rclone's pacer absorbs throttling within a pass. Ordinary failed passes count against the run's retry budget without stopping other mappings.
@@ -145,7 +172,7 @@ If `plan` is interrupted (exit 130 for Ctrl-C or 143 for SIGTERM), read `status`
 
 For `blocked` (exit 5) with `uploadQuota.code = "upload_quota_exceeded"` in the execute result or `status.mappingPasses[].uploadQuota`, present the acting account, hit time and earliest resume estimate. Google allows 750 GB of uploads per user per day; Migmate stops the other active passes and starts no queued mapping for that account. Recommend waiting until `earliestResumeAt` (hit time + 24 hours), then repeat `execute` on the same job. Explain `resumeTimeIsEstimate = true`: this is not Google's reset clock or guaranteed allowance. An earlier manual retry is allowed; automatic quota resume is unavailable. Quota stops bypass the ordinary failure budget; the quota pass's final `errors = null` means its ordinary failure count is unknown, while `rcloneErrors` retains the unclassified raw aggregate. Preserve earlier failures for review; a quota block is not an acceptance request.
 
-Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File migration uses no reserved IDs, private markers, move-by-id or local staging; Teams archive uploads retain their own protections. rclone copies empty directories and supported file timestamps/content type with owner, permission and label metadata off; folders get modification times only. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary.
+Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File copies use no reserved IDs, per-file private markers, move-by-id or local staging; SharePoint library provisioning separately writes a creation-request marker for recovery, as described in [STAGED.md](STAGED.md). Teams archive uploads retain their own protections. rclone copies empty directories and supported file timestamps/content type with owner, permission and label metadata off; folders get modification times only. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary.
 
 ## Observed Google uploads
 

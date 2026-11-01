@@ -126,3 +126,59 @@ On `preflight_failed` with `detail.check: discovery_request_failed`, read
 one, `detail.route`): hand it to the administrator. `429`, `5xx` or `0` means Graph throttled or was
 unreachable; discovery writes nothing, so rerun it later, and report a repeat with
 `migmate --version`.
+
+### Optional SharePoint library membership
+
+Library creation itself uses the existing Graph write credential: no certificate
+is required. Without manifest members, the library inherits site access, is visible
+to site members before go-live, and has no Migmate-managed membership proof or fence.
+Use this mode when access is managed externally after copying.
+
+Only a manifest that names library members needs the optional credential:
+
+```toml
+[rclone.sharepointDestinationCertificate]
+resolver = "file"
+path = "/operator-owned/sharepoint-destination.pem"
+mode = "0600"
+```
+
+Hand these tenant prerequisites to the administrator:
+
+1. Register a valid certificate on the **same destination app** named by
+   `rclone.sharepointDestinationRemote`. Keep its Graph `Sites.ReadWrite.All`
+   grant unchanged; never reuse a read-only source app for writes.
+2. Grant the app **SharePoint** application permission `Sites.Selected` and
+   administrator consent. A separate administrative provisioning identity grants
+   `fullcontrol` on each approved existing site. The migration app must not receive
+   tenant-wide SharePoint `Sites.FullControl.All`; Migmate refuses broader token roles.
+3. Keep the matching RSA private key (at least 2048 bits) and X.509 certificate in
+   one operator-owned PEM outside the job folder with owner-only access. Add only
+   its file reference to the operator config. Never print or copy private-key bytes.
+4. Named groups must already resolve uniquely by email among the selected site's
+   registered principals. An unresolved/ambiguous group refuses
+   `member_identity_unresolved`; Migmate does not guess an Entra claim or request
+   directory-wide permissions.
+
+Observe manifest load and runtime capability checks after setup. Migmate requests
+a SharePoint-audience token lazily for membership work and observes the selected
+site's `ManageLists`, `ManagePermissions` and `EnumeratePermissions` capabilities
+before creation/inheritance changes. Scope alone is not grant proof. Missing
+certificate, denied access or absent/malformed permission evidence refuses with
+`sharepoint_membership_credentials_required` or
+`sharepoint_membership_permissions_unproven` under `preflight_failed`.
+
+Named-member libraries break inheritance before copying; deferred grants remain
+behind the go-live fence. Permission enumeration retains implicit app/system
+principals instead of hiding them. Microsoft documents an implicit current-principal
+grant when inheritance is broken; its actual app-only representation is observed at
+runtime, not assumed. Without independently proven creator identity, **any nonempty
+initial ACL refuses before copying or named grants** as `preflight_failed` with
+`detail.check: destination_initial_access_unproven`; `detail.actual` retains the
+principals. Do not accept the baseline merely because it was observed, and do not
+blindly remove application access. Report this prerequisite to the maintainers:
+independent current-principal identity proof is needed for tenants that install
+such an implicit grant. No live tenant has qualified this path in this change.
+
+References: [selected-site permissions](https://learn.microsoft.com/en-us/sharepoint/dev/sp-add-ins-modernize/understanding-rsc-for-msgraph-and-sharepoint-online),
+[certificate app-only authentication](https://learn.microsoft.com/en-us/sharepoint/dev/solution-guidance/security-apponly-azuread).

@@ -14,12 +14,15 @@ function roots(mapping: FileMappingConfig): string {
     destFolderId: mapping.destFolderId,
     destFolderPath: mapping.destFolderPath,
     createDrive: mapping.createDrive?.name,
+    creationSiteId: mapping.createDrive?.siteId,
   });
 }
 const roles: Record<string, number> = {
   reader: 0,
+  read: 0,
   commenter: 1,
   writer: 2,
+  write: 2,
   fileOrganizer: 3,
   organizer: 4,
   owner: 5,
@@ -56,7 +59,8 @@ export function approvalAuthority(
       previousMapping.destDriveId === mapping.destDriveId &&
       previousMapping.destFolderId === mapping.destFolderId &&
       previousMapping.destFolderPath === mapping.destFolderPath &&
-      previousMapping.createDrive?.name === mapping.createDrive?.name
+      previousMapping.createDrive?.name === mapping.createDrive?.name &&
+      previousMapping.createDrive?.siteId === mapping.createDrive?.siteId
         ? previousMapping.createDrive
         : undefined;
     for (const member of mapping.createDrive?.members ?? []) {

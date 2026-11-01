@@ -1,6 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setImmediate } from "node:timers/promises";
 import type { CheckResult } from "../types.ts";
+import { ProviderFault } from "./fault.ts";
+import {
+  googleSourceName,
+  googleDestinationName,
+  sharepointSourceName,
+  sharepointDestinationName,
+  sharepointDestinationNameToStandard,
+} from "./adapters/rclone-name-encoding.ts";
 import type {
   ArchiveAssetRequest,
   ArchiveConversation,
@@ -15,9 +23,11 @@ import type {
   CopyPassStats,
   CopyPassStatus,
   DestinationEntry,
+  DestinationContainer,
   DestinationItemKind,
   FileHashEntry,
   FileListingComparison,
+  FilePassRoot,
   GoogleAbout,
   DriveMember,
   DriveMembership,
@@ -65,6 +75,7 @@ export interface FakeDestinationItemFixture {
   content?: Uint8Array | string;
   reportedChecksum?: string | null;
   provenance?: ProvenanceRecord | null;
+  webUrl?: string;
 }
 
 export interface FakeRetryRule {
@@ -121,6 +132,13 @@ export interface FakeCopyPassScenario {
   afterFiles?: number;
 }
 
+export interface FakeDestinationContainerFixture {
+  container: DestinationContainer;
+  siteId?: string;
+  members: DriveMembership[];
+  inheritsPermissions?: boolean;
+}
+
 export interface FakeFileMigrationFixture {
   sourceDriveId: string;
   sourceRootId: string;
@@ -139,6 +157,12 @@ export interface FakeFileMigrationFixture {
   effects?: FakeEffectRule[];
   applicationIdentity?: string;
   googleAbout?: GoogleAbout | Error;
+  destinationProvider?: "google_shared_drive" | "sharepoint";
+  inheritedSiteMembers?: Record<string, DriveMembership[]>;
+  destinationContainers?: FakeDestinationContainerFixture[];
+  sharepointMembershipAvailable?: boolean;
+  /** Observed app/system grants installed by breaking inheritance, if any. */
+  implicitLibraryMembers?: DriveMembership[];
   unreadableSourceDrives?: string[];
   now?: () => Date;
   checks?: CheckResult[];
@@ -258,6 +282,7 @@ function cloneDestination(entry: MutableDestinationEntry): DestinationEntry {
     modifiedAt: entry.modifiedAt,
     mimeType: entry.mimeType,
     reportedChecksum: entry.reportedChecksum,
+    ...(entry.webUrl ? { webUrl: entry.webUrl } : {}),
     provenance: entry.provenance ? { ...entry.provenance } : null,
   };
 }
@@ -327,7 +352,13 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly about: GoogleAbout | Error;
   private readonly unreadableSourceDrives: Set<string>;
   private readonly now: () => Date;
-  private readonly sharedDrives = new Map<string, SharedDrive>();
+  private readonly sharedDrives = new Map<string, DestinationContainer>();
+  private readonly destinationProvider: "google_shared_drive" | "sharepoint";
+  private readonly inheritedSiteMembers: Record<string, DriveMembership[]>;
+  private readonly sharepointMembershipAvailable: boolean;
+  private readonly implicitLibraryMembers: DriveMembership[];
+  private readonly containerSites = new Map<string, string>();
+  private readonly uniquePermissions = new Set<string>();
   private readonly driveRequests = new Map<string, string>();
   private readonly driveMembers = new Map<string, DriveMembership[]>();
   private readonly callLog: string[] = [];
@@ -342,6 +373,10 @@ export class FakeFileMigrationPort implements ProviderPort {
 
   constructor(fixture: FakeFileMigrationFixture) {
     this.now = fixture.now ?? (() => new Date());
+    this.destinationProvider = fixture.destinationProvider ?? "google_shared_drive";
+    this.inheritedSiteMembers = structuredClone(fixture.inheritedSiteMembers ?? {});
+    this.sharepointMembershipAvailable = fixture.sharepointMembershipAvailable ?? false;
+    this.implicitLibraryMembers = structuredClone(fixture.implicitLibraryMembers ?? []);
     this.unreadableSourceDrives = new Set(fixture.unreadableSourceDrives);
     this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
     this.sourceDriveId = fixture.sourceDriveId;
@@ -368,6 +403,14 @@ export class FakeFileMigrationPort implements ProviderPort {
 
     for (const destination of fixture.destinationItems) {
       this.insertDestination(destination);
+    }
+
+    for (const saved of fixture.destinationContainers ?? []) {
+      const { container, siteId } = saved;
+      this.sharedDrives.set(container.id, { ...container });
+      this.driveMembers.set(container.id, structuredClone(saved.members));
+      if (siteId !== undefined) this.containerSites.set(container.id, siteId);
+      if (saved.inheritsPermissions === false) this.uniquePermissions.add(container.id);
     }
 
     this.workerState = {
@@ -414,7 +457,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   }
 
   loseResponseOnce(
-    method: "createDestinationFolder" | "uploadDestinationContent",
+    method: FakeEffectRule["method"],
     objectId?: string,
     error: Error = lostResponse(),
   ): void {
@@ -441,33 +484,145 @@ export class FakeFileMigrationPort implements ProviderPort {
     return structuredClone(this.about);
   }
 
-  async createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null> {
-    this.throwEffect("createSharedDrive", input.name, "before");
-    if (this.driveRequests.has(input.requestId)) return null;
-    const id = `drive-${this.sharedDrives.size + 1}`;
-    const drive = { id, name: input.name, createdTime: this.now().toISOString() };
+  async destinationCreator(): Promise<string> {
+    return this.destinationProvider === "sharepoint"
+      ? ""
+      : (await this.googleAbout()).user.emailAddress;
+  }
+
+  private requireMembershipCredentials(): void {
+    if (this.destinationProvider === "sharepoint" && !this.sharepointMembershipAvailable)
+      throw Object.assign(
+        new Error(
+          "Named library members require the optional SharePoint certificate setup in CREDENTIALS.md.",
+        ),
+        { code: "sharepoint_membership_credentials_required", transient: false },
+      );
+  }
+
+  async validateDestinationCreation(
+    input: Parameters<NonNullable<ProviderPort["validateDestinationCreation"]>>[0],
+  ): Promise<void> {
+    if (input.members.length === 0) return;
+    this.callLog.push(`validateDestinationCreation:${input.siteId ?? ""}`);
+    try {
+      this.requireMembershipCredentials();
+    } catch {
+      throw new ProviderFault(
+        "preflight_failed",
+        "Named library members require the optional SharePoint certificate setup in CREDENTIALS.md.",
+        { check: "sharepoint_membership_credentials_required", siteId: input.siteId },
+      );
+    }
+    if (this.destinationProvider === "sharepoint" && !input.siteId)
+      throw destinationFault("destination_site_required", 400);
+    this.throwEffect("validateDestinationCreation", input.siteId, "before");
+  }
+
+  async createDestinationContainer(
+    input: Parameters<ProviderPort["createDestinationContainer"]>[0],
+  ): Promise<DestinationContainer | null> {
+    this.callLog.push(`createDestinationContainer:${input.name}`);
+    this.throwEffect("createDestinationContainer", input.name, "before");
+    const sharepoint = this.destinationProvider === "sharepoint";
+    if (sharepoint && !input.siteId) throw destinationFault("destination_site_required", 400);
+    if (
+      sharepoint
+        ? [...this.sharedDrives.values()].some(
+            (drive) =>
+              drive.name === input.name && this.containerSites.get(drive.id) === input.siteId,
+          )
+        : this.driveRequests.has(input.requestId)
+    )
+      return null;
+    let sequence = this.sharedDrives.size + 1;
+    while (this.sharedDrives.has(`drive-${sequence}`)) sequence++;
+    const id = `drive-${sequence}`;
+    const rootFolderId = sharepoint ? `${id}-root` : id;
+    const drive: DestinationContainer = {
+      id,
+      name: input.name,
+      createdTime: this.now().toISOString(),
+      ...(sharepoint ? { rootFolderId, creationRequestId: input.requestId } : {}),
+    };
     this.sharedDrives.set(id, drive);
     this.driveRequests.set(input.requestId, id);
-    this.driveMembers.set(id, [
-      {
-        email: (await this.googleAbout()).user.emailAddress,
-        type: "user",
-        role: "organizer",
-      },
-    ]);
-    this.insertDestination({ id, driveId: id, name: input.name, parentId: null, kind: "folder" });
-    this.throwEffect("createSharedDrive", input.name, "after");
+    if (input.siteId) this.containerSites.set(id, input.siteId);
+    this.driveMembers.set(
+      id,
+      sharepoint
+        ? structuredClone(this.inheritedSiteMembers[input.siteId!] ?? [])
+        : [{ email: await this.destinationCreator(), type: "user", role: "organizer" }],
+    );
+    this.insertDestination({
+      id: rootFolderId,
+      driveId: id,
+      name: input.name,
+      parentId: null,
+      kind: "folder",
+      ...(sharepoint
+        ? {
+            webUrl: `https://fake.sharepoint.com/sites/${encodeURIComponent(input.siteId!)}/${encodeURIComponent(input.name)}`,
+          }
+        : {}),
+    });
+    this.throwEffect("createDestinationContainer", input.name, "after");
     return { ...drive };
   }
-  async findSharedDrives(name: string): Promise<SharedDrive[]> {
+  async findDestinationContainers(
+    input: Parameters<ProviderPort["findDestinationContainers"]>[0],
+  ): Promise<DestinationContainer[]> {
+    if (this.destinationProvider === "sharepoint" && !input.siteId)
+      throw destinationFault("destination_site_required", 400);
     return [...this.sharedDrives.values()]
-      .filter((drive) => drive.name === name)
+      .filter(
+        (drive) =>
+          drive.name === input.name &&
+          (this.destinationProvider !== "sharepoint" ||
+            this.containerSites.get(drive.id) === input.siteId),
+      )
       .map((drive) => ({ ...drive }));
   }
+
+  async prepareDestinationMembers(driveId: string): Promise<void> {
+    this.requireMembershipCredentials();
+    this.callLog.push(`prepareDestinationMembers:${driveId}`);
+    this.throwEffect("prepareDestinationMembers", driveId, "before");
+    if (this.destinationProvider === "sharepoint" && !this.uniquePermissions.has(driveId)) {
+      if (!this.driveMembers.has(driveId)) throw destinationFault("destination_missing", 404);
+      this.driveMembers.set(driveId, structuredClone(this.implicitLibraryMembers));
+      this.uniquePermissions.add(driveId);
+      this.callLog.push(`breakPermissionInheritance:${driveId}`);
+    }
+    this.throwEffect("prepareDestinationMembers", driveId, "after");
+  }
+
+  destinationInheritsPermissions(driveId: string): boolean {
+    return this.containerSites.has(driveId) && !this.uniquePermissions.has(driveId);
+  }
+
+  snapshotDestinationContainers(): FakeDestinationContainerFixture[] {
+    return [...this.sharedDrives.values()].map((container) => {
+      const siteId = this.containerSites.get(container.id);
+      return {
+        container: { ...container },
+        ...(siteId === undefined ? {} : { siteId }),
+        members: structuredClone(this.driveMembers.get(container.id) ?? []),
+        inheritsPermissions: this.destinationInheritsPermissions(container.id),
+      };
+    });
+  }
   async listDriveMembers(driveId: string): Promise<DriveMembership[]> {
+    this.requireMembershipCredentials();
     return structuredClone(this.driveMembers.get(driveId) ?? []);
   }
   async addDriveMember(driveId: string, member: DriveMember): Promise<void> {
+    if (this.destinationProvider === "sharepoint") {
+      if (!["read", "write", "owner"].includes(member.role))
+        throw destinationFault("unsupported_member_role", 400);
+      await this.prepareDestinationMembers(driveId);
+    }
+    this.callLog.push(`addDriveMember:${driveId}:${member.email}`);
     this.throwEffect("addDriveMember", member.email, "before");
     const members = this.driveMembers.get(driveId);
     if (!members) throw destinationFault("destination_missing", 404);
@@ -639,7 +794,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     return rows;
   }
 
-  snapshotDestination(): Array<{
+  snapshotDestination(rootId = this.destinationRootId): Array<{
     id: string;
     parentId: string | null;
     name: string;
@@ -650,7 +805,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     reportedChecksum: string | null;
     provenance: ProvenanceRecord | null;
   }> {
-    const root = this.destinationById[this.destinationRootId];
+    const root = this.destinationById[rootId];
     if (!root) {
       return [];
     }
@@ -925,22 +1080,32 @@ export class FakeFileMigrationPort implements ProviderPort {
     return pass;
   }
 
-  private tree(root: string): Map<string, MutableSourceEntry | MutableDestinationEntry> {
-    const source = this.sourceById[root];
+  private tree(root: FilePassRoot): Map<string, MutableSourceEntry | MutableDestinationEntry> {
+    const source = this.sourceById[root.fs];
     const entries = source ? this.sourceById : this.destinationById;
     const children = source ? this.sourceChildrenByParent : this.destinationChildrenByParent;
-    if (entries[root]?.kind !== "folder") throw destinationFault("directory_not_found", 404);
+    if (entries[root.fs]?.kind !== "folder") throw destinationFault("directory_not_found", 404);
+    const standardName =
+      root.kind === "google_drive"
+        ? googleSourceName
+        : root.kind === "sharepoint"
+          ? source
+            ? sharepointSourceName
+            : sharepointDestinationNameToStandard
+          : (name: string) => name;
     const result = new Map<string, MutableSourceEntry | MutableDestinationEntry>();
     const visit = (id: string, prefix: string) => {
       for (const childId of children[id] ?? []) {
         const child = entries[childId];
         if (!child) continue;
-        const path = `${prefix}${child.name}`;
+        const name = standardName(child.name);
+        if (name === null) throw destinationFault("path_unrepresentable", 400);
+        const path = `${prefix}${name}`;
         result.set(path, child);
         if (sourceDirectory(child)) visit(child.id, `${path}/`);
       }
     };
-    visit(root, "");
+    visit(root.fs, "");
     return result;
   }
 
@@ -949,8 +1114,8 @@ export class FakeFileMigrationPort implements ProviderPort {
   ): Promise<FileListingComparison> {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("compareFileListings", input.source.fs);
-    const source = this.tree(input.source.fs);
-    const destination = this.tree(input.destination.fs);
+    const source = this.tree(input.source);
+    const destination = this.tree(input.destination);
     const comparison: {
       [K in keyof FileListingComparison]: FileListingComparison[K] extends Iterable<infer T>
         ? FileListingComparison[K] extends string
@@ -1065,21 +1230,28 @@ export class FakeFileMigrationPort implements ProviderPort {
       await setImmediate();
       active();
       await checkpoint();
-      const source = this.tree(input.source.fs);
-      const destination = this.tree(input.destination.fs);
+      const source = this.tree(input.source);
+      const destination = this.tree(input.destination);
       const parents = new Map<string, string>([["", input.destination.fs]]);
       for (const [path, entry] of source) {
         active();
         const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
         const parentId = parents.get(parentPath)!;
         const existing = destination.get(path);
+        const basename = path.slice(path.lastIndexOf("/") + 1);
+        const destinationName =
+          input.destination.kind === "sharepoint"
+            ? sharepointDestinationName(basename)
+            : input.destination.kind === "google_drive"
+              ? googleDestinationName(basename)
+              : basename;
         if (sourceDirectory(entry)) {
           if (existing && existing.kind !== "folder") throw new Error(`not a directory: ${path}`);
           const folder =
             existing ??
             (await this.createDestinationFolder({
               parentFolderId: parentId,
-              name: entry.name,
+              name: destinationName,
               createdAt: entry.createdAt,
               modifiedAt: entry.modifiedAt,
             }));
@@ -1112,7 +1284,7 @@ export class FakeFileMigrationPort implements ProviderPort {
             id: this.nextDestinationId("file"),
             parentId,
             driveId: this.destinationParent(parentId).driveId,
-            name: entry.name,
+            name: destinationName,
             kind: "file",
             content: entry.content,
             createdAt: entry.createdAt,
@@ -1188,7 +1360,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   async listFolders(input: Parameters<ProviderPort["listFolders"]>[0]): Promise<Iterable<string>> {
     this.assertPassWorker(input.socketPath);
     this.throwRetryAfter("listFolders", input.root.fs);
-    return [...this.tree(input.root.fs)]
+    return [...this.tree(input.root)]
       .filter(([, entry]) => sourceDirectory(entry))
       .map(([path]) => path)
       .sort();
@@ -1202,7 +1374,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.throwRetryAfter("listFileHashes", input.root.fs);
     const hashes: FileHashEntry[] = [];
     const selected = input.paths === undefined ? null : new Set(input.paths);
-    for (const [path, entry] of this.tree(input.root.fs)) {
+    for (const [path, entry] of this.tree(input.root)) {
       if (sourceDirectory(entry) || (selected !== null && !selected.has(path))) continue;
       const unreadable =
         input.download &&
@@ -1387,6 +1559,7 @@ export class FakeFileMigrationPort implements ProviderPort {
       reportedChecksum:
         fixture.reportedChecksum !== undefined ? fixture.reportedChecksum : checksum,
       provenance: fixture.provenance ? { ...fixture.provenance } : null,
+      ...(fixture.webUrl ? { webUrl: fixture.webUrl } : {}),
       content: bytes,
     };
     this.insertDestinationEntry(entry);

@@ -420,12 +420,12 @@ describe("map-only listing migration", () => {
 
     it(`approves only roots and verifies whole listings without downloads (${reverse ? "reverse" : "forward"})`, async (t) => {
       const h = await routeHarness(t);
-      const inventory = t.mock.method(h.port, "listSourceChildren", async () => {
-        throw new Error("Map-only migration must not inventory source children");
-      });
+      const inventory = t.mock.method(h.port, "listSourceChildren");
       const hashes = t.mock.method(h.port, "listFileHashes");
       await approve(h);
       assert.equal(hashes.mock.callCount(), 0);
+      assert.equal(inventory.mock.callCount() > 0, reverse);
+      inventory.mock.restore();
       const planned = value(await h.engine.reader(h.ref).rows({ phase: "plan" })).rows;
       assert.equal(planned.length, 1);
       assert.ok(planned[0]?.jobType === "file_migration");
@@ -437,7 +437,6 @@ describe("map-only listing migration", () => {
       const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
       assert.equal(verified.clean, true);
       assert.deepEqual(verified.findings, []);
-      assert.equal(inventory.mock.callCount(), 0);
       assert.ok(hashes.mock.calls.every((call) => !call.arguments[0].download));
     });
 
@@ -1143,6 +1142,7 @@ describe("Google Shared Drives to SharePoint", () => {
       parentId: null,
       name: "second",
       kind: "folder",
+      webUrl: "https://fake.sharepoint.com/sites/Existing/Second",
     });
     return input;
   }
@@ -1742,7 +1742,8 @@ describe("deferred member go-live", () => {
     );
     const access = JSON.parse(
       report.sections.find(
-        (section: { title: string }) => section.title === "Created Shared Drives and members",
+        (section: { title: string }) =>
+          section.title === "Created destination containers and members",
       ).body,
     );
     assert.equal(access.grants[0].member.email, "finance@example.com");
@@ -2504,7 +2505,7 @@ describe("file migration through the engine", () => {
     input.now = () => new Date("2026-09-01T00:00:01.000Z");
     input.effects = [
       {
-        method: "createSharedDrive",
+        method: "createDestinationContainer",
         timing: "after",
         count: 1,
         error: new TypeError("Lost response"),
@@ -2523,7 +2524,7 @@ describe("file migration through the engine", () => {
     const verified = value(await h.engine.withWriterResult(h.ref, (w) => w.verify()));
     assert.equal(verified.clean, true);
     assert.deepEqual(verified.findings, []);
-    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+    assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 1);
   });
   it("refuses an older same-name drive after a lost creation response without deleting its files", async (t) => {
     const input = fixture();
@@ -2537,9 +2538,12 @@ describe("file migration through the engine", () => {
       content: "outside",
     });
     const h = await provisioningHarness(t, input, { mirror: true, deleteLimit: 10 });
-    const outside = (await h.port.createSharedDrive({ name: "Finance", requestId: "outside" }))!;
+    const outside = (await h.port.createDestinationContainer({
+      name: "Finance",
+      requestId: "outside",
+    }))!;
     h.port.scriptEffect({
-      method: "createSharedDrive",
+      method: "createDestinationContainer",
       timing: "before",
       count: 1,
       error: new TypeError("Creation response unavailable"),
@@ -2690,7 +2694,7 @@ describe("file migration through the engine", () => {
     const input = fixture();
     input.effects = [
       {
-        method: "createSharedDrive",
+        method: "createDestinationContainer",
         timing: "after",
         count: 1,
         error: new TypeError("Connection lost after creation"),
@@ -2698,18 +2702,18 @@ describe("file migration through the engine", () => {
     ];
     const h = await provisioningHarness(t, input);
     await execute(h);
-    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+    assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 1);
     const status = value(await h.engine.reader(h.ref).status());
     assert.equal(status.mappingPasses[0]?.status, "completed");
     assert.equal(status.memberGrants[0]?.member.email, "finance@example.com");
     await execute(h);
-    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+    assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 1);
   });
   it("refuses ambiguous lost creation responses instead of guessing a same-named drive", async (t) => {
     const h = await provisioningHarness(t);
-    await h.port.createSharedDrive({ name: "Finance", requestId: "operator-drive" });
+    await h.port.createDestinationContainer({ name: "Finance", requestId: "operator-drive" });
     h.port.scriptEffect({
-      method: "createSharedDrive",
+      method: "createDestinationContainer",
       timing: "after",
       count: 1,
       error: new TypeError("Lost response"),
@@ -2718,7 +2722,7 @@ describe("file migration through the engine", () => {
     assert.equal(result.ok, false);
     if (result.ok) throw new Error("Ambiguous drives must refuse");
     assert.equal(result.refusal.code, "drive_creation_ambiguous");
-    assert.equal((await h.port.findSharedDrives("Finance")).length, 2);
+    assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 2);
     const status = value(await h.engine.reader(h.ref).status());
     assert.equal(status.createdDrives[0]?.driveId, null);
     assert.deepEqual(status.memberGrants, []);
@@ -2740,7 +2744,10 @@ describe("file migration through the engine", () => {
     assert.match(driveId, /^drive-/);
     assert.deepEqual(crashed.memberGrants, []);
     assert.equal(crashed.mappingPasses[0]?.status, "pending");
-    await h.port.createSharedDrive({ name: "Finance", requestId: "unrelated-after-crash" });
+    await h.port.createDestinationContainer({
+      name: "Finance",
+      requestId: "unrelated-after-crash",
+    });
     h.engine.close();
     h.engine = openEngine({ home: h.home, now: () => new Date(now), provider: h.port });
     await execute(h);
@@ -2748,7 +2755,7 @@ describe("file migration through the engine", () => {
     assert.equal(recovered.createdDrives[0]?.driveId, driveId);
     assert.equal(recovered.mappingPasses[0]?.status, "completed");
     assert.equal(recovered.memberGrants[0]?.driveId, driveId);
-    assert.equal((await h.port.findSharedDrives("Finance")).length, 2);
+    assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 2);
   });
   it("reports membership drift as a blocking finding without repairing access during verification", async (t) => {
     const h = await provisioningHarness(t);
@@ -2853,13 +2860,13 @@ describe("file migration through the engine", () => {
     await approve(h);
     await execute(h);
     assert.equal(value(await h.engine.reader(h.ref).status()).createdDrives[0]?.driveId, driveId);
-    assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+    assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 1);
   });
   it("recovers creation intents with zero or one visible candidate after reopening", async (t) => {
     for (const timing of ["before", "after"] as const) {
       const h = await provisioningHarness(t);
       h.port.scriptEffect({
-        method: "createSharedDrive",
+        method: "createDestinationContainer",
         timing,
         count: 1,
         error: new Error("crash before durable response"),
@@ -2876,7 +2883,7 @@ describe("file migration through the engine", () => {
       const recovered = value(await h.engine.reader(h.ref).status());
       assert.equal(recovered.createdDrives[0]?.requestId, intent.requestId);
       assert.equal(recovered.mappingPasses[0]?.status, "completed");
-      assert.equal((await h.port.findSharedDrives("Finance")).length, 1);
+      assert.equal((await h.port.findDestinationContainers({ name: "Finance" })).length, 1);
     }
   });
   it("copies into existing and created destinations in the same approved manifest", async (t) => {
@@ -2912,7 +2919,7 @@ describe("file migration through the engine", () => {
     );
     await approve(h);
     await execute(h);
-    const drive = (await h.port.findSharedDrives("A"))[0]!;
+    const drive = (await h.port.findDestinationContainers({ name: "A" }))[0]!;
     assert.equal(
       (await h.port.listDestinationChildren(drive.id))[0]?.reportedChecksum,
       hash("one"),
@@ -2945,7 +2952,9 @@ describe("file migration through the engine", () => {
       const result = await h.engine.withWriterResult(h.ref, (w) => w.plan());
       assert.equal(result.ok, canCreateDrives, JSON.stringify(result));
       if (result.ok) {
-        const section = result.value.sections.find((s) => s.title === "Shared Drives to create");
+        const section = result.value.sections.find(
+          (s) => s.title === "Destination containers to create",
+        );
         assert.deepEqual(JSON.parse(section!.body), [
           {
             mappingId: "new-drive",
@@ -2984,7 +2993,7 @@ describe("file migration through the engine", () => {
     );
     await approve(h);
     await execute(h);
-    const drives = await h.port.findSharedDrives("Finance");
+    const drives = await h.port.findDestinationContainers({ name: "Finance" });
     assert.equal(drives.length, 1);
     assert.deepEqual(await h.port.listDriveMembers(drives[0]!.id), [
       { email: "files@example.com", type: "user", role: "organizer" },

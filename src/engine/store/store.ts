@@ -1444,7 +1444,8 @@ class StoreImpl implements Store {
          WHERE EXISTS (SELECT 1 FROM job WHERE type='file_migration')
          AND (NOT EXISTS (SELECT 1 FROM item i WHERE i.rev=p.rev AND i.phase='plan')
            OR EXISTS (SELECT 1 FROM item i WHERE i.rev=p.rev AND i.phase='plan'
-             AND COALESCE(json_extract(i.payload,'$.fileScope.mapOnly'),0)<>1))
+             AND COALESCE(json_extract(i.payload,'$.fileScope.mapOnly'),0)<>1
+             AND json_type(i.payload,'$.destinationConstraint') IS NULL))
          ORDER BY p.rev LIMIT 1`,
       )
       .get();
@@ -2402,6 +2403,9 @@ class StoreImpl implements Store {
               omissionReason:
                 evidence?.jobType === "file_migration" ? (evidence.omissionReason ?? null) : null,
               nextStep: evidence?.jobType === "file_migration" ? (evidence.nextStep ?? null) : null,
+              ...(evidence?.jobType === "file_migration" && evidence.destinationConstraint
+                ? { destinationConstraint: evidence.destinationConstraint }
+                : {}),
               relativePath: String(row.relative_path),
               size: nullableNumber(row.size),
               destinationFileId: nullableString(row.dest_file_id),

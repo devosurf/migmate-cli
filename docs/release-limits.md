@@ -1,6 +1,6 @@
 # Release limits
 
-This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots and Dropbox shared namespaces to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders to existing SharePoint document libraries or folders. Teams archives remain local packages with optional Shared Drive cold storage.
+This page separates shipped guarantees from historical live observations. File migration supports SharePoint document-library roots and Dropbox shared namespaces to existing Google Shared Drive folders or to Shared Drives created from the manifest, and Google Shared Drive folders to SharePoint document libraries or folders, including libraries created inside existing sites. Teams archives remain local packages with optional Shared Drive cold storage.
 
 File configuration selects top-level `sourceProvider = "sharepoint"` and
 `destinationProvider = "google_shared_drive"`, or the reversed pair, or
@@ -99,7 +99,7 @@ remains visible without repeating the risk challenge. Changing only the source
 scope does not expand access to the same destination, but still expands mirror
 authority. Initial close separately confirms its access consequences.
 
-Acceptance requires explicit named groups and one non-empty rationale, retained
+Acceptance of eligible findings requires explicit named groups and one non-empty rationale, retained
 with each code. Review shows consequences, per-group affected-item counts and
 examples. Groups may overlap; group count is not a distinct-item total. Accepted
 exceptions stay visible in status and reports. Unattended acceptance also requires
@@ -115,7 +115,8 @@ transfer-permission change is introduced. See
 
 Both existing file directions now use ADR-0014 map-only approval. Approval binds
 mapping roots, drives to create, members and options, not a file inventory.
-There is no file/deletion preview or inventory-age/freshness gate.
+Destination constraint checks and encoding notices are planning observations, not
+a frozen per-file approval inventory. There is no file/deletion preview or inventory-age/freshness gate.
 Informational account-activity snapshots are described next; they add no planning
 scan, prediction, quota threshold or inventory-age gate.
 
@@ -174,7 +175,7 @@ Local worker/fake-provider tests are not live Google charging qualification.
 
 ## 1. File copy is path-based, not collision-protected
 
-File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach private provenance markers, move prior copies by ID, or compare a revision token before writing. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
+File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach per-file private provenance markers, move prior copies by ID, or compare a revision token before writing. SharePoint library provisioning separately uses a creation-request marker in the list description for recovery. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
 
 Copy never deletes. A renamed or removed source file can leave a destination-only file; verification reports `destination_only_retained` without blocking close. Mapping manifests load from strict JSON or fixed-column CSV into the job store and freeze into the plan; see README's **Mapping manifests** for the format and paged review. Existing destinations can coexist with drives to create when mirror is off. A job's provider pair fixes one direction for every mapping: a row in the other direction, including any row of a mixed manifest, refuses at load with its row and `source.type`.
 
@@ -187,6 +188,26 @@ per-file Graph inventory. Shared Drive → SharePoint size differences on PDF,
 Office and HTML files raise `destination_rewrote_file`; other types raise
 `size_mismatch`. SharePoint → Shared Drive served-size rewrites can still cause
 copy failures and `size_mismatch`.
+
+SharePoint destinations use the pinned rclone OneDrive default encoding. Invalid
+characters that previously caused Google → SharePoint copy failures or refusals
+now copy under encoded destination names; native source names are unchanged.
+Plan and report disclose every affected original → encoded path, with both names,
+as a nonblocking `destination_name_encoded` notice. Descendants of encoded folders
+each receive a notice when their destination path differs. These are observations,
+not per-file approval or acceptance requests.
+
+Duplicate source siblings and collisions between effective encoded sibling names,
+unsupported reserved names/prefixes, excessive path length and folder depth still
+block the mapping. Fix the source and re-check; there is no acceptance, exclusion
+or automatic collision-resolution rename. SharePoint's decoded server-relative
+destination path must fit 400 characters **after encoding**, including site/library
+prefixes. A desktop 255-character component limit is not enforced as a cloud-copy
+limit. Missing root path proof also blocks copying and requires readable metadata.
+For a not-yet-created library, planning still checks names and duplicates and emits
+encoding notices, but defers path proof and length checks until the root exists.
+Constraints run before every copy pass, including final catch-up passes, and during
+verification; map-only approval still covers roots, not a frozen file inventory.
 
 Version history, list-item fields, retention labels and permissions are not
 copied; plan and report disclose these omissions once, not as per-file findings.
@@ -205,7 +226,7 @@ remains to copy or delete. It is observed quiescence, not a snapshot or freeze.
 
 Job `[options] mirror = true` requires `deleteLimit`, a nonnegative safe integer applied separately to every mapping pass. Mirror accepts only manifest `destination.create` mappings, reusing their durable job-created drives on repeat passes; existing destinations refuse at load with row and field. The plan and report disclose mirror and its limit. rclone fails a mapping that exceeds the cap without deleting beyond it; other mappings continue. Deletions are not rolled back. Ordinary retries have a fresh cap; final settle catch-up passes retain the original cumulative deletion authorization. Successful mirror passes remove destination-only files; verification still reports leftovers it observes, rather than hiding post-pass drift. This is tested with the fake provider and local-folder rclone binary, not a live tenant mirror run.
 
-Creation recovery adopts a sole exact-name match only when Google's `createdTime`
+Google creation recovery adopts a sole exact-name match only when Google's `createdTime`
 is at or after the durable creation-intent timestamp; older or missing evidence
 refuses `drive_creation_ambiguous`, as do multiple matches. The creation record
 distinguishes an own create response from timestamp-checked name recovery.
@@ -245,8 +266,9 @@ and copies without manifest grants, and `status.memberGrants` remains empty thro
 execution. Verified prestages and intermediate deltas do not grant access.
 
 Deferred go-live is authorized by a digest-bound initial `close` confirmation,
-after the latest required verification and acceptance of all blocking findings
-(`verification_unaccepted` otherwise). Staged finality, settling and full
+after the latest required verification and resolution of all blocking findings
+(`verification_unaccepted` otherwise). Only eligible findings can be accepted;
+destination name/path blockers require repair and re-check. Staged finality, settling and full
 verification are required before any grant. Close renders and publishes the
 readiness report before new authorization, the first fence or grant; failure
 leaves access unchanged. After recording authorization, it checks every affected
@@ -321,12 +343,13 @@ no live tenant provisioning measurement is claimed.
 
 **Google Shared Drives to SharePoint.** A job with
 `sourceProvider = "google_shared_drive"` and `destinationProvider = "sharepoint"`
-reads Google Shared Drive folders (drive id and folder id) into existing SharePoint
-document libraries or folders (drive id and library-relative path); the provider pair is frozen
-into the plan and report. Migmate creates no SharePoint sites,
-libraries or folders, and never adds the acting account to a source drive: it must
-already be a member. Manifest load and preflight check every source drive as the acting
-account and refuse `preflight_failed`, naming each unreadable drive in `unreadableSourceDrives`.
+reads Google Shared Drive folders (drive id and folder id) into SharePoint
+document libraries or folders. Existing roots use drive id and library-relative path;
+new libraries use `destination.create` and `destination.siteId`. The provider pair is
+frozen into the plan and report. Migmate never creates SharePoint sites and never
+adds the acting account to a source drive: it must already be a member.
+Manifest load and preflight check every source drive as the acting account and refuse
+`preflight_failed`, naming each unreadable drive in `unreadableSourceDrives`.
 SharePoint is written only by a separate destination app, the optional third rclone
 remote `rclone.sharepointDestinationRemote`. Its token's roles must be exactly
 `Sites.ReadWrite.All`; anything else refuses `credential_permissions_invalid`, as does
@@ -343,10 +366,55 @@ verification downloads the source to compute SharePoint's quickXorHash.
 PDF, Office or HTML differences raise `destination_rewrote_file`; other types
 raise `size_mismatch` for size differences or `content_mismatch` for hash
 differences. Findings carry available sizes/hashes and block `close` until
-accepted. Mirror and drive provisioning remain Google-destination only.
+accepted. Mirror requires a container created by this job with durable creation
+provenance; existing SharePoint libraries continue to refuse it. Library recovery
+is scoped to the approved existing site and preserves separate library/root item
+identities. It requires durable `creationAttemptedAt` and a unique qualifying
+candidate whose list description contains the exact
+`migmate:creation-request:<requestId>` marker for the durable `creationRequestId`.
+The same library-creation POST writes that marker; name/site/time alone cannot
+prove ownership. Foreign or unmarked same-title candidates and HTTP 409 refuse,
+never authorize adoption or replay of the non-idempotent POST. An attempted
+creation with no visible candidate remains `creation_outcome_unknown`; retry
+observation, not creation. An intent without an attempt may make its first call
+but cannot adopt a candidate. Google's name/time recovery rules are unchanged.
 Engine, HTTP-transport and local-folder rclone tests cover this direction. The optional
 live suite runs a reverse probe for a reverse job config (copy, quickXorHash verification,
 and a replaced Office file and plain file); no credentialed run of it is claimed.
+
+Created libraries with no manifest members need no certificate: they inherit site
+permissions and are visible to site members before go-live. Plan and report disclose
+unfenced access and that membership is neither managed nor proven; close requires no
+membership evidence for them. A manifest naming members requires optional
+certificate-backed SharePoint-audience `Sites.Selected` with administrator-provisioned
+per-site `fullcontrol`. The app's Graph write grant is unchanged. Tenant-wide
+SharePoint `Sites.FullControl.All` refuses; missing credentials or unavailable/denied
+site capability evidence refuses before permission mutation. Named-member libraries
+break inheritance before copy and use the normal deferred fence, grants and checks.
+Unknown app/system principals remain in actual membership evidence. A nonempty
+initial ACL without proven creator identity refuses before any copy or manifest
+grant (`destination_initial_access_unproven`); it is never adopted as an authorized
+baseline. Real tenants whose inheritance break installs an implicit principal need
+independent identity proof before this managed path can proceed. No live tenant
+has qualified it; see the skill's CREDENTIALS guide.
+
+SharePoint-invalid characters now use the pinned rclone OneDrive default encoding,
+including existing Google → SharePoint routes. Native source names are unchanged;
+plan/report retain original and encoded names/paths in nonblocking
+`destination_name_encoded` notices for every affected path and descendant.
+This changes previously failed/refused invalid-character copies into encoded copies.
+
+Before every copy/mirror pass and after every final consistency wait, destination
+constraints enumerate native source identities and encoded paths. Duplicate names
+(including encoded/case-insensitive collisions), reserved names/prefixes and
+unrepresentable names block. The 400 decoded server-relative character limit is
+measured after encoding, including site/library prefixes. Missing destination root
+URL evidence also blocks. Fix the source and re-check; acceptance, exclusions and
+collision-resolving renames are unavailable. Existing destination roots that cannot
+round-trip losslessly through the worker encoding refuse instead of addressing a
+different folder. Microsoft's 255-character segment warning concerns desktop sync,
+not the current cloud path hard limit. No live tenant library-creation, permission
+or conflict probe is claimed.
 
 ### Listing execution and historical evidence
 

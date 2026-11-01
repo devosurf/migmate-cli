@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { CredentialSession } from "../credentials.ts";
 import { ProviderFault } from "../fault.ts";
+import { DiskListing, disposeListing } from "../listing.ts";
 import type { CheckResult } from "../../types.ts";
 import type {
   DestinationEntry,
@@ -157,17 +158,12 @@ export class GoogleAdapter implements FileAdapter {
   readonly mappings: Mapping[];
   readonly #destinationRoots: DestinationRoot[];
   readonly #session: CredentialSession;
-  readonly #resolvedSources = new Set<string>();
   readonly #destDrive = new Map<string, string>();
 
   constructor(input: AdapterInput) {
     this.mappings = input.mappings;
     this.#destinationRoots = input.destinationRoots;
     this.#session = input.session;
-    for (const mapping of this.mappings) {
-      if (mapping.sourceItemId)
-        this.#resolvedSources.add(sourceKey(mapping.sourceDriveId, mapping.sourceItemId));
-    }
     for (const root of this.#destinationRoots)
       this.#destDrive.set(root.destFolderId, root.destDriveId);
   }
@@ -175,7 +171,6 @@ export class GoogleAdapter implements FileAdapter {
   #googleSource(raw: GoogleFile, driveId: string): SourceEntry {
     if (raw.driveId !== driveId)
       throw new ProviderFault("unsupported_route", "The source is not in the exact Shared Drive.");
-    this.#resolvedSources.add(sourceKey(driveId, raw.id));
     const kind =
       raw.mimeType === FOLDER_MIME
         ? "folder"
@@ -259,10 +254,10 @@ export class GoogleAdapter implements FileAdapter {
         "The source drive is outside the explicit mappings.",
       );
     try {
-      return this.#googleSource(
-        (await this.#getRaw(input.itemId, input.signal)).file,
-        input.driveId,
-      );
+      const { file } = await this.#getRaw(input.itemId, input.signal);
+      if (file.id !== input.itemId)
+        throw new ProviderFault("source_read_failed", "The source stable item ID did not match.");
+      return this.#googleSource(file, input.driveId);
     } catch (error) {
       if (error instanceof HttpProviderFault && error.status === 404) return null;
       throw error;
@@ -297,7 +292,17 @@ export class GoogleAdapter implements FileAdapter {
     };
   }
 
-  async createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null> {
+  async destinationCreator(): Promise<string> {
+    return (await this.googleAbout()).user.emailAddress;
+  }
+
+  async prepareDestinationMembers(_driveId: string): Promise<void> {
+    // Shared Drives already have independent membership.
+  }
+
+  async createDestinationContainer(
+    input: Parameters<ProviderPort["createDestinationContainer"]>[0],
+  ): Promise<SharedDrive | null> {
     const query = new URLSearchParams({
       requestId: input.requestId,
       fields: "id,name,createdTime",
@@ -313,7 +318,9 @@ export class GoogleAdapter implements FileAdapter {
     return responseJson<SharedDrive>(response);
   }
 
-  async findSharedDrives(name: string): Promise<SharedDrive[]> {
+  async findDestinationContainers({
+    name,
+  }: Parameters<ProviderPort["findDestinationContainers"]>[0]): Promise<SharedDrive[]> {
     const found: SharedDrive[] = [];
     for await (const drives of cursorPages(
       null,
@@ -440,17 +447,24 @@ export class GoogleAdapter implements FileAdapter {
 
   async listSourceChildren(
     input: Parameters<ProviderPort["listSourceChildren"]>[0],
-  ): Promise<SourceEntry[]> {
+  ): Promise<DiskListing<SourceEntry>> {
     const { driveId, itemId: sourceItemId } = input;
-    if (!this.#resolvedSources.has(sourceKey(driveId, sourceItemId)))
+    const parent = await this.readSourceItem(input);
+    if (!parent || parent.kind !== "folder")
       throw new ProviderFault(
         "preflight_failed",
-        "The source parent has not been resolved by stable ID.",
+        "The source parent is not an accessible folder at its stable ID.",
       );
-    const items: SourceEntry[] = [];
-    for await (const files of cursorPages(
-      null,
-      async (token) => {
+    const items = new DiskListing<SourceEntry>((entry) => sourceKey(entry.driveId, entry.id));
+    try {
+      using cursors = new DiskListing<string>((cursor) => cursor);
+      let token: string | undefined;
+      do {
+        if (token) {
+          if (cursors.has(token))
+            throw new ProviderFault("source_read_failed", "Source paging repeated a cursor.");
+          cursors.add(token);
+        }
         const query = new URLSearchParams({
           corpora: "drive",
           driveId,
@@ -468,18 +482,21 @@ export class GoogleAdapter implements FileAdapter {
         }>(await this.#google(`/drive/v3/files?${query}`, { signal: input.signal ?? null }));
         if (page.incompleteSearch)
           throw new ProviderFault("source_read_failed", "Source listing was incomplete.");
-        return { value: page.files, next: page.nextPageToken };
-      },
-      () => new ProviderFault("source_read_failed", "Source paging repeated a cursor."),
-    )) {
-      for (const file of files) items.push(this.#googleSource(file, driveId));
+        for (const file of page.files) {
+          input.signal?.throwIfAborted();
+          items.add(this.#googleSource(file, driveId));
+        }
+        token = page.nextPageToken;
+      } while (token);
+      input.signal?.throwIfAborted();
+      return items;
+    } catch (error) {
+      disposeListing(items);
+      throw error;
     }
-    return items;
   }
   async *openSourceContent(input: { driveId: string; itemId: string }): AsyncIterable<Uint8Array> {
     const { driveId, itemId: sourceItemId } = input;
-    if (!this.#resolvedSources.has(sourceKey(driveId, sourceItemId)))
-      throw new ProviderFault("source_read_failed", "The source identity has not been resolved.");
     const before = await this.readSourceItem({ driveId, itemId: sourceItemId });
     if (!before?.downloadable || !before.etag)
       throw new ProviderFault("source_read_failed", "Source is not a stable downloadable file.");
@@ -756,11 +773,13 @@ export class GoogleAdapter implements FileAdapter {
     });
     if (!source || source.kind !== "folder")
       throw new ProviderFault("preflight_failed", "The source folder is inaccessible.");
-    await this.listSourceChildren({
-      driveId: source.driveId,
-      itemId: source.id,
-      ...(signal ? { signal } : {}),
-    });
+    disposeListing(
+      await this.listSourceChildren({
+        driveId: source.driveId,
+        itemId: source.id,
+        ...(signal ? { signal } : {}),
+      }),
+    );
     return {};
   }
 

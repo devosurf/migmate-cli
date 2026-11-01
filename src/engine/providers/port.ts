@@ -56,6 +56,8 @@ export interface DestinationEntry {
   mimeType: string | null;
   reportedChecksum: string | null;
   provenance: ProvenanceRecord | null;
+  /** Provider-observed URL used for destination path constraints. */
+  webUrl?: string;
 }
 
 export interface TransferWorkerHandle {
@@ -197,6 +199,14 @@ export interface SharedDrive {
   name: string;
   createdTime?: string;
 }
+export interface DestinationContainer {
+  id: string;
+  name: string;
+  createdTime?: string;
+  rootFolderId?: string;
+  /** Request identity observed in an exact provider-persisted creation marker. */
+  creationRequestId?: string;
+}
 /** Observations include unsupported public/domain grants so verification can report them. */
 export interface DriveMembership {
   email: string;
@@ -207,9 +217,22 @@ export interface DriveMembership {
 export interface ProviderPort extends FilePassProvider {
   googleAbout(signal?: AbortSignal): Promise<GoogleAbout>;
   readSharedDrive(driveId: string, signal?: AbortSignal): Promise<SharedDrive | null>;
-  /** A 409 replay returns null: the caller must reconcile by exact name. */
-  createSharedDrive(input: { name: string; requestId: string }): Promise<SharedDrive | null>;
-  findSharedDrives(name: string): Promise<SharedDrive[]>;
+  /** Empty means app-only identity, with no implicit person membership. */
+  destinationCreator(): Promise<string>;
+  /** Read-only provider prerequisites, before any creation or permission mutation. */
+  validateDestinationCreation?(input: { siteId?: string; members: DriveMember[] }): Promise<void>;
+  /** A conflict returns null: the caller must reconcile by exact name and scope. */
+  createDestinationContainer(input: {
+    name: string;
+    requestId: string;
+    siteId?: string;
+  }): Promise<DestinationContainer | null>;
+  findDestinationContainers(input: {
+    name: string;
+    siteId?: string;
+  }): Promise<DestinationContainer[]>;
+  /** Called only for manifest-named members, before observing or granting them. */
+  prepareDestinationMembers(driveId: string): Promise<void>;
   listDriveMembers(driveId: string): Promise<DriveMembership[]>;
   addDriveMember(driveId: string, member: DriveMember): Promise<void>;
   resolveFilePass(input: {
@@ -260,7 +283,9 @@ export interface ProviderPort extends FilePassProvider {
     sourceItemId: string;
     signal?: AbortSignal;
   }): Promise<SourceEntry | null>;
-  /** Drive-scoped, repeatable inventory. Caller must disposeListing after use. */
+  /** Graph item IDs are unique only within a drive: every source read names both.
+   * The caller owns the returned inventory and must release it with disposeListing;
+   * array-backed fake implementations remain valid iterables. */
   listSourceChildren(input: {
     driveId: string;
     itemId: string;

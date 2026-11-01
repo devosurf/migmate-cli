@@ -48,8 +48,11 @@ export interface FileAdapter
         ProviderPort,
         | "googleAbout"
         | "readSharedDrive"
-        | "createSharedDrive"
-        | "findSharedDrives"
+        | "destinationCreator"
+        | "validateDestinationCreation"
+        | "createDestinationContainer"
+        | "findDestinationContainers"
+        | "prepareDestinationMembers"
         | "listDriveMembers"
         | "addDriveMember"
         | "reserveDestinationId"

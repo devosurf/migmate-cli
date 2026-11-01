@@ -19,6 +19,11 @@ import { createTransferSupervisor, type TransferSupervisor } from "./transfer-wo
 import type { CopyPassReference, FileListingComparison } from "./port.ts";
 import { FakeFileMigrationPort } from "./fake.ts";
 import { disposeListing } from "./listing.ts";
+import {
+  SHAREPOINT_DESTINATION_ENCODING,
+  googleSourceName,
+  sharepointDestinationName,
+} from "./adapters/rclone-name-encoding.ts";
 
 function comparisonArrays(comparison: FileListingComparison) {
   return {
@@ -1185,6 +1190,94 @@ it(
       await assert.rejects(supervisor.copyPassStatus(stale));
       await assert.rejects(supervisor.copyPassStats(stale));
       await assert.rejects(supervisor.stopCopyPass(stale));
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  "copies encoded names with the pinned worker and verifies the same STANDARD paths",
+  { skip: !enabled },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mm-encoded-names-"));
+    const supervisor = createTransferSupervisor({
+      configPath: null,
+      jobDirectory: directory,
+      binary: suppliedBinary(),
+    });
+    try {
+      const source = join(directory, "source");
+      const destination = join(directory, "destination");
+      await mkdir(join(source, "bad:folder"), { recursive: true });
+      await mkdir(destination);
+      const names = [
+        'quote".txt',
+        "star*.txt",
+        "colon:.txt",
+        "less<.txt",
+        "more>.txt",
+        "report?.txt",
+        "report？.txt",
+        "back\\slash.txt",
+        "pipe|.txt",
+        "\u0001control.txt",
+        " leading.txt",
+        "trailing ",
+        "trailing.",
+        ".dot",
+        "literal‛‛quote.txt",
+        "fullwidth／.txt",
+        "␠leading",
+        "trailing␠",
+        "trailing．",
+      ];
+      for (const name of names) await writeFile(join(source, name), `bytes:${name}`);
+      await writeFile(join(source, "bad:folder", "nested?.txt"), "nested bytes");
+      const worker = await supervisor.startTransferWorker({ runDirectory: "run" });
+      const input = {
+        socketPath: worker.socketPath,
+        source: { fs: `:local,encoding=InvalidUtf8:${source}`, kind: "local" as const },
+        destination: {
+          fs: `:local,encoding='${SHAREPOINT_DESTINATION_ENCODING}':${destination}`,
+          kind: "local" as const,
+        },
+      };
+      const pass = await supervisor.startCopyPass({ ...input, mode: "copy", transfers: 2 });
+      const status = await finish(supervisor, { socketPath: worker.socketPath, pass });
+      assert.equal(status.state, "completed", JSON.stringify(status));
+      const expected = names.map((name) => sharepointDestinationName(googleSourceName(name)!));
+      assert.deepEqual((await readdir(destination)).sort(), [...expected, "bad：folder"].sort());
+      for (const [index, name] of names.entries())
+        assert.equal(await readFile(join(destination, expected[index]!), "utf8"), `bytes:${name}`);
+      assert.equal(
+        await readFile(join(destination, "bad：folder", "nested？.txt"), "utf8"),
+        "nested bytes",
+      );
+      const compared = await supervisor.compareFileListings({ ...input, mode: "copy" });
+      try {
+        assert.deepEqual([...compared.new], []);
+        assert.deepEqual([...compared.changed], []);
+        assert.equal([...compared.unchanged].length, names.length + 1);
+      } finally {
+        for (const listing of Object.values(compared)) disposeListing(listing);
+      }
+      const destinationFolders = await supervisor.listFolders({
+        socketPath: worker.socketPath,
+        root: input.destination,
+      });
+      let sourceFolders: Iterable<string> | undefined;
+      try {
+        sourceFolders = await supervisor.listFolders({
+          socketPath: worker.socketPath,
+          root: input.source,
+        });
+        assert.deepEqual([...destinationFolders], [...sourceFolders]);
+      } finally {
+        disposeListing(destinationFolders);
+        disposeListing(sourceFolders);
+      }
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });

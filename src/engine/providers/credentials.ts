@@ -15,8 +15,11 @@ import {
   assertSeparateSharePointApplications,
   loadArchiveGraph,
   requestGraphToken,
+  loadSharePointCertificate,
+  requestSharePointToken,
+  sharepointOrigin,
 } from "./adapters/credentials/sharepoint.ts";
-import type { GraphCredential } from "./adapters/credentials/sharepoint.ts";
+import type { GraphCredential, SharePointCertificate } from "./adapters/credentials/sharepoint.ts";
 import { loadArchiveGoogle, requestGoogleToken } from "./adapters/credentials/google.ts";
 import type { GoogleCredential } from "./adapters/credentials/google.ts";
 import { requestDropboxToken } from "./adapters/credentials/dropbox.ts";
@@ -41,6 +44,7 @@ import type {
 export interface CredentialSession {
   graphToken(signal?: AbortSignal): Promise<string>;
   graphDestinationToken(signal?: AbortSignal): Promise<string>;
+  sharepointDestinationToken?(siteUrl: string, signal?: AbortSignal): Promise<string>;
   googleToken(signal?: AbortSignal): Promise<string>;
   dropboxToken(signal?: AbortSignal): Promise<string>;
   readonly dropboxAdminId?: string | undefined;
@@ -254,6 +258,7 @@ interface CredentialState {
   graph: GraphCredential | undefined;
   graphDestination?: GraphCredential;
   sharepointDestinationRemote?: string;
+  sharepointCertificateRef?: FileCredentialReference;
   google: GoogleCredential | undefined;
   dropbox?: DropboxCredential;
   dropboxRemote?: string;
@@ -293,7 +298,11 @@ async function loadCredentials(
     const pair = fileProviderPair(input);
     const mappings = parseMappings(input.mappings, pair.source.credentials);
     const rclone = record(input.rclone);
-    allowedKeys(rclone, ["config", ...credentialBindings.map((binding) => binding.key)]);
+    allowedKeys(rclone, [
+      "config",
+      "sharepointDestinationCertificate",
+      ...credentialBindings.map((binding) => binding.key),
+    ]);
     const required = [
       pair.source.credentials.remoteKey.source,
       pair.destination.credentials.remoteKey.destination,
@@ -334,10 +343,17 @@ async function loadCredentials(
         );
       }
       assertSeparateSharePointApplications(material.graph, material.graphDestination);
+      const sharepointCertificateRef =
+        rclone.sharepointDestinationCertificate === undefined
+          ? undefined
+          : fileReference(rclone.sharepointDestinationCertificate);
+      if (sharepointCertificateRef && !material.graphDestination)
+        throw refused("credential_config_invalid");
       return {
         jobType,
         graph: material.graph,
         ...(material.graphDestination ? { graphDestination: material.graphDestination } : {}),
+        ...(sharepointCertificateRef ? { sharepointCertificateRef } : {}),
         ...(remotes.has("sharepointDestinationRemote")
           ? { sharepointDestinationRemote: remotes.get("sharepointDestinationRemote")! }
           : {}),
@@ -383,6 +399,9 @@ export async function createCredentialSession(input: {
   let googlePending: Promise<string> | undefined;
   let dropboxCache: Token | undefined;
   let dropboxPending: Promise<string> | undefined;
+  const sharepointCache = new Map<string, Token>();
+  const sharepointPending = new Map<string, Promise<string>>();
+  let certificatePending: Promise<SharePointCertificate> | undefined;
   const controller = new AbortController();
 
   function active(): CredentialState {
@@ -438,6 +457,54 @@ export async function createCredentialSession(input: {
       return await destinationPending;
     } finally {
       destinationPending = undefined;
+    }
+  }
+
+  async function sharepointDestinationToken(
+    siteUrl: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    signal?.throwIfAborted();
+    const current = active();
+    if (!current.graphDestination || !current.sharepointCertificateRef)
+      throw new ProviderFault(
+        "sharepoint_membership_credentials_required",
+        "Named library members require the optional SharePoint certificate setup in CREDENTIALS.md.",
+      );
+    const origin = sharepointOrigin(siteUrl);
+    const cached = sharepointCache.get(origin);
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.value;
+    const pending = sharepointPending.get(origin);
+    if (pending) return pending;
+    const request = (async () => {
+      // Graph-only, inherited-access libraries never open or authenticate this key.
+      certificatePending ??= (async () => {
+        const pem = await readCredentialFile(current.sharepointCertificateRef!, input.jobDirectory);
+        try {
+          return loadSharePointCertificate(pem.bytes);
+        } finally {
+          pem.bytes.fill(0);
+        }
+      })();
+      const certificate = await certificatePending;
+      const token = await requestSharePointToken(
+        current.graphDestination!,
+        certificate,
+        origin,
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+      );
+      active();
+      sharepointCache.set(origin, token);
+      return token.value;
+    })();
+    sharepointPending.set(origin, request);
+    try {
+      return await request;
+    } catch (error) {
+      certificatePending = undefined;
+      throw error;
+    } finally {
+      sharepointPending.delete(origin);
     }
   }
 
@@ -501,6 +568,7 @@ export async function createCredentialSession(input: {
   return {
     graphToken,
     graphDestinationToken,
+    sharepointDestinationToken,
     get delegatedSubject() {
       return active().google?.delegatedSubject;
     },
@@ -588,6 +656,21 @@ export async function createCredentialSession(input: {
               },
             }
           : {}),
+        ...(sharepointCache.size > 0
+          ? {
+              sharepointDestination: {
+                tenantId: current.graphDestination!.tenantId,
+                clientId: current.graphDestination!.clientId,
+                authentication: "certificate",
+                resources: [...sharepointCache].map(([origin, token]) => ({
+                  origin,
+                  grantedPermissions: [...token.permissions],
+                  permissionEvidence: "token_roles",
+                  authenticatedAt: token.authenticatedAt,
+                })),
+              },
+            }
+          : {}),
         ...(current.google
           ? {
               google: {
@@ -632,6 +715,9 @@ export async function createCredentialSession(input: {
       dropboxPending = undefined;
       destinationCache = undefined;
       destinationPending = undefined;
+      sharepointCache.clear();
+      sharepointPending.clear();
+      certificatePending = undefined;
       state = undefined;
       graphCache = undefined;
       googleCache = undefined;

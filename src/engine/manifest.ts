@@ -14,7 +14,7 @@ export type ManifestRoot = { type: FileProviderId; driveId: string } & (
 export interface ManifestMapping {
   id: string;
   source: ManifestRoot;
-  destination: ManifestRoot | { type: FileProviderId; create: string };
+  destination: ManifestRoot | { type: FileProviderId; create: string; siteId?: string };
   members?: DriveMember[];
 }
 export interface LoadedManifest {
@@ -46,6 +46,7 @@ const columns = [
   "members",
   "source.folderId",
   "destination.folderPath",
+  "destination.siteId",
 ];
 function csv(text: string): unknown {
   const rows: string[][] = [];
@@ -86,6 +87,7 @@ function csv(text: string): unknown {
   );
   if (
     JSON.stringify(header) !== JSON.stringify(columns) &&
+    JSON.stringify(header) !== JSON.stringify(columns.slice(0, 11)) &&
     JSON.stringify(header) !== JSON.stringify(columns.slice(0, 7)) &&
     JSON.stringify(header) !== JSON.stringify(columns.slice(0, 9)) &&
     JSON.stringify(header) !== JSON.stringify(namespaceHeader)
@@ -119,10 +121,14 @@ function csv(text: string): unknown {
         destination: {
           type: r[4],
           ...(r[7] ? { create: r[7] } : {}),
+          ...(r[11] ? { siteId: r[11] } : {}),
           ...(r[5] || !r[7] ? { driveId: r[5] } : {}),
           ...(fileProviderPair({ sourceProvider: r[1], destinationProvider: r[4] }).destination
             .rootField === "folderPath"
-            ? { folderPath: r[10], ...(r[6] ? { folderId: r[6] } : {}) }
+            ? {
+                ...(!r[7] || r[10] ? { folderPath: r[10] } : {}),
+                ...(r[6] ? { folderId: r[6] } : {}),
+              }
             : {
                 ...(r[6] || !r[7] ? { folderId: r[6] } : {}),
                 ...(r[10] ? { folderPath: r[10] } : {}),
@@ -185,6 +191,7 @@ export function parseManifest(
       "folderId",
       "folderPath",
       "create",
+      "siteId",
     ]);
     if (s.type === undefined) throw new ManifestError(row, "source.type");
     if (d.type === undefined) throw new ManifestError(row, "destination.type");
@@ -257,8 +264,8 @@ export function parseManifest(
     if (d[invalidDestinationField] !== undefined)
       throw new ManifestError(row, `destination.${invalidDestinationField}`);
     if (d.create !== undefined) {
-      if (pair.destination.rootField !== "folderId")
-        throw new ManifestError(row, "destination.create");
+      if (pair.destination.creationParent === "siteId") stable(d.siteId, "destination.siteId");
+      else if (d.siteId !== undefined) throw new ManifestError(row, "destination.siteId");
       if (d.driveId !== undefined || d.folderId !== undefined || d.folderPath !== undefined)
         throw new ManifestError(
           row,
@@ -271,10 +278,12 @@ export function parseManifest(
         destination: {
           type: pair.destination.id,
           create: text(d.create, row, "destination.create"),
+          ...(d.siteId !== undefined ? { siteId: stable(d.siteId, "destination.siteId") } : {}),
         },
         members,
       };
     }
+    if (d.siteId !== undefined) throw new ManifestError(row, "destination.siteId");
     const destination: ManifestRoot =
       pair.destination.rootField === "folderId"
         ? {
