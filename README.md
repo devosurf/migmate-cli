@@ -579,7 +579,9 @@ container if it names that container's members.
 files directly inside its source root, not its subfolders. It carries the loose files
 of a folder whose subfolders map elsewhere, so other mappings' roots may sit beneath a
 files-only root, on either side. Its copy, verification and mirror never reach below
-its root. In CSV, the optional last column `filesOnly` takes `true` or stays empty.
+its root. A OneNote notebook directly inside a files-only root is a folder to the
+transfer, so it is neither copied nor reported: map it, or its folder, separately.
+In CSV, the optional last column `filesOnly` takes `true` or stays empty.
 
 **Member grant timing.**
 
@@ -1159,7 +1161,12 @@ row's `destination.siteId`. The optional `--file` writes **only the manifest**,
 creates a private new file, and refuses to overwrite an existing path.
 
 Discovery is read-only. It never loads mappings, creates containers, translates
-access or changes the plan, and its counts are a point-in-time observation. A target
+access or changes the plan, and its counts are a point-in-time observation.
+Onboarding, `doctor` and discovery accept a job with no mappings; `plan` refuses
+`configuration_invalid` with `detail.field: "mappings"` until a manifest is loaded.
+A source without boundaries yields an empty draft, which `manifest load` refuses.
+Every container in a job is one destination type, so the job-wide target is the
+per-destination override; per-boundary targets refine it. A target
 naming a boundary discovery did not find refuses `configuration_invalid` with
 `detail.field: "--capacity-target"` and the `boundaryIds`. Discovery holds the
 source's folder tree, not its files, in memory.
