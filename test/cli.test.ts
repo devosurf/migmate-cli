@@ -545,7 +545,7 @@ it("onboards a fresh job, discovers an unloaded draft, and plans its reviewed ma
   assert.match(proposal.value.planDigest, /^[a-f0-9]{64}$/u);
 });
 
-it("discovers boundaries, partitions them to a capacity target, and loads and plans the draft", async (t) => {
+it("discovers boundaries, partitions them to a capacity target, and runs the draft", async (t) => {
   const file = (id: string, parentId: string, driveId: string): FakeSourceItemFixture => ({
     id,
     parentId,
@@ -664,7 +664,47 @@ it("discovers boundaries, partitions them to a capacity target, and loads and pl
   assert.equal(document<{ mappingCount: number }>(loaded).value.mappingCount, 5);
   const plan = await invoke(["plan", "--job", id, "--output", "json"], h.engine());
   assert.equal(plan.code, 0, plan.stdout);
-  assert.match(document<PlanRevision>(plan).value.planDigest, /^[a-f0-9]{64}$/u);
+  const planDigest = document<PlanRevision>(plan).value.planDigest;
+  assert.match(planDigest, /^[a-f0-9]{64}$/u);
+
+  // The draft runs: three containers, the shared one holding both boundaries' folders,
+  // and the split boundary's loose files beside its kept subfolder.
+  const approve = ["approve", "--job", id, "--approver", "ci", "--plan-digest", planDigest];
+  assert.equal((await invoke(approve, h.engine())).code, 0);
+  const executed = await invoke(["execute", "--job", id, "--output", "json"], h.engine());
+  assert.equal(executed.code, 0, executed.stdout);
+  const verified = await invoke(["verify", "--job", id, "--output", "json"], h.engine());
+  assert.equal(verified.code, 0, verified.stdout);
+  const { createdDrives } = document<JobStatus>(
+    await invoke(["status", "--job", id, "--output", "json"], h.engine()),
+  ).value;
+  assert.deepEqual(createdDrives.map((d) => d.name).sort(), [
+    "Budgets and 1 more",
+    "Legal",
+    "Projects (part 2 of 2)",
+  ]);
+  const contents = (name: string) => {
+    const drive = createdDrives.find((d) => d.name === name)!;
+    return h.provider
+      .snapshotDestination(drive.rootFolderId ?? drive.driveId!)
+      .map((item) => item.path)
+      .filter((path) => path !== ".")
+      .sort();
+  };
+  assert.deepEqual(contents("Budgets and 1 more"), [
+    "Budgets",
+    "Budgets/other-1.txt",
+    "Budgets/other-2.txt",
+    "Projects",
+    "Projects/Small",
+    "Projects/Small/small-1.txt",
+    "Projects/loose-1.txt",
+    "Projects/loose-2.txt",
+  ]);
+  assert.deepEqual(contents("Projects (part 2 of 2)"), [
+    "Big",
+    ...[1, 2, 3, 4, 5].map((n) => `Big/big-${n}.txt`),
+  ]);
 });
 
 it("discover refuses site-scoped access in the JSON envelope without writing a draft", async (t) => {
