@@ -59,7 +59,7 @@ const HELP = `Migmate — one lifecycle, two job types
 migmate init --type file_migration|teams_archive [--config job.toml|job.json]
 migmate creds init --job ID --config job.toml|job.json
 migmate manifest load --job ID --file manifest.json|manifest.csv
-migmate discover --job ID [--file draft.json]
+migmate discover --job ID [--file draft.json] [--capacity-target ITEMS|BOUNDARY_ID=ITEMS ...]
 migmate doctor|plan|execute|status|verify|report|close --job ID
 migmate plan --job ID --final               # staged final cutover revision
 migmate execute --job ID --detach            # background coordinator; private JSONL attempt log
@@ -746,7 +746,7 @@ async function executeCommand(
     };
   }
   if (invocation.command === "discover") {
-    const result = await reader.discover();
+    const result = await reader.discover(invocation.capacity);
     if (!result.ok) return result;
     if (invocation.file) {
       try {

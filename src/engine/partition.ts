@@ -240,13 +240,13 @@ export function partition(input: PartitionInput): Partition {
   for (const bin of bins) {
     const ids = [...new Set(bin.units.map((unit) => unit.boundary.id))];
     const first = bin.units[0]!.boundary;
+    // A part's number counts every container holding the boundary, shared ones too.
+    for (const id of ids) seen.set(id, (seen.get(id) ?? 0) + 1);
     let name: string;
     if (ids.length > 1) name = `${first.name} and ${ids.length - 1} more`;
-    else if (parts.get(first.id)! > 1) {
-      const index = (seen.get(first.id) ?? 0) + 1;
-      seen.set(first.id, index);
-      name = `${first.name} (part ${index} of ${parts.get(first.id)})`;
-    } else name = first.name;
+    else if (parts.get(first.id)! > 1)
+      name = `${first.name} (part ${seen.get(first.id)} of ${parts.get(first.id)})`;
+    else name = first.name;
     name = name.trim() || first.id;
     let unique = name;
     for (let n = 2; usedNames.has(unique.toLowerCase()); n++) unique = `${name} (${n})`;
@@ -357,4 +357,68 @@ function memberKey(members: readonly BoundaryMember[]): string[] {
 
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+export interface DiscoverResult {
+  sourceProvider: FileProviderId;
+  destinationProvider: FileProviderId;
+  observedAt: string;
+  capacity: {
+    hardLimit: number | null;
+    defaultTarget: number | null;
+    targets: Record<string, number>;
+  };
+  boundaries: {
+    id: string;
+    kind: BoundaryKind;
+    name: string;
+    parent?: string;
+    files: number;
+    folders: number;
+    members: BoundaryMember[] | null;
+  }[];
+  containers: ProposedContainer[];
+  /** The reviewable draft; `--file` writes exactly this. */
+  manifest: Partition["manifest"];
+  notices: string[];
+}
+
+/** The review document: counts per boundary without its folder tree, and the draft. */
+export function discoverResult(
+  input: PartitionInput & { targets: Record<string, number> },
+): DiscoverResult {
+  const proposed = partition(input);
+  const counts = (folder: DiscoveredFolder): { files: number; folders: number } => {
+    let files = folder.files,
+      folders = 0;
+    for (const child of folder.folders) {
+      const below = counts(child);
+      files += below.files;
+      folders += 1 + below.folders;
+    }
+    return { files, folders };
+  };
+  return {
+    sourceProvider: input.discovery.sourceProvider,
+    destinationProvider: input.destinationProvider,
+    observedAt: input.discovery.observedAt,
+    capacity: {
+      hardLimit: input.hardLimit,
+      defaultTarget: input.defaultTarget,
+      targets: input.targets,
+    },
+    boundaries: [...input.discovery.boundaries]
+      .sort((a, b) => compare(a.id, b.id))
+      .map((boundary) => ({
+        id: boundary.id,
+        kind: boundary.kind,
+        name: boundary.name,
+        ...(boundary.parent !== undefined ? { parent: boundary.parent } : {}),
+        ...counts(boundary.tree),
+        members: boundary.members,
+      })),
+    containers: proposed.containers,
+    manifest: proposed.manifest,
+    notices: [...input.discovery.notices, ...proposed.notices],
+  };
 }

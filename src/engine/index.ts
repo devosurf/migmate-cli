@@ -127,6 +127,7 @@ import { teamsArchiveDriver } from "./drivers/teams-archive.ts";
 import { parseArchiveConfig } from "./archive/config.ts";
 import type { ArchiveConfig } from "./providers/archive.ts";
 import type { CommitRow, CommitUnit } from "./commit.ts";
+import { defaultCapacityTarget, discoverResult } from "./partition.ts";
 import type { DriverContext, JobTypeDriver, ReportSection } from "./drivers/types.ts";
 import {
   ReportArray,
@@ -932,7 +933,7 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
     }
   }
   return {
-    async discover() {
+    async discover(capacity) {
       const input = await withStore((store) => {
         const paths = pathsFor(deps, ref);
         const type = store.status().jobType;
@@ -941,12 +942,32 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
       if (!input.ok) return input;
       const { paths, type, config } = input.value;
       if (type !== "file_migration")
-        return refuse("unsupported_route", "Discovery requires a SharePoint source file job.");
+        return refuse("unsupported_route", "Discovery requires a file migration job.");
       const provider = providerFor(deps, paths, type, config);
       try {
-        if (!provider.discoverSharePoint)
-          return refuse("unsupported_route", "The provider does not support SharePoint discovery.");
-        return ok(await provider.discoverSharePoint());
+        if (!provider.discoverSource)
+          return refuse("unsupported_route", "The provider does not support source discovery.");
+        const pair = fileProviderPair(config);
+        const discovery = await provider.discoverSource();
+        const targets = capacity?.targets ?? {};
+        const known = new Set(discovery.boundaries.map((boundary) => boundary.id));
+        const unknown = Object.keys(targets).filter((id) => !known.has(id));
+        if (unknown.length)
+          return refuse(
+            "configuration_invalid",
+            "A capacity target names a boundary discovery did not find.",
+            { detail: { field: "--capacity-target", boundaryIds: unknown } },
+          );
+        const hardLimit = pair.destination.containerItemLimit ?? null;
+        return ok(
+          discoverResult({
+            discovery,
+            destinationProvider: pair.destination.id,
+            hardLimit,
+            defaultTarget: capacity?.target ?? defaultCapacityTarget(hardLimit),
+            targets,
+          }),
+        );
       } catch (error) {
         if (error instanceof ProviderFault && error.code === "preflight_failed")
           return refuse("preflight_failed", error.message, { detail: error.evidence });

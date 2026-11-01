@@ -34,6 +34,8 @@ export interface Invocation {
   goLiveDigest?: string;
   mappingIds: string[];
   codes: string[];
+  /** ADR-0020 D3: discover's capacity target for all boundaries, and per boundary ID. */
+  capacity?: { target?: number; targets: Record<string, number> };
   note?: string;
   reason?: string;
   confirm: boolean;
@@ -144,6 +146,7 @@ export function parseInvocation(argv: string[]): Invocation {
     "--view",
     "--mapping",
     "--schema-version",
+    "--capacity-target",
   ];
   for (let index = 0; index < argv.length; index++) {
     const token = argv[index]!;
@@ -173,7 +176,12 @@ export function parseInvocation(argv: string[]): Invocation {
     const value = equal === -1 ? argv[++index] : token.slice(equal + 1);
     if (!value || value.startsWith("--") || /[\u0000]/u.test(value))
       throw new UsageFailure("An option needs a non-empty value.");
-    if (values.has(flag) && flag !== "--code" && flag !== "--mapping")
+    if (
+      values.has(flag) &&
+      flag !== "--code" &&
+      flag !== "--mapping" &&
+      flag !== "--capacity-target"
+    )
       throw new UsageFailure("An option was supplied more than once.");
     const prior = values.get(flag);
     if (prior) prior.push(value);
@@ -310,6 +318,29 @@ export function parseInvocation(argv: string[]): Invocation {
   for (const flag of ["--type", "--label"]) only(flag, ["init"]);
   only("--config", ["init", "creds init"]);
   only("--file", ["manifest load", "discover"]);
+  only("--capacity-target", ["discover"]);
+  const capacity = values.get("--capacity-target");
+  if (capacity) {
+    const parsed: NonNullable<Invocation["capacity"]> = { targets: {} };
+    for (const raw of capacity) {
+      // N for every boundary, or BOUNDARY=N for one; the boundary ID may contain "=".
+      const equal = raw.lastIndexOf("=");
+      const id = equal === -1 ? undefined : raw.slice(0, equal);
+      const count = equal === -1 ? raw : raw.slice(equal + 1);
+      if (!/^[1-9]\d*$/u.test(count) || !Number.isSafeInteger(Number(count)) || id === "")
+        throw new UsageFailure("--capacity-target takes ITEMS or BOUNDARY_ID=ITEMS.");
+      if (id === undefined) {
+        if (parsed.target !== undefined)
+          throw new UsageFailure("Give one job-wide --capacity-target.");
+        parsed.target = Number(count);
+      } else {
+        if (Object.hasOwn(parsed.targets, id))
+          throw new UsageFailure("A boundary's --capacity-target was supplied more than once.");
+        parsed.targets[id] = Number(count);
+      }
+    }
+    invocation.capacity = parsed;
+  }
   only("--approver", ["approve", "accept", "close", "acknowledge"]);
   only("--plan-digest", ["approve"]);
   only("--close-digest", ["close"]);
