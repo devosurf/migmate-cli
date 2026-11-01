@@ -1,6 +1,7 @@
 import type { CheckResult, JobType } from "../types.ts";
 import type { ArchiveProvider } from "./archive.ts";
 import type { SharePointDiscovery } from "./discovery.ts";
+import type { SourceDiscovery } from "../partition.ts";
 
 export type SourceItemKind = "file" | "folder" | "package" | "reference" | "undownloadable";
 export type DestinationItemKind = "file" | "folder" | "shortcut" | "document";
@@ -259,6 +260,8 @@ export interface ProviderPort extends FilePassProvider {
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
   archive?: ArchiveProvider;
   discoverSharePoint?(): Promise<SharePointDiscovery>;
+  /** ADR-0020 D1: read-only count of the source per access boundary; never job state. */
+  discoverSource?(signal?: AbortSignal): Promise<SourceDiscovery>;
   sourcePlanningEvidence?(signal?: AbortSignal): Promise<{
     evidence: Record<string, unknown>;
     notices: readonly string[];

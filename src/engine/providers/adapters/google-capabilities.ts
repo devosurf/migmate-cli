@@ -17,6 +17,8 @@ export const googleCapabilities: FileProviderCapabilities = {
   id: "google_shared_drive",
   rcloneBackend: "drive",
   rootField: "folderId",
+  // Google refuses further items with teamDriveFileLimitExceeded.
+  containerItemLimit: 500_000,
   idempotentCreation: true,
   sourceName: googleSourceName,
   hashType: "sha256",

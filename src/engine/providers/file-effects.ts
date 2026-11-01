@@ -103,6 +103,9 @@ export class FileEffects {
   async discoverSharePoint() {
     return this.#effect(this.#source, "discoverSharePoint").call(this.#source);
   }
+  async discoverSource(signal?: AbortSignal) {
+    return this.#effect(this.#source, "discoverSource").call(this.#source, signal);
+  }
   async sourcePlanningEvidence(signal?: AbortSignal) {
     return this.#source.sourcePlanningEvidence?.(signal) ?? { evidence: {}, notices: [] };
   }
