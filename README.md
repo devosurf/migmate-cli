@@ -4,7 +4,7 @@ Finite, one-way movement or preservation of organizational content. The authorit
 
 Two job types:
 
-- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder, and Google Shared Drive folder to a SharePoint document library or folder, including libraries created inside existing sites.
+- **File migration** — SharePoint document library or Dropbox shared namespace to a Google Shared Drive folder, and Google Shared Drive folder or Dropbox shared namespace to a SharePoint document library or folder, including libraries created inside existing sites.
 - **Teams archive** — Microsoft Teams conversations to a local, offline HTML + JSONL package, optionally retained as conversation ZIPs in a Google Shared Drive folder.
 
 `CONTEXT.md` is the glossary. It is the authority on what each term means; this README assumes it.
@@ -310,8 +310,9 @@ destinationProvider = "google_shared_drive"
 
 For the reverse direction, use `sourceProvider = "google_shared_drive"` and
 `destinationProvider = "sharepoint"`. Dropbox team content uses
-`sourceProvider = "dropbox"` and `destinationProvider = "google_shared_drive"`.
-Dropbox destinations, Dropbox → SharePoint, and same-provider copies refuse `unsupported_route`.
+`sourceProvider = "dropbox"` with `destinationProvider = "google_shared_drive"` or
+`destinationProvider = "sharepoint"`. Dropbox destinations and same-provider copies
+refuse `unsupported_route`.
 An empty config defaults to the forward pair; saved file configs name both providers.
 New file configs containing `route` refuse `configuration_invalid`: replace that
 field with `sourceProvider` and `destinationProvider` as shown above, rather than
@@ -369,6 +370,15 @@ Native Dropbox inventories, export-name collision checks, and verification cover
 use disk-backed indexes and bounded pages rather than retaining a whole listing.
 Dropbox → Google uploads contribute to the same engine-home Google account ledger
 as other Google-destination jobs; the Dropbox content hash does not measure uploads.
+
+Dropbox → SharePoint uses the same SharePoint destination rules as Google →
+SharePoint: libraries created inside existing sites, rclone's OneDrive encoding with
+a nonblocking `destination_name_encoded` notice per changed path, and blocking
+findings for reserved names, case-insensitive collisions (including a Paper export
+beside an ordinary file of the same final name) and paths over 400 characters.
+Source names are read through the pinned Dropbox backend's default encoding. Listing
+verification compares paths and sizes; hash verification downloads Dropbox bytes and
+computes SharePoint's quickXorHash.
 
 Legacy Paper has no documented mapping from its document IDs to a shared namespace.
 During PLAN, Migmate observes the selected administrator's `paper_as_files` through

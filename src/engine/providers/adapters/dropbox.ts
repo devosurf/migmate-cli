@@ -27,7 +27,7 @@ interface DropboxItem {
 function unsupported(): never {
   throw new ProviderFault(
     "unsupported_route",
-    "Dropbox is supported only as a source into Google Shared Drives.",
+    "Dropbox is supported only as a source into Google Shared Drives or SharePoint libraries.",
   );
 }
 function quote(value: string): string {

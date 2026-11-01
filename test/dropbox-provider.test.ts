@@ -77,10 +77,15 @@ const manifest = {
   ],
 };
 
-test("Dropbox manifest uses namespace identity and only the shipped destination", () => {
+test("Dropbox manifest uses namespace identity and only the shipped destinations", () => {
   const parsed = parseManifest(JSON.stringify(manifest), "json");
   assert.deepEqual(parsed.mappings[0]?.source, { type: "dropbox", driveId: "123", folderPath: "" });
-  for (const destinationProvider of ["dropbox", "sharepoint"]) {
+  for (const destinationProvider of ["google_shared_drive", "sharepoint"])
+    assert.equal(
+      fileProviderPair({ sourceProvider: "dropbox", destinationProvider }).destination.id,
+      destinationProvider,
+    );
+  for (const destinationProvider of ["dropbox"]) {
     assert.throws(
       () => fileProviderPair({ sourceProvider: "dropbox", destinationProvider }),
       (error: unknown) => error instanceof ProviderFault && error.code === "unsupported_route",

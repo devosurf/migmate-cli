@@ -54,7 +54,6 @@ test("new file configurations refuse route and point to provider-pair fields", a
 test("unshipped and same-provider pairs refuse before creating a job", async (t) => {
   const h = await harness(t);
   for (const [sourceProvider, destinationProvider] of [
-    ["dropbox", "sharepoint"],
     ["dropbox", "dropbox"],
     ["google_shared_drive", "dropbox"],
     ["sharepoint", "sharepoint"],
@@ -188,7 +187,6 @@ for (const format of manifestFormats) {
   test(`unsupported manifest provider pairs retain their refusal in ${format}`, async (t) => {
     const h = await harness(t);
     for (const [source, destination] of [
-      ["dropbox", "sharepoint"],
       ["dropbox", "dropbox"],
       ["google_shared_drive", "dropbox"],
       ["sharepoint", "sharepoint"],

@@ -8,6 +8,9 @@ import {
   sharepointSourceName,
   sharepointDestinationName,
   sharepointDestinationNameToStandard,
+  dropboxSourceName,
+  dropboxDestinationName,
+  dropboxDestinationNameToStandard,
 } from "./adapters/rclone-name-encoding.ts";
 import type {
   ArchiveAssetRequest,
@@ -157,7 +160,7 @@ export interface FakeFileMigrationFixture {
   effects?: FakeEffectRule[];
   applicationIdentity?: string;
   googleAbout?: GoogleAbout | Error;
-  destinationProvider?: "google_shared_drive" | "sharepoint";
+  destinationProvider?: "google_shared_drive" | "sharepoint" | "dropbox";
   inheritedSiteMembers?: Record<string, DriveMembership[]>;
   destinationContainers?: FakeDestinationContainerFixture[];
   sharepointMembershipAvailable?: boolean;
@@ -353,7 +356,8 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly unreadableSourceDrives: Set<string>;
   private readonly now: () => Date;
   private readonly sharedDrives = new Map<string, DestinationContainer>();
-  private readonly destinationProvider: "google_shared_drive" | "sharepoint";
+  private readonly destinationProvider: "google_shared_drive" | "sharepoint" | "dropbox";
+  private readonly explicitDestinationProvider: boolean;
   private readonly inheritedSiteMembers: Record<string, DriveMembership[]>;
   private readonly sharepointMembershipAvailable: boolean;
   private readonly implicitLibraryMembers: DriveMembership[];
@@ -374,6 +378,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   constructor(fixture: FakeFileMigrationFixture) {
     this.now = fixture.now ?? (() => new Date());
     this.destinationProvider = fixture.destinationProvider ?? "google_shared_drive";
+    this.explicitDestinationProvider = fixture.destinationProvider !== undefined;
     this.inheritedSiteMembers = structuredClone(fixture.inheritedSiteMembers ?? {});
     this.sharepointMembershipAvailable = fixture.sharepointMembershipAvailable ?? false;
     this.implicitLibraryMembers = structuredClone(fixture.implicitLibraryMembers ?? []);
@@ -1092,7 +1097,11 @@ export class FakeFileMigrationPort implements ProviderPort {
           ? source
             ? sharepointSourceName
             : sharepointDestinationNameToStandard
-          : (name: string) => name;
+          : root.kind === "dropbox"
+            ? source
+              ? dropboxSourceName
+              : dropboxDestinationNameToStandard
+            : (name: string) => name;
     const result = new Map<string, MutableSourceEntry | MutableDestinationEntry>();
     const visit = (id: string, prefix: string) => {
       for (const childId of children[id] ?? []) {
@@ -1244,7 +1253,9 @@ export class FakeFileMigrationPort implements ProviderPort {
             ? sharepointDestinationName(basename)
             : input.destination.kind === "google_drive"
               ? googleDestinationName(basename)
-              : basename;
+              : input.destination.kind === "dropbox"
+                ? dropboxDestinationName(basename)
+                : basename;
         if (sourceDirectory(entry)) {
           if (existing && existing.kind !== "folder") throw new Error(`not a directory: ${path}`);
           const folder =
@@ -1335,6 +1346,18 @@ export class FakeFileMigrationPort implements ProviderPort {
 
   async resolveFilePass(input: Parameters<ProviderPort["resolveFilePass"]>[0]) {
     if (!this.workerState?.alive) throw destinationFault("worker_exited", 500);
+    // Historical fixtures name only the source; the reverse pair was implied.
+    const destinationKind = this.explicitDestinationProvider
+      ? (
+          {
+            sharepoint: "sharepoint",
+            dropbox: "dropbox",
+            google_shared_drive: "google_drive",
+          } as const
+        )[this.destinationProvider]
+      : input.sourceType === "google_shared_drive"
+        ? ("sharepoint" as const)
+        : ("google_drive" as const);
     return {
       socketPath: this.workerState.socketPath,
       source: {
@@ -1348,11 +1371,8 @@ export class FakeFileMigrationPort implements ProviderPort {
       },
       destination: {
         fs: input.destFolderId,
-        ignoreSizeAndChecksum: input.sourceType === "google_shared_drive",
-        kind:
-          input.sourceType === "google_shared_drive"
-            ? ("sharepoint" as const)
-            : ("google_drive" as const),
+        ignoreSizeAndChecksum: destinationKind === "sharepoint",
+        kind: destinationKind,
       },
     };
   }

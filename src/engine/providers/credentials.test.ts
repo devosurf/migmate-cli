@@ -906,6 +906,68 @@ test("Dropbox credential session authenticates once, retains grant evidence and 
   await assert.rejects(session.dropboxToken(), { code: "credential_session_disposed" });
 });
 
+test("Dropbox sources load beside a separate SharePoint destination application", async (t) => {
+  t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
+    assert.equal(String(target), "https://api.dropboxapi.com/oauth2/token");
+    assert.ok(init?.body instanceof URLSearchParams);
+    return Response.json({
+      access_token: "initial-token",
+      token_type: "Bearer",
+      expires_in: 14400,
+      refresh_token: "refresh-canary",
+      team_id: "dbtid:team",
+      scope: DROPBOX_READ_SCOPES.join(" "),
+    });
+  });
+  const fields = await beginDropboxAuthorization("dropbox-app").exchange(
+    "code",
+    new AbortController().signal,
+  );
+  const directory = await mkdtemp(join(tmpdir(), "migmate-credentials-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "rclone.conf");
+  const jobDirectory = await mkdtemp(join(tmpdir(), "migmate-job-"));
+  t.after(() => rm(jobDirectory, { recursive: true, force: true }));
+  const dropbox = [...dropboxSource, ...fields].map(([key, value]) => `${key} = ${value}`);
+  const sharepoint = source.filter((line) => !/^(drive_id|root_folder_id) /u.test(line));
+  await writeFile(
+    path,
+    `[dropbox-source]\n${dropbox.join("\n")}\n\n[sharepoint-destination]\n${sharepoint.join("\n")}\n`,
+    { mode: 0o600 },
+  );
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config: {
+      sourceProvider: "dropbox",
+      destinationProvider: "sharepoint",
+      rclone: {
+        config: { resolver: "file", path, mode: "0600" },
+        dropboxRemote: "dropbox-source",
+        sharepointDestinationRemote: "sharepoint-destination",
+      },
+    },
+  });
+  t.after(() => session.dispose());
+  assert.equal(session.dropboxRemote, "dropbox-source");
+  assert.equal(session.dropboxAdminId, "dbmid:admin");
+  await assert.rejects(
+    createCredentialSession({
+      jobType: "file_migration",
+      jobDirectory,
+      config: {
+        sourceProvider: "dropbox",
+        destinationProvider: "sharepoint",
+        rclone: {
+          config: { resolver: "file", path, mode: "0600" },
+          dropboxRemote: "dropbox-source",
+        },
+      },
+    }),
+    { code: "credential_config_invalid" },
+  );
+});
+
 async function persistedDropboxCredentials(t: TestContext) {
   t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
     if (String(target) === "https://oauth2.googleapis.com/token")
