@@ -237,6 +237,7 @@ type FileConfig = CommonConfig & {
     destinationRemote: string;
     sharepointDestinationRemote?: string;
     dropboxRemote?: string;
+    dropboxDestinationRemote?: string;
     sharepointDestinationCertificate?: FileReference;
   };
 };

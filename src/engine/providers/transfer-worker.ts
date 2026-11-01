@@ -1267,6 +1267,9 @@ export function createTransferSupervisor(options: {
         errors: result.errors,
         speed: result.speed,
         transferring,
+        ...(typeof result.lastError === "string" && result.lastError
+          ? { lastError: result.lastError }
+          : {}),
       };
     },
     async stopCopyPass({ socketPath, pass }) {

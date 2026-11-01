@@ -150,7 +150,7 @@ export class PersistentCliPort extends FakeFileMigrationPort {
   constructor(
     destinationPath: string,
     control?: { verb: string; ready: () => void },
-    destinationProvider: "google_shared_drive" | "sharepoint" = "google_shared_drive",
+    destinationProvider: "google_shared_drive" | "sharepoint" | "dropbox" = "google_shared_drive",
     sharepointMembershipAvailable = false,
     fixture = cliFixture(),
   ) {
@@ -326,7 +326,7 @@ export class DropboxCliPort extends PersistentCliPort {
   constructor(
     destinationPath: string,
     control?: { verb: string; ready: () => void },
-    destinationProvider: "google_shared_drive" | "sharepoint" = "google_shared_drive",
+    destinationProvider: "google_shared_drive" | "sharepoint" | "dropbox" = "google_shared_drive",
     sharepointMembershipAvailable = false,
   ) {
     const fixture = cliFixture();

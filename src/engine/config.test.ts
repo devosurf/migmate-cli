@@ -93,7 +93,6 @@ test("engine refuses unsupported provider pairs even with valid remote names", a
   const { engine, reference } = await fixture(t);
   for (const [sourceProvider, destinationProvider] of [
     ["sharepoint", "sharepoint"],
-    ["google_shared_drive", "dropbox"],
     ["dropbox", "dropbox"],
     ["unknown", "google_shared_drive"],
   ]) {

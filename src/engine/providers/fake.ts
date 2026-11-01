@@ -132,6 +132,8 @@ export interface FakeCopyPassScenario {
   sourceRootId?: string;
   pause?: boolean;
   error?: string;
+  /** An error rclone keeps retrying: reported in stats while the pass stays running. */
+  retryingError?: string;
   afterFiles?: number;
 }
 
@@ -164,6 +166,8 @@ export interface FakeFileMigrationFixture {
   inheritedSiteMembers?: Record<string, DriveMembership[]>;
   destinationContainers?: FakeDestinationContainerFixture[];
   sharepointMembershipAvailable?: boolean;
+  /** A Dropbox team-space team, where team-folder creation is disallowed. */
+  dropboxTeamSpace?: boolean;
   /** Observed app/system grants installed by breaking inheritance, if any. */
   implicitLibraryMembers?: DriveMembership[];
   unreadableSourceDrives?: string[];
@@ -191,7 +195,18 @@ interface FakeCopyPass {
   release?: () => void;
 }
 
-function fileHash(bytes: Uint8Array, type: "sha256" | "md5" | "quickxor"): string {
+function fileHash(bytes: Uint8Array, type: "sha256" | "md5" | "quickxor" | "dropbox"): string {
+  if (type === "dropbox") {
+    // https://www.dropbox.com/developers/reference/content-hash
+    const blocks = createHash("sha256");
+    for (let offset = 0; offset < bytes.length; offset += 4 * 1024 * 1024)
+      blocks.update(
+        createHash("sha256")
+          .update(bytes.subarray(offset, offset + 4 * 1024 * 1024))
+          .digest(),
+      );
+    return blocks.digest("hex");
+  }
   if (type !== "quickxor") return createHash(type).update(bytes).digest("hex");
   const hash = Buffer.alloc(20);
   for (let i = 0; i < bytes.length; i++) {
@@ -360,6 +375,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   private readonly explicitDestinationProvider: boolean;
   private readonly inheritedSiteMembers: Record<string, DriveMembership[]>;
   private readonly sharepointMembershipAvailable: boolean;
+  private readonly dropboxTeamSpace: boolean;
   private readonly implicitLibraryMembers: DriveMembership[];
   private readonly containerSites = new Map<string, string>();
   private readonly uniquePermissions = new Set<string>();
@@ -381,6 +397,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.explicitDestinationProvider = fixture.destinationProvider !== undefined;
     this.inheritedSiteMembers = structuredClone(fixture.inheritedSiteMembers ?? {});
     this.sharepointMembershipAvailable = fixture.sharepointMembershipAvailable ?? false;
+    this.dropboxTeamSpace = fixture.dropboxTeamSpace ?? false;
     this.implicitLibraryMembers = structuredClone(fixture.implicitLibraryMembers ?? []);
     this.unreadableSourceDrives = new Set(fixture.unreadableSourceDrives);
     this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
@@ -490,7 +507,7 @@ export class FakeFileMigrationPort implements ProviderPort {
   }
 
   async destinationCreator(): Promise<string> {
-    return this.destinationProvider === "sharepoint"
+    return this.destinationProvider !== "google_shared_drive"
       ? ""
       : (await this.googleAbout()).user.emailAddress;
   }
@@ -508,6 +525,17 @@ export class FakeFileMigrationPort implements ProviderPort {
   async validateDestinationCreation(
     input: Parameters<NonNullable<ProviderPort["validateDestinationCreation"]>>[0],
   ): Promise<void> {
+    if (this.destinationProvider === "dropbox") {
+      this.callLog.push("validateDestinationCreation:dropbox");
+      if (this.dropboxTeamSpace)
+        throw new ProviderFault(
+          "preflight_failed",
+          "This Dropbox team uses a team space, where new folders are visible to the whole team at once. Migmate cannot fence them before go-live; copy into an existing team folder instead.",
+          { check: "dropbox_team_space_unfenced" },
+        );
+      this.throwEffect("validateDestinationCreation", "", "before");
+      return;
+    }
     if (input.members.length === 0) return;
     this.callLog.push(`validateDestinationCreation:${input.siteId ?? ""}`);
     try {
@@ -530,25 +558,33 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.callLog.push(`createDestinationContainer:${input.name}`);
     this.throwEffect("createDestinationContainer", input.name, "before");
     const sharepoint = this.destinationProvider === "sharepoint";
+    const dropbox = this.destinationProvider === "dropbox";
     if (sharepoint && !input.siteId) throw destinationFault("destination_site_required", 400);
     if (
-      sharepoint
-        ? [...this.sharedDrives.values()].some(
-            (drive) =>
-              drive.name === input.name && this.containerSites.get(drive.id) === input.siteId,
+      dropbox
+        ? // Dropbox team-folder names are unique per team, case-insensitively.
+          [...this.sharedDrives.values()].some(
+            (drive) => drive.name.toLowerCase() === input.name.toLowerCase(),
           )
-        : this.driveRequests.has(input.requestId)
+        : sharepoint
+          ? [...this.sharedDrives.values()].some(
+              (drive) =>
+                drive.name === input.name && this.containerSites.get(drive.id) === input.siteId,
+            )
+          : this.driveRequests.has(input.requestId)
     )
       return null;
     let sequence = this.sharedDrives.size + 1;
     while (this.sharedDrives.has(`drive-${sequence}`)) sequence++;
     const id = `drive-${sequence}`;
-    const rootFolderId = sharepoint ? `${id}-root` : id;
+    const rootFolderId = sharepoint || dropbox ? `${id}-root` : id;
     const drive: DestinationContainer = {
       id,
       name: input.name,
       createdTime: this.now().toISOString(),
       ...(sharepoint ? { rootFolderId, creationRequestId: input.requestId } : {}),
+      // Team folders have no description or tag to carry a request marker.
+      ...(dropbox ? { rootFolderId } : {}),
     };
     this.sharedDrives.set(id, drive);
     this.driveRequests.set(input.requestId, id);
@@ -557,7 +593,10 @@ export class FakeFileMigrationPort implements ProviderPort {
       id,
       sharepoint
         ? structuredClone(this.inheritedSiteMembers[input.siteId!] ?? [])
-        : [{ email: await this.destinationCreator(), type: "user", role: "organizer" }],
+        : dropbox
+          ? // API-created team folders give access to no one, not even admins.
+            []
+          : [{ email: await this.destinationCreator(), type: "user", role: "organizer" }],
     );
     this.insertDestination({
       id: rootFolderId,
@@ -582,7 +621,9 @@ export class FakeFileMigrationPort implements ProviderPort {
     return [...this.sharedDrives.values()]
       .filter(
         (drive) =>
-          drive.name === input.name &&
+          (this.destinationProvider === "dropbox"
+            ? drive.name.toLowerCase() === input.name.toLowerCase()
+            : drive.name === input.name) &&
           (this.destinationProvider !== "sharepoint" ||
             this.containerSites.get(drive.id) === input.siteId),
       )
@@ -627,6 +668,11 @@ export class FakeFileMigrationPort implements ProviderPort {
         throw destinationFault("unsupported_member_role", 400);
       await this.prepareDestinationMembers(driveId);
     }
+    if (
+      this.destinationProvider === "dropbox" &&
+      (member.type !== "group" || !["viewer", "editor"].includes(member.role))
+    )
+      throw destinationFault("unsupported_member_role", 400);
     this.callLog.push(`addDriveMember:${driveId}:${member.email}`);
     this.throwEffect("addDriveMember", member.email, "before");
     const members = this.driveMembers.get(driveId);
@@ -1225,6 +1271,17 @@ export class FakeFileMigrationPort implements ProviderPort {
     const checkpoint = async () => {
       if (!scenario || scenarioApplied || pass.stats.files < (scenario.afterFiles ?? 0)) return;
       scenarioApplied = true;
+      if (scenario.retryingError) {
+        pass.stats.errors++;
+        pass.stats.lastError = scenario.retryingError;
+        // rclone keeps retrying; only a stop ends this pass.
+        await new Promise<void>((resolve) => {
+          pass.release = resolve;
+          paused?.();
+        });
+        delete pass.release;
+        active();
+      }
       if (scenario.pause) {
         await new Promise<void>((resolve) => {
           pass.release = resolve;
@@ -1406,7 +1463,9 @@ export class FakeFileMigrationPort implements ProviderPort {
         input.root.kind === "local" ||
         (input.root.kind === "sharepoint"
           ? input.hashType === "quickxor"
-          : input.hashType !== "quickxor");
+          : input.root.kind === "dropbox"
+            ? input.hashType === "dropbox"
+            : input.hashType !== "quickxor" && input.hashType !== "dropbox");
       const hash =
         !supported ||
         unreadable ||
@@ -1448,6 +1507,13 @@ export class FakeFileMigrationPort implements ProviderPort {
   releaseCopyPasses(jobid?: number): void {
     for (const pass of this.passes.values())
       if (jobid === undefined || pass.handle.jobid === jobid) pass.release?.();
+  }
+
+  /** An operator renaming a conflicting destination container. */
+  renameDestinationContainer(id: string, name: string): void {
+    const container = this.sharedDrives.get(id);
+    if (!container) throw new Error(`Unknown destination container ${id}`);
+    this.sharedDrives.set(id, { ...container, name });
   }
 
   removeDestinationItem(id: string): void {

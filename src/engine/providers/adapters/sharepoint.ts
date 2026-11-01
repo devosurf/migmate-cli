@@ -23,6 +23,7 @@ import type {
   SourceEntry,
   FilePassRoot,
 } from "../port.ts";
+import { markCreationRejected } from "../port.ts";
 import { sharepointOrigin } from "./credentials/sharepoint.ts";
 import { discoverSharePoint } from "../discovery.ts";
 import {
@@ -163,6 +164,9 @@ export class SharePointAdapter implements FileAdapter {
       );
     } catch (error) {
       if (error instanceof HttpProviderFault && error.status === 409) return null;
+      // Other 4xx, 429 included, refuse before the library exists.
+      if (error instanceof HttpProviderFault && error.status >= 400 && error.status < 500)
+        throw markCreationRejected(error);
       throw error;
     }
     return this.#container(input.siteId, library);

@@ -12,8 +12,10 @@ export interface UploadQuotaStop {
   code: "upload_quota_exceeded";
   /** Time Migmate first observed the failed upload pass. */
   hitAt: string;
-  /** Null only for older plans that did not record a non-impersonated account. */
+  /** Null only for older plans that did not record a non-impersonated account, and for Dropbox. */
   actingGoogleAccount: string | null;
+  /** Absent for Google's per-account daily allowance; Dropbox's is per team, per month. */
+  limit?: "dropbox_team_monthly_upload_calls";
   earliestResumeAt: string;
   resumeTimeIsEstimate: true;
 }
@@ -70,6 +72,8 @@ export interface CreatedDrive {
   intentAt?: string;
   /** Recorded before a non-idempotent provider call; absence means it was not attempted. */
   creationAttemptedAt?: string;
+  /** Attempts the provider definitely refused, so nothing was created by them. */
+  rejectedCreationAttempts?: string[];
   provenance?:
     | { kind: "create_response" }
     | { kind: "name_recovery"; createdTime: string }
@@ -95,7 +99,7 @@ export interface CreatedDrive {
   /** Listing observed by the latest verification; never rebased once go-live starts. */
   verifiedDestination?: {
     revision: number;
-    hashType: "sha256" | "quickxor";
+    hashType: "sha256" | "quickxor" | "dropbox";
     md5: boolean;
     digest: string;
   };

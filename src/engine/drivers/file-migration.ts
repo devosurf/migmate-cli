@@ -35,6 +35,7 @@ import type {
   ProviderPort,
   SourceEntry,
 } from "../providers/port.ts";
+import { isCreationRejected } from "../providers/port.ts";
 import type { CommitFinding, CommitUnit, JobTypeDriver, ReportSection } from "./types.ts";
 import { ReportText, reportJson } from "../report.ts";
 import {
@@ -221,8 +222,14 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
               },
             );
           drive = { ...drive, creationAttemptedAt: ctx.now().toISOString() };
-          yield { ...unit("creation-attempt"), createdDrive: drive };
+          const attempt = drive.rejectedCreationAttempts?.length ?? 0;
+          // Commit keys are idempotent, so each attempt after a rejection needs its own.
+          yield {
+            ...unit(attempt ? `creation-attempt:${attempt}` : "creation-attempt"),
+            createdDrive: drive,
+          };
         }
+        let rejection: unknown = null;
         try {
           created = await ctx.provider.createDestinationContainer({
             name: drive.name,
@@ -230,12 +237,36 @@ async function* provision(ctx: FileContext): AsyncIterable<CommitUnit> {
             ...(drive.siteId ? { siteId: drive.siteId } : {}),
           });
           if (created) drive = { ...drive, provenance: { kind: "create_response" } };
+          else if (!idempotent) rejection = "conflict";
         } catch (error) {
-          if (
+          if (!idempotent && isCreationRejected(error)) rejection = error;
+          else if (
             !(error instanceof TypeError) &&
             !(error instanceof HttpProviderFault && retryableStatus(error.status))
           )
             throw error;
+        }
+        if (rejection) {
+          // The provider created nothing, so a later run may create once the cause is gone.
+          const { creationAttemptedAt, ...cleared } = drive;
+          drive = {
+            ...cleared,
+            rejectedCreationAttempts: [
+              ...(drive.rejectedCreationAttempts ?? []),
+              creationAttemptedAt!,
+            ],
+          };
+          yield {
+            ...unit(`creation-rejected:${drive.rejectedCreationAttempts!.length}`),
+            createdDrive: drive,
+          };
+          if (rejection !== "conflict") throw rejection;
+          // A conflict names a container without this job's proof: recovery refuses it.
+          await recover();
+          throw Object.assign(
+            new Error("The provider reported a name conflict that is not yet visible; retry."),
+            { code: "provider_request_failed", transient: true },
+          );
         }
         if (!created) created = await recover();
         if (!created) {
@@ -1515,12 +1546,14 @@ async function* copyPass(
         // Worker teardown may have already discarded its counter.
       }
       if (finalStats) {
-        const transferring = finalStats.transferring.slice(0, 5);
-        const transferringTotal = finalStats.transferringTotal ?? finalStats.transferring.length;
+        // rclone's error text can name files: it is never pass evidence.
+        const { lastError: _lastError, ...observed } = finalStats;
+        const transferring = observed.transferring.slice(0, 5);
+        const transferringTotal = observed.transferringTotal ?? observed.transferring.length;
         pass = {
           ...pass,
           lastStats: {
-            ...finalStats,
+            ...observed,
             transferring,
             transferringTotal,
             transferringTruncated: transferringTotal > transferring.length,
@@ -1672,9 +1705,25 @@ async function* copyPass(
     yield unit();
     for (;;) {
       ctx.signal?.throwIfAborted();
-      const status = await ctx.provider.copyPassStatus(reference);
-      const stats = await ctx.provider.copyPassStats(reference);
+      let status = await ctx.provider.copyPassStatus(reference);
+      const { lastError, ...stats } = await ctx.provider.copyPassStats(reference);
       lastObservation = { bytes: stats.bytes, at: ctx.now() };
+      // rclone retries quota errors it does not classify (Dropbox's monthly limit);
+      // a match in its running error stops the pass instead of retrying for hours.
+      if (
+        status.state === "running" &&
+        lastError &&
+        fileProviderPair(ctx.config).destination.quotaWhileRunning &&
+        fileProviderPair(ctx.config).destination.quotaStop?.(ctx, lastError)
+      ) {
+        try {
+          await stopAndReconcile();
+        } catch (error) {
+          // Keep the quota evidence: the failure path classifies this message.
+          throw Object.assign(new Error(lastError), { cause: error });
+        }
+        status = { state: "failed", error: lastError };
+      }
       const transferring = stats.transferring.slice(0, 5);
       const transferringTotal = stats.transferringTotal ?? stats.transferring.length;
       const lastStats = {
@@ -1807,7 +1856,7 @@ async function membershipUnit(
 function goLiveBaseline(
   ctx: FileContext,
   mapping: FileMappingConfig,
-  observed: { hashType: "sha256" | "quickxor"; md5: boolean; digest: string },
+  observed: { hashType: "sha256" | "quickxor" | "dropbox"; md5: boolean; digest: string },
 ): CommitUnit | undefined {
   if (
     !managesCreatedAccess(ctx.config, mapping) ||
@@ -1857,7 +1906,7 @@ async function* verifyListing(ctx: FileContext): AsyncIterable<CommitUnit> {
     try {
       const list = async (
         side: FilePassRoot,
-        hashType: "quickxor" | "sha256" | "md5",
+        hashType: "quickxor" | "sha256" | "md5" | "dropbox",
         download = false,
         paths?: string[],
       ) => {

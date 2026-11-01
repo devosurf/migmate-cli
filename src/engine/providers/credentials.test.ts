@@ -11,6 +11,7 @@ import { createProductionProvider } from "./production.ts";
 import {
   beginDropboxAuthorization,
   DROPBOX_READ_SCOPES,
+  DROPBOX_WRITE_SCOPES,
   dropboxRemoteSettings,
   loadDropboxCredential,
   requestDropboxToken,
@@ -965,6 +966,145 @@ test("Dropbox sources load beside a separate SharePoint destination application"
       },
     }),
     { code: "credential_config_invalid" },
+  );
+});
+
+async function dropboxFields(
+  t: TestContext,
+  role: "source" | "destination",
+  appKey = "dropbox-app",
+) {
+  t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
+    assert.equal(String(target), "https://api.dropboxapi.com/oauth2/token");
+    assert.ok(init?.body instanceof URLSearchParams);
+    return Response.json({
+      access_token: "initial-token",
+      token_type: "Bearer",
+      expires_in: 14400,
+      refresh_token: `${role}-refresh-canary`,
+      team_id: "dbtid:team",
+      scope: (role === "source" ? DROPBOX_READ_SCOPES : DROPBOX_WRITE_SCOPES).join(" "),
+    });
+  });
+  const fields = await beginDropboxAuthorization(appKey, role).exchange(
+    "code",
+    new AbortController().signal,
+  );
+  t.mock.restoreAll();
+  return fields;
+}
+
+test("Dropbox destination authorization requests exactly the write scopes", async (t) => {
+  const url = new URL(beginDropboxAuthorization("dropbox-writer", "destination").url);
+  assert.equal(url.searchParams.get("scope"), DROPBOX_WRITE_SCOPES.join(" "));
+  const fields = await dropboxFields(t, "destination", "dropbox-writer");
+  const section = new Map([
+    ["type", "dropbox"],
+    ["client_id", "dropbox-writer"],
+    ["impersonate_admin", "dbmid:writer"],
+    ...fields,
+  ]);
+  const credential = loadDropboxCredential(section, "destination");
+  t.after(() => credential.refreshToken.fill(0));
+  assert.equal(credential.role, "destination");
+  assert.deepEqual(credential.grantedScopes, [...DROPBOX_WRITE_SCOPES].sort());
+  // A write grant is never a read-only source, nor a read grant a writer.
+  assert.throws(() => loadDropboxCredential(section, "source"), {
+    code: "credential_permissions_invalid",
+  });
+  const reader = new Map([...dropboxSource, ...(await dropboxFields(t, "source"))]);
+  assert.throws(() => loadDropboxCredential(reader, "destination"), {
+    code: "credential_permissions_invalid",
+  });
+});
+
+for (const grant of [
+  `${DROPBOX_WRITE_SCOPES.join(" ")} files.content.read`,
+  `${DROPBOX_WRITE_SCOPES.join(" ")} members.write`,
+  `${DROPBOX_WRITE_SCOPES.join(" ")} team_data.governance.write`,
+  DROPBOX_WRITE_SCOPES.filter((scope) => scope !== "sharing.write").join(" "),
+]) {
+  test(`Dropbox destination refuses a wider or incomplete write grant: ${grant}`, async (t) => {
+    t.mock.method(globalThis, "fetch", async () =>
+      Response.json({
+        access_token: "access-canary",
+        token_type: "bearer",
+        expires_in: 14400,
+        refresh_token: "refresh-canary",
+        team_id: "dbtid:team",
+        scope: grant,
+      }),
+    );
+    await assert.rejects(
+      beginDropboxAuthorization("dropbox-writer", "destination").exchange(
+        "code-canary",
+        new AbortController().signal,
+      ),
+      { code: "credential_permissions_invalid" },
+    );
+  });
+}
+
+test("Dropbox destinations load a separate write app and refuse the source app's client ID", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "migmate-credentials-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const jobDirectory = await mkdtemp(join(tmpdir(), "migmate-job-"));
+  t.after(() => rm(jobDirectory, { recursive: true, force: true }));
+  const path = join(directory, "rclone.conf");
+  const sharepoint = source.filter((line) => !/^(drive_id|root_folder_id) /u.test(line));
+  const writer = (appKey: string, fields: Map<string, string>) =>
+    [["type", "dropbox"], ["client_id", appKey], ["impersonate_admin", "dbmid:writer"], ...fields]
+      .map(([key, value]) => `${key} = ${value}`)
+      .join("\n");
+  const config = {
+    sourceProvider: "sharepoint",
+    destinationProvider: "dropbox",
+    rclone: {
+      config: { resolver: "file", path, mode: "0600" },
+      sourceRemote: "sharepoint-source",
+      dropboxDestinationRemote: "dropbox-destination",
+    },
+  };
+  await writeFile(
+    path,
+    `[sharepoint-source]\n${sharepoint.join("\n")}\n\n[dropbox-destination]\n${writer("dropbox-writer", await dropboxFields(t, "destination", "dropbox-writer"))}\n`,
+    { mode: 0o600 },
+  );
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config,
+  });
+  t.after(() => session.dispose());
+  assert.equal(session.dropboxDestinationRemote, "dropbox-destination");
+  assert.equal(session.dropboxDestinationAdminId, "dbmid:writer");
+  assert.equal(session.dropboxRemote, null);
+  await assert.rejects(session.dropboxToken(), { code: "credential_dropbox_unavailable" });
+  session.dispose();
+  // D4: the write app must not be the read-only source app, whatever its grant.
+  const reader = [...dropboxSource, ...(await dropboxFields(t, "source"))]
+    .map(([key, value]) => `${key} = ${value}`)
+    .join("\n");
+  await writeFile(
+    path,
+    `[dropbox-source]\n${reader}\n\n[dropbox-destination]\n${writer("dropbox-app", await dropboxFields(t, "destination"))}\n`,
+    { mode: 0o600 },
+  );
+  await assert.rejects(
+    createCredentialSession({
+      jobType: "file_migration",
+      jobDirectory,
+      config: {
+        sourceProvider: "dropbox",
+        destinationProvider: "dropbox",
+        rclone: {
+          config: { resolver: "file", path, mode: "0600" },
+          dropboxRemote: "dropbox-source",
+          dropboxDestinationRemote: "dropbox-destination",
+        },
+      },
+    }),
+    { code: "unsupported_route" },
   );
 });
 

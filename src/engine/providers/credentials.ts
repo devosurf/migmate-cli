@@ -49,6 +49,10 @@ export interface CredentialSession {
   dropboxToken(signal?: AbortSignal): Promise<string>;
   readonly dropboxAdminId?: string | undefined;
   readonly dropboxRemote?: string | null;
+  /** The separate Dropbox write app; never the read-only source app. */
+  dropboxDestinationToken?(signal?: AbortSignal): Promise<string>;
+  readonly dropboxDestinationAdminId?: string | undefined;
+  readonly dropboxDestinationRemote?: string | null;
   identity(signal?: AbortSignal): Promise<string>;
   evidence(signal?: AbortSignal): Promise<Record<string, unknown>>;
   readonly rcloneConfigPath: string | null;
@@ -262,6 +266,8 @@ interface CredentialState {
   google: GoogleCredential | undefined;
   dropbox?: DropboxCredential;
   dropboxRemote?: string;
+  dropboxDestination?: DropboxCredential;
+  dropboxDestinationRemote?: string;
   mappings: MappingIdentity[];
   configPath: string | null;
   sourceRemote: string | null;
@@ -343,6 +349,16 @@ async function loadCredentials(
         );
       }
       assertSeparateSharePointApplications(material.graph, material.graphDestination);
+      // D4: writes never reuse the read-only source app, even on another team.
+      if (
+        material.dropbox &&
+        material.dropboxDestination &&
+        material.dropbox.clientId === material.dropboxDestination.clientId
+      )
+        throw refused("credential_permissions_invalid", {
+          provider: "dropbox",
+          reason: "destination_reuses_source_app",
+        });
       const sharepointCertificateRef =
         rclone.sharepointDestinationCertificate === undefined
           ? undefined
@@ -360,6 +376,10 @@ async function loadCredentials(
         google: material.google,
         ...(material.dropbox ? { dropbox: material.dropbox } : {}),
         ...(remotes.has("dropboxRemote") ? { dropboxRemote: remotes.get("dropboxRemote")! } : {}),
+        ...(material.dropboxDestination ? { dropboxDestination: material.dropboxDestination } : {}),
+        ...(remotes.has("dropboxDestinationRemote")
+          ? { dropboxDestinationRemote: remotes.get("dropboxDestinationRemote")! }
+          : {}),
         mappings,
         configPath: loaded.path,
         sourceRemote: remotes.get("sourceRemote") ?? null,
@@ -373,6 +393,7 @@ async function loadCredentials(
     material.graph?.secret?.fill(0);
     material.graphDestination?.secret?.fill(0);
     material.dropbox?.refreshToken.fill(0);
+    material.dropboxDestination?.refreshToken.fill(0);
     if (error instanceof ProviderFault) throw error;
     throw refused("credential_config_invalid");
   }
@@ -399,6 +420,8 @@ export async function createCredentialSession(input: {
   let googlePending: Promise<string> | undefined;
   let dropboxCache: Token | undefined;
   let dropboxPending: Promise<string> | undefined;
+  let dropboxDestinationCache: Token | undefined;
+  let dropboxDestinationPending: Promise<string> | undefined;
   const sharepointCache = new Map<string, Token>();
   const sharepointPending = new Map<string, Promise<string>>();
   let certificatePending: Promise<SharePointCertificate> | undefined;
@@ -554,6 +577,30 @@ export async function createCredentialSession(input: {
     }
   }
 
+  async function dropboxDestinationToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    const credential = active().dropboxDestination;
+    if (!credential) throw refused("credential_dropbox_unavailable");
+    if (dropboxDestinationCache && dropboxDestinationCache.expiresAt > Date.now() + 60_000)
+      return dropboxDestinationCache.value;
+    if (dropboxDestinationPending) return dropboxDestinationPending;
+    dropboxDestinationCache = undefined;
+    dropboxDestinationPending = (async () => {
+      const token = await requestDropboxToken(
+        credential,
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+      );
+      active();
+      dropboxDestinationCache = token;
+      return token.value;
+    })();
+    try {
+      return await dropboxDestinationPending;
+    } finally {
+      dropboxDestinationPending = undefined;
+    }
+  }
+
   async function authenticate(signal?: AbortSignal): Promise<CredentialState> {
     const current = active();
     await Promise.all([
@@ -561,6 +608,7 @@ export async function createCredentialSession(input: {
       ...(current.graphDestination ? [graphDestinationToken(signal)] : []),
       ...(current.google ? [googleToken(signal)] : []),
       ...(current.dropbox ? [dropboxToken(signal)] : []),
+      ...(current.dropboxDestination ? [dropboxDestinationToken(signal)] : []),
     ]);
     return active();
   }
@@ -580,6 +628,13 @@ export async function createCredentialSession(input: {
     get dropboxRemote() {
       return active().dropboxRemote ?? null;
     },
+    dropboxDestinationToken,
+    get dropboxDestinationAdminId() {
+      return active().dropboxDestination?.adminId;
+    },
+    get dropboxDestinationRemote() {
+      return active().dropboxDestinationRemote ?? null;
+    },
     async identity(signal) {
       if (input.mode === "archive_verification") await googleToken(signal);
       else await authenticate(signal);
@@ -592,6 +647,15 @@ export async function createCredentialSession(input: {
                 clientId: current.dropbox.clientId,
                 teamId: current.dropbox.teamId,
                 adminId: current.dropbox.adminId,
+              },
+            }
+          : {}),
+        ...(current.dropboxDestination
+          ? {
+              dropboxDestination: {
+                clientId: current.dropboxDestination.clientId,
+                teamId: current.dropboxDestination.teamId,
+                adminId: current.dropboxDestination.adminId,
               },
             }
           : {}),
@@ -631,6 +695,19 @@ export async function createCredentialSession(input: {
                 scopeEvidence: "authorization_code",
                 authorizedAt: current.dropbox.authorizedAt,
                 authenticatedAt: dropboxCache!.authenticatedAt,
+              },
+            }
+          : {}),
+        ...(current.dropboxDestination
+          ? {
+              dropboxDestination: {
+                clientId: current.dropboxDestination.clientId,
+                teamId: current.dropboxDestination.teamId,
+                adminId: current.dropboxDestination.adminId,
+                grantedScopes: [...current.dropboxDestination.grantedScopes],
+                scopeEvidence: "authorization_code",
+                authorizedAt: current.dropboxDestination.authorizedAt,
+                authenticatedAt: dropboxDestinationCache!.authenticatedAt,
               },
             }
           : {}),
@@ -711,8 +788,11 @@ export async function createCredentialSession(input: {
       state?.graph?.secret?.fill(0);
       state?.graphDestination?.secret?.fill(0);
       state?.dropbox?.refreshToken.fill(0);
+      state?.dropboxDestination?.refreshToken.fill(0);
       dropboxCache = undefined;
       dropboxPending = undefined;
+      dropboxDestinationCache = undefined;
+      dropboxDestinationPending = undefined;
       destinationCache = undefined;
       destinationPending = undefined;
       sharepointCache.clear();

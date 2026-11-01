@@ -23,7 +23,10 @@ const provider = new FixturePort(
         },
       }
     : undefined,
-  process.env.CLI_TEST_DESTINATION_PROVIDER === "sharepoint" ? "sharepoint" : "google_shared_drive",
+  process.env.CLI_TEST_DESTINATION_PROVIDER === "sharepoint" ||
+    process.env.CLI_TEST_DESTINATION_PROVIDER === "dropbox"
+    ? process.env.CLI_TEST_DESTINATION_PROVIDER
+    : "google_shared_drive",
   process.env.CLI_TEST_SHAREPOINT_MEMBERSHIP === "1",
 );
 if (process.env.CLI_TEST_ENCODED_NAMES === "1") {

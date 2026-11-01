@@ -28,8 +28,12 @@ For Google → SharePoint, swap the two values. Dropbox → Google uses
 `sourceProvider = "dropbox"` and `destinationProvider = "google_shared_drive"`;
 Dropbox → SharePoint uses `destinationProvider = "sharepoint"` with the same
 SharePoint destination rules as Google → SharePoint (encoding notices, blocking
-reserved names, case collisions and long paths). Dropbox destinations and
-same-provider copies refuse
+reserved names, case collisions and long paths). Google → Dropbox and SharePoint →
+Dropbox use `destinationProvider = "dropbox"`: team folders created or named by
+`namespaceId`, groups-only members by `groupId`, a separate write app (see
+[CREDENTIALS.md](CREDENTIALS.md#dropbox-destination-write-app)) and blocking
+case-collision, reserved-name and 255-character findings. Same-provider copies,
+Dropbox → Dropbox included, refuse
 `unsupported_route`. Empty config defaults to the forward pair; saved file configs
 name both providers. Explicit `route` in a new file config refuses
 `configuration_invalid`: replace `route` with `sourceProvider` and
@@ -174,6 +178,8 @@ Explain host lifetime before detaching: terminal closure/SSH disconnect are supp
 If `plan` is interrupted (exit 130 for Ctrl-C or 143 for SIGTERM), read `status`, then rerun plain `plan --job ID`. File and Teams collection abort in-flight reads, release the lease and leave any earlier completed plan intact; partial collection is not approvable. Normal cooperative interruption needs neither `reclaim` nor `execute`. The web view's **Quit process safely** also interrupts planning.
 
 For `blocked` (exit 5) with `uploadQuota.code = "upload_quota_exceeded"` in the execute result or `status.mappingPasses[].uploadQuota`, present the acting account, hit time and earliest resume estimate. Google allows 750 GB of uploads per user per day; Migmate stops the other active passes and starts no queued mapping for that account. Recommend waiting until `earliestResumeAt` (hit time + 24 hours), then repeat `execute` on the same job. Explain `resumeTimeIsEstimate = true`: this is not Google's reset clock or guaranteed allowance. An earlier manual retry is allowed; automatic quota resume is unavailable. Quota stops bypass the ordinary failure budget; the quota pass's final `errors = null` means its ordinary failure count is unknown, while `rcloneErrors` retains the unclassified raw aggregate. Preserve earlier failures for review; a quota block is not an acceptance request.
+
+When `uploadQuota.limit = "dropbox_team_monthly_upload_calls"`, the Dropbox team has used its monthly allowance of upload calls, shared by every app on the team. There is no acting account. Recommend waiting until `earliestResumeAt` (08:00 UTC on the first of the next month, an estimate: Dropbox names no reset time zone) or asking the Dropbox administrator about the team's plan, then repeat `execute` on the same job.
 
 Choose dedicated destination roots: file copy never deletes, but can update existing same-path files without collision protection. File copies use no reserved IDs, per-file private markers, move-by-id or local staging; SharePoint library provisioning separately writes a creation-request marker for recovery, as described in [STAGED.md](STAGED.md). Teams archive uploads retain their own protections. rclone copies empty directories and supported file timestamps/content type with owner, permission and label metadata off; folders get modification times only. SharePoint uses paths inside drives pinned by id, never `root_folder_id`. See README's “File mapping copies and recovery” for the shipped boundary.
 

@@ -11,7 +11,10 @@ import {
 } from "./shared.ts";
 import type { FileCredentialAdapter, Token } from "./shared.ts";
 
+export type DropboxRole = "source" | "destination";
+
 export interface DropboxCredential {
+  role: DropboxRole;
   clientId: string;
   teamId: string;
   adminId: string;
@@ -36,17 +39,41 @@ const ALLOWED_READ_SCOPES: Record<string, true> = {
   "team_data.content.read": true,
   "members.read": true,
 };
+/**
+ * The destination write app: uploads into one namespace, team-folder creation and
+ * listing, group membership on created team folders, and team feature reads.
+ * https://developers.dropbox.com/oauth-guide#dropbox-api-permissions
+ */
+export const DROPBOX_WRITE_SCOPES = [
+  "files.metadata.read",
+  "files.content.write",
+  "team_data.member",
+  "team_data.content.read",
+  "team_data.content.write",
+  "sharing.read",
+  "sharing.write",
+  "team_info.read",
+] as const;
+const ALLOWED_WRITE_SCOPES: Record<string, true> = {
+  ...Object.fromEntries(DROPBOX_WRITE_SCOPES.map((scope) => [scope, true])),
+  // Identity reads only; content reads and metadata writes stay refused.
+  "account_info.read": true,
+  "members.read": true,
+  "groups.read": true,
+};
 const TOKEN_ENDPOINT = "https://api.dropboxapi.com/oauth2/token";
 const PROOF_KEY = "migmate_scope_proof";
 
-function scopes(value: unknown): string[] {
+function scopes(value: unknown, role: DropboxRole): string[] {
   if (typeof value !== "string" || !value.trim())
     throw refused("credential_permissions_invalid", { provider: "dropbox" });
   const granted = [...new Set(value.trim().split(/\s+/u))].sort();
+  const allowed = role === "source" ? ALLOWED_READ_SCOPES : ALLOWED_WRITE_SCOPES;
+  const required = role === "source" ? DROPBOX_READ_SCOPES : DROPBOX_WRITE_SCOPES;
   // Unknown permissions fail closed, including administrative scopes without a .write suffix.
   if (
-    granted.some((scope) => !Object.hasOwn(ALLOWED_READ_SCOPES, scope)) ||
-    DROPBOX_READ_SCOPES.some((required) => !granted.includes(required))
+    granted.some((scope) => !Object.hasOwn(allowed, scope)) ||
+    required.some((scope) => !granted.includes(scope))
   )
     throw refused("credential_permissions_invalid", { provider: "dropbox" });
   return granted;
@@ -91,7 +118,10 @@ export function dropboxRemoteSettings(section: Map<string, string>): {
   return { clientId: clientId(section.get("client_id")), adminId };
 }
 
-export function loadDropboxCredential(section: Map<string, string>): DropboxCredential {
+export function loadDropboxCredential(
+  section: Map<string, string>,
+  role: DropboxRole = "source",
+): DropboxCredential {
   const settings = dropboxRemoteSettings(section);
   // rclone-created tokens have no observable initial grant and cannot be imported.
   if (!section.has(PROOF_KEY))
@@ -125,8 +155,9 @@ export function loadDropboxCredential(section: Map<string, string>): DropboxCred
     !/^dbtid:[A-Za-z0-9_-]+$/u.test(proof.teamId)
   )
     throw refused("credential_permissions_invalid", { provider: "dropbox" });
-  const grantedScopes = scopes(proof.grantedScopes.join(" "));
+  const grantedScopes = scopes(proof.grantedScopes.join(" "), role);
   return {
+    role,
     ...settings,
     teamId: proof.teamId,
     refreshToken: Buffer.from(refresh),
@@ -136,7 +167,10 @@ export function loadDropboxCredential(section: Map<string, string>): DropboxCred
 }
 
 /** The verifier stays in the closure and is consumed once; the code never enters job config. */
-export function beginDropboxAuthorization(appKey: string): {
+export function beginDropboxAuthorization(
+  appKey: string,
+  role: DropboxRole = "source",
+): {
   url: string;
   exchange(code: string, signal: AbortSignal): Promise<Map<string, string>>;
 } {
@@ -149,7 +183,7 @@ export function beginDropboxAuthorization(appKey: string): {
     token_access_type: "offline",
     code_challenge_method: "S256",
     code_challenge: createHash("sha256").update(verifier).digest("base64url"),
-    scope: DROPBOX_READ_SCOPES.join(" "),
+    scope: (role === "source" ? DROPBOX_READ_SCOPES : DROPBOX_WRITE_SCOPES).join(" "),
   }).toString();
   return {
     url: url.href,
@@ -164,7 +198,7 @@ export function beginDropboxAuthorization(appKey: string): {
       verifier = undefined;
       const requestedAt = Date.now();
       const response = await tokenResponse(TOKEN_ENDPOINT, body, signal, "dropbox");
-      const grantedScopes = scopes(response.scope);
+      const grantedScopes = scopes(response.scope, role);
       const refresh = refreshToken(response.refresh_token);
       const teamId = text(response.team_id);
       if (!/^dbtid:[A-Za-z0-9_-]+$/u.test(teamId))
@@ -201,7 +235,7 @@ export async function requestDropboxToken(
   credential: DropboxCredential,
   signal: AbortSignal,
 ): Promise<Token> {
-  const permissions = scopes(credential.grantedScopes.join(" "));
+  const permissions = scopes(credential.grantedScopes.join(" "), credential.role);
   const requestedAt = Date.now();
   const response = await tokenResponse(
     TOKEN_ENDPOINT,
@@ -214,7 +248,7 @@ export async function requestDropboxToken(
     "dropbox",
   );
   // A refresh need not repeat scopes. It never establishes or replaces initial grant proof.
-  if (response.scope !== undefined) scopes(response.scope);
+  if (response.scope !== undefined) scopes(response.scope, credential.role);
   const token = parseToken(response, requestedAt);
   token.permissions = permissions;
   return token;
@@ -227,13 +261,20 @@ export const dropboxCredentialAdapter: FileCredentialAdapter = {
     if (id !== "/" && !/^id:[A-Za-z0-9_-]+$/u.test(id)) throw refused("credential_config_invalid");
     return id;
   },
-  remoteKey: { source: "dropboxRemote", destination: "dropboxRemote" },
+  remoteKey: { source: "dropboxRemote", destination: "dropboxDestinationRemote" },
   bindings: [
     {
       key: "dropboxRemote",
       allowUnused: false,
       async load(section) {
-        return { dropbox: loadDropboxCredential(section) };
+        return { dropbox: loadDropboxCredential(section, "source") };
+      },
+    },
+    {
+      key: "dropboxDestinationRemote",
+      allowUnused: false,
+      async load(section) {
+        return { dropboxDestination: loadDropboxCredential(section, "destination") };
       },
     },
   ],

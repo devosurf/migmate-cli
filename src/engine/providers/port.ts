@@ -106,6 +106,8 @@ export interface CopyPassStats {
   transferringTotal?: number;
   /** Whether the persisted in-flight sample omits entries. */
   transferringTruncated?: boolean;
+  /** rclone's latest error text; only provider quota detection reads it, never evidence. */
+  lastError?: string;
 }
 
 export interface FileHashEntry {
@@ -163,7 +165,7 @@ export interface FilePassProvider {
   listFileHashes(input: {
     socketPath: string;
     root: FilePassRoot;
-    hashType: "sha256" | "md5" | "quickxor";
+    hashType: "sha256" | "md5" | "quickxor" | "dropbox";
     download: boolean;
     /** Exact relative files to list and hash; an empty selection reads no files. */
     paths?: string[];
@@ -192,7 +194,16 @@ export interface DriveMember {
   email: string;
   type: "user" | "group";
   role:
-    "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader" | "read" | "write" | "owner";
+    | "organizer"
+    | "fileOrganizer"
+    | "writer"
+    | "commenter"
+    | "reader"
+    | "read"
+    | "write"
+    | "owner"
+    | "viewer"
+    | "editor";
 }
 export interface SharedDrive {
   id: string;
@@ -221,7 +232,11 @@ export interface ProviderPort extends FilePassProvider {
   destinationCreator(): Promise<string>;
   /** Read-only provider prerequisites, before any creation or permission mutation. */
   validateDestinationCreation?(input: { siteId?: string; members: DriveMember[] }): Promise<void>;
-  /** A conflict returns null: the caller must reconcile by exact name and scope. */
+  /**
+   * A conflict returns null: the caller must reconcile by exact name and scope.
+   * A non-idempotent provider returns null or throws a fault marked by
+   * `markCreationRejected` only when the provider definitely created nothing.
+   */
   createDestinationContainer(input: {
     name: string;
     requestId: string;
@@ -332,4 +347,17 @@ export interface ProviderPort extends FilePassProvider {
   stopTransferWorker(input: { socketPath: string }): Promise<void>;
   terminateTransferWorker(input: { socketPath: string }): Promise<void>;
   transferWorkerVersion(input: { socketPath: string }): Promise<string | null>;
+}
+
+/** Marks a creation fault as a definite refusal: the provider created nothing. */
+export function markCreationRejected<T extends object>(error: T): T {
+  return Object.assign(error, { creationRejected: true as const });
+}
+
+export function isCreationRejected(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { creationRejected?: unknown }).creationRejected === true
+  );
 }

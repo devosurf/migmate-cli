@@ -122,7 +122,12 @@ function csv(text: string): unknown {
           type: r[4],
           ...(r[7] ? { create: r[7] } : {}),
           ...(r[11] ? { siteId: r[11] } : {}),
-          ...(r[5] || !r[7] ? { driveId: r[5] } : {}),
+          ...(r[5] || !r[7]
+            ? {
+                [fileProviderPair({ sourceProvider: r[1], destinationProvider: r[4] }).destination
+                  .containerField ?? "driveId"]: r[5],
+              }
+            : {}),
           ...(fileProviderPair({ sourceProvider: r[1], destinationProvider: r[4] }).destination
             .rootField === "folderPath"
             ? {
@@ -188,6 +193,7 @@ export function parseManifest(
     const d = object(m.destination, row, "destination", [
       "type",
       "driveId",
+      "namespaceId",
       "folderId",
       "folderPath",
       "create",
@@ -199,14 +205,26 @@ export function parseManifest(
     const sourceContainerField = pair.source.containerField ?? "driveId";
     if (s[sourceContainerField === "driveId" ? "namespaceId" : "driveId"] !== undefined)
       throw new ManifestError(row, `source.${sourceContainerField}`);
+    const destinationContainerField = pair.destination.containerField ?? "driveId";
+    if (d[destinationContainerField === "driveId" ? "namespaceId" : "driveId"] !== undefined)
+      throw new ManifestError(row, `destination.${destinationContainerField}`);
+    const groupMembers = pair.destination.memberIdentity === "dropbox_group";
     const members: DriveMember[] = [];
     if (m.members !== undefined) {
       if (!Array.isArray(m.members)) throw new ManifestError(row, "members");
       for (const [index, rawMember] of m.members.entries()) {
         const field = `members.${index}`;
-        const member = object(rawMember, row, field, ["email", "type", "role"]);
+        const member = object(
+          rawMember,
+          row,
+          field,
+          groupMembers ? ["groupId", "type", "role"] : ["email", "type", "role"],
+        );
         if (member.type !== "user" && member.type !== "group")
           throw new ManifestError(row, `${field}.type`);
+        // Dropbox team folders are shared with groups only, named by group ID.
+        if (groupMembers && member.type !== "group")
+          throw new ManifestError(row, `${field}.type`, "Dropbox team folders take groups only");
         const role = pair.destination.memberRole(member.role);
         if (!role)
           throw new ManifestError(
@@ -214,11 +232,17 @@ export function parseManifest(
             `${field}.role`,
             "The destination cannot represent this role",
           );
-        if (!/^[^\s@]+@[^\s@]+$/u.test(text(member.email, row, `${field}.email`)))
-          throw new ManifestError(row, `${field}.email`);
-        const email = String(member.email).toLowerCase();
+        const identity = groupMembers ? "groupId" : "email";
+        if (
+          !(groupMembers ? /^g:[0-9a-f]{1,64}$/iu : /^[^\s@]+@[^\s@]+$/u).test(
+            text(member[identity], row, `${field}.${identity}`),
+          )
+        )
+          throw new ManifestError(row, `${field}.${identity}`);
+        // A Dropbox group ID is the member's identity key, held where emails are.
+        const email = String(member[identity]).toLowerCase();
         if (members.some((m) => m.email === email))
-          throw new ManifestError(row, `${field}.email`, "Duplicate member");
+          throw new ManifestError(row, `${field}.${identity}`, "Duplicate member");
         members.push({ email, type: member.type, role });
       }
       if (!(m.destination && typeof m.destination === "object" && "create" in m.destination))
@@ -266,7 +290,11 @@ export function parseManifest(
     if (d.create !== undefined) {
       if (pair.destination.creationParent === "siteId") stable(d.siteId, "destination.siteId");
       else if (d.siteId !== undefined) throw new ManifestError(row, "destination.siteId");
-      if (d.driveId !== undefined || d.folderId !== undefined || d.folderPath !== undefined)
+      if (
+        d[destinationContainerField] !== undefined ||
+        d.folderId !== undefined ||
+        d.folderPath !== undefined
+      )
         throw new ManifestError(
           row,
           "destination.create",
@@ -293,7 +321,10 @@ export function parseManifest(
           }
         : {
             type: pair.destination.id,
-            driveId: stable(d.driveId, "destination.driveId"),
+            driveId: stable(
+              d[destinationContainerField],
+              `destination.${destinationContainerField}`,
+            ),
             folderPath: path(d.folderPath, "destination.folderPath"),
           };
     return { id, source, destination };
