@@ -41,6 +41,13 @@ export interface MappingPass {
     | null;
   error: string | null;
   uploadQuota?: UploadQuotaStop;
+  /** ADR-0019 D1: the pool account this pass wrote as; absent is the job's own identity. */
+  account?: string;
+  /**
+   * ADR-0019 D5: whether the stopped transfer was proven ended. Its mapping moves to
+   * another account only when it was, so a mapping never has two writers.
+   */
+  stopConfirmed?: boolean;
 }
 
 export interface GoLiveCheck {
@@ -72,6 +79,11 @@ export interface CreatedDrive {
   siteId?: string;
   /** Monotonic: clearing a manifest's members never restores inherited access. */
   managedAccess?: boolean;
+  /**
+   * ADR-0019 D4: pool accounts' temporary write membership, granted while copying and
+   * removed at close before the membership check. Never an end-user grant.
+   */
+  uploaders?: { account: string; role: string; grantedAt: string; removedAt?: string }[];
   /** Proven empty initial ACL when no creator identity is available, before manifest grants. */
   initialMembers?: DriveMembership[];
   creatorEmail: string;

@@ -3585,11 +3585,19 @@ function makeWriter(
                 signal.aborted ? "interrupted" : "blocked",
                 drained.committed,
                 budget,
+                undefined,
+                drained.accountStops,
               );
             transition(verified.value.clean ? "finish_clean" : "finish_gaps", "verify", {
               verificationDigest: verified.value.verificationDigest,
             });
-            return terminalResult("completed", drained.committed, budget);
+            return terminalResult(
+              "completed",
+              drained.committed,
+              budget,
+              undefined,
+              drained.accountStops,
+            );
           } catch (error) {
             if (job().state === "executing") transition("interrupt", "execute");
             throw error;
