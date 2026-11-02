@@ -54,6 +54,22 @@ const FILE_FIELDS =
   "id,name,driveId,parents,mimeType,size,createdTime,modifiedTime,sha256Checksum,headRevisionId,appProperties,capabilities,trashed";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
+interface GooglePermission {
+  id: string;
+  emailAddress?: string;
+  domain?: string;
+  type: string;
+  role: string;
+  deleted?: boolean;
+}
+/**
+ * Shared Drive roles that can add files: `organizer` (Manager) and `fileOrganizer`
+ * (Content manager). An uploader is a content manager.
+ * https://developers.google.com/workspace/drive/api/guides/ref-roles
+ */
+const UPLOADER_ROLE = "fileOrganizer";
+const UPLOADER_OR_STRONGER = new Set(["organizer", UPLOADER_ROLE]);
+
 /**
  * Archive verification detects drift using `headRevisionId` for binary content
  * and `modifiedTime` for metadata. Uploads are create-only, so this observation
@@ -243,15 +259,26 @@ export class GoogleAdapter implements FileAdapter {
       : this.#session.googleToken(signal);
   }
 
-  /** The rclone remote of this side, impersonating its own delegated account. */
-  #remote(driveId: string, folderId: string, extra = ""): string {
+  /**
+   * The rclone remote of this side, impersonating its own delegated account, or an
+   * acting-account pool member (ADR-0019 D1). rclone keys its backend cache by remote
+   * name plus a hash of the overridden connection-string parameters, and the drive
+   * backend builds its JWT token source from `impersonate`, so each account gets its
+   * own fs and token source rather than a swapped shared one.
+   * https://github.com/rclone/rclone/blob/v1.75.0/fs/newfs.go#L62-L85
+   * https://github.com/rclone/rclone/blob/v1.75.0/fs/cache/cache.go#L98-L103
+   * https://github.com/rclone/rclone/blob/v1.75.0/backend/drive/drive.go#L1297-L1299
+   */
+  #remote(driveId: string, folderId: string, extra = "", account?: string): string {
     const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
     const remote = this.#separateSource
       ? this.#session.googleSourceRemote
       : this.#session.destinationRemote;
-    const subject = this.#separateSource
-      ? this.#session.googleSourceDelegatedSubject
-      : this.#session.delegatedSubject;
+    const subject =
+      account ??
+      (this.#separateSource
+        ? this.#session.googleSourceDelegatedSubject
+        : this.#session.delegatedSubject);
     return `${remote},team_drive=${quote(driveId)},root_folder_id=${quote(folderId)}${subject ? `,impersonate=${quote(subject)}` : ""}${extra}:`;
   }
 
@@ -261,6 +288,22 @@ export class GoogleAdapter implements FileAdapter {
     headers.set("Authorization", `Bearer ${await this.#token(init.signal ?? undefined)}`);
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     return fetchProvider(googleUrl(path), { ...init, headers });
+  }
+
+  /** ADR-0019: a request observed as one pool account, never the job's own identity. */
+  async #googleAs(account: string, path: string, init: RequestInit = {}): Promise<Response> {
+    if (this.#separateSource || !this.#session.googleAccountToken)
+      throw new ProviderFault(
+        "credential_google_unavailable",
+        "Acting-account pools need the destination service account.",
+        { provider: "google" },
+      );
+    init.signal?.throwIfAborted();
+    const token = await this.#session.googleAccountToken(account, init.signal ?? undefined);
+    return fetchProvider(googleUrl(path), {
+      ...init,
+      headers: { Authorization: `Bearer ${token}` },
+    });
   }
 
   async #getRaw(objectId: string, signal?: AbortSignal): Promise<{ file: GoogleFile }> {
@@ -380,8 +423,9 @@ export class GoogleAdapter implements FileAdapter {
     return found;
   }
 
-  async listDriveMembers(driveId: string): Promise<DriveMembership[]> {
-    const members: DriveMembership[] = [];
+  /** Every permission on a Shared Drive, read as the job's own identity. */
+  async #permissions(driveId: string, signal?: AbortSignal): Promise<GooglePermission[]> {
+    const found: GooglePermission[] = [];
     for await (const permissions of cursorPages(
       null,
       async (cursor) => {
@@ -392,29 +436,125 @@ export class GoogleAdapter implements FileAdapter {
         });
         if (cursor) query.set("pageToken", cursor);
         const page = await responseJson<{
-          permissions?: {
-            emailAddress?: string;
-            domain?: string;
-            type: string;
-            role: string;
-            deleted?: boolean;
-          }[];
+          permissions?: GooglePermission[];
           nextPageToken?: string;
         }>(
-          await this.#google(`/drive/v3/files/${encodeURIComponent(driveId)}/permissions?${query}`),
+          await this.#google(
+            `/drive/v3/files/${encodeURIComponent(driveId)}/permissions?${query}`,
+            { signal: signal ?? null },
+          ),
         );
         return { value: page.permissions ?? [], next: page.nextPageToken };
       },
       () => new ProviderFault("provider_request_failed", "Member listing cursor repeated."),
     ))
-      members.push(
-        ...permissions.map((member) => ({
-          email: member.emailAddress ?? member.domain ?? "",
-          type: member.deleted ? "deleted" : member.type,
-          role: member.role,
-        })),
+      found.push(...permissions);
+    return found;
+  }
+
+  async listDriveMembers(driveId: string): Promise<DriveMembership[]> {
+    return (await this.#permissions(driveId)).map((member) => ({
+      email: member.emailAddress ?? member.domain ?? "",
+      type: member.deleted ? "deleted" : member.type,
+      role: member.role,
+    }));
+  }
+
+  /** The account's own direct user permission; addresses compare case-insensitively. */
+  async #userPermission(
+    driveId: string,
+    account: string,
+    signal?: AbortSignal,
+  ): Promise<GooglePermission | undefined> {
+    const wanted = account.toLowerCase();
+    return (await this.#permissions(driveId, signal)).find(
+      (permission) =>
+        permission.type === "user" &&
+        !permission.deleted &&
+        permission.emailAddress?.toLowerCase() === wanted,
+    );
+  }
+
+  /**
+   * ADR-0019 D4: a pool account becomes a content manager of a drive this job created.
+   * A Manager or Content manager already writes; a weaker direct role is never upgraded.
+   * https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/create
+   */
+  async addUploaderMember(driveId: string, account: string, signal?: AbortSignal): Promise<void> {
+    const existing = await this.#userPermission(driveId, account, signal);
+    if (existing && UPLOADER_OR_STRONGER.has(existing.role)) return;
+    if (existing)
+      throw new ProviderFault(
+        "unsupported_member_role",
+        "A pool account already holds a weaker role on this Shared Drive.",
+        { provider: "google", driveId, account, role: existing.role },
       );
-    return members;
+    await responseJson(
+      await this.#google(
+        `/drive/v3/files/${encodeURIComponent(driveId)}/permissions?supportsAllDrives=true&sendNotificationEmail=false&fields=id`,
+        {
+          signal: signal ?? null,
+          method: "POST",
+          body: JSON.stringify({ emailAddress: account, type: "user", role: UPLOADER_ROLE }),
+        },
+      ),
+    );
+  }
+
+  /**
+   * ADR-0019 D4: removes only the uploader membership; any other role is left for the
+   * membership check to report.
+   * https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/delete
+   */
+  async removeUploaderMember(
+    driveId: string,
+    account: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const existing = await this.#userPermission(driveId, account, signal);
+    if (existing?.role !== UPLOADER_ROLE) return;
+    const response = await this.#google(
+      `/drive/v3/files/${encodeURIComponent(driveId)}/permissions/${encodeURIComponent(existing.id)}?supportsAllDrives=true`,
+      { method: "DELETE", signal: signal ?? null },
+    );
+    try {
+      await requireSuccess(response);
+    } catch (error) {
+      if (error instanceof HttpProviderFault && error.status === 404) return;
+      throw error;
+    }
+    await response.body?.cancel();
+  }
+
+  /**
+   * ADR-0019 D4: whether a pool account can add children to an existing destination
+   * root, read as that account and without writing. `capabilities.canAddChildren` is
+   * Drive's own answer for the requesting user.
+   * https://developers.google.com/workspace/drive/api/reference/rest/v3/files#capabilities
+   */
+  async proveAccountWrite(
+    input: Parameters<NonNullable<ProviderPort["proveAccountWrite"]>>[0],
+  ): Promise<{ writable: boolean; evidence: Record<string, unknown> }> {
+    const { account, destDriveId, destFolderId, signal } = input;
+    const evidence = { provider: "google", account, destDriveId, destFolderId };
+    try {
+      const file = await responseJson<GoogleFile>(
+        await this.#googleAs(
+          account,
+          `/drive/v3/files/${encodeURIComponent(destFolderId)}?supportsAllDrives=true&fields=id,driveId,capabilities(canAddChildren)`,
+          { signal: signal ?? null },
+        ),
+      );
+      const canAddChildren = file.capabilities?.canAddChildren === true;
+      return {
+        writable: canAddChildren && file.id === destFolderId && file.driveId === destDriveId,
+        evidence: { ...evidence, observedDriveId: file.driveId ?? null, canAddChildren },
+      };
+    } catch (error) {
+      if (error instanceof HttpProviderFault && (error.status === 403 || error.status === 404))
+        return { writable: false, evidence: { ...evidence, status: error.status } };
+      throw error;
+    }
   }
 
   async addDriveMember(driveId: string, member: DriveMember): Promise<void> {
@@ -446,11 +586,18 @@ export class GoogleAdapter implements FileAdapter {
   async resolveDestinationPass(input: FilePassInput): Promise<FilePassRoot> {
     // Server-side copies run as the destination's delegated account, which must already
     // read the source; the read-only source account never writes (ADR-0018 D10).
+    // A pool account would also need to read the source, so the engine refuses the pair.
+    if (input.account !== undefined && this.#serverSideCopy)
+      throw new ProviderFault(
+        "unsupported_route",
+        "Acting-account pools cannot use server-side copy.",
+      );
     return {
       fs: this.#remote(
         input.destDriveId,
         input.destFolderId,
         this.#serverSideCopy ? ",server_side_across_configs=true" : "",
+        input.account,
       ),
       kind: "google_drive" as const,
       ...(this.#serverSideCopy ? { serverSideCopy: true } : {}),
