@@ -119,6 +119,7 @@ import {
   COPY_DEFAULTS,
   fileMigrationDriver,
   goLive,
+  removeUploaders,
   GoLiveCheckError,
   memberGrantTiming,
   managesCreatedAccess,
@@ -2291,10 +2292,9 @@ function makeWriter(
       try {
         const current = readConfig(paths, job().type);
         if ("mappings" in current) {
-          const pool =
-            current.actingAccounts === undefined
-              ? null
-              : poolFor(store, current, (frozenPlan ??= store.readPlanRevision(revision)));
+          // A plan made with a pool keeps one: dropping the key removes every account
+          // rather than reverting writes to the job's own identity.
+          const pool = poolFor(store, current, (frozenPlan ??= store.readPlanRevision(revision)));
           live = {
             mappingsInFlight: current.options.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight,
             transfersPerMapping:
@@ -3543,7 +3543,7 @@ function makeWriter(
               "The approved inputs or authenticated route identity have changed.",
             );
           const pool = poolFor(store, config, plan);
-          if ("mappings" in config && config.actingAccounts !== undefined && !pool?.active.length)
+          if (pool && !pool.active.length)
             return refuse(
               "approval_required",
               "No approved acting account remains in the pool. Approve the added accounts or restore an approved one.",
@@ -4077,6 +4077,18 @@ function makeWriter(
           const authorized = await authorizeClose();
           if (!authorized.ok) return authorized;
         }
+        // ADR-0019 D4: uploader membership goes at close whatever the grant timing; go-live
+        // removed it before its membership check, and a recovered close resumes it here.
+        if (
+          "mappings" in config &&
+          store.readCreatedDrives().some((drive) => drive.uploaders?.some((u) => !u.removedAt))
+        )
+          for await (const unit of removeUploaders(
+            context(provider(config, true), config, revision, undefined, true),
+          )) {
+            guard("close");
+            store.commit(unit);
+          }
         const acceptedExceptions = store
           .readAcceptances(verification.verificationDigest)
           .map((a) => a.code);

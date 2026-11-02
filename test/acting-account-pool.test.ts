@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { parse, stringify } from "smol-toml";
 import { openEngine, type Engine, type JobRef } from "../src/engine/index.ts";
 import {
@@ -222,6 +223,100 @@ describe("acting-account pools", () => {
     );
   });
 
+  it("lets a settling mapping on an exhausted account finish while its sibling moves", async (t) => {
+    const ids = ["finance", "legal", "sales"];
+    const h = await harness(
+      t,
+      [],
+      [ONE, TWO],
+      (input) => {
+        input.sourceItems.push(
+          ...ids.flatMap((id) => [
+            { id, parentId: "source-root", name: id, kind: "folder" as const },
+            {
+              id: `${id}-file`,
+              parentId: id,
+              name: `${id}.txt`,
+              kind: "file" as const,
+              content: id,
+            },
+          ]),
+        );
+      },
+      { staged: true, mappingsInFlight: 3, consistencyIntervalMs: 0 },
+    );
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: ids.map((id) => ({
+              id,
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+              destination: { type: "google_shared_drive", create: id },
+            })),
+          }),
+        }),
+      ),
+    );
+    await approve(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+    const accountOf = new Map(
+      (await status(h)).mappingPasses.map((pass) => [pass.mappingId, pass.account]),
+    );
+    // Two mappings share an account; one of them hits the limit while the other settles.
+    const shared = ids.filter((id) => accountOf.get(id) === ONE);
+    assert.equal(shared.length, 2);
+    // The first ONE pass holds until its sibling is settling, then hits the limit.
+    (h.port as unknown as { copyPassScenarios: object[] }).copyPassScenarios.push({
+      account: ONE,
+      pause: true,
+      error: QUOTA,
+    });
+    const plan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan({ final: true })));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          approver: "operator@example.test",
+          mode: "unattended",
+          planDigest: plan.planDigest,
+          freeze: { by: "operator@example.test", at: now, how: "writers stopped" },
+        }),
+      ),
+    );
+    h.engine.close();
+    let settling = 0;
+    h.engine = openEngine({
+      home: h.home,
+      now: () => new Date(now),
+      provider: h.port,
+      waitForConsistency: async (_ms, signal) => {
+        settling++;
+        await delay(300, undefined, { signal });
+      },
+    });
+    // Release the held pass once a sibling's copy completes, so the limit lands while that
+    // sibling sits between its copy and its settling wait.
+    const copyPassStatus = h.port.copyPassStatus.bind(h.port);
+    t.mock.method(
+      h.port,
+      "copyPassStatus",
+      async (reference: Parameters<typeof copyPassStatus>[0]) => {
+        const observed = await copyPassStatus(reference);
+        if (observed.state === "completed") h.port.releaseCopyPasses();
+        return observed;
+      },
+    );
+    const result = value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+    assert.equal(result.outcome, "completed");
+    assert.ok(settling >= 2);
+    assert.deepEqual(
+      result.accountStops?.map((stop) => stop.actingGoogleAccount),
+      [ONE],
+    );
+  });
+
   it("blocks with every account's stop when the whole pool is daily-limited", async (t) => {
     const h = await harness(t, ["a", "b"], [ONE, TWO], (input) => {
       input.copyPasses = [
@@ -331,6 +426,42 @@ describe("acting-account pools", () => {
     assert.equal((await status(h)).currentPlan?.revision, 1);
   });
 
+  it("blocks queued work when the last unexhausted account is removed mid-run", async (t) => {
+    const h = await harness(
+      t,
+      ["a", "b", "c"],
+      [ONE, TWO],
+      (input) => {
+        input.copyPasses = [{ sourceRootId: "a", account: ONE, error: QUOTA }];
+      },
+      { mappingsInFlight: 1 },
+    );
+    await approve(h);
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const config = parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    const start = h.port.startCopyPass.bind(h.port);
+    t.mock.method(h.port, "startCopyPass", async (input: Parameters<typeof start>[0]) => {
+      const handle = await start(input);
+      if (h.port.passAccounts.at(-1) === TWO)
+        value(await h.engine.updateSettings(h.ref, { ...config, actingAccounts: [ONE] }));
+      return handle;
+    });
+    const result = value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+    assert.equal(result.outcome, "blocked");
+    assert.equal(result.uploadQuota?.actingGoogleAccount, ONE);
+    assert.deepEqual(h.port.passAccounts, [ONE, TWO]);
+    const passes = (await status(h)).mappingPasses;
+    assert.deepEqual(
+      passes
+        .filter((pass) => pass.mappingId !== "a")
+        .map((pass) => [pass.mappingId, pass.status, pass.uploadQuota?.actingGoogleAccount]),
+      [
+        ["b", "pending", ONE],
+        ["c", "pending", ONE],
+      ],
+    );
+  });
+
   it("refuses execute when no approved account remains", async (t) => {
     const h = await harness(t, ["a"], [ONE]);
     await approve(h);
@@ -346,53 +477,54 @@ describe("acting-account pools", () => {
     assert.deepEqual(h.port.passAccounts, []);
   });
 
-  it("grants uploader membership on created containers and removes it at close", async (t) => {
-    const h = await harness(t, [], [ONE, TWO], undefined, { memberGrants: "after_verification" });
-    value(
-      await h.engine.withWriterResult(h.ref, (w) =>
-        w.loadManifest({
-          format: "json",
-          content: JSON.stringify({
-            version: 1,
-            mappings: [
-              {
-                id: "finance",
-                source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
-                destination: { type: "google_shared_drive", create: "Finance" },
-                members: [{ email: "finance@example.test", type: "group", role: "writer" }],
-              },
-            ],
+  for (const memberGrants of ["after_verification", "before_copy"])
+    it(`grants uploader membership on created containers and removes it at close (${memberGrants})`, async (t) => {
+      const h = await harness(t, [], [ONE, TWO], undefined, { memberGrants });
+      value(
+        await h.engine.withWriterResult(h.ref, (w) =>
+          w.loadManifest({
+            format: "json",
+            content: JSON.stringify({
+              version: 1,
+              mappings: [
+                {
+                  id: "finance",
+                  source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+                  destination: { type: "google_shared_drive", create: "Finance" },
+                  members: [{ email: "finance@example.test", type: "group", role: "writer" }],
+                },
+              ],
+            }),
           }),
-        }),
-      ),
-    );
-    await approve(h);
-    const result = value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
-    assert.equal(result.outcome, "completed");
-    const executed = await status(h);
-    const driveId = executed.createdDrives[0]!.driveId!;
-    const account = executed.mappingPasses[0]!.account!;
-    assert.ok([ONE, TWO].includes(account));
-    assert.ok(
-      (await h.port.listDriveMembers(driveId)).some(
-        (member) => member.email === account && member.role === "fileOrganizer",
-      ),
-    );
-    assert.equal(
-      h.port.calls.filter((call) => call.startsWith("proveAccountWrite:")).length,
-      0,
-      "created containers are granted, not proven",
-    );
-    assert.equal(value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).clean, true);
-    value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
-    const closed = await status(h);
-    assert.equal(closed.state, "closed");
-    assert.ok(closed.createdDrives[0]!.uploaders?.every((uploader) => uploader.removedAt));
-    assert.deepEqual(
-      (await h.port.listDriveMembers(driveId)).map((member) => member.email).toSorted(),
-      ["files@example.test", "finance@example.test"],
-    );
-  });
+        ),
+      );
+      await approve(h);
+      const result = value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+      assert.equal(result.outcome, "completed");
+      const executed = await status(h);
+      const driveId = executed.createdDrives[0]!.driveId!;
+      const account = executed.mappingPasses[0]!.account!;
+      assert.ok([ONE, TWO].includes(account));
+      assert.ok(
+        (await h.port.listDriveMembers(driveId)).some(
+          (member) => member.email === account && member.role === "fileOrganizer",
+        ),
+      );
+      assert.equal(
+        h.port.calls.filter((call) => call.startsWith("proveAccountWrite:")).length,
+        0,
+        "created containers are granted, not proven",
+      );
+      assert.equal(value(await h.engine.withWriterResult(h.ref, (w) => w.verify())).clean, true);
+      value(await h.engine.withWriterResult(h.ref, async (w) => w.close(await closeDecision(h))));
+      const closed = await status(h);
+      assert.equal(closed.state, "closed");
+      assert.ok(closed.createdDrives[0]!.uploaders?.every((uploader) => uploader.removedAt));
+      assert.deepEqual(
+        (await h.port.listDriveMembers(driveId)).map((member) => member.email).toSorted(),
+        ["files@example.test", "finance@example.test"],
+      );
+    });
 });
 
 describe("Dropbox acting-account pools", () => {

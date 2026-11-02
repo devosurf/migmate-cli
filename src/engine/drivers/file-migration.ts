@@ -1371,6 +1371,8 @@ interface PassSlot {
   transfers: number;
   /** The account's daily-limit stop, once it has one in this run (D5). */
   exhausted(): UploadQuotaStop | undefined;
+  /** Stops this mapping's transfers only, never its settling or listing. */
+  stop: AbortSignal;
 }
 
 /** What a mapping moved to another account keeps from its stopped attempt (D5). */
@@ -1392,6 +1394,39 @@ interface Running {
   abort: AbortController;
   carry: Carry;
   last?: MappingPass;
+}
+
+/** A mapping left queued because every account it could use is daily-limited (D5). */
+function quotaPending(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  stop: UploadQuotaStop,
+): CommitUnit {
+  const previous = (ctx.resume.mappingPasses ?? [])
+    .filter((pass) => pass.revision === ctx.revision && pass.mappingId === mapping.id)
+    .at(-1);
+  const passNumber =
+    previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1;
+  const pass: MappingPass = {
+    ...pendingPass(
+      ctx.revision,
+      mapping.id,
+      passNumber,
+      ctx.config.options?.mirror ? "mirror" : "copy",
+    ),
+    uploadQuota: stop,
+  };
+  const unit: CommitUnit = {
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["mapping", mapping.id, passNumber, "quota", stop.hitAt]),
+    checkpoint: mapping.id,
+    rows: [],
+    findings: [],
+    mappingPass: pass,
+  };
+  observe(ctx, unit);
+  return unit;
 }
 
 /** A mapping no approved account can write: its pass fails without starting a transfer. */
@@ -1448,19 +1483,6 @@ function observe(ctx: FileContext, unit: CommitUnit): void {
   if (unit.watermark) ctx.resume.watermarks[unit.watermark.unitKey] = unit.watermark.value;
 }
 
-/** D4: a member of the created container already, by the manifest or as its creator. */
-function holdsMembership(ctx: FileContext, drive: CreatedDrive, account: string): boolean {
-  if (drive.creatorEmail.toLowerCase() === account) return true;
-  return ctx.config.mappings.some(
-    (mapping) =>
-      mapping.createDrive &&
-      createdDriveFor(ctx.resume.createdDrives, mapping) === drive &&
-      mapping.createDrive.members.some(
-        (member) => member.type === "user" && member.email.toLowerCase() === account,
-      ),
-  );
-}
-
 /** D4: uploader membership for one pool account on every unfenced container the job made. */
 async function* grantUploaders(ctx: FileContext, account: string): AsyncIterable<CommitUnit> {
   const role = fileProviderPair(ctx.config).destination.uploaderRole!;
@@ -1468,7 +1490,9 @@ async function* grantUploaders(ctx: FileContext, account: string): AsyncIterable
     if (!drive.driveId || drive.goLive) continue;
     if (drive.uploaders?.some((uploader) => uploader.account === account && !uploader.removedAt))
       continue;
-    if (holdsMembership(ctx, drive, account)) continue;
+    // The creator already writes as owner; a manifest member is granted anyway, since its
+    // approved role may not write yet, and the provider refuses a weaker direct role.
+    if (drive.creatorEmail.toLowerCase() === account) continue;
     if (!ctx.provider.addUploaderMember)
       throw new ProviderFault(
         "unsupported_route",
@@ -1541,6 +1565,9 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
   const assigned = new Map<string, string | null>();
   let perAccount = false;
   const uses = new Map<string | null, number>();
+  const unusable = new Map<string, string>();
+  // Mappings no account can take now, only because writable accounts are exhausted.
+  const parked: FileMappingConfig[] = [];
   for (const pass of ctx.resume.mappingPasses ?? [])
     if (pass.revision === ctx.revision) assigned.set(pass.mappingId, pass.account ?? null);
   function* load(): Iterable<[string | null, number]> {
@@ -1565,8 +1592,17 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
     );
     for (const account of candidates) {
       if (account === null) return null;
+      if (unusable.has(account)) continue;
       if (!prepared.has(account)) {
-        yield* grantUploaders(ctx, account);
+        try {
+          yield* grantUploaders(ctx, account);
+        } catch (error) {
+          // One account the provider refuses (not an active member, a weaker direct role)
+          // leaves the others to write; ProviderFault is its evidence, never a secret.
+          if (!(error instanceof ProviderFault)) throw error;
+          unusable.set(account, error.code);
+          continue;
+        }
         prepared.add(account);
       }
       // Existing containers need the operator's pre-grant, proven as the account (D4).
@@ -1616,11 +1652,17 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
         const mapping = provisionedMapping(ctx, next.mapping);
         const account = yield* assign(mapping, eligible);
         if (account === undefined) {
-          yield poolRefusal(
-            ctx,
-            mapping,
-            "No approved acting account can write to this destination; pre-grant it, then run execute again.",
-          );
+          if (exhausted.size) parked.push(next.mapping);
+          else
+            yield poolRefusal(
+              ctx,
+              mapping,
+              `No approved acting account can write to this destination; pre-grant it, then run execute again.${
+                unusable.size
+                  ? ` Refused: ${[...unusable].map(([a, code]) => `${a} (${code})`).join(", ")}.`
+                  : ""
+              }`,
+            );
           continue;
         }
         assigned.set(mapping.id, account);
@@ -1631,10 +1673,10 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
           account,
           transfers: live.transfersPerMapping,
           exhausted: () => exhausted.get(account),
+          stop: abort.signal,
         };
         const passCtx: FileContext = {
           ...ctx,
-          signal: AbortSignal.any([ctx.signal!, abort.signal]),
           ...(account !== null ? { actingGoogleAccount: account } : {}),
         };
         active.set(copyMapping(passCtx, mapping, slot, carry, next.carry !== undefined), {
@@ -1644,7 +1686,17 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
           carry,
         });
       }
-      if (!active.size) break;
+      if (!active.size) {
+        // D5: work left only because its accounts are exhausted blocks with their stops.
+        const left = [...queue.map((item) => item.mapping), ...parked];
+        if (left.length && !ctx.signal?.aborted && exhausted.size) {
+          const stop = [...exhausted.values()].sort((a, b) =>
+            a.earliestResumeAt < b.earliestResumeAt ? -1 : 1,
+          )[0]!;
+          for (const mapping of left) yield quotaPending(ctx, mapping, stop);
+        }
+        break;
+      }
       let progressed = false;
       for (const [iterator, running] of active) {
         const next = await iterator.next();
@@ -1654,12 +1706,7 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
           const last = running.last;
           // D5: a stopped account's mapping moves on only once its writer is proven
           // stopped; ordinary throttling and other failures never move work.
-          if (
-            perAccount &&
-            last?.uploadQuota &&
-            !ctx.signal?.aborted &&
-            (last.status === "failed" || last.stopConfirmed === true)
-          )
+          if (perAccount && last?.uploadQuota && !ctx.signal?.aborted && last.stopConfirmed)
             queue.unshift({ mapping: running.mapping, carry: running.carry });
           continue;
         }
@@ -1954,7 +2001,9 @@ async function* copyMapping(
         yield settleUnit(ctx, state);
       }
       let completed = false;
-      for await (const unit of copyPass(ctx, mapping, passNumber, authorized, slot)) {
+      // An exhausted account stops this mapping's transfer, not the run's other work (D5).
+      const transfer = slot ? { ...ctx, signal: AbortSignal.any([ctx.signal!, slot.stop]) } : ctx;
+      for await (const unit of copyPass(transfer, mapping, passNumber, authorized, slot)) {
         completed = unit?.mappingPass?.status === "completed";
         if (completed && state && unit) {
           state.copyPending = false;
@@ -2304,6 +2353,8 @@ async function* copyPass(
           ? { ...lastStats, errors: null, rcloneErrors: lastStats.errors }
           : lastStats,
         ...(uploadQuota ? { uploadQuota } : {}),
+        // rclone reported the job finished: its transfer has ended (D5).
+        ...(uploadQuota && slot?.account ? { stopConfirmed: true } : {}),
         endedAt: status.state === "running" ? null : ctx.now().toISOString(),
       };
       const observedAt = ctx.now().getTime();
@@ -2348,7 +2399,7 @@ async function* copyPass(
               : null,
           }
         : {}),
-      ...(accountStop ? { stopConfirmed: ended } : {}),
+      ...(uploadQuota && slot?.account ? { stopConfirmed: ended } : {}),
       endedAt: ctx.now().toISOString(),
     };
     yield unit();
