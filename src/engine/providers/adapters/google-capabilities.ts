@@ -27,6 +27,9 @@ export const googleCapabilities: FileProviderCapabilities = {
   ledgerAccountedUploads: true,
   quotaStop: uploadQuotaStop,
   creatorRole: "organizer",
+  // Content manager: adds and edits files, cannot change membership.
+  uploaderRole: "fileOrganizer",
+  quotaPerAccount: true,
   memberRole(role) {
     if (role === "manager") return "organizer";
     return typeof role === "string" && Object.hasOwn(roles, role)

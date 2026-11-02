@@ -302,6 +302,15 @@ export function createProductionProvider(input: ProductionProviderInput): Produc
     async addDriveMember(driveId, member) {
       return (await files()).addDriveMember(driveId, member);
     },
+    async addUploaderMember(driveId, account, signal) {
+      return (await files()).addUploaderMember(driveId, account, signal);
+    },
+    async removeUploaderMember(driveId, account, signal) {
+      return (await files()).removeUploaderMember(driveId, account, signal);
+    },
+    async proveAccountWrite(value) {
+      return (await files()).proveAccountWrite(value);
+    },
     async resolveFilePass(value) {
       if (!current) throw new ProviderFault("provider_failed", "The transfer worker is absent.");
       return { socketPath: current.socketPath, ...(await (await files()).resolveFilePass(value)) };

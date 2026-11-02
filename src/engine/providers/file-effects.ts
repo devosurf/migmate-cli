@@ -282,6 +282,23 @@ export class FileEffects {
     return this.#effect(this.#destination, "addDriveMember").call(this.#destination, ...input);
   }
 
+  async addUploaderMember(...input: Parameters<NonNullable<ProviderPort["addUploaderMember"]>>) {
+    return this.#effect(this.#destination, "addUploaderMember").call(this.#destination, ...input);
+  }
+
+  async removeUploaderMember(
+    ...input: Parameters<NonNullable<ProviderPort["removeUploaderMember"]>>
+  ) {
+    return this.#effect(this.#destination, "removeUploaderMember").call(
+      this.#destination,
+      ...input,
+    );
+  }
+
+  async proveAccountWrite(...input: Parameters<NonNullable<ProviderPort["proveAccountWrite"]>>) {
+    return this.#effect(this.#destination, "proveAccountWrite").call(this.#destination, ...input);
+  }
+
   async *openSourceContent(...input: Parameters<ProviderPort["openSourceContent"]>) {
     yield* this.#effect(this.#source, "openSourceContent").call(this.#source, ...input);
   }
