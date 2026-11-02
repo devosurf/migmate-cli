@@ -178,6 +178,26 @@ not gate approval/execution, allocate allowance or schedule jobs. The existing
 provider quota stop, exit 5, hit + 24-hour estimate and manual resume are unchanged.
 Local worker/fake-provider tests are not live Google charging qualification.
 
+## Acting-account pools — ADR-0019
+
+Pools are tested against the fake provider and faked provider HTTP only; no pass has
+written as a pool account in a real tenant. Unconfirmed:
+
+- **Google:** a pool account that reaches a Shared Drive only through a group gets a
+  direct content-manager permission beside it; Drive's acceptance of that is assumed.
+  An account outside domain-wide delegation fails the write proof as a credential
+  fault rather than as "not writable".
+- **Dropbox:** the API lists a `team_folder` error for `add_folder_member` and
+  `remove_folder_member`, so a team folder may refuse individual editor members
+  outright; if so, uploader membership needs a per-job group instead. A member reached
+  through a group passes the write proof but is granted directly too. Member status is
+  cached per run, so a member suspended mid-run is noticed only when its pass fails.
+- **Reassignment:** a mapping moves only after its rclone job reports finished or its
+  stop is confirmed; an unconfirmed stop keeps the job blocked. A moved attempt may
+  resend a large file the stopped attempt had partly uploaded.
+- **Observation:** the upload ledger keys pool accounts like the single acting account,
+  in one engine home only (D7).
+
 ## 1. File copy is path-based, not collision-protected
 
 File migration uses rclone copy rather than Migmate's per-item destination writer. It can update existing same-path files and does not reserve destination IDs, attach per-file private provenance markers, move prior copies by ID, or compare a revision token before writing. SharePoint library provisioning separately uses a creation-request marker in the list description for recovery. Choose dedicated destination roots and exclude outside writers during migration. Teams archive uploads are unchanged.
