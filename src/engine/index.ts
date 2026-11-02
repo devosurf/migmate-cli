@@ -46,6 +46,7 @@ import {
   type Closure,
   type ClosureOutcome,
   type ExecuteResult,
+  type JobStatus,
   type GoLiveAcknowledgment,
   type UploadQuotaStop,
   type FacetCount,
@@ -898,6 +899,7 @@ export function openEngine(opts: ProvidedEngineOptions): Engine {
       return outer.ok ? outer.value : outer;
     },
     requestControl: (ref, options) => requestControl(deps, ref, options),
+    approveAccounts: (ref, a) => approveAccounts(deps, ref, a),
     reclaim: (ref, decision) => reclaimJob(deps, ref, decision),
     close() {
       deps.closed = true;
@@ -1054,13 +1056,34 @@ function makeReader(deps: EngineDeps, ref: JobRef): JobReader {
             ? fileProviderPair(persisted(plannedConfig, stored.jobType)).destination
                 .ledgerAccountedUploads
             : plannedConfig.destination !== undefined;
+        let actingAccounts: JobStatus["actingAccounts"];
+        if (stored.jobType === "file_migration")
+          try {
+            const current = readConfig(pathsFor(deps, ref), stored.jobType);
+            const pool = poolFor(s, current, plan);
+            if (pool && "mappings" in current)
+              actingAccounts = {
+                ...pool,
+                mappingsInFlight:
+                  current.options.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight,
+                transfersPerMapping:
+                  current.options.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
+              };
+          } catch (error) {
+            // Status still answers while the operator file is missing or mid-edit.
+            if (!(error instanceof EngineRefusalError)) throw error;
+          }
         const status = {
           ...stored,
+          ...(actingAccounts ? { actingAccounts } : {}),
           uploadActivity: readUploadActivity(
             deps.home,
             deps.now(),
             plan && ledgerAccountedUploads
-              ? [typeof approvedAccount === "string" ? approvedAccount : ""]
+              ? [
+                  typeof approvedAccount === "string" ? approvedAccount : "",
+                  ...(actingAccounts?.approved ?? []),
+                ]
               : [],
           ),
         };
@@ -1396,6 +1419,82 @@ async function requestControl(
     }
   } catch (error) {
     const failure = expectedFailure<ControlResult>(error);
+    if (failure) return failure;
+    throw error;
+  } finally {
+    store?.close();
+  }
+}
+async function approveAccounts(
+  deps: EngineDeps,
+  ref: JobRef,
+  a: { approver: string; poolDigest: string; mode: "interactive" | "unattended" },
+): Promise<Outcome<AccountApproval>> {
+  let store: Store | undefined;
+  try {
+    if (deps.closed) return refuse("lease_held", "The engine is closed.");
+    if (
+      !a ||
+      typeof a.approver !== "string" ||
+      !a.approver.trim() ||
+      typeof a.poolDigest !== "string" ||
+      !["interactive", "unattended"].includes(a.mode)
+    )
+      return refuse(
+        "approval_required",
+        "Approving acting accounts requires an explicit named approver, mode and the reviewed pool digest.",
+      );
+    const paths = pathsFor(deps, ref);
+    const local = localFilesystem(paths.dir);
+    if (!local.ok) return local;
+    const opened = openStore(paths.dir, {
+      migmateVersion: MIGMATE_VERSION,
+      now: deps.now,
+      existingOnly: true,
+    });
+    if (!opened.ok) return opened;
+    store = opened.value;
+    const hostId = readHostId(deps.home) ?? "";
+    const opened_ = store;
+    return opened_.atomic((): Outcome<AccountApproval> => {
+      const job = opened_.readJob();
+      if (!job) return refuse("job_not_found", "The job does not exist.");
+      const terminal = refusalForClosedJob(job.state);
+      if (terminal) return refuse(terminal, "The job has reached an absorbing terminal state.");
+      const mismatch = hostRefusal<AccountApproval>(job, hostId, opened_.readLease());
+      if (mismatch) return mismatch;
+      const plan = job.planRevision === null ? null : opened_.readPlanRevision(job.planRevision);
+      const approval = plan ? opened_.readApproval(plan.revision) : null;
+      if (!plan || !approval || approval.planDigest !== plan.planDigest)
+        return refuse(
+          "approval_required",
+          "Approve the current plan first; it approves the pool it was planned with.",
+        );
+      // Go-live fences transfers for good: no account can receive work after it starts.
+      if (opened_.readCreatedDrives().some((drive) => drive.goLive))
+        return refuse("go_live_started", "Go-live has fenced transfers; no account can be added.");
+      const pool = poolFor(opened_, readConfig(paths, job.type), plan);
+      if (!pool?.poolDigest)
+        return refuse("approval_required", "No added acting account awaits approval.");
+      if (a.poolDigest !== pool.poolDigest)
+        return refuse("approval_digest_stale", "The pool changed since it was reviewed.", {
+          detail: { expected: pool.poolDigest, pending: pool.pending },
+        });
+      const record: AccountApproval = {
+        revision: plan.revision,
+        planDigest: plan.planDigest,
+        accounts: [...pool.pending].sort(),
+        poolDigest: pool.poolDigest,
+        approver: a.approver.trim(),
+        mode: a.mode,
+        identityAssurance: "declared_unverified",
+        at: deps.now().toISOString(),
+      };
+      opened_.writeAccountApproval(record);
+      return ok(record);
+    });
+  } catch (error) {
+    const failure = expectedFailure<AccountApproval>(error);
     if (failure) return failure;
     throw error;
   } finally {
@@ -2344,10 +2443,16 @@ function makeWriter(
     interrupted: boolean;
     blocked: boolean;
     uploadQuota?: UploadQuotaStop;
+    accountStops?: UploadQuotaStop[];
   }> {
     let committed = 0;
     let mappingFailed = false;
     let uploadQuota: UploadQuotaStop | undefined;
+    const accountStops = new Map<string | null, UploadQuotaStop>();
+    // A pool moves a stopped account's mappings (ADR-0019 D5): a stop blocks the run only
+    // while its mapping has no later pass, and the run reports every account's stop.
+    const unresolved = new Map<string, { passNumber: number; stop: UploadQuotaStop }>();
+    const stops = () => (accountStops.size ? { accountStops: [...accountStops.values()] } : {});
     let lastUnit = job().lastCheckpoint ?? "start";
     for (;;) {
       if (signal?.aborted) return { committed, interrupted: true, blocked: false };
@@ -2400,8 +2505,17 @@ function makeWriter(
               if (store.commit(unit).applied) {
                 committed++;
                 store.publishProgress();
+                const moved = unit.mappingPass && unresolved.get(unit.mappingPass.mappingId);
+                if (moved && unit.mappingPass!.passNumber > moved.passNumber)
+                  unresolved.delete(unit.mappingPass!.mappingId);
                 if (unit.mappingPass?.uploadQuota) {
-                  uploadQuota ??= unit.mappingPass.uploadQuota;
+                  const stop = unit.mappingPass.uploadQuota;
+                  if (!accountStops.has(stop.actingGoogleAccount))
+                    accountStops.set(stop.actingGoogleAccount, stop);
+                  unresolved.set(unit.mappingPass.mappingId, {
+                    passNumber: unit.mappingPass.passNumber,
+                    stop,
+                  });
                 } else if (unit.mappingPass?.status === "failed") {
                   budget.mappingFailure(unit.mappingPass.mappingId);
                   mappingFailed = true;
@@ -2421,15 +2535,18 @@ function makeWriter(
         }
         if (signal?.aborted) return { committed, interrupted: true, blocked: false };
         store.appendEvent({ verb: phase, phase, kind: "phase_completed", payload: { committed } });
+        uploadQuota = [...unresolved.values()][0]?.stop;
         return {
           committed,
           interrupted: false,
           blocked: mappingFailed || uploadQuota !== undefined,
           ...(uploadQuota ? { uploadQuota } : {}),
+          ...stops(),
         };
       } catch (error) {
+        uploadQuota = [...unresolved.values()][0]?.stop;
         if (uploadQuota && error instanceof Error && error.name === "AbortError")
-          return { committed, interrupted: false, blocked: true, uploadQuota };
+          return { committed, interrupted: false, blocked: true, uploadQuota, ...stops() };
         if (signal?.aborted || (error instanceof Error && error.name === "AbortError"))
           return { committed, interrupted: true, blocked: false };
         const expected = expectedFailure(error);
@@ -2601,6 +2718,7 @@ function makeWriter(
     committedUnits: number,
     budget: RetryBudget,
     uploadQuota?: UploadQuotaStop,
+    accountStops?: UploadQuotaStop[],
   ): Outcome<ExecuteResult> {
     const resumable = outcome !== "completed";
     store.atomic(() => {
@@ -2615,6 +2733,7 @@ function makeWriter(
           resumable,
           resumeVerb: resumable ? "execute" : null,
           ...(uploadQuota ? { uploadQuota } : {}),
+          ...(accountStops?.length ? { accountStops } : {}),
         },
       });
     });
@@ -2625,6 +2744,7 @@ function makeWriter(
       committedUnits,
       ...(outcome === "blocked" ? { budget: budget.summary() } : {}),
       ...(uploadQuota ? { uploadQuota } : {}),
+      ...(accountStops?.length ? { accountStops } : {}),
     });
   }
   async function createReport(closureOutcome?: ClosureOutcome): Promise<Outcome<ArtifactSet>> {
@@ -3437,7 +3557,13 @@ function makeWriter(
               if (p.assertExecutionEvidence) await p.assertExecutionEvidence(bound);
             }
             const drained = archiveVerificationResume
-              ? { committed: 0, interrupted: false, blocked: false, uploadQuota: undefined }
+              ? {
+                  committed: 0,
+                  interrupted: false,
+                  blocked: false,
+                  uploadQuota: undefined,
+                  accountStops: undefined,
+                }
               : await drain(p, config, plan.revision, "execute", budget, signal);
             if (drained.interrupted || drained.blocked)
               return terminalResult(
@@ -3445,6 +3571,7 @@ function makeWriter(
                 drained.committed,
                 budget,
                 drained.uploadQuota,
+                drained.accountStops,
               );
             store.writeJob({ ...job(), executionCompleted: true });
             store.appendEvent({

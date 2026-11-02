@@ -30,6 +30,7 @@ import type {
 } from "./types.ts";
 import type { LoadedManifest } from "./manifest.ts";
 import type { DiscoverResult } from "./partition.ts";
+import type { AccountApproval } from "./pool.ts";
 
 export interface EngineOptions {
   /** Engine home. Holds the host identity file and one job folder per job. */
@@ -93,6 +94,16 @@ export interface Engine {
    */
   withWriterResult<T>(ref: JobRef, fn: (w: JobWriter) => Promise<Outcome<T>>): Promise<Outcome<T>>;
   requestControl(ref: JobRef, options: ControlOptions): Promise<Outcome<ControlResult>>;
+  /**
+   * ADR-0019 D3: approve the acting accounts added to the pool since its plan was
+   * approved. Lease-free, like a control request, so a running `execute` gives them work
+   * at its next pass admission without a re-plan or a restart. The digest is the one the
+   * reviewing surface displayed (`status.actingAccounts.poolDigest`), never transcribed.
+   */
+  approveAccounts(
+    ref: JobRef,
+    a: { approver: string; poolDigest: string; mode: "interactive" | "unattended" },
+  ): Promise<Outcome<AccountApproval>>;
   reclaim(ref: JobRef, decision: ReclaimDecision): Promise<Outcome<RecoveryReport>>;
   close(): void;
 }

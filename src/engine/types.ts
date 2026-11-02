@@ -7,6 +7,7 @@
 import type { CopyPassStats, DriveMember, DriveMembership } from "./providers/port.ts";
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 import type { UploadActivity } from "./store/uploads.ts";
+import type { ActingAccountPool } from "./pool.ts";
 
 export interface UploadQuotaStop {
   code: "upload_quota_exceeded";
@@ -302,6 +303,8 @@ export interface ExecuteResult {
   /** Populated when the run stopped in `blocked`. */
   budget?: { failedAttempts: number; failedUnitRatio: number };
   uploadQuota?: UploadQuotaStop;
+  /** ADR-0019 D5: every pool account's daily-limit stop in this run, once each. */
+  accountStops?: UploadQuotaStop[];
 }
 
 export interface CheckResult {
@@ -544,6 +547,14 @@ export interface JobStatus {
   planDigest: string | null;
   currentPlan: PlanRevision | null;
   uploadActivity?: UploadActivity;
+  /**
+   * ADR-0019: the acting-account pool of the current plan against the editable
+   * configuration, with the copy concurrency the next pass admission will use.
+   */
+  actingAccounts?: ActingAccountPool & {
+    mappingsInFlight: number;
+    transfersPerMapping: number;
+  };
   lastInteractiveIdentity?: string | null;
   currentApproval?: ApprovalRecord | null;
   approvalAuthority?: ApprovalAuthority;
