@@ -12,6 +12,7 @@ export type CommandName =
   | "accept"
   | "acknowledge"
   | "reclaim"
+  | "settings"
   | "web"
   | "stop"
   | "version";
@@ -26,6 +27,9 @@ export interface Invocation {
   file?: string;
   approver?: string;
   planDigest?: string;
+  /** ADR-0019 D3: approve the pool's added acting accounts rather than a plan. */
+  accounts?: boolean;
+  poolDigest?: string;
   final?: boolean;
   detach?: boolean;
   freeze?: { by: string; at: string; how: string };
@@ -127,6 +131,7 @@ export function parseInvocation(argv: string[]): Invocation {
     "--file",
     "--approver",
     "--plan-digest",
+    "--pool-digest",
     "--freeze-by",
     "--freeze-at",
     "--freeze-how",
@@ -164,6 +169,7 @@ export function parseInvocation(argv: string[]): Invocation {
         "--stop-worker",
         "--final",
         "--detach",
+        "--accounts",
       ].includes(token)
     ) {
       if (switches.has(token)) throw new UsageFailure("A switch was supplied more than once.");
@@ -200,13 +206,14 @@ export function parseInvocation(argv: string[]): Invocation {
       "accept",
       "acknowledge",
       "reclaim",
+      "settings",
       "stop",
       "web",
     ].includes(command) &&
     !((help || version) && words.length === 0)
   ) {
     throw new UsageFailure(
-      "Supply a lifecycle command, creds init, manifest load, discover, accept, acknowledge, reclaim, or web.",
+      "Supply a lifecycle command, creds init, manifest load, discover, accept, acknowledge, reclaim, settings, or web.",
     );
   }
   if (version && words.length > 0) throw new UsageFailure("--version takes no command.");
@@ -287,6 +294,7 @@ export function parseInvocation(argv: string[]): Invocation {
     file: "--file",
     approver: "--approver",
     planDigest: "--plan-digest",
+    poolDigest: "--pool-digest",
     verificationDigest: "--verification-digest",
     closeDigest: "--close-digest",
     goLiveDigest: "--go-live-digest",
@@ -305,6 +313,8 @@ export function parseInvocation(argv: string[]): Invocation {
   } else if (!jobId) throw new UsageFailure("This command requires --job.");
   if (command === "creds init" && !invocation.config)
     throw new UsageFailure("creds init requires --config with typed file references.");
+  if (command === "settings" && !invocation.config)
+    throw new UsageFailure("settings requires --config with the job's full configuration.");
   if (command === "manifest load" && !invocation.file)
     throw new UsageFailure("manifest load requires --file manifest.json|manifest.csv.");
   const only = (flag: string, allowed: string[]) => {
@@ -316,7 +326,7 @@ export function parseInvocation(argv: string[]): Invocation {
       "--detach is only available for execute with text or JSON output; tail the attempt log and use status to follow progress.",
     );
   for (const flag of ["--type", "--label"]) only(flag, ["init"]);
-  only("--config", ["init", "creds init"]);
+  only("--config", ["init", "creds init", "settings"]);
   only("--file", ["manifest load", "discover"]);
   only("--capacity-target", ["discover"]);
   const capacity = values.get("--capacity-target");
@@ -343,6 +353,12 @@ export function parseInvocation(argv: string[]): Invocation {
   }
   only("--approver", ["approve", "accept", "close", "acknowledge"]);
   only("--plan-digest", ["approve"]);
+  only("--pool-digest", ["approve"]);
+  only("--accounts", ["approve"]);
+  if (switches.has("--accounts")) invocation.accounts = true;
+  if (invocation.poolDigest !== undefined) invocation.accounts = true;
+  if (invocation.accounts && (invocation.planDigest !== undefined || values.has("--freeze-by")))
+    throw new UsageFailure("Approve either a plan or the pool's added accounts, not both.");
   only("--close-digest", ["close"]);
   only("--go-live-digest", ["acknowledge"]);
   only("--final", ["plan"]);

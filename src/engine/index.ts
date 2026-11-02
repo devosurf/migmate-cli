@@ -900,6 +900,7 @@ export function openEngine(opts: ProvidedEngineOptions): Engine {
     },
     requestControl: (ref, options) => requestControl(deps, ref, options),
     approveAccounts: (ref, a) => approveAccounts(deps, ref, a),
+    updateSettings: (ref, raw) => updateSettings(deps, ref, raw),
     reclaim: (ref, decision) => reclaimJob(deps, ref, decision),
     close() {
       deps.closed = true;
@@ -1419,6 +1420,76 @@ async function requestControl(
     }
   } catch (error) {
     const failure = expectedFailure<ControlResult>(error);
+    if (failure) return failure;
+    throw error;
+  } finally {
+    store?.close();
+  }
+}
+/** ADR-0019 D3: settings a running job may change without the writer lease. */
+const LIVE_SETTINGS = ["actingAccounts", "mappingsInFlight", "transfersPerMapping"] as const;
+function liveView(config: JobConfig): Record<string, unknown> {
+  if (!("mappings" in config)) return {};
+  const { mappings: _m, manifestDigest: _d, actingAccounts, ...rest } = config;
+  const { mappingsInFlight, transfersPerMapping, ...options } = rest.options;
+  return {
+    fixed: { ...rest, options },
+    actingAccounts: actingAccounts ?? null,
+    mappingsInFlight: mappingsInFlight ?? null,
+    transfersPerMapping: transfersPerMapping ?? null,
+  };
+}
+async function updateSettings(
+  deps: EngineDeps,
+  ref: JobRef,
+  raw: unknown,
+): Promise<Outcome<{ changed: string[] }>> {
+  let store: Store | undefined;
+  try {
+    if (deps.closed) return refuse("lease_held", "The engine is closed.");
+    const paths = pathsFor(deps, ref);
+    const local = localFilesystem(paths.dir);
+    if (!local.ok) return local;
+    const opened = openStore(paths.dir, {
+      migmateVersion: MIGMATE_VERSION,
+      now: deps.now,
+      existingOnly: true,
+    });
+    if (!opened.ok) return opened;
+    store = opened.value;
+    const held = store;
+    const hostId = readHostId(deps.home) ?? "";
+    return held.atomic((): Outcome<{ changed: string[] }> => {
+      const job = held.readJob();
+      if (!job) return refuse("job_not_found", "The job does not exist.");
+      const terminal = refusalForClosedJob(job.state);
+      if (terminal) return refuse(terminal, "The job has reached an absorbing terminal state.");
+      const mismatch = hostRefusal<{ changed: string[] }>(job, hostId, held.readLease());
+      if (mismatch) return mismatch;
+      if (job.type !== "file_migration")
+        return refuse("configuration_invalid", "Only file migrations have live settings.");
+      const current = readConfig(paths, job.type);
+      const next = parseConfig(persisted(raw, job.type), job.type, paths);
+      const before = liveView(current);
+      const after = liveView(next);
+      // Everything else may carry new authority or identity: it goes through onboarding.
+      if (canonicalJson(before.fixed) !== canonicalJson(after.fixed))
+        return refuse(
+          "configuration_invalid",
+          "Only actingAccounts, mappingsInFlight and transfersPerMapping change here; use creds init for the rest.",
+          { detail: { fields: [...LIVE_SETTINGS] } },
+        );
+      const changed = LIVE_SETTINGS.filter(
+        (field) => canonicalJson(before[field]) !== canonicalJson(after[field]),
+      );
+      if (changed.length && "mappings" in next) {
+        const { mappings: _m, manifestDigest: _d, ...settings } = next;
+        atomicFile(paths.configPath, stringifyToml(settings));
+      }
+      return ok({ changed: [...changed] });
+    });
+  } catch (error) {
+    const failure = expectedFailure<{ changed: string[] }>(error);
     if (failure) return failure;
     throw error;
   } finally {

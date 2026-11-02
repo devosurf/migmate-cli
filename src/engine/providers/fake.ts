@@ -717,6 +717,8 @@ export class FakeFileMigrationPort implements ProviderPort {
   }
   /** ADR-0019 D1: the pool account of each started pass, in order; "" is the job's own. */
   readonly passAccounts: string[] = [];
+  /** The transfers each started pass asked for, in order. */
+  readonly passTransfers: number[] = [];
   private readonly accountOf = new WeakMap<object, string>();
   async addUploaderMember(driveId: string, account: string): Promise<void> {
     this.callLog.push(`addUploaderMember:${driveId}:${account}`);
@@ -1394,6 +1396,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.passes.set(jobid, pass);
     const account = this.accountOf.get(input.destination) ?? "";
     this.passAccounts.push(account);
+    this.passTransfers.push(input.transfers);
     const scenarioIndex = this.copyPassScenarios.findIndex(
       (scenario) =>
         (scenario.sourceRootId === undefined || scenario.sourceRootId === input.source.fs) &&

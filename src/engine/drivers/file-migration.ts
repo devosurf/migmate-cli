@@ -1668,14 +1668,15 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
         observe(ctx, next.value);
         const pass = next.value.mappingPass;
         if (pass) running.last = pass;
-        if (pass?.uploadQuota && pass.status !== "running") {
+        // A quota a running pass reports (Dropbox's monthly limit) stops it too.
+        if (pass?.uploadQuota) {
           if (!perAccount) {
             if (!teamStop.signal.aborted) teamStop.abort();
           } else if (!exhausted.has(running.account)) {
-            // The account gets no more work in this run; its other passes stop now.
+            // The account gets no more work in this run; its passes stop now.
             exhausted.set(running.account, pass.uploadQuota);
             for (const other of active.values())
-              if (other !== running && other.account === running.account) other.abort.abort();
+              if (other.account === running.account) other.abort.abort();
           }
         }
         if (!pass || pass.status !== "running" || !pass.lastStats) progressed = true;

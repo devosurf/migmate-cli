@@ -127,6 +127,9 @@ function readerEngine(
     async approveAccounts() {
       return refused;
     },
+    async updateSettings() {
+      return refused;
+    },
     close() {},
   };
 }

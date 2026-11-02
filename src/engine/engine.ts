@@ -100,6 +100,12 @@ export interface Engine {
    * at its next pass admission without a re-plan or a restart. The digest is the one the
    * reviewing surface displayed (`status.actingAccounts.poolDigest`), never transcribed.
    */
+  /**
+   * ADR-0019 D3: change the settings a running job may change, lease-free: the acting
+   * accounts and copy concurrency. The next pass admission reads them; anything else in
+   * the configuration still changes through onboarding.
+   */
+  updateSettings(ref: JobRef, raw: unknown): Promise<Outcome<{ changed: string[] }>>;
   approveAccounts(
     ref: JobRef,
     a: { approver: string; poolDigest: string; mode: "interactive" | "unattended" },

@@ -157,6 +157,71 @@ describe("acting-account pools", () => {
     assert.equal(h.port.passAccounts.filter((account) => account === ONE).length, 1);
   });
 
+  it("keeps a mirror deletion limit across reassignment", async (t) => {
+    const h = await harness(
+      t,
+      [],
+      [ONE, TWO],
+      (input) => {
+        input.sourceItems.push({
+          id: "x",
+          parentId: "source-root",
+          name: "x.txt",
+          kind: "file",
+          content: "x",
+        });
+      },
+      { staged: true, mirror: true, deleteLimit: 1, consistencyIntervalMs: 0 },
+    );
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: [
+              {
+                id: "finance",
+                source: { type: "sharepoint", driveId: "source-drive", folderPath: "" },
+                destination: { type: "google_shared_drive", create: "Finance" },
+                members: [{ email: "finance@example.test", type: "group", role: "writer" }],
+              },
+            ],
+          }),
+        }),
+      ),
+    );
+    await approve(h);
+    value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+    const first = h.port.passAccounts[0]!;
+    const other = first === ONE ? TWO : ONE;
+    h.port.deleteSourceItem("x");
+    (h.port as unknown as { copyPassScenarios: object[] }).copyPassScenarios.push({
+      account: first,
+      error: QUOTA,
+    });
+    // A final staged pass keeps one deletion budget across its attempts.
+    const plan = value(await h.engine.withWriterResult(h.ref, (w) => w.plan({ final: true })));
+    value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.approve({
+          approver: "operator@example.test",
+          mode: "unattended",
+          planDigest: plan.planDigest,
+          freeze: { by: "operator@example.test", at: now, how: "writers stopped" },
+        }),
+      ),
+    );
+    const result = value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+    // The moved attempt reuses the stopped one's authorization rather than counting it twice.
+    assert.equal(result.outcome, "completed");
+    assert.deepEqual(h.port.passAccounts.slice(1), [first, other]);
+    assert.equal(
+      h.port.snapshotDestination().some((item) => item.path === "x.txt"),
+      false,
+    );
+  });
+
   it("blocks with every account's stop when the whole pool is daily-limited", async (t) => {
     const h = await harness(t, ["a", "b"], [ONE, TWO], (input) => {
       input.copyPasses = [
@@ -224,6 +289,48 @@ describe("acting-account pools", () => {
     assert.deepEqual(h.port.passAccounts.toSorted(), [ONE, TWO]);
   });
 
+  it("reads live concurrency and removals at the next pass admission of a running execute", async (t) => {
+    const h = await harness(
+      t,
+      ["a", "b", "c"],
+      [ONE, TWO],
+      (input) => {
+        input.copyPasses = [{ sourceRootId: "a", pause: true, afterFiles: 0 }];
+      },
+      { mappingsInFlight: 1, transfersPerMapping: 4 },
+    );
+    await approve(h);
+    const paused = Promise.withResolvers<void>();
+    const start = h.port.startCopyPass.bind(h.port);
+    t.mock.method(h.port, "startCopyPass", async (input: Parameters<typeof start>[0]) => {
+      const handle = await start(input);
+      if (handle.jobid === 1) {
+        await h.port.waitForCopyPassPaused(handle.jobid);
+        paused.resolve();
+      }
+      return handle;
+    });
+    const running = h.engine.withWriterResult(h.ref, (w) => w.execute());
+    await paused.promise;
+    const path = join(h.home, "jobs", h.ref.id, "job.toml");
+    const config = parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    // Removing the running pass's account needs no approval; that pass still finishes.
+    const changed = value(
+      await h.engine.updateSettings(h.ref, {
+        ...config,
+        actingAccounts: [TWO],
+        options: { ...(config.options as object), transfersPerMapping: 2 },
+      }),
+    );
+    assert.deepEqual(changed.changed, ["actingAccounts", "transfersPerMapping"]);
+    h.port.releaseCopyPasses();
+    const result = value(await running);
+    assert.equal(result.outcome, "completed");
+    assert.deepEqual(h.port.passAccounts, [ONE, TWO, TWO]);
+    assert.deepEqual(h.port.passTransfers, [4, 2, 2]);
+    assert.equal((await status(h)).currentPlan?.revision, 1);
+  });
+
   it("refuses execute when no approved account remains", async (t) => {
     const h = await harness(t, ["a"], [ONE]);
     await approve(h);
@@ -285,5 +392,81 @@ describe("acting-account pools", () => {
       (await h.port.listDriveMembers(driveId)).map((member) => member.email).toSorted(),
       ["files@example.test", "finance@example.test"],
     );
+  });
+});
+
+describe("Dropbox acting-account pools", () => {
+  const MONTHLY =
+    "upload failed: invalid_account_type/feature/: Your team has used all of its data transport API calls for the month.";
+  async function dropbox(t: TestContext, fixture: Partial<FakeFileMigrationFixture> = {}) {
+    const input = {
+      ...fileFixture(
+        ["a", "b"].flatMap((id) => [
+          { id, parentId: "source-root", name: id, kind: "folder" as const },
+          { id: `${id}-file`, parentId: id, name: `${id}.txt`, kind: "file" as const, content: id },
+        ]),
+      ),
+      destinationProvider: "dropbox" as const,
+      now: () => new Date(now),
+      ...fixture,
+    };
+    const port = new FakeFileMigrationPort(input);
+    const home = await mkdtemp(join(tmpdir(), "migmate-dropbox-pool-"));
+    t.after(() => rm(home, { recursive: true, force: true }));
+    const engine = openEngine({ home, now: () => new Date(now), provider: port });
+    const ref = value(
+      await engine.initJob({
+        type: "file_migration",
+        config: {
+          sourceProvider: "sharepoint",
+          destinationProvider: "dropbox",
+          actingAccounts: [ONE, TWO],
+          options: { memberGrants: "after_verification", consistencyIntervalMs: 0 },
+        },
+      }),
+    );
+    value(
+      await engine.withWriterResult(ref, (w) =>
+        w.loadManifest({
+          format: "json",
+          content: JSON.stringify({
+            version: 1,
+            mappings: ["a", "b"].map((id) => ({
+              id,
+              source: { type: "sharepoint", driveId: "source-drive", folderPath: id },
+              destination: { type: "dropbox", create: `Team ${id}` },
+            })),
+          }),
+        }),
+      ),
+    );
+    const h = { home, engine, ref, port };
+    await approve(h);
+    return h;
+  }
+
+  it("spreads passes across members with editor uploader membership", async (t) => {
+    const h = await dropbox(t);
+    const result = value(await h.engine.withWriterResult(h.ref, (w) => w.execute()));
+    assert.equal(result.outcome, "completed");
+    assert.deepEqual(h.port.passAccounts.toSorted(), [ONE, TWO]);
+    for (const drive of (await status(h)).createdDrives)
+      assert.ok(drive.uploaders?.some((uploader) => uploader.role === "editor"));
+  });
+
+  it("blocks the whole job on the team's monthly limit and never reassigns", async (t) => {
+    const h = await dropbox(t, {
+      copyPasses: [{ sourceRootId: "a", retryingError: MONTHLY }],
+    });
+    const result = value(
+      await h.engine.withWriterResult(h.ref, (w) =>
+        w.execute({ signal: AbortSignal.timeout(5000) }),
+      ),
+    );
+    assert.equal(result.outcome, "blocked");
+    assert.equal(result.uploadQuota?.limit, "dropbox_team_monthly_upload_calls");
+    assert.equal(h.port.passAccounts.length, 2);
+    const passes = (await status(h)).mappingPasses;
+    assert.equal(passes.filter((pass) => pass.mappingId === "a").length, 1);
   });
 });
