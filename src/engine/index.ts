@@ -2225,8 +2225,7 @@ function makeWriter(
               ? null
               : poolFor(store, current, (frozenPlan ??= store.readPlanRevision(revision)));
           live = {
-            mappingsInFlight:
-              current.options.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight,
+            mappingsInFlight: current.options.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight,
             transfersPerMapping:
               current.options.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
             accounts: pool ? pool.active : null,
