@@ -115,6 +115,7 @@ import {
   provisionedDestination,
 } from "./drivers/created-containers.ts";
 import {
+  COPY_DEFAULTS,
   fileMigrationDriver,
   goLive,
   GoLiveCheckError,
@@ -129,8 +130,16 @@ import {
   historicalProviderPair,
   pairRemoteKeys,
   sameProviderPair,
+  serverSideCopy,
   type FileProviderId,
 } from "./providers/adapters/capabilities.ts";
+import {
+  actingAccountPool,
+  parseActingAccounts,
+  type AccountApproval,
+  type ActingAccountPool,
+  type LiveSettings,
+} from "./pool.ts";
 import { teamsArchiveDriver } from "./drivers/teams-archive.ts";
 import { parseArchiveConfig } from "./archive/config.ts";
 import type { ArchiveConfig } from "./providers/archive.ts";
@@ -238,6 +247,7 @@ type FileConfig = CommonConfig & {
   mappings: Mapping[];
   impersonate?: boolean;
   subject?: string;
+  actingAccounts?: string[];
   sourceImpersonate?: boolean;
   sourceSubject?: string;
   options: NonNullable<FileMigrationConfig["options"]>;
@@ -338,6 +348,7 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
           "rclone",
           "impersonate",
           "subject",
+          "actingAccounts",
           "sourceImpersonate",
           "sourceSubject",
         ]
@@ -490,6 +501,19 @@ function parseConfig(raw: unknown, type: JobType, paths: JobPaths): JobConfig {
       config.subject = subject;
     }
     if (config.impersonate && !config.subject) configError("subject");
+    if (input.actingAccounts !== undefined) {
+      // D2: Google and Dropbox writes only; reads and SharePoint keep one identity.
+      // Google pool accounts are impersonated users, so delegation must already be on.
+      const accounts = parseActingAccounts(input.actingAccounts);
+      if (
+        !accounts ||
+        !pair.destination.uploaderRole ||
+        (pair.destination.id === "google_shared_drive" && !config.impersonate) ||
+        serverSideCopy(input)
+      )
+        configError("actingAccounts");
+      config.actingAccounts = accounts;
+    }
     // Google → Google reads with its own read-only account, never the writing one.
     const separateGoogleSource = sameProvider && pair.source.id === "google_shared_drive";
     for (const [flag, field] of [["sourceImpersonate", "sourceSubject"]] as const) {
@@ -1537,9 +1561,21 @@ function configurationAuthority(config: JobConfig, frozenConfiguration?: string)
     const sameLegacyPair =
       legacyPair?.sourceProvider === pair.source.id &&
       legacyPair.destinationProvider === pair.destination.id;
+    // ADR-0019 D3: copy concurrency grants no authority, so plans no longer bind it.
+    // Plans made before keep their encoding, with the frozen values, never the live ones.
+    const {
+      mappingsInFlight: _mappings,
+      transfersPerMapping: _transfers,
+      ...options
+    } = config.options;
+    const frozenOptions: Record<string, unknown> = frozenConfiguration
+      ? (JSON.parse(frozenConfiguration).options ?? {})
+      : {};
+    for (const key of ["mappingsInFlight", "transfersPerMapping"] as const)
+      if (frozenOptions[key] !== undefined) Object.assign(options, { [key]: frozenOptions[key] });
     return canonicalJson({
       mappings: config.mappings,
-      options: config.options,
+      options,
       ...(config.manifestDigest ? { manifestDigest: config.manifestDigest } : {}),
       ...(sameLegacyPair
         ? { route }
@@ -1592,6 +1628,23 @@ function currentVerification(store: Store): (VerificationRevision & { planRev: n
   return rev == null ? null : store.readVerificationRevision(rev);
 }
 
+/** ADR-0019: the current plan's acting-account pool against the editable configuration. */
+function poolFor(
+  store: Store,
+  config: JobConfig,
+  plan: { revision: number; planDigest: string; evidence: unknown } | null,
+): ActingAccountPool | null {
+  if (!("mappings" in config) || !plan) return null;
+  const planned = object(plan.evidence, "plan.evidence").actingAccounts;
+  if (config.actingAccounts === undefined && planned === undefined) return null;
+  return actingAccountPool({
+    configured: config.actingAccounts,
+    planned: Array.isArray(planned) ? (planned as string[]) : undefined,
+    approvals: store.readAccountApprovals(),
+    revision: plan.revision,
+    planDigest: plan.planDigest,
+  });
+}
 function closeReview(store: Store, config: JobConfig) {
   const job = store.readJob()!;
   const plan = job.planRevision === null ? null : store.readPlanRevision(job.planRevision);
@@ -2061,9 +2114,45 @@ function makeWriter(
       ? object(plan.evidence, "plan.evidence").actingGoogleAccount
       : undefined;
     const authority = reporting ? closeReview(store, config) : null;
+    let live: LiveSettings | undefined;
+    let frozenPlan: ReturnType<Store["readPlanRevision"]> | undefined;
+    // Only the operator file is reread: mappings and plan are frozen for this run.
+    const liveSettings = (): LiveSettings => {
+      try {
+        const current = readConfig(paths, job().type);
+        if ("mappings" in current) {
+          const pool =
+            current.actingAccounts === undefined
+              ? null
+              : poolFor(store, current, (frozenPlan ??= store.readPlanRevision(revision)));
+          live = {
+            mappingsInFlight:
+              current.options.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight,
+            transfersPerMapping:
+              current.options.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
+            accounts: pool ? pool.active : null,
+          };
+        }
+      } catch (error) {
+        // An edit in progress keeps the last settings that parsed; the store must not fail.
+        if (!(error instanceof EngineRefusalError)) throw error;
+      }
+      return (
+        live ?? {
+          mappingsInFlight:
+            ("mappings" in config ? config.options.mappingsInFlight : undefined) ??
+            COPY_DEFAULTS.mappingsInFlight,
+          transfersPerMapping:
+            ("mappings" in config ? config.options.transfersPerMapping : undefined) ??
+            COPY_DEFAULTS.transfersPerMapping,
+          accounts: null,
+        }
+      );
+    };
     return {
       config: config as never,
       revision,
+      ...(!reporting && plan && "mappings" in config ? { live: liveSettings } : {}),
       ...(stage === "prestage" || stage === "delta" || stage === "final" ? { stage } : {}),
       ...(typeof actingGoogleAccount === "string" ? { actingGoogleAccount } : {}),
       beginUpload: (source, identity, account) =>
@@ -3024,9 +3113,14 @@ function makeWriter(
             "mappings" in config
               ? fileProviderPair(config).destination.ledgerAccountedUploads
               : config.destination !== undefined;
+          const actingAccounts =
+            "mappings" in config && config.actingAccounts ? config.actingAccounts : undefined;
           const uploadActivity = ledgerAccountedUploads
             ? (initializeUploadLedger(deps.home, deps.now()),
-              readUploadActivity(deps.home, deps.now(), [actingGoogleAccount ?? ""]))
+              readUploadActivity(deps.home, deps.now(), [
+                actingGoogleAccount ?? "",
+                ...(actingAccounts ?? []),
+              ]))
             : null;
           if (uploadActivity)
             reportSections.push({
@@ -3062,6 +3156,8 @@ function makeWriter(
               binding: evidence,
               reportSections,
               ...(actingGoogleAccount !== undefined ? { actingGoogleAccount } : {}),
+              // ADR-0019 D1: approving this plan approves exactly this pool.
+              ...(actingAccounts ? { actingAccounts } : {}),
               uploadActivity,
             },
             disclosures,
@@ -3255,6 +3351,13 @@ function makeWriter(
             return refuse(
               "plan_revision_required",
               "The approved inputs or authenticated route identity have changed.",
+            );
+          const pool = poolFor(store, config, plan);
+          if ("mappings" in config && config.actingAccounts !== undefined && !pool?.active.length)
+            return refuse(
+              "approval_required",
+              "No approved acting account remains in the pool. Approve the added accounts or restore an approved one.",
+              { detail: { pending: pool?.pending ?? [], removed: pool?.removed ?? [] } },
             );
           const approvedAccount = object(plan.evidence, "plan.evidence").actingGoogleAccount;
           if (typeof approvedAccount === "string") {

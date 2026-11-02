@@ -87,6 +87,11 @@ export interface FileMigrationConfig {
   mappings: FileMappingConfig[];
   impersonate?: boolean;
   subject?: string;
+  /**
+   * ADR-0019: the acting-account pool passes write as, one account per pass. The job's
+   * own identity (subject or admin) still creates containers, grants and verifies.
+   */
+  actingAccounts?: string[];
   /** Google → Google only: the read-only source account's delegation. */
   sourceImpersonate?: boolean;
   sourceSubject?: string;
@@ -127,7 +132,7 @@ export function managesCreatedAccess(
   );
 }
 
-const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
+export const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
 
 type Phase = "plan" | "execute" | "verify";
 interface SourceView extends SourceEntry {
