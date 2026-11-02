@@ -11,6 +11,7 @@ import { createProductionProvider } from "./production.ts";
 import {
   beginDropboxAuthorization,
   DROPBOX_READ_SCOPES,
+  DROPBOX_POOL_WRITE_SCOPES,
   DROPBOX_WRITE_SCOPES,
   dropboxRemoteSettings,
   loadDropboxCredential,
@@ -1065,6 +1066,19 @@ test("Dropbox destination authorization requests exactly the write scopes", asyn
   assert.throws(() => loadDropboxCredential(reader, "destination"), {
     code: "credential_permissions_invalid",
   });
+});
+
+test("Dropbox destination authorization for a pool also requests members.read", () => {
+  const url = new URL(
+    beginDropboxAuthorization("dropbox-writer", "destination", { pool: true }).url,
+  );
+  assert.equal(url.searchParams.get("scope"), DROPBOX_POOL_WRITE_SCOPES.join(" "));
+  assert.deepEqual(
+    DROPBOX_POOL_WRITE_SCOPES.filter(
+      (scope) => !(DROPBOX_WRITE_SCOPES as readonly string[]).includes(scope),
+    ),
+    ["members.read"],
+  );
 });
 
 for (const grant of [
