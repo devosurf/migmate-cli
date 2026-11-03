@@ -89,7 +89,13 @@ async function onboardDropboxRole(
     if (!input.io.stdin.isTTY || !input.io.stderr.isTTY)
       throw refused("credential_interaction_required", { provider: "dropbox" });
     input.signal.throwIfAborted();
-    const authorization = beginDropboxAuthorization(settings.clientId, role);
+    // ADR-0019: pool passes act as members, which rclone resolves with members.read.
+    const pool = role === "destination" && config.actingAccounts !== undefined;
+    const authorization = beginDropboxAuthorization(
+      settings.clientId,
+      role,
+      pool ? { pool } : undefined,
+    );
     await input.io.stderr.write(
       `Open this Dropbox authorization URL in your browser and approve the ${role === "source" ? "read-only team app" : "destination write app"} as a team administrator:\n${authorization.url}\nPaste the authorization code (blank cancels): `,
     );

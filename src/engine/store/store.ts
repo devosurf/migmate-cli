@@ -63,6 +63,7 @@ import type {
 } from "../providers/archive.ts";
 import { canonicalJson, digestJson, digestVerificationEvidence } from "./digest.ts";
 import type { StoredMappings } from "../manifest.ts";
+import type { AccountApproval } from "../pool.ts";
 import { readReportJson, readReportSettlement, reportCoverage } from "./report.ts";
 import { exceptionConsequence, isAcceptable } from "../codes.ts";
 import { approvalAuthority } from "../decisions.ts";
@@ -177,6 +178,9 @@ export interface Store {
   latestApprovedPlan(): PlanRevisionRecord | null;
   readCloseAuthorization(): CloseAuthorization | null;
   writeCloseAuthorization(record: CloseAuthorization): void;
+  readAccountApprovals(): AccountApproval[];
+  /** False when this exact reviewed proposal was already approved. */
+  writeAccountApproval(record: AccountApproval): boolean;
   readGoLiveAcknowledgments(): GoLiveAcknowledgment[];
   writeGoLiveAcknowledgment(record: GoLiveAcknowledgment): void;
   lastInteractiveIdentity(): string | null;
@@ -1010,6 +1014,36 @@ class StoreImpl implements Store {
       kind: "phase_completed",
       payload: { decision: "go_live_acknowledgment", evidenceDigest: record.evidenceDigest },
     });
+  }
+  /** ADR-0019 D3: approvals of acting-account pool expansions, oldest first. */
+  readAccountApprovals(): AccountApproval[] {
+    return this.db
+      .prepare(
+        "SELECT payload FROM decision_evidence WHERE key GLOB 'account_approval:*' ORDER BY rowid",
+      )
+      .all()
+      .map((row) => JSON.parse(String(row.payload)) as AccountApproval);
+  }
+  writeAccountApproval(record: AccountApproval): boolean {
+    const inserted = this.db
+      .prepare(
+        "INSERT INTO decision_evidence (key,payload) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+      )
+      .run(`account_approval:${record.revision}:${record.poolDigest}`, canonicalJson(record));
+    if (!inserted.changes) return false;
+    if (record.mode === "interactive") this.recordInteractiveIdentity(record.approver);
+    this.appendEvent({
+      verb: "approve",
+      phase: "approve",
+      kind: "phase_completed",
+      payload: {
+        decision: "acting_accounts",
+        revision: record.revision,
+        accounts: record.accounts,
+        poolDigest: record.poolDigest,
+      },
+    });
+    return true;
   }
   lastInteractiveIdentity(): string | null {
     const row = this.db

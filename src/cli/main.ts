@@ -67,6 +67,9 @@ migmate stop --job ID                        # stop running work resumably
 migmate approve --job ID --approver IDENTITY --plan-digest DIGEST --output json
   [--freeze-by IDENTITY --freeze-at TIMESTAMP --freeze-how TEXT]
 migmate approve --job ID                    # human terminal: review, then type yes
+migmate settings --job ID --config job.toml  # live: actingAccounts, copy concurrency
+migmate approve --job ID --accounts          # human terminal: approve added acting accounts
+migmate approve --job ID --approver IDENTITY --pool-digest DIGEST --output json
 migmate accept --job ID                     # human terminal: select groups and rationale
 migmate accept --job ID --approver IDENTITY --verification-digest DIGEST --code CODE --note RATIONALE
   [--code CODE ...]                          # unattended; one rationale for the selection
@@ -471,6 +474,44 @@ async function approve(
   return review(reader, invocation, status, { ...result.value, plan: status.currentPlan });
 }
 
+/** ADR-0019 D3 through ADR-0016's handoff: the reviewed pool digest is never transcribed. */
+async function approveAccounts(
+  invocation: Invocation,
+  output: Output,
+  engine: Engine,
+  status: JobStatus,
+): Promise<AdapterOutcome> {
+  const interactive = interactiveDecision(invocation, output, invocation.poolDigest);
+  let approver = invocation.approver?.trim();
+  const pool = status.actingAccounts;
+  const poolDigest = interactive ? pool?.poolDigest : invocation.poolDigest;
+  if (interactive) {
+    if (!pool?.poolDigest || !pool.pending.length)
+      return refusal("approval_required", "No added acting account awaits approval.");
+    await output.io.stderr.write(
+      `Added acting accounts (new write authority; each is granted uploader membership on created containers):\n${pool.pending.map((account) => `  ${account}`).join("\n")}\n`,
+    );
+    approver = (await declaredIdentity(invocation, output, status)) ?? undefined;
+    if (
+      !approver ||
+      !(await confirm(
+        output,
+        `Let these ${pool.pending.length} accounts write for this job as ${approver} (unverified)?`,
+      ))
+    )
+      return refusal("approval_required", "Account approval was not confirmed.");
+  }
+  if (!approver || !poolDigest?.trim() || output.abort.signal.aborted)
+    return refusal(
+      "approval_required",
+      "Unattended account approval requires --approver and --pool-digest.",
+    );
+  return engine.approveAccounts(
+    { id: invocation.jobId! },
+    { approver, poolDigest, mode: interactive ? "interactive" : "unattended" },
+  );
+}
+
 async function accept(
   invocation: Invocation,
   output: Output,
@@ -786,8 +827,11 @@ async function executeCommand(
       invocation.command === "plan" ? status.value.currentPlan : undefined,
     );
   const result = await withEvents(invocation, output, reader, async () => {
+    if (invocation.command === "approve" && invocation.accounts)
+      return approveAccounts(invocation, output, engine, status.value);
     if (invocation.command === "approve")
       return approve(invocation, output, engine, reader, status.value);
+    if (invocation.command === "settings") return engine.updateSettings(job, config);
     if (invocation.command === "accept") return accept(invocation, output, engine, status.value);
     if (invocation.command === "acknowledge")
       return acknowledge(invocation, output, engine, status.value);

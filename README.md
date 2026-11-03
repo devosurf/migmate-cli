@@ -299,6 +299,56 @@ service-account key and deleting the delegation entry as open operator tasks;
 Migmate does not perform those administrative deletions. A manifest that creates
 Shared Drives also requires `about.canCreateDrives = true` in preflight.
 
+### Acting-account pools
+
+A Google or Dropbox destination can spread its writes over an approved pool of acting
+accounts ([ADR-0019](docs/adr/0019-acting-account-pools.md)). List them as a top-level
+setting beside `impersonate`:
+
+```toml
+impersonate = true
+subject = "files@example.com"
+actingAccounts = ["upload-1@example.com", "upload-2@example.com"]
+```
+
+Each pass writes as exactly one pool account, through a destination remote of its own;
+reads, container creation, member grants and verification stay on the job's own
+identity. Google pool accounts are impersonated through the same domain-wide delegation,
+so `impersonate = true` is required; Dropbox pool accounts are active team members acted
+as through Select-User, and the write app must hold `members.read` (`creds init` asks for
+it when `actingAccounts` is set). SharePoint destinations and server-side Google copy
+refuse a pool (`configuration_invalid` naming `actingAccounts`). A pool holds at most 100
+distinct addresses.
+
+Approving the plan approves the pool it was planned with. Plan and report disclose the
+pool and its **uploader membership**: on each container the job creates, every pool
+account it uses is granted content manager (Google) or editor (Dropbox), and close
+removes that membership before the membership check. For existing destinations, grant
+each pool account write access beforehand; preflight proves it as the account
+(`actingAccount:<email>:<driveId>`) without writing.
+
+While a job runs, `migmate settings --job ID --config job.toml` changes only
+`actingAccounts`, `mappingsInFlight` and `transfersPerMapping`, without the writer lease;
+any other difference is refused, and still goes through `creds init`. The running
+`execute` reads them at its next pass admission; running passes keep their account and
+transfers.
+
+- Concurrency changes need no approval and never change the plan.
+- A removed account needs no approval: its running passes finish and it gets no new one.
+- An added account is new write authority. `status.actingAccounts` lists it under
+  `pending` with a `poolDigest`; approve it with `migmate approve --job ID --accounts`
+  in a terminal, or unattended with `--approver IDENTITY --pool-digest DIGEST`. No re-plan
+  or restart is needed. Go-live fences further additions.
+- `execute` refuses with `approval_required` when no approved account remains.
+
+On a Google daily upload limit, only that account stops: its other passes stop, it gets
+no more work in that `execute`, and its unfinished mappings move to another pool account
+once the stopped transfer is proven ended. A moved mapping keeps its mirror deletion
+budget. When every account is exhausted, the job blocks with `accountStops`, each
+account's stop and resume estimate. Ordinary throttling, storage, permission and network
+errors never move work. A Dropbox pool only spreads passes; the team's monthly upload-call
+limit still blocks the whole job.
+
 ### File provider selection
 
 Set both providers at the top level of the operator TOML, before any table header:
@@ -974,7 +1024,7 @@ These are conservative defaults: two active mappings, each with up to four file 
 
 `status` exposes durable `mappingPasses`: mapping and pass number, mode, rclone handle, state, timestamps, last stats and error. rclone's backend pacer handles throttling within each pass. An ordinary failed pass retains rclone's error and counts against the run's retry budget without stopping other active or queued mappings; the run remains blocked if any pass fails. Run `execute` again to retry failed or interrupted mappings; completed mappings in the approved revision are skipped. On writer-open recovery, every unfinished pass whose worker is gone becomes interrupted, including all passes active at a crash. A retried copy lets rclone skip identical files instead of recovering per-file uploads.
 
-**Google upload quota is different.** Google documents [750 GB per user per day](https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints) across My Drive and Shared Drives. For file uploads into Drive, the worker uses `--drive-stop-on-upload-limit`. On the first detected upload-quota failure, Migmate cooperatively stops the other active passes, starts no queued mapping, and returns `blocked` (exit **5**). All mappings share the job's acting Google account. The execute result and terminal event carry `uploadQuota`; the failed pass retains it in `status.mappingPasses[].uploadQuota`, alongside the original error:
+**Google upload quota is different.** Google documents [750 GB per user per day](https://developers.google.com/workspace/drive/api/guides/limits#additional_constraints) across My Drive and Shared Drives. For file uploads into Drive, the worker uses `--drive-stop-on-upload-limit`. On the first detected upload-quota failure, Migmate cooperatively stops the other active passes, starts no queued mapping, and returns `blocked` (exit **5**). All mappings share the job's acting Google account, unless the job has an [acting-account pool](#acting-account-pools), where only the stopped account's work moves. The execute result and terminal event carry `uploadQuota`; the failed pass retains it in `status.mappingPasses[].uploadQuota`, alongside the original error:
 
 ```json
 {

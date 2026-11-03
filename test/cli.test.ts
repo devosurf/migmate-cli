@@ -2399,3 +2399,90 @@ it("explicit reclaim refuses a live writer rather than treating confirmation as 
     owner.close();
   }
 });
+
+it("changes a pool live and approves its added accounts through the CLI (ADR-0019)", async (t) => {
+  const fixture = cliFixture();
+  fixture.googleAbout = { user: { emailAddress: "files@example.com" }, canCreateDrives: false };
+  const h = harness(t, fixture);
+  const pooled = {
+    ...CLI_JOB_CONFIG,
+    impersonate: true,
+    subject: "files@example.com",
+    actingAccounts: ["one@example.com"],
+  };
+  const config = join(h.home, "input.toml");
+  writeFileSync(config, stringifyToml(pooled));
+  const id = document<{ id: string }>(
+    await invoke(
+      ["init", "--type", "file_migration", "--config", config, "--output", "json"],
+      h.engine(),
+    ),
+  ).value.id;
+  const planned_ = document<PlanRevision>(
+    await invoke(["plan", "--job", id, "--output", "json"], h.engine()),
+  );
+  assert.equal(planned_.ok, true, JSON.stringify(planned_.refusal));
+  const plan = planned_.value;
+  document(
+    await invoke(
+      ["approve", "--job", id, "--approver", "ci:review", "--plan-digest", plan.planDigest],
+      h.engine(),
+    ),
+  );
+  // A change outside the live settings is refused and leaves job.toml alone.
+  writeFileSync(config, stringifyToml({ ...pooled, subject: "other@example.com" }));
+  const fixed = await invoke(
+    ["settings", "--job", id, "--config", config, "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(document(fixed).refusal.code, "configuration_invalid");
+  writeFileSync(
+    config,
+    stringifyToml({
+      ...pooled,
+      actingAccounts: ["one@example.com", "two@example.com"],
+      options: { mappingsInFlight: 1 },
+    }),
+  );
+  const changed = document<{ changed: string[] }>(
+    await invoke(["settings", "--job", id, "--config", config, "--output", "json"], h.engine()),
+  );
+  assert.deepEqual(changed.value.changed, ["actingAccounts", "mappingsInFlight"]);
+  const status = document<JobStatus>(
+    await invoke(["status", "--job", id, "--output", "json"], h.engine()),
+  ).value;
+  assert.deepEqual(status.actingAccounts?.pending, ["two@example.com"]);
+  assert.equal(status.currentPlan?.planDigest, plan.planDigest);
+  const unattended = await invoke(
+    ["approve", "--job", id, "--accounts", "--approver", "ci:review", "--output", "json"],
+    h.engine(),
+  );
+  assert.equal(document(unattended).refusal.code, "approval_required");
+  const human = await invoke(["approve", "--job", id, "--accounts"], h.engine(), {
+    tty: [true, false, true],
+    answers: ["", "yes"],
+  });
+  assert.equal(human.code, 0);
+  assert.ok(human.stderr.includes("two@example.com"));
+  const approved = document<JobStatus>(
+    await invoke(["status", "--job", id, "--output", "json"], h.engine()),
+  ).value;
+  assert.deepEqual(approved.actingAccounts?.active, ["one@example.com", "two@example.com"]);
+  const both = await invoke(
+    [
+      "approve",
+      "--job",
+      id,
+      "--approver",
+      "ci:review",
+      "--plan-digest",
+      plan.planDigest,
+      "--pool-digest",
+      "x",
+      "--output",
+      "json",
+    ],
+    h.engine(),
+  );
+  assert.equal(both.code, 2);
+});

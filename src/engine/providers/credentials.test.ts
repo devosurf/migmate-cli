@@ -11,6 +11,7 @@ import { createProductionProvider } from "./production.ts";
 import {
   beginDropboxAuthorization,
   DROPBOX_READ_SCOPES,
+  DROPBOX_POOL_WRITE_SCOPES,
   DROPBOX_WRITE_SCOPES,
   dropboxRemoteSettings,
   loadDropboxCredential,
@@ -528,6 +529,55 @@ test("file tokens omit the subject when impersonation is off", async (t) => {
   assert.equal(await session.googleToken(), "self-token");
 });
 
+test("pool account tokens impersonate each account with the destination key, cached per account", async (t) => {
+  const { jobDirectory, config } = await googleToGoogleFiles(t);
+  const requests: Record<string, unknown>[] = [];
+  t.mock.method(globalThis, "fetch", async (target: unknown, init?: RequestInit) => {
+    assert.equal(String(target), "https://oauth2.googleapis.com/token");
+    const claims = googleClaims(init);
+    requests.push(claims);
+    return Response.json({
+      access_token: `token-for-${String(claims.sub)}-${requests.length}`,
+      token_type: "Bearer",
+      expires_in: 3600,
+    });
+  });
+  const session = await createCredentialSession({
+    jobType: "file_migration",
+    jobDirectory,
+    config,
+  });
+  // Concurrent asks for one account share one exchange; addresses are case-insensitive.
+  const [first, second] = await Promise.all([
+    session.googleAccountToken!("pool1@example.com"),
+    session.googleAccountToken!("Pool1@example.com"),
+  ]);
+  assert.equal(first, "token-for-pool1@example.com-1");
+  assert.equal(second, first);
+  assert.equal(
+    await session.googleAccountToken!("pool2@example.com"),
+    "token-for-pool2@example.com-2",
+  );
+  assert.equal(await session.googleAccountToken!("pool1@example.com"), first);
+  assert.deepEqual(
+    requests.map((claims) => [claims.iss, claims.sub, claims.scope]),
+    ["pool1@example.com", "pool2@example.com"].map((sub) => [
+      "migmate@migmate-test.iam.gserviceaccount.com",
+      sub,
+      "https://www.googleapis.com/auth/drive",
+    ]),
+  );
+  // Pool tokens never replace the job's own identity.
+  assert.equal(await session.googleToken(), "token-for-writer@example.com-3");
+  await assert.rejects(session.googleAccountToken!("not an address"), {
+    code: "credential_config_invalid",
+  });
+  session.dispose();
+  await assert.rejects(session.googleAccountToken!("pool1@example.com"), {
+    code: "credential_session_disposed",
+  });
+});
+
 test("operator rclone impersonation refuses even when job delegation is enabled", async (t) => {
   const { jobDirectory, config } = await operatorFiles(t, source.join("\n"));
   await appendFile(config.rclone.config.path, "impersonate = other@example.com\n");
@@ -1016,6 +1066,19 @@ test("Dropbox destination authorization requests exactly the write scopes", asyn
   assert.throws(() => loadDropboxCredential(reader, "destination"), {
     code: "credential_permissions_invalid",
   });
+});
+
+test("Dropbox destination authorization for a pool also requests members.read", () => {
+  const url = new URL(
+    beginDropboxAuthorization("dropbox-writer", "destination", { pool: true }).url,
+  );
+  assert.equal(url.searchParams.get("scope"), DROPBOX_POOL_WRITE_SCOPES.join(" "));
+  assert.deepEqual(
+    DROPBOX_POOL_WRITE_SCOPES.filter(
+      (scope) => !(DROPBOX_WRITE_SCOPES as readonly string[]).includes(scope),
+    ),
+    ["members.read"],
+  );
 });
 
 for (const grant of [

@@ -36,6 +36,7 @@ export const dropboxCapabilities: FileProviderCapabilities = {
   quotaStop: monthlyUploadStop,
   quotaWhileRunning: true,
   creatorRole: "owner",
+  uploaderRole: "editor",
   memberRole(role) {
     switch (role) {
       case "reader":

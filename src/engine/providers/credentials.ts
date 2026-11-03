@@ -51,6 +51,11 @@ export interface CredentialSession {
   graphDestinationToken(signal?: AbortSignal): Promise<string>;
   sharepointDestinationToken?(siteUrl: string, signal?: AbortSignal): Promise<string>;
   googleToken(signal?: AbortSignal): Promise<string>;
+  /**
+   * ADR-0019 D1: a token acting as one acting-account pool member, minted with the
+   * destination service account (`sub` = that account); never the read-only source one.
+   */
+  googleAccountToken?(account: string, signal?: AbortSignal): Promise<string>;
   /** Google → Google only: the separate read-only source account; never used to write. */
   googleSourceToken?(signal?: AbortSignal): Promise<string>;
   readonly googleSourceRemote?: string | null;
@@ -432,6 +437,8 @@ export async function createCredentialSession(input: {
   let destinationPending: Promise<string> | undefined;
   let graphPending: Promise<string> | undefined;
   let googlePending: Promise<string> | undefined;
+  const googleAccountCache = new Map<string, Token>();
+  const googleAccountPending = new Map<string, Promise<string>>();
   let googleSourceCache: Token | undefined;
   let googleSourcePending: Promise<string> | undefined;
   let dropboxCache: Token | undefined;
@@ -570,6 +577,35 @@ export async function createCredentialSession(input: {
     }
   }
 
+  async function googleAccountToken(account: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    const credential = active().google;
+    if (!credential) throw refused("credential_google_unavailable");
+    if (!/^[^\s@]+@[^\s@]+$/u.test(account)) throw refused("credential_config_invalid");
+    // Workspace addresses are case-insensitive: one account, one cached token.
+    const key = account.toLowerCase();
+    const cached = googleAccountCache.get(key);
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.value;
+    const pending = googleAccountPending.get(key);
+    if (pending) return pending;
+    googleAccountCache.delete(key);
+    const request = (async () => {
+      const token = await requestGoogleToken(
+        { ...credential, delegatedSubject: account },
+        signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+      );
+      active();
+      googleAccountCache.set(key, token);
+      return token.value;
+    })();
+    googleAccountPending.set(key, request);
+    try {
+      return await request;
+    } finally {
+      googleAccountPending.delete(key);
+    }
+  }
+
   async function googleSourceToken(signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const credential = active().googleSource;
@@ -662,6 +698,7 @@ export async function createCredentialSession(input: {
       return active().google?.delegatedSubject;
     },
     googleToken,
+    googleAccountToken,
     googleSourceToken,
     get googleSourceRemote() {
       return active().googleSourceRemote ?? null;
@@ -874,6 +911,8 @@ export async function createCredentialSession(input: {
       state = undefined;
       graphCache = undefined;
       googleCache = undefined;
+      googleAccountCache.clear();
+      googleAccountPending.clear();
       googleSourceCache = undefined;
       graphPending = undefined;
       googlePending = undefined;

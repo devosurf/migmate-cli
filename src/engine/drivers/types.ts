@@ -11,6 +11,7 @@ import type { CommitFinding, CommitRow, CommitUnit } from "../commit.ts";
 import type { ArchiveResumeState } from "../providers/archive.ts";
 import type { ReportArray, ReportText } from "../report.ts";
 import type { UploadAttempt } from "../store/uploads.ts";
+import type { LiveSettings } from "../pool.ts";
 
 export type {
   CommitFinding,
@@ -40,6 +41,11 @@ export interface DriverContext<Cfg> {
   config: Cfg;
   revision: number;
   stage?: "prestage" | "delta" | "final";
+  /**
+   * ADR-0019 D3: copy concurrency and the approved, still-configured pool, read again at
+   * every pass admission so they change while a job runs. Absent outside `execute`.
+   */
+  live?: () => LiveSettings;
   /** Observed in preflight and retained in the plan, never refreshed while reporting. */
   actingGoogleAccount?: string;
   /** Account belongs to this attempt, so each approved pool account uses the same ledger. */

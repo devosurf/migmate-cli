@@ -124,6 +124,12 @@ function readerEngine(
     async requestControl() {
       return refused;
     },
+    async approveAccounts() {
+      return refused;
+    },
+    async updateSettings() {
+      return refused;
+    },
     close() {},
   };
 }

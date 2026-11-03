@@ -74,6 +74,13 @@ export interface FileProviderCapabilities {
   /** rclone retries this quota error, so its running error text must stop the pass. */
   quotaWhileRunning?: boolean;
   creatorRole: DriveMember["role"];
+  /**
+   * ADR-0019 D2: this destination's writes may spread over an acting-account pool, with
+   * this role as uploader membership on created containers (D4). Absent refuses a pool.
+   */
+  uploaderRole?: DriveMember["role"];
+  /** ADR-0019 D5: an upload-quota stop is the account's own and moves its work. */
+  quotaPerAccount?: boolean;
   memberRole(role: unknown): DriveMember["role"] | undefined;
   /** How manifests name members; Dropbox team folders take groups by group ID. */
   memberIdentity?: "email" | "dropbox_group";

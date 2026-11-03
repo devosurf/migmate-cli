@@ -7,6 +7,7 @@
 import type { CopyPassStats, DriveMember, DriveMembership } from "./providers/port.ts";
 import type { FileMappingConfig } from "./drivers/file-migration.ts";
 import type { UploadActivity } from "./store/uploads.ts";
+import type { ActingAccountPool } from "./pool.ts";
 
 export interface UploadQuotaStop {
   code: "upload_quota_exceeded";
@@ -40,6 +41,13 @@ export interface MappingPass {
     | null;
   error: string | null;
   uploadQuota?: UploadQuotaStop;
+  /** ADR-0019 D1: the pool account this pass wrote as; absent is the job's own identity. */
+  account?: string;
+  /**
+   * ADR-0019 D5: whether the stopped transfer was proven ended. Its mapping moves to
+   * another account only when it was, so a mapping never has two writers.
+   */
+  stopConfirmed?: boolean;
 }
 
 export interface GoLiveCheck {
@@ -71,6 +79,11 @@ export interface CreatedDrive {
   siteId?: string;
   /** Monotonic: clearing a manifest's members never restores inherited access. */
   managedAccess?: boolean;
+  /**
+   * ADR-0019 D4: pool accounts' temporary write membership, granted while copying and
+   * removed at close before the membership check. Never an end-user grant.
+   */
+  uploaders?: { account: string; role: string; grantedAt: string; removedAt?: string }[];
   /** Proven empty initial ACL when no creator identity is available, before manifest grants. */
   initialMembers?: DriveMembership[];
   creatorEmail: string;
@@ -302,6 +315,8 @@ export interface ExecuteResult {
   /** Populated when the run stopped in `blocked`. */
   budget?: { failedAttempts: number; failedUnitRatio: number };
   uploadQuota?: UploadQuotaStop;
+  /** ADR-0019 D5: every pool account's daily-limit stop in this run, once each. */
+  accountStops?: UploadQuotaStop[];
 }
 
 export interface CheckResult {
@@ -544,6 +559,14 @@ export interface JobStatus {
   planDigest: string | null;
   currentPlan: PlanRevision | null;
   uploadActivity?: UploadActivity;
+  /**
+   * ADR-0019: the acting-account pool of the current plan against the editable
+   * configuration, with the copy concurrency the next pass admission will use.
+   */
+  actingAccounts?: ActingAccountPool & {
+    mappingsInFlight: number;
+    transfersPerMapping: number;
+  };
   lastInteractiveIdentity?: string | null;
   currentApproval?: ApprovalRecord | null;
   approvalAuthority?: ApprovalAuthority;

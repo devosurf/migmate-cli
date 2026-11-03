@@ -272,7 +272,29 @@ export interface ProviderPort extends FilePassProvider {
     destFolderId: string;
     /** Marks both resolved roots files-only (ADR-0020 D4). */
     filesOnly?: true;
+    /**
+     * ADR-0019 D1: the acting-account pool member this pass writes as, through a
+     * destination remote isolated to that account. Absent is the job's own identity.
+     */
+    account?: string;
   }): Promise<{ socketPath: string; source: FilePassRoot; destination: FilePassRoot }>;
+  /**
+   * ADR-0019 D4: give a pool account uploader membership (Google content manager,
+   * Dropbox editor) on a container this job created. Already a member is success.
+   */
+  addUploaderMember?(driveId: string, account: string, signal?: AbortSignal): Promise<void>;
+  /** ADR-0019 D4: remove a pool account's uploader membership. Already absent is success. */
+  removeUploaderMember?(driveId: string, account: string, signal?: AbortSignal): Promise<void>;
+  /**
+   * ADR-0019 D4: whether a pool account can write into an existing destination root,
+   * observed as that account and without writing. Not a member is `writable: false`.
+   */
+  proveAccountWrite?(input: {
+    account: string;
+    destDriveId: string;
+    destFolderId: string;
+    signal?: AbortSignal;
+  }): Promise<{ writable: boolean; evidence: Record<string, unknown> }>;
   archive?: ArchiveProvider;
   /** ADR-0020 D1: read-only count of the source per access boundary; never job state. */
   discoverSource?(signal?: AbortSignal): Promise<SourceDiscovery>;

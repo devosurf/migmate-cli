@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { ProviderFault } from "../fault.ts";
 import { DiskListing } from "../listing.ts";
 import { HttpProviderFault, fetchProvider, responseBytes, responseJson } from "../http.ts";
@@ -75,7 +76,14 @@ interface FolderMembers {
   invitees?: { access_type: { ".tag": string }; invitee: { ".tag": string; email?: string } }[];
   cursor?: string;
 }
+interface TeamMember {
+  /** Null when Dropbox names no active member for the email. */
+  teamMemberId: string | null;
+  status: string;
+}
 const ROOT_PREFIX = "ns:";
+/** Bounded backoff for sharing/check_remove_member_job_status, about a minute in all. */
+const REMOVE_POLL_DELAYS_MS = [250, 500, 1_000, 2_000, ...Array<number>(14).fill(4_000)];
 function quote(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
@@ -99,6 +107,8 @@ export class DropboxAdapter implements FileAdapter {
   #namespaces: Promise<Map<string, Namespace>> | undefined;
   readonly #writableNamespaces = new Set<string>();
   readonly #destinationItems = new Map<string, { namespace: string; path: string }>();
+  readonly #teamMembers = new Map<string, Promise<TeamMember>>();
+  #membersRead: Promise<void> | undefined;
 
   constructor(input: AdapterInput) {
     this.#session = input.session;
@@ -111,7 +121,8 @@ export class DropboxAdapter implements FileAdapter {
     namespace?: string,
     signal?: AbortSignal,
     content = false,
-    selectUser = false,
+    // true selects the configured admin; a team-member ID acts as that member alone.
+    selectUser: boolean | string = false,
     role: "source" | "destination" | "discovery" = "source",
   ): Promise<Response> {
     const host = content ? "content.dropboxapi.com" : "api.dropboxapi.com";
@@ -133,17 +144,18 @@ export class DropboxAdapter implements FileAdapter {
         );
       return adminId;
     };
+    const member = typeof selectUser === "string" ? selectUser : undefined;
     if (namespace !== undefined) {
-      headers["Dropbox-API-Select-Admin"] = requireAdmin();
+      if (member === undefined) headers["Dropbox-API-Select-Admin"] = requireAdmin();
       headers["Dropbox-API-Path-Root"] = JSON.stringify({
         ".tag": "namespace_id",
         namespace_id: namespace,
       });
-    } else if (tagged && !endpoint.startsWith("team/")) {
+    } else if (tagged && member === undefined && !endpoint.startsWith("team/")) {
       // Sharing calls act in team-admin mode; team endpoints take the team token itself.
       headers["Dropbox-API-Select-Admin"] = requireAdmin();
     }
-    if (selectUser) headers["Dropbox-API-Select-User"] = requireAdmin();
+    if (selectUser) headers["Dropbox-API-Select-User"] = member ?? requireAdmin();
     if (content) headers["Dropbox-API-Arg"] = JSON.stringify(body);
     else headers["content-type"] = "application/json";
     let response: Response;
@@ -857,6 +869,218 @@ export class DropboxAdapter implements FileAdapter {
     });
   }
 
+  // ADR-0019: pool accounts are team members acting through Select-User.
+
+  /** rclone's `impersonate` and our member lookups both need members.read. */
+  async #requireMembersRead(signal?: AbortSignal): Promise<void> {
+    this.#membersRead ??= (async () => {
+      const evidence = await this.#session.evidence(signal);
+      const granted = (evidence.dropboxDestination as { grantedScopes?: unknown } | undefined)
+        ?.grantedScopes;
+      if (!Array.isArray(granted) || !granted.includes("members.read"))
+        throw new ProviderFault(
+          "preflight_failed",
+          "A Dropbox acting-account pool needs the destination write app to hold members.read.",
+          { check: "dropbox_pool_requires_members_read" },
+        );
+    })().catch((error: unknown) => {
+      this.#membersRead = undefined;
+      throw error;
+    });
+    return this.#membersRead;
+  }
+
+  async #teamMember(account: string, signal?: AbortSignal): Promise<TeamMember> {
+    await this.#requireMembersRead(signal);
+    const key = account.toLowerCase();
+    let pending = this.#teamMembers.get(key);
+    if (!pending) {
+      // https://www.dropbox.com/developers/documentation/http/teams#team-members-get_info
+      pending = this.#write<{
+        members_info?: {
+          ".tag": string;
+          profile?: { team_member_id?: string; status?: { ".tag": string } };
+        }[];
+      }>(
+        "team/members/get_info_v2",
+        { members: [{ ".tag": "email", email: account }] },
+        undefined,
+        signal,
+      ).then((result) => {
+        const item = result.members_info?.[0];
+        if (item?.[".tag"] !== "member_info") return { teamMemberId: null, status: "not_found" };
+        const status = item.profile?.status?.[".tag"] ?? "unknown";
+        const id = item.profile?.team_member_id;
+        // Select-User acts only as an active member; invited, suspended or removed cannot write.
+        return {
+          teamMemberId: status === "active" && id && /^dbmid:[A-Za-z0-9_-]+$/u.test(id) ? id : null,
+          status,
+        };
+      });
+      const settled = pending;
+      settled.catch(() => {
+        if (this.#teamMembers.get(key) === settled) this.#teamMembers.delete(key);
+      });
+      this.#teamMembers.set(key, settled);
+    }
+    return pending;
+  }
+
+  async #activeMember(account: string, signal?: AbortSignal): Promise<string> {
+    const member = await this.#teamMember(account, signal);
+    if (!member.teamMemberId)
+      throw new ProviderFault(
+        "member_identity_unresolved",
+        "The pool account is not an active member of the Dropbox team.",
+        { account, memberStatus: member.status },
+      );
+    return member.teamMemberId;
+  }
+
+  async addUploaderMember(driveId: string, account: string, signal?: AbortSignal): Promise<void> {
+    await this.#activeMember(account, signal);
+    const present = (await this.listDriveMembers(driveId)).find(
+      (member) => member.type === "user" && member.email === account.toLowerCase(),
+    );
+    if (present?.role === "editor" || present?.role === "owner") return;
+    if (present)
+      throw new ProviderFault(
+        "unsupported_member_role",
+        "The pool account already holds a weaker role on the team folder.",
+        { account, namespaceId: driveId, role: present.role },
+      );
+    // A team member's email selects that member; quiet sends no notification.
+    // https://www.dropbox.com/developers/documentation/http/documentation#sharing-add_folder_member
+    await this.#write(
+      "sharing/add_folder_member",
+      {
+        shared_folder_id: driveId,
+        members: [
+          { member: { ".tag": "email", email: account }, access_level: { ".tag": "editor" } },
+        ],
+        quiet: true,
+      },
+      undefined,
+      signal,
+    );
+  }
+
+  async removeUploaderMember(
+    driveId: string,
+    account: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const present = (await this.listDriveMembers(driveId)).find(
+      (member) =>
+        (member.type === "user" || member.type === "invitee") &&
+        member.email === account.toLowerCase(),
+    );
+    // Absent is done; any other role is not ours to remove and the membership check reports it.
+    if (present?.role !== "editor") return;
+    const failed = (reason: string | undefined) =>
+      new ProviderFault(
+        "provider_request_failed",
+        "Dropbox did not remove the uploader membership.",
+        { account, namespaceId: driveId, ...(reason ? { reason } : {}) },
+      );
+    let job: { ".tag": string; async_job_id?: string };
+    try {
+      // https://www.dropbox.com/developers/documentation/http/documentation#sharing-remove_folder_member
+      job = await this.#write(
+        "sharing/remove_folder_member",
+        {
+          shared_folder_id: driveId,
+          member: { ".tag": "email", email: account },
+          leave_a_copy: false,
+        },
+        undefined,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof DropboxApiFault && error.summary.startsWith("member_error/not_a_member"))
+        return;
+      throw error;
+    }
+    if (job[".tag"] === "complete") return;
+    if (job[".tag"] !== "async_job_id" || !job.async_job_id) throw failed(job[".tag"]);
+    // https://www.dropbox.com/developers/documentation/http/documentation#sharing-check_remove_member_job_status
+    for (const wait of [0, ...REMOVE_POLL_DELAYS_MS]) {
+      if (wait)
+        await delay(wait, undefined, signal ? { signal } : {}).catch((error: unknown) => {
+          signal?.throwIfAborted();
+          throw error;
+        });
+      signal?.throwIfAborted();
+      const status = await this.#write<{
+        ".tag": string;
+        failed?: { ".tag": string; member_error?: { ".tag": string } };
+      }>(
+        "sharing/check_remove_member_job_status",
+        { async_job_id: job.async_job_id },
+        undefined,
+        signal,
+      );
+      if (status[".tag"] === "complete") return;
+      if (status[".tag"] === "failed") {
+        if (
+          status.failed?.[".tag"] === "member_error" &&
+          status.failed.member_error?.[".tag"] === "not_a_member"
+        )
+          return;
+        throw failed(status.failed?.[".tag"]);
+      }
+      if (status[".tag"] !== "in_progress") throw failed(status[".tag"]);
+    }
+    throw failed("in_progress");
+  }
+
+  async proveAccountWrite(input: {
+    account: string;
+    destDriveId: string;
+    destFolderId: string;
+    signal?: AbortSignal;
+  }): Promise<{ writable: boolean; evidence: Record<string, unknown> }> {
+    const { account, destDriveId, destFolderId, signal } = input;
+    await this.#destinationNamespace(destDriveId, signal);
+    const evidence: Record<string, unknown> = { account, namespaceId: destDriveId, destFolderId };
+    const member = await this.#teamMember(account, signal);
+    if (!member.teamMemberId)
+      return { writable: false, evidence: { ...evidence, memberStatus: member.status } };
+    evidence.teamMemberId = member.teamMemberId;
+    try {
+      // Observed as the member: access_type is that member's effective access, groups included.
+      // https://www.dropbox.com/developers/documentation/http/documentation#sharing-get_folder_metadata
+      const metadata = await responseJson<{ access_type?: { ".tag": string } }>(
+        await this.#response(
+          "sharing/get_folder_metadata",
+          { shared_folder_id: destDriveId },
+          undefined,
+          signal,
+          false,
+          member.teamMemberId,
+          "destination",
+        ),
+      );
+      const accessType = metadata.access_type?.[".tag"] ?? null;
+      return {
+        writable: accessType === "owner" || accessType === "editor",
+        evidence: { ...evidence, accessType },
+      };
+    } catch (error) {
+      // access_error/not_a_member and its kin are 409s: the member cannot reach the folder.
+      if (error instanceof HttpProviderFault && [403, 404, 409].includes(error.status))
+        return {
+          writable: false,
+          evidence: {
+            ...evidence,
+            status: error.status,
+            ...(error.evidence.providerCode ? { providerCode: error.evidence.providerCode } : {}),
+          },
+        };
+      throw error;
+    }
+  }
+
   async readDestinationObject(
     input: Parameters<NonNullable<ProviderPort["readDestinationObject"]>>[0],
   ): Promise<DestinationEntry | null> {
@@ -975,6 +1199,14 @@ export class DropboxAdapter implements FileAdapter {
       !this.#session.dropboxDestinationAdminId
     )
       unsupported();
+    // ADR-0019 D1: a pool pass writes as that member alone. rclone resolves the email to a
+    // team-member ID with members/get_info (members.read) and sends Select-User.
+    // https://github.com/rclone/rclone/blob/v1.75.0/backend/dropbox/dropbox.go#L579-L600
+    if (input.account !== undefined) await this.#activeMember(input.account);
+    const actor =
+      input.account === undefined
+        ? `impersonate_admin=${quote(this.#session.dropboxDestinationAdminId)}`
+        : `impersonate=${quote(input.account)}`;
     const nativePath = this.#folderNamespace(destination.id).path;
     const nativeParts = nativePath.split("/").filter(Boolean);
     const standardParts = nativeParts.map(dropboxDestinationNameToStandard);
@@ -991,7 +1223,7 @@ export class DropboxAdapter implements FileAdapter {
     // per-file failures; async would hide which file failed.
     // https://github.com/rclone/rclone/blob/v1.75.0/backend/dropbox/dropbox.go#L566-L590
     return {
-      fs: `${this.#session.dropboxDestinationRemote},root_namespace=${quote(input.destDriveId)},impersonate_admin=${quote(this.#session.dropboxDestinationAdminId)},batch_mode=sync,encoding=${quote(DROPBOX_ENCODING)}:${standardParts.join("/")}`,
+      fs: `${this.#session.dropboxDestinationRemote},root_namespace=${quote(input.destDriveId)},${actor},batch_mode=sync,encoding=${quote(DROPBOX_ENCODING)}:${standardParts.join("/")}`,
       kind: "dropbox",
     };
   }

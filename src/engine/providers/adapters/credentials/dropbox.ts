@@ -59,6 +59,12 @@ export const DROPBOX_WRITE_SCOPES = [
   "sharing.write",
   "team_info.read",
 ] as const;
+/**
+ * Requested only for a job with an acting-account pool (ADR-0019): rclone's `impersonate`
+ * and Migmate's member lookups resolve pool emails to team-member IDs with members.read.
+ * https://github.com/rclone/rclone/blob/v1.75.0/backend/dropbox/dropbox.go#L152-L170
+ */
+export const DROPBOX_POOL_WRITE_SCOPES = [...DROPBOX_WRITE_SCOPES, "members.read"] as const;
 const ALLOWED_WRITE_SCOPES: Record<string, true> = {
   ...Object.fromEntries(DROPBOX_WRITE_SCOPES.map((scope) => [scope, true])),
   // Identity reads only; content reads and metadata writes stay refused.
@@ -175,6 +181,7 @@ export function loadDropboxCredential(
 export function beginDropboxAuthorization(
   appKey: string,
   role: DropboxRole = "source",
+  options: { pool?: boolean } = {},
 ): {
   url: string;
   exchange(code: string, signal: AbortSignal): Promise<Map<string, string>>;
@@ -188,7 +195,12 @@ export function beginDropboxAuthorization(
     token_access_type: "offline",
     code_challenge_method: "S256",
     code_challenge: createHash("sha256").update(verifier).digest("base64url"),
-    scope: (role === "source" ? DROPBOX_REQUESTED_READ_SCOPES : DROPBOX_WRITE_SCOPES).join(" "),
+    scope: (role === "source"
+      ? DROPBOX_REQUESTED_READ_SCOPES
+      : options.pool
+        ? DROPBOX_POOL_WRITE_SCOPES
+        : DROPBOX_WRITE_SCOPES
+    ).join(" "),
   }).toString();
   return {
     url: url.href,

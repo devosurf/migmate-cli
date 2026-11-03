@@ -8,7 +8,7 @@
 
 Google allows each Workspace user 750 GB of uploads per 24 hours and advises against more than about 3 sustained writes per second per account. On one account, a 120 TB, 17M-file project needs 160 days of upload allowance and about 66 days of writes. Google's large-migration guidance recommends spreading writes over many impersonated users. Today a file job has one acting account, bound into its plan. We give a job an approved pool of acting accounts and keep each pass on one of them.
 
-This records an accepted decision, not shipped behavior. Commands, runtime and operator documentation stay unchanged until it is implemented.
+Implemented in [#115](https://github.com/devosurf/migmate-cli/issues/115). One managed worker serves every account, each pass through its own per-account remote. Added accounts are approved with `approve --accounts`, and running jobs change pool and concurrency through the lease-free `settings` verb. Live behavior against real tenants is not yet observed.
 
 ## Decisions
 

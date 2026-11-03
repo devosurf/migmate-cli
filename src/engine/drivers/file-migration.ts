@@ -30,6 +30,7 @@ import type {
   GoLiveAcknowledgment,
   GoLiveCheck,
   MappingPass,
+  UploadQuotaStop,
 } from "../types.ts";
 import { checkedBeforeGrant, goLiveCheckSettled, unsettledGoLiveCheck } from "../go-live.ts";
 import { HttpProviderFault, retryableStatus } from "../providers/http.ts";
@@ -87,6 +88,11 @@ export interface FileMigrationConfig {
   mappings: FileMappingConfig[];
   impersonate?: boolean;
   subject?: string;
+  /**
+   * ADR-0019: the acting-account pool passes write as, one account per pass. The job's
+   * own identity (subject or admin) still creates containers, grants and verifies.
+   */
+  actingAccounts?: string[];
   /** Google → Google only: the read-only source account's delegation. */
   sourceImpersonate?: boolean;
   sourceSubject?: string;
@@ -127,7 +133,7 @@ export function managesCreatedAccess(
   );
 }
 
-const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
+export const COPY_DEFAULTS = { mappingsInFlight: 2, transfersPerMapping: 4 };
 
 type Phase = "plan" | "execute" | "verify";
 interface SourceView extends SourceEntry {
@@ -724,6 +730,14 @@ function expectedMembers(
       type: "user",
       role: fileProviderPair(ctx.config).destination.creatorRole,
     });
+  // ADR-0019 D4: uploader membership is expected only until close removes it.
+  for (const uploader of heldUploaders(ctx, drive))
+    if (
+      !expected.some(
+        (member) => member.type === "user" && member.email.toLowerCase() === uploader.email,
+      )
+    )
+      expected.push(uploader);
   return expected;
 }
 
@@ -791,6 +805,8 @@ export async function* goLive(
     drive.goLive = { startedAt: ctx.now().toISOString(), revision: ctx.revision, verificationAt };
     yield unit(drive, JSON.stringify(["go-live-fence", drive.driveId]));
   }
+  // ADR-0019 D4: uploader membership goes before the membership check, once fenced.
+  yield* removeUploaders(ctx);
   // Settled checks never substitute for missing or ambiguous grant checkpoints.
   yield* grantMembers({
     ...ctx,
@@ -1187,8 +1203,12 @@ async function* mirrorDeletions(
   mapping: FileMappingConfig,
   passNumber: number,
   reserved: number,
-): AsyncGenerator<CommitUnit, number> {
-  if (!ctx.config.options?.mirror) return 0;
+  prior?: Set<string>,
+): AsyncGenerator<
+  CommitUnit,
+  { authorized: number; counted: number; paths: Set<string> | undefined }
+> {
+  if (!ctx.config.options?.mirror) return { authorized: 0, counted: 0, paths: undefined };
   const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
   const resources: unknown[] = [];
   try {
@@ -1200,7 +1220,10 @@ async function* mirrorDeletions(
     resources.push(...Object.values(comparison));
     const deleted = indexListing(comparison.deleted);
     resources.push(deleted);
-    if (reserved + deleted.size > ctx.config.options.deleteLimit!)
+    // Paths an earlier attempt of this pass was authorized to delete, and these, count once.
+    const paths = new Set(prior);
+    for (const entry of deleted) paths.add(entry.path);
+    if (reserved + paths.size > ctx.config.options.deleteLimit!)
       throw new FilePlanRevisionRequiredError(
         "Mirror would delete more destination files than deleteLimit allows; review the source, then raise deleteLimit in a new plan.",
       );
@@ -1269,7 +1292,7 @@ async function* mirrorDeletions(
         rows,
         findings: [],
       };
-    return deleted.size;
+    return { authorized: deleted.size, counted: paths.size, paths };
   } finally {
     for (const resource of resources) disposeListing(resource);
   }
@@ -1341,37 +1364,368 @@ async function* collect(ctx: FileContext): AsyncIterable<CommitUnit> {
   }
 }
 
+/** ADR-0019 D1: one pass's account and copy concurrency, fixed when it is admitted. */
+interface PassSlot {
+  /** Null is the job's own identity: a job without a pool, or a provider without one. */
+  account: string | null;
+  transfers: number;
+  /** The account's daily-limit stop, once it has one in this run (D5). */
+  exhausted(): UploadQuotaStop | undefined;
+  /** Stops this mapping's transfers only, never its settling or listing. */
+  stop: AbortSignal;
+}
+
+/** What a mapping moved to another account keeps from its stopped attempt (D5). */
+interface Carry {
+  /** Destination-only paths the stopped attempt was authorized to delete. */
+  deletionPaths?: Set<string>;
+  /** The settle reservation before the stopped attempt, so it is not counted twice. */
+  reservedBefore?: number;
+}
+
+interface Admission {
+  mapping: FileMappingConfig;
+  carry?: Carry;
+}
+
+interface Running {
+  mapping: FileMappingConfig;
+  account: string | null;
+  abort: AbortController;
+  carry: Carry;
+  last?: MappingPass;
+}
+
+/** A mapping left queued because every account it could use is daily-limited (D5). */
+function quotaPending(
+  ctx: FileContext,
+  mapping: FileMappingConfig,
+  stop: UploadQuotaStop,
+): CommitUnit {
+  const previous = (ctx.resume.mappingPasses ?? [])
+    .filter((pass) => pass.revision === ctx.revision && pass.mappingId === mapping.id)
+    .at(-1);
+  const passNumber =
+    previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1;
+  const pass: MappingPass = {
+    ...pendingPass(
+      ctx.revision,
+      mapping.id,
+      passNumber,
+      ctx.config.options?.mirror ? "mirror" : "copy",
+    ),
+    uploadQuota: stop,
+  };
+  const unit: CommitUnit = {
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["mapping", mapping.id, passNumber, "quota", stop.hitAt]),
+    checkpoint: mapping.id,
+    rows: [],
+    findings: [],
+    mappingPass: pass,
+  };
+  observe(ctx, unit);
+  return unit;
+}
+
+/** A mapping no approved account can write: its pass fails without starting a transfer. */
+function poolRefusal(ctx: FileContext, mapping: FileMappingConfig, error: string): CommitUnit {
+  const previous = (ctx.resume.mappingPasses ?? [])
+    .filter((pass) => pass.revision === ctx.revision && pass.mappingId === mapping.id)
+    .at(-1);
+  const passNumber =
+    previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1;
+  const at = ctx.now().toISOString();
+  const pass: MappingPass = {
+    ...pendingPass(
+      ctx.revision,
+      mapping.id,
+      passNumber,
+      ctx.config.options?.mirror ? "mirror" : "copy",
+    ),
+    status: "failed",
+    startedAt: at,
+    endedAt: at,
+    error,
+  };
+  const unit: CommitUnit = {
+    rev: ctx.revision,
+    phase: "execute",
+    unitKey: JSON.stringify(["mapping", mapping.id, passNumber, "unassigned"]),
+    checkpoint: mapping.id,
+    rows: [],
+    findings: [],
+    mappingPass: pass,
+  };
+  observe(ctx, unit);
+  return unit;
+}
+
+function poolError(message: string, detail: Record<string, unknown>): Error {
+  return Object.assign(new Error(message), { code: "approval_required", detail });
+}
+
+/** Keep this run's view of passes and settle state current, so a moved mapping resumes. */
+function observe(ctx: FileContext, unit: CommitUnit): void {
+  const pass = unit.mappingPass;
+  if (pass) {
+    const passes = (ctx.resume.mappingPasses ??= []);
+    const index = passes.findIndex(
+      (item) =>
+        item.revision === pass.revision &&
+        item.mappingId === pass.mappingId &&
+        item.passNumber === pass.passNumber,
+    );
+    if (index >= 0) passes[index] = pass;
+    else passes.push(pass);
+  }
+  if (unit.watermark) ctx.resume.watermarks[unit.watermark.unitKey] = unit.watermark.value;
+}
+
+/** D4: uploader membership for one pool account on every unfenced container the job made. */
+async function* grantUploaders(ctx: FileContext, account: string): AsyncIterable<CommitUnit> {
+  const role = fileProviderPair(ctx.config).destination.uploaderRole!;
+  for (const drive of ctx.resume.createdDrives ?? []) {
+    if (!drive.driveId || drive.goLive) continue;
+    if (drive.uploaders?.some((uploader) => uploader.account === account && !uploader.removedAt))
+      continue;
+    // The creator already writes as owner; a manifest member is granted anyway, since its
+    // approved role may not write yet, and the provider refuses a weaker direct role.
+    if (drive.creatorEmail.toLowerCase() === account) continue;
+    if (!ctx.provider.addUploaderMember)
+      throw new ProviderFault(
+        "unsupported_route",
+        "The destination provider cannot grant uploader membership.",
+      );
+    await ctx.provider.addUploaderMember(drive.driveId, account, ctx.signal);
+    drive.uploaders = [
+      ...(drive.uploaders ?? []).filter((uploader) => uploader.account !== account),
+      { account, role, grantedAt: ctx.now().toISOString() },
+    ];
+    yield {
+      ...provisionUnit(ctx, drive.mappingId, `uploader:${account}`),
+      createdDrive: drive,
+    };
+  }
+}
+
+/**
+ * D4: remove every uploader membership before the membership check, so it compares only
+ * approved members. Runs at close, after transfers are fenced; a recovery resumes it.
+ */
+export async function* removeUploaders(ctx: FileContext): AsyncIterable<CommitUnit> {
+  for (const drive of ctx.resume.createdDrives ?? []) {
+    if (!drive.driveId || !drive.uploaders?.some((uploader) => !uploader.removedAt)) continue;
+    for (const uploader of drive.uploaders) {
+      if (uploader.removedAt) continue;
+      if (!ctx.provider.removeUploaderMember)
+        throw new ProviderFault(
+          "unsupported_route",
+          "The destination provider cannot remove uploader membership.",
+        );
+      await ctx.provider.removeUploaderMember(drive.driveId, uploader.account, ctx.signal);
+      uploader.removedAt = ctx.now().toISOString();
+      yield {
+        rev: ctx.revision,
+        phase: "execute",
+        unitKey: JSON.stringify(["uploader-removal", drive.driveId, uploader.account]),
+        checkpoint: drive.mappingId,
+        rows: [],
+        findings: [],
+        createdDrive: drive,
+      };
+    }
+  }
+}
+
+/** Uploader memberships still held, as the membership check must expect them. */
+function heldUploaders(ctx: FileContext, drive: CreatedDrive): DriveMembership[] {
+  return (drive.uploaders ?? [])
+    .filter((uploader) => !uploader.removedAt)
+    .map((uploader) => ({ email: uploader.account, type: "user", role: uploader.role }));
+}
+
 async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
   yield* provision(ctx);
-  const quotaStop = new AbortController();
+  const destination = fileProviderPair(ctx.config).destination;
+  // A team-wide stop (Dropbox's monthly upload calls) halts every pass; a Google
+  // daily-limit stop belongs to one account and moves its work instead (D5, D6).
+  const teamStop = new AbortController();
   ctx = {
     ...ctx,
-    signal: ctx.signal ? AbortSignal.any([ctx.signal, quotaStop.signal]) : quotaStop.signal,
+    signal: ctx.signal ? AbortSignal.any([ctx.signal, teamStop.signal]) : teamStop.signal,
   };
-  const mappings = ctx.config.mappings[Symbol.iterator]();
-  const active = new Set<AsyncGenerator<CommitUnit | null>>();
-  const limit = ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight;
-  let exhausted = false;
-  try {
-    while (active.size || !exhausted) {
-      while (!ctx.signal?.aborted && !exhausted && active.size < limit) {
-        const next = mappings.next();
-        if (next.done) exhausted = true;
-        else active.add(copyMapping(ctx, provisionedMapping(ctx, next.value)));
+  const queue: Admission[] = ctx.config.mappings.map((mapping) => ({ mapping }));
+  const active = new Map<AsyncGenerator<CommitUnit | null>, Running>();
+  const exhausted = new Map<string | null, UploadQuotaStop>();
+  const prepared = new Set<string>();
+  const writable = new Map<string, boolean>();
+  // Assignment is durable: a mapping keeps the account of its last pass while it can.
+  const assigned = new Map<string, string | null>();
+  let perAccount = false;
+  const uses = new Map<string | null, number>();
+  const unusable = new Map<string, string>();
+  // Mappings no account can take now, only because writable accounts are exhausted.
+  const parked: FileMappingConfig[] = [];
+  for (const pass of ctx.resume.mappingPasses ?? [])
+    if (pass.revision === ctx.revision) assigned.set(pass.mappingId, pass.account ?? null);
+  function* load(): Iterable<[string | null, number]> {
+    const counts = new Map<string | null, number>();
+    for (const running of active.values())
+      counts.set(running.account, (counts.get(running.account) ?? 0) + 1);
+    yield* counts;
+  }
+  async function* assign(
+    mapping: FileMappingConfig,
+    eligible: (string | null)[],
+  ): AsyncGenerator<CommitUnit, string | null | undefined> {
+    const counts = new Map(load());
+    const sticky = assigned.get(mapping.id);
+    // Prefer the mapping's last account, then the least busy, then the least used.
+    const candidates = [...eligible].sort(
+      (a, b) =>
+        Number(b === sticky) - Number(a === sticky) ||
+        (counts.get(a) ?? 0) - (counts.get(b) ?? 0) ||
+        (uses.get(a) ?? 0) - (uses.get(b) ?? 0) ||
+        eligible.indexOf(a) - eligible.indexOf(b),
+    );
+    for (const account of candidates) {
+      if (account === null) return null;
+      if (unusable.has(account)) continue;
+      if (!prepared.has(account)) {
+        try {
+          yield* grantUploaders(ctx, account);
+        } catch (error) {
+          // One account the provider refuses (not an active member, a weaker direct role)
+          // leaves the others to write; ProviderFault is its evidence, never a secret.
+          if (!(error instanceof ProviderFault)) throw error;
+          unusable.set(account, error.code);
+          continue;
+        }
+        prepared.add(account);
       }
-      if (!active.size) break;
+      // Existing containers need the operator's pre-grant, proven as the account (D4).
+      if (!mapping.createDrive) {
+        const key = JSON.stringify([account, mapping.destDriveId]);
+        if (!writable.has(key)) {
+          const proof = ctx.provider.proveAccountWrite
+            ? await ctx.provider.proveAccountWrite({
+                account,
+                destDriveId: mapping.destDriveId!,
+                destFolderId: mapping.destFolderId!,
+                ...abortable(ctx),
+              })
+            : { writable: false };
+          writable.set(key, proof.writable);
+        }
+        if (!writable.get(key)) continue;
+      }
+      return account;
+    }
+    return undefined;
+  }
+  try {
+    for (;;) {
+      const live = ctx.live?.() ?? {
+        mappingsInFlight: ctx.config.options?.mappingsInFlight ?? COPY_DEFAULTS.mappingsInFlight,
+        transfersPerMapping:
+          ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
+        accounts: null,
+      };
+      // Without a pool every pass writes as the job's own identity, as before pools.
+      const pooled = Boolean(live.accounts && destination.uploaderRole);
+      const pool: (string | null)[] = pooled ? live.accounts! : [null];
+      // Without a pool the one identity's stop halts the run, as it did before pools.
+      perAccount = pooled && destination.quotaPerAccount === true;
+      while (!ctx.signal?.aborted && queue.length && active.size < live.mappingsInFlight) {
+        const eligible = pool.filter((account) => !exhausted.has(account));
+        if (!eligible.length) {
+          if (!pool.length && !active.size && !exhausted.size)
+            throw poolError(
+              "No approved acting account remains in the pool. Approve the added accounts or restore an approved one.",
+              { mappingIds: queue.map((item) => item.mapping.id) },
+            );
+          break;
+        }
+        const next = queue.shift()!;
+        const mapping = provisionedMapping(ctx, next.mapping);
+        const account = yield* assign(mapping, eligible);
+        if (account === undefined) {
+          if (exhausted.size) parked.push(next.mapping);
+          else
+            yield poolRefusal(
+              ctx,
+              mapping,
+              `No approved acting account can write to this destination; pre-grant it, then run execute again.${
+                unusable.size
+                  ? ` Refused: ${[...unusable].map(([a, code]) => `${a} (${code})`).join(", ")}.`
+                  : ""
+              }`,
+            );
+          continue;
+        }
+        assigned.set(mapping.id, account);
+        uses.set(account, (uses.get(account) ?? 0) + 1);
+        const abort = new AbortController();
+        const carry = next.carry ?? {};
+        const slot: PassSlot = {
+          account,
+          transfers: live.transfersPerMapping,
+          exhausted: () => exhausted.get(account),
+          stop: abort.signal,
+        };
+        const passCtx: FileContext = {
+          ...ctx,
+          ...(account !== null ? { actingGoogleAccount: account } : {}),
+        };
+        active.set(copyMapping(passCtx, mapping, slot, carry, next.carry !== undefined), {
+          mapping,
+          account,
+          abort,
+          carry,
+        });
+      }
+      if (!active.size) {
+        // D5: work left only because its accounts are exhausted blocks with their stops.
+        const left = [...queue.map((item) => item.mapping), ...parked];
+        if (left.length && !ctx.signal?.aborted && exhausted.size) {
+          const stop = [...exhausted.values()].sort((a, b) =>
+            a.earliestResumeAt < b.earliestResumeAt ? -1 : 1,
+          )[0]!;
+          for (const mapping of left) yield quotaPending(ctx, mapping, stop);
+        }
+        break;
+      }
       let progressed = false;
-      for (const iterator of active) {
+      for (const [iterator, running] of active) {
         const next = await iterator.next();
         if (next.done) {
           active.delete(iterator);
           progressed = true;
+          const last = running.last;
+          // D5: a stopped account's mapping moves on only once its writer is proven
+          // stopped; ordinary throttling and other failures never move work.
+          if (perAccount && last?.uploadQuota && !ctx.signal?.aborted && last.stopConfirmed)
+            queue.unshift({ mapping: running.mapping, carry: running.carry });
           continue;
         }
         // A suppressed stats observation still yields its scheduler turn.
         if (next.value === null) continue;
+        observe(ctx, next.value);
         const pass = next.value.mappingPass;
-        if (pass?.uploadQuota && !quotaStop.signal.aborted) quotaStop.abort();
+        if (pass) running.last = pass;
+        // A quota a running pass reports (Dropbox's monthly limit) stops it too.
+        if (pass?.uploadQuota) {
+          if (!perAccount) {
+            if (!teamStop.signal.aborted) teamStop.abort();
+          } else if (!exhausted.has(running.account)) {
+            // The account gets no more work in this run; its passes stop now.
+            exhausted.set(running.account, pass.uploadQuota);
+            for (const other of active.values())
+              if (other.account === running.account) other.abort.abort();
+          }
+        }
         if (!pass || pass.status !== "running" || !pass.lastStats) progressed = true;
         yield next.value;
       }
@@ -1385,7 +1739,7 @@ async function* execute(ctx: FileContext): AsyncIterable<CommitUnit> {
   } finally {
     // An engine/store failure must still stop every pass, even if one stop fails.
     const stopped = await Promise.allSettled(
-      [...active].map((iterator) => iterator.return(undefined)),
+      [...active.keys()].map((iterator) => iterator.return(undefined)),
     );
     const failed = stopped.find((result) => result.status === "rejected");
     if (failed?.status === "rejected") throw failed.reason;
@@ -1583,6 +1937,9 @@ async function* checkDestinationConstraints(
 async function* copyMapping(
   ctx: FileContext,
   mapping: FileMappingConfig,
+  slot?: PassSlot,
+  carry: Carry = {},
+  moved = false,
 ): AsyncGenerator<CommitUnit | null> {
   const previous = (ctx.resume.mappingPasses ?? [])
     .filter((pass) => pass.mappingId === mapping.id)
@@ -1593,13 +1950,16 @@ async function* copyMapping(
   if (state?.outcome === "settled" || (!final && previous?.status === "completed")) return;
   let copyNeeded = !state || state.copyPending;
   // An ambiguous/crashed attempt consumes a catch-up attempt rather than resetting the bound.
+  // A mapping moved off a stopped account (ADR-0019 D5) continues the same attempt.
   if (state?.copyPending) {
-    if (state.passes >= state.maxPasses) {
-      state.outcome = "exhausted";
-      yield settleUnit(ctx, state);
-      throw cutoverIncomplete();
+    if (!moved) {
+      if (state.passes >= state.maxPasses) {
+        state.outcome = "exhausted";
+        yield settleUnit(ctx, state);
+        throw cutoverIncomplete();
+      }
+      state.passes++;
     }
-    state.passes++;
     state.copyPassNumber++;
   }
   if (final && !state)
@@ -1623,19 +1983,27 @@ async function* copyMapping(
         (previous?.status === "pending" ? previous.passNumber : (previous?.passNumber ?? 0) + 1);
       // Native identities are checked before each copy and after every consistency wait.
       if (!(yield* checkDestinationConstraints(ctx, mapping, passNumber))) return;
-      const authorized = yield* mirrorDeletions(
+      // Deletion limits survive a move: the stopped attempt's authorized paths still count.
+      const reserved = state ? (carry.reservedBefore ?? state.deletionsReserved) : 0;
+      const deletions = yield* mirrorDeletions(
         ctx,
         mapping,
         passNumber,
-        state?.deletionsReserved ?? 0,
+        reserved,
+        carry.deletionPaths,
       );
+      if (deletions.paths) carry.deletionPaths = deletions.paths;
+      carry.reservedBefore = reserved;
+      const authorized = deletions.authorized;
       if (state) {
         state.copyPending = true;
-        state.deletionsReserved += authorized;
+        state.deletionsReserved = reserved + deletions.counted;
         yield settleUnit(ctx, state);
       }
       let completed = false;
-      for await (const unit of copyPass(ctx, mapping, passNumber, authorized)) {
+      // An exhausted account stops this mapping's transfer, not the run's other work (D5).
+      const transfer = slot ? { ...ctx, signal: AbortSignal.any([ctx.signal!, slot.stop]) } : ctx;
+      for await (const unit of copyPass(transfer, mapping, passNumber, authorized, slot)) {
         completed = unit?.mappingPass?.status === "completed";
         if (completed && state && unit) {
           state.copyPending = false;
@@ -1644,6 +2012,9 @@ async function* copyMapping(
         yield unit;
       }
       if (!completed || !state) return;
+      // The completed attempt consumed its authorization; catch-up passes reserve anew.
+      delete carry.deletionPaths;
+      delete carry.reservedBefore;
     }
     if (!state) return;
     if (ctx.waitForConsistency)
@@ -1710,6 +2081,7 @@ async function* copyPass(
   mapping: FileMappingConfig,
   passNumber: number,
   authorizedDeletions: number,
+  slot?: PassSlot,
 ): AsyncGenerator<CommitUnit | null> {
   let pass = pendingPass(
     ctx.revision,
@@ -1717,6 +2089,7 @@ async function* copyPass(
     passNumber,
     ctx.config.options?.mirror ? "mirror" : "copy",
   );
+  if (slot?.account) pass.account = slot.account;
   pass = { ...pass, startedAt: ctx.now().toISOString() };
   let sequence = 0;
   let publishedAt: number | undefined;
@@ -1733,9 +2106,11 @@ async function* copyPass(
   let reference: CopyPassReference | undefined;
   let upload: UploadAttempt | undefined;
   let lastObservation: { bytes: number; at: Date } | undefined;
-  async function stopAndReconcile(): Promise<void> {
+  /** True when the transfer is proven ended; a pass that never started is. */
+  async function stopAndReconcile(): Promise<boolean> {
     const stopping = reference;
-    if (!stopping) return;
+    if (!stopping) return true;
+    let ended = false;
     reference = undefined;
     let stopped = false;
     let stopError: unknown;
@@ -1750,6 +2125,7 @@ async function* copyPass(
       let finalStats;
       try {
         terminal = (await ctx.provider.copyPassStatus(stopping)).state !== "running";
+        ended = terminal;
       } catch {
         // A stop acknowledgment is not proof that the transfer function ended.
       }
@@ -1786,6 +2162,14 @@ async function* copyPass(
         );
     }
     if (!stopped) throw stopError;
+    if (!upload) {
+      try {
+        ended = (await ctx.provider.copyPassStatus(stopping)).state !== "running";
+      } catch {
+        // A stop acknowledgment is not proof that the transfer function ended.
+      }
+    }
+    return ended;
   }
   try {
     ctx.signal?.throwIfAborted();
@@ -1806,7 +2190,11 @@ async function* copyPass(
           "Mirror requires proven job-created drive provenance; this mapping cannot delete.",
         );
     }
-    const resolved = await ctx.provider.resolveFilePass(destinationMapping(mapping));
+    // D1: the pass writes through a destination remote isolated to its own account.
+    const resolved = await ctx.provider.resolveFilePass({
+      ...destinationMapping(mapping),
+      ...(slot?.account ? { account: slot.account } : {}),
+    });
     const { source: sourceAdapter, destination: destinationAdapter } = fileProviderPair(ctx.config);
     if (sourceAdapter.sourceEntryFindings) {
       let blocked = false;
@@ -1906,7 +2294,10 @@ async function* copyPass(
       ...(ctx.config.options?.mirror
         ? { mode: "mirror" as const, deleteLimit: authorizedDeletions }
         : { mode: "copy" as const }),
-      transfers: ctx.config.options?.transfersPerMapping ?? COPY_DEFAULTS.transfersPerMapping,
+      transfers:
+        slot?.transfers ??
+        ctx.config.options?.transfersPerMapping ??
+        COPY_DEFAULTS.transfersPerMapping,
     });
     reference = { socketPath: resolved.socketPath, pass: handle };
     upload?.observe(
@@ -1962,6 +2353,8 @@ async function* copyPass(
           ? { ...lastStats, errors: null, rcloneErrors: lastStats.errors }
           : lastStats,
         ...(uploadQuota ? { uploadQuota } : {}),
+        // rclone reported the job finished: its transfer has ended (D5).
+        ...(uploadQuota && slot?.account ? { stopConfirmed: true } : {}),
         endedAt: status.state === "running" ? null : ctx.now().toISOString(),
       };
       const observedAt = ctx.now().getTime();
@@ -1982,10 +2375,14 @@ async function* copyPass(
   } catch (error) {
     const interrupted =
       ctx.signal?.aborted || (error instanceof Error && error.name === "AbortError");
-    await stopAndReconcile();
+    const ended = await stopAndReconcile();
     if (error instanceof UploadLedgerError) throw error;
     const message = interrupted ? null : error instanceof Error ? error.message : String(error);
-    const uploadQuota = fileProviderPair(ctx.config).destination.quotaStop?.(ctx, message);
+    // D5: a pass stopped because its account hit the daily limit carries that stop, and
+    // whether its transfer is proven ended, so its mapping can move to another account.
+    const accountStop = interrupted ? slot?.exhausted() : undefined;
+    const uploadQuota =
+      accountStop ?? fileProviderPair(ctx.config).destination.quotaStop?.(ctx, message);
     pass = {
       ...pass,
       status: interrupted ? "interrupted" : "failed",
@@ -2002,6 +2399,7 @@ async function* copyPass(
               : null,
           }
         : {}),
+      ...(uploadQuota && slot?.account ? { stopConfirmed: ended } : {}),
       endedAt: ctx.now().toISOString(),
     };
     yield unit();
@@ -2644,6 +3042,40 @@ async function* preflight(ctx: FileContext): AsyncIterable<CheckResult> {
   ] as const)
     if (adapter.preflight && !(yield* adapter.preflight(ctx, destination))) return;
   const provider = ctx.provider;
+  // ADR-0019 D4: every pool account must already write to each existing destination.
+  const proven = new Set<string>();
+  for (const account of ctx.config.actingAccounts ?? [])
+    for (const mapping of ctx.config.mappings) {
+      if (mapping.createDrive || !mapping.destDriveId || !mapping.destFolderId) continue;
+      const key = JSON.stringify([account, mapping.destDriveId]);
+      if (proven.has(key)) continue;
+      proven.add(key);
+      ctx.signal?.throwIfAborted();
+      const proof = provider.proveAccountWrite
+        ? await provider.proveAccountWrite({
+            account,
+            destDriveId: mapping.destDriveId,
+            destFolderId: mapping.destFolderId,
+            ...abortable(ctx),
+          })
+        : { writable: false, evidence: { reason: "provider_cannot_prove" } };
+      yield {
+        id: `actingAccount:${account}:${mapping.destDriveId}`,
+        title: "Pool account can write to the existing destination",
+        status: proof.writable ? "pass" : "fail",
+        ...(proof.writable ? {} : { code: "preflight_failed" }),
+        evidence: {
+          account,
+          destDriveId: mapping.destDriveId,
+          ...proof.evidence,
+          ...(proof.writable
+            ? {}
+            : {
+                fix: "Grant this account write access to the existing destination beforehand; Migmate grants uploader membership only on containers it creates.",
+              }),
+        },
+      };
+    }
   for (const mapping of ctx.config.mappings) {
     ctx.signal?.throwIfAborted();
     const source = await provider.resolveSourceRoot({ ...mapping, ...abortable(ctx) });
@@ -2823,6 +3255,31 @@ async function* reportSections(ctx: FileContext): AsyncIterable<ReportSection> {
         ? `Acting account: ${ctx.actingGoogleAccount} (service account; impersonation off).`
         : "The service-account address was not recorded in this plan (impersonation off).",
   };
+  if (ctx.config.actingAccounts?.length) {
+    // ADR-0019 D1/D4: what approving this plan authorizes, and what close takes back.
+    const role = pair.destination.uploaderRole;
+    yield {
+      title: "Acting-account pool",
+      format: "text",
+      body: [
+        `Passes write as one of ${ctx.config.actingAccounts.length} approved acting accounts each: ${ctx.config.actingAccounts.join(", ")}.`,
+        `Uploader membership: each pool account is granted ${role} on containers this job creates, and it is removed at close before the membership check. It is not an end-user grant.`,
+        "Existing destinations need each pool account's write access granted beforehand; preflight proves it.",
+        pair.destination.quotaPerAccount
+          ? "An account that hits Google's daily upload limit gets no more work in that execute; its unfinished mappings move to another pool account once its transfer is proven stopped. Ordinary throttling never moves work."
+          : "Passes are spread across the pool; nothing moves work between accounts.",
+      ].join("\n"),
+    };
+    const uploaders = (ctx.resume.createdDrives ?? []).flatMap((drive) =>
+      (drive.uploaders ?? []).map((uploader) => ({
+        driveId: drive.driveId,
+        name: drive.name,
+        ...uploader,
+      })),
+    );
+    if (uploaders.length)
+      yield { title: "Uploader membership", format: "text", body: JSON.stringify(uploaders) };
+  }
   if (sameProviderPair(pair) && pair.source.id === "google_shared_drive")
     yield {
       title: "Read-only Google source account",

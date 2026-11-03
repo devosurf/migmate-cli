@@ -122,6 +122,16 @@ older source job before onboarding its destination app.
 Created team folders need a team without a team space; manifest members are Dropbox
 groups by `groupId` (`g:…`).
 
+A job with an acting-account pool also needs `members.read` on the write app: each
+pass writes as one pool member through rclone's `impersonate`, which resolves the
+member's email to a team-member ID with that scope. Enable it in the app's
+Permissions tab; `creds init` asks for it when the config sets `actingAccounts`, so
+re-run it after adding a pool to an onboarded job. A pool without it refuses
+`preflight_failed` with check `dropbox_pool_requires_members_read`. Each pool account
+must be an active team member: Migmate adds it as an editor of the team folders it
+creates and removes it at close; for an existing team folder, give it editor access
+beforehand.
+
 ### Same-provider credentials
 
 Same-provider routes still use a read-only source credential and a separate write

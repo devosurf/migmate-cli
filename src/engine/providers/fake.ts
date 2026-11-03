@@ -142,6 +142,8 @@ export interface FakeCopyPassScenario {
   /** An error rclone keeps retrying: reported in stats while the pass stays running. */
   retryingError?: string;
   afterFiles?: number;
+  /** ADR-0019: match only a pass writing as this pool account. */
+  account?: string;
 }
 
 export interface FakeDestinationContainerFixture {
@@ -190,6 +192,8 @@ export interface FakeFileMigrationFixture {
   sharepointMembershipAvailable?: boolean;
   /** A Dropbox team-space team, where team-folder creation is disallowed. */
   dropboxTeamSpace?: boolean;
+  /** ADR-0019 D4: pool accounts without write access to existing destinations. */
+  unwritableAccounts?: string[];
   /** Observed app/system grants installed by breaking inheritance, if any. */
   implicitLibraryMembers?: DriveMembership[];
   unreadableSourceDrives?: string[];
@@ -375,6 +379,7 @@ function destinationFault(code: string, status: number): Error {
 export class FakeFileMigrationPort implements ProviderPort {
   readonly sourceDriveId: string;
   readonly sourceRootId: string;
+  private readonly unwritableAccounts: string[];
   readonly destinationDriveId: string;
   readonly destinationRootId: string;
   readonly archive?: FakeArchivePort;
@@ -444,6 +449,7 @@ export class FakeFileMigrationPort implements ProviderPort {
     this.copyPassScenarios = fixture.copyPasses?.map((scenario) => ({ ...scenario })) ?? [];
     this.sourceDriveId = fixture.sourceDriveId;
     this.sourceRootId = fixture.sourceRootId;
+    this.unwritableAccounts = fixture.unwritableAccounts ?? [];
     this.destinationDriveId = fixture.destinationDriveId;
     this.destinationRootId = fixture.destinationRootId;
     this.retryAfterRules = fixture.retryAfter
@@ -708,6 +714,36 @@ export class FakeFileMigrationPort implements ProviderPort {
   async listDriveMembers(driveId: string): Promise<DriveMembership[]> {
     this.requireMembershipCredentials();
     return structuredClone(this.driveMembers.get(driveId) ?? []);
+  }
+  /** ADR-0019 D1: the pool account of each started pass, in order; "" is the job's own. */
+  readonly passAccounts: string[] = [];
+  /** The transfers each started pass asked for, in order. */
+  readonly passTransfers: number[] = [];
+  private readonly accountOf = new WeakMap<object, string>();
+  async addUploaderMember(driveId: string, account: string): Promise<void> {
+    this.callLog.push(`addUploaderMember:${driveId}:${account}`);
+    this.throwEffect("addUploaderMember", account, "before");
+    const members = this.driveMembers.get(driveId);
+    if (!members) throw destinationFault("destination_missing", 404);
+    const role = this.destinationProvider === "dropbox" ? "editor" : "fileOrganizer";
+    if (!members.some((m) => m.type === "user" && m.email === account))
+      members.push({ email: account, type: "user", role });
+    this.throwEffect("addUploaderMember", account, "after");
+  }
+  async removeUploaderMember(driveId: string, account: string): Promise<void> {
+    this.callLog.push(`removeUploaderMember:${driveId}:${account}`);
+    this.throwEffect("removeUploaderMember", account, "before");
+    const members = this.driveMembers.get(driveId) ?? [];
+    const index = members.findIndex(
+      (m) =>
+        m.type === "user" && m.email === account && ["fileOrganizer", "editor"].includes(m.role),
+    );
+    if (index >= 0) members.splice(index, 1);
+  }
+  async proveAccountWrite(input: Parameters<NonNullable<ProviderPort["proveAccountWrite"]>>[0]) {
+    this.callLog.push(`proveAccountWrite:${input.destDriveId}:${input.account}`);
+    const writable = !this.unwritableAccounts.includes(input.account);
+    return { writable, evidence: { account: input.account, fake: true } };
   }
   async addDriveMember(driveId: string, member: DriveMember): Promise<void> {
     if (this.destinationProvider === "sharepoint") {
@@ -1358,9 +1394,13 @@ export class FakeFileMigrationPort implements ProviderPort {
       done: Promise.resolve(),
     };
     this.passes.set(jobid, pass);
+    const account = this.accountOf.get(input.destination) ?? "";
+    this.passAccounts.push(account);
+    this.passTransfers.push(input.transfers);
     const scenarioIndex = this.copyPassScenarios.findIndex(
       (scenario) =>
-        scenario.sourceRootId === undefined || scenario.sourceRootId === input.source.fs,
+        (scenario.sourceRootId === undefined || scenario.sourceRootId === input.source.fs) &&
+        (scenario.account === undefined || scenario.account === account),
     );
     const scenario =
       scenarioIndex < 0 ? undefined : this.copyPassScenarios.splice(scenarioIndex, 1)[0];
@@ -1530,6 +1570,13 @@ export class FakeFileMigrationPort implements ProviderPort {
         ? ("sharepoint" as const)
         : ("google_drive" as const);
     const scope = input.filesOnly ? { filesOnly: true as const } : {};
+    const destination = {
+      fs: input.destFolderId,
+      ignoreSizeAndChecksum: destinationKind === "sharepoint",
+      kind: destinationKind,
+      ...scope,
+    };
+    if (input.account) this.accountOf.set(destination, input.account);
     return {
       socketPath: this.workerState.socketPath,
       source: {
@@ -1542,12 +1589,7 @@ export class FakeFileMigrationPort implements ProviderPort {
               ? ("dropbox" as const)
               : ("sharepoint" as const),
       },
-      destination: {
-        fs: input.destFolderId,
-        ignoreSizeAndChecksum: destinationKind === "sharepoint",
-        kind: destinationKind,
-        ...scope,
-      },
+      destination,
     };
   }
 
