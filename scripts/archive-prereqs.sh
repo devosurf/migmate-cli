@@ -231,9 +231,11 @@ banner "Migmate Teams-archive prerequisites"
 stage "Prerequisite directory and tenant"
 say "These prerequisites live beside the file route's, in one operator-owned directory outside the repository."
 say "Nothing secret is ever written into the repo, into a job folder, or into this script's output."
-DEFAULT_PREREQ_DIR="$HOME/.config/migmate"
-say "The file route's wizard usually writes to $DEFAULT_PREREQ_DIR."
-ask MIGMATE_PREREQ_DIR "Operator-owned absolute directory for these prerequisite files:"
+# Migmate's credential directory (`migmate creds dir`): short reference names resolve here.
+DEFAULT_PREREQ_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+[[ "$DEFAULT_PREREQ_DIR" == /* ]] || DEFAULT_PREREQ_DIR="$HOME/.config"
+DEFAULT_PREREQ_DIR="$DEFAULT_PREREQ_DIR/migmate/credentials"
+ask MIGMATE_PREREQ_DIR "Directory for these prerequisite files [Enter uses Migmate's credential directory, $DEFAULT_PREREQ_DIR]:"
 if [[ -z "$MIGMATE_PREREQ_DIR" ]]; then MIGMATE_PREREQ_DIR="$DEFAULT_PREREQ_DIR"; fi
 case "$MIGMATE_PREREQ_DIR" in
   /*) ;;
@@ -244,6 +246,7 @@ case "$MIGMATE_PREREQ_DIR" in
 esac
 PREREQ_DIR="$MIGMATE_PREREQ_DIR"
 mkdir -p "$PREREQ_DIR/entra"
+chmod 700 "$PREREQ_DIR"
 # Move the env file into the prerequisite directory before anything is stored.
 OLD_ENV_FILE="$ENV_FILE"
 ENV_FILE="$PREREQ_DIR/.archive-prereqs.env"

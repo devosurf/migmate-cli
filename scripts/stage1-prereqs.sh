@@ -220,7 +220,12 @@ if ! confirm "Create the Entra app registration and client secret now?"; then
   warn "stopped before app registration."
   exit 1
 fi
-ask MIGMATE_PREREQ_DIR "Choose an operator-owned absolute directory outside the repo for these prerequisite files:"
+# Migmate's credential directory (`migmate creds dir`): short reference names resolve here.
+DEFAULT_PREREQ_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+[[ "$DEFAULT_PREREQ_DIR" == /* ]] || DEFAULT_PREREQ_DIR="$HOME/.config"
+DEFAULT_PREREQ_DIR="$DEFAULT_PREREQ_DIR/migmate/credentials"
+ask MIGMATE_PREREQ_DIR "Directory for these prerequisite files [Enter uses Migmate's credential directory, $DEFAULT_PREREQ_DIR]:"
+if [[ -z "$MIGMATE_PREREQ_DIR" ]]; then MIGMATE_PREREQ_DIR="$DEFAULT_PREREQ_DIR"; fi
 case "$MIGMATE_PREREQ_DIR" in
   /*) ;;
   *) warn "Use an absolute path outside the repo."; exit 1 ;;
@@ -234,6 +239,7 @@ esac
 PREREQ_DIR="$MIGMATE_PREREQ_DIR"
 ENV_FILE="$PREREQ_DIR/.stage1-prereqs.env"
 mkdir -p "$PREREQ_DIR/entra"
+chmod 700 "$PREREQ_DIR"
 write_env MIGMATE_PREREQ_DIR "$PREREQ_DIR"
 write_env MIGMATE_PREREQ_ENV_FILE "$ENV_FILE"
 say "Create the app as Migmate in Entra ID > App registrations > New registration."
