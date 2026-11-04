@@ -7,6 +7,7 @@ export type OutputMode = "text" | "json" | "jsonl";
 export type CommandName =
   | Verb
   | "creds init"
+  | "creds dir"
   | "manifest load"
   | "discover"
   | "accept"
@@ -108,7 +109,8 @@ export function outputMode(argv: string[]): OutputMode {
 
 export function commandLabel(argv: string[]): string {
   const first = argv[0];
-  return (first === "creds" && argv[1] === "init") || (first === "manifest" && argv[1] === "load")
+  return (first === "creds" && (argv[1] === "init" || argv[1] === "dir")) ||
+    (first === "manifest" && argv[1] === "load")
     ? `${first} ${argv[1]}`
     : first && !first.startsWith("-")
       ? first
@@ -201,6 +203,7 @@ export function parseInvocation(argv: string[]): Invocation {
     !VERBS.includes(command as Verb) &&
     ![
       "creds init",
+      "creds dir",
       "manifest load",
       "discover",
       "accept",
@@ -213,7 +216,7 @@ export function parseInvocation(argv: string[]): Invocation {
     !((help || version) && words.length === 0)
   ) {
     throw new UsageFailure(
-      "Supply a lifecycle command, creds init, manifest load, discover, accept, acknowledge, reclaim, settings, or web.",
+      "Supply a lifecycle command, creds init, creds dir, manifest load, discover, accept, acknowledge, reclaim, settings, or web.",
     );
   }
   if (version && words.length > 0) throw new UsageFailure("--version takes no command.");
@@ -274,8 +277,11 @@ export function parseInvocation(argv: string[]): Invocation {
   const invocation: Invocation = {
     command: (version ? "version" : command || "status") as CommandName,
     output: output as OutputMode,
-    // Help and version never open a store and must remain available with a broken workspace.
-    home: resolve(get("--home") ?? (help || version ? "." : defaultHome())),
+    // Help, version and creds dir never open a store and must remain available with a
+    // broken workspace.
+    home: resolve(
+      get("--home") ?? (help || version || command === "creds dir" ? "." : defaultHome()),
+    ),
     codes,
     mappingIds,
     ...(get("--note") === undefined ? {} : { note: get("--note")! }),
@@ -307,6 +313,14 @@ export function parseInvocation(argv: string[]): Invocation {
   const from = integer("--from", 0);
   if (from !== undefined) invocation.from = from;
   if (help || version) return invocation;
+  if (command === "creds dir") {
+    if (
+      switches.size ||
+      [...values.keys()].some((flag) => !["--output", "--home", "--schema-version"].includes(flag))
+    )
+      throw new UsageFailure("creds dir takes no job or other options.");
+    return invocation;
+  }
   if (command === "init") {
     if (!type) throw new UsageFailure("init requires an explicit --type.");
     if (jobId) throw new UsageFailure("init generates its job id.");

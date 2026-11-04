@@ -50,6 +50,11 @@ import {
 } from "./detached.ts";
 export { initializeDetachedChild } from "./detached.ts";
 import { onboardDropboxCredentials } from "./credentials.ts";
+import {
+  credentialDirectory,
+  ensureCredentialDirectory,
+  expandCredentialNames,
+} from "./credential-directory.ts";
 import { ProviderFault } from "../engine/providers/fault.ts";
 
 export type { Io, IoInput, IoStream } from "./io.ts";
@@ -58,6 +63,7 @@ const HELP = `Migmate — one lifecycle, two job types
 
 migmate init --type file_migration|teams_archive [--config job.toml|job.json]
 migmate creds init --job ID --config job.toml|job.json
+migmate creds dir                           # print (and create) the credential directory
 migmate manifest load --job ID --file manifest.json|manifest.csv
 migmate discover --job ID [--file draft.json] [--capacity-target ITEMS|BOUNDARY_ID=ITEMS ...]
 migmate doctor|plan|execute|status|verify|report|close --job ID
@@ -92,6 +98,9 @@ Later commands find it automatically, including from subfolders and new sessions
 Without a workspace, defaults remain macOS ~/Library/Application Support/Migmate;
 Linux \${XDG_STATE_HOME:-~/.local/state}/migmate. Any other platform is refused.
 Config input is TOML or JSON containing typed file credential references, never secrets.
+A reference path may be a short name such as "rclone.conf": it names a file in the
+credential directory, \${XDG_CONFIG_HOME:-~/.config}/migmate/credentials (owner-only,
+created by Migmate; MIGMATE_CREDENTIALS_DIR overrides it). Absolute paths still work.
 Only the engine writes job.toml. Dropbox creds init uses browser/paste-code PKCE
 and stores its offline token and scope proof only in the referenced credential file.
 Init without config creates an unconfigured job: onboard before doctor/plan.
@@ -741,7 +750,7 @@ async function executeCommand(
   if (invocation.config !== undefined) {
     const input = await readConfig(invocation.config);
     if (!input.ok) return input;
-    config = input.value;
+    config = await expandCredentialNames(input.value);
   }
   if (invocation.command === "init") {
     const result = await engine.initJob({
@@ -1000,6 +1009,11 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     // always name the release.
     else if (invocation.command === "version")
       result = { ok: true, value: { version: MIGMATE_VERSION } };
+    else if (invocation.command === "creds dir")
+      result = {
+        ok: true,
+        value: { credentialDirectory: await ensureCredentialDirectory(credentialDirectory()) },
+      };
     else {
       // The durable store is node:sqlite, a release-candidate API. A runtime below
       // its floor refuses here rather than reaching the store, and --help still
@@ -1052,6 +1066,10 @@ export async function run(argv: string[], io: Io, suppliedEngine?: Engine): Prom
     if (invocation?.help && output.mode === "text" && result.ok) await io.stdout.write(HELP);
     else if (invocation?.command === "version" && output.mode === "text" && result.ok)
       await io.stdout.write(`${MIGMATE_VERSION}\n`);
+    else if (invocation?.command === "creds dir" && output.mode === "text" && result.ok)
+      await io.stdout.write(
+        `${(result.value as { credentialDirectory: string }).credentialDirectory}\n`,
+      );
     else if (invocation?.detach && result.ok && output.mode === "text") {
       const value = result.value as { pid: number; logPath: string };
       await io.stdout.write(

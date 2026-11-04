@@ -287,3 +287,56 @@ test("Dropbox creds init persists both provider bindings and rereads them throug
     /code-canary|access-canary|refresh-canary/u,
   );
 });
+
+test("creds init resolves a short credential name and records its absolute path", async (t) => {
+  const input = await fixture(t);
+  const directory = join(input.storeDirectory, "..", "credentials");
+  const previous = process.env.MIGMATE_CREDENTIALS_DIR;
+  process.env.MIGMATE_CREDENTIALS_DIR = directory;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MIGMATE_CREDENTIALS_DIR;
+    else process.env.MIGMATE_CREDENTIALS_DIR = previous;
+  });
+  await mkdir(directory, { mode: 0o755 });
+  const path = join(directory, "rclone.conf");
+  await writeFile(path, input.original, { mode: 0o600 });
+  const engine = openEngine({
+    home: input.storeDirectory,
+    provider: new FakeFileMigrationPort({
+      sourceDriveId: "namespace",
+      sourceRootId: "/",
+      destinationDriveId: "drive",
+      destinationRootId: "root",
+      sourceItems: [],
+      destinationItems: [],
+      checks: [{ id: "fixture.credentials", title: "Provider seam", status: "pass", evidence: {} }],
+    }),
+  });
+  t.after(() => engine.close());
+  const initialized = await engine.initJob({ type: "file_migration" });
+  assert.ok(initialized.ok);
+  const configPath = join(input.storeDirectory, "operator.json");
+  const rclone = { ...input.config.rclone, config: { resolver: "file", path: "rclone.conf" } };
+  await writeFile(configPath, JSON.stringify({ ...input.config, rclone }));
+  t.mock.method(globalThis, "fetch", async () => issuance());
+  const code = await run(
+    ["creds", "init", "--home", input.storeDirectory, "--job", initialized.value.id].concat([
+      "--config",
+      configPath,
+      "--output",
+      "json",
+    ]),
+    input.io,
+    engine,
+  );
+  assert.equal(code, 0, input.output().stdout);
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  assert.match(await readFile(path, "utf8"), /migmate_scope_proof/u);
+  const persisted = parseToml(
+    await readFile(join(input.storeDirectory, "jobs", initialized.value.id, "job.toml"), "utf8"),
+  );
+  assert.deepEqual(persisted.rclone, {
+    ...rclone,
+    config: { resolver: "file", path, mode: "0600" },
+  });
+});
