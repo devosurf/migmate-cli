@@ -2,6 +2,8 @@
 
 Operator config holds **credential references**: typed pointers to operator-owned files, resolved just in time. Keep secret values out of config, out of issues, out of commits, and out of your own output — a reference is the thing to pass around. A reference file must be a regular file owned by the invoking user with no group or other permission bits — `0600`, or stricter — and a `mode` stated in the reference must read exactly `0600`.
 
+Credential files live in the **credential directory**: run `migmate creds dir` for its path; it creates the directory owner-only. Never ask the human where to keep credential files and never invent another folder. Write each file there `0600` and reference it by short name (`path = "rclone.conf"`); Migmate records the absolute path. Paths inside an rclone config (`service_account_file`) must be absolute: build them from `creds dir`.
+
 `scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) walk a human through tenant setup and write those files. Both accept `--resume <env-file>`. These are human steps; hand them over rather than attempting the tenant work.
 
 For file-job delegation, set top-level `impersonate = true` and `subject` in job
@@ -37,7 +39,7 @@ contain the known read-only scopes `team_info.read`, `team_data.content.read`, a
 Full Dropbox selects the accessible content; these scopes constrain operations.
 Use the administrator's **team-member ID** (`dbmid:…`), not their email.
 
-Prepare an owner-only rclone file outside the engine home with the Google destination
+Prepare an owner-only rclone file in the credential directory with the Google destination
 remote and this source seed:
 
 ```ini
@@ -215,7 +217,7 @@ Only a manifest that names library members needs the optional credential:
 ```toml
 [rclone.sharepointDestinationCertificate]
 resolver = "file"
-path = "/operator-owned/sharepoint-destination.pem"
+path = "sharepoint-destination.pem"
 mode = "0600"
 ```
 
@@ -229,7 +231,7 @@ Hand these tenant prerequisites to the administrator:
    `fullcontrol` on each approved existing site. The migration app must not receive
    tenant-wide SharePoint `Sites.FullControl.All`; Migmate refuses broader token roles.
 3. Keep the matching RSA private key (at least 2048 bits) and X.509 certificate in
-   one operator-owned PEM outside the job folder with owner-only access. Add only
+   one owner-only PEM in the credential directory. Add only
    its file reference to the operator config. Never print or copy private-key bytes.
 4. Named groups must already resolve uniquely by email among the selected site's
    registered principals. An unresolved/ambiguous group refuses

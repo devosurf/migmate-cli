@@ -96,7 +96,8 @@ explicitly; `--help` remains available.
 
 The `.migmate/` directory holds durable plans, checkpoints, reports and archive content.
 Keep it and customer inputs out of source control; this repository ignores `.migmate/`.
-Credential files remain protected outside the repository and job directories.
+Credential files remain protected outside the repository and job directories, by default
+in Migmate's [credential directory](#credential-directory).
 
 ## The lifecycle
 
@@ -1122,7 +1123,29 @@ In `migmate web`, tick the confirmation checkbox beside **Quit process safely**,
 
 Operator config carries **credential references** — typed pointers to operator-owned files — never secret values. Migmate resolves a reference just in time and never copies the bytes into durable state. Reference files must be regular files owned by the invoking user carrying no group or other permission bits — `0600`, or stricter — and live outside the repository; the engine and the live test runner both refuse anything looser.
 
-`scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
+`scripts/stage1-prereqs.sh` (file route) and `scripts/archive-prereqs.sh` (archive route) are interactive wizards that walk the tenant setup a human has to do, and write those files, by default into the credential directory. Both take `--resume <env-file>` to re-emit config without walking the tenant again.
+
+### Credential directory
+
+Credential files have one default home, the same for every job and project:
+`${XDG_CONFIG_HOME:-~/.config}/migmate/credentials`, on macOS as on Linux.
+`migmate creds dir` prints it, creating it owner-only (`0700`) when missing and
+tightening an existing directory you own; it refuses a symlink or a directory owned by
+someone else. `MIGMATE_CREDENTIALS_DIR` (an absolute path) overrides it.
+
+A reference may name a file in that directory by a short name instead of a full path:
+
+```toml
+[rclone]
+config = { resolver = "file", path = "rclone.conf", mode = "0600" }
+```
+
+A short name is one or more plain segments (`rclone.conf`, `entra/client-secret.txt`):
+no `..`, `~`, `$`, or leading dots. `init`, `creds init` and `settings` expand it to the
+absolute path before anything is stored, so `job.toml` always records the full path and
+later commands read the same file wherever they run from. Absolute paths still work.
+Paths written inside an rclone config, such as `service_account_file`, are read by
+rclone itself and must stay absolute.
 
 ### SharePoint source grants and discovery
 

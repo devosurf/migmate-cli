@@ -45,7 +45,7 @@ Read [STAGED.md](STAGED.md) before choosing staging, mirror or access timing; re
 
 ## 3 — Prerequisites
 
-Use [CREDENTIALS.md](CREDENTIALS.md) to read existing references, client/tenant IDs and route requirements without printing secrets. Ask only unresolved source-grant and delegation decisions. Hand tenant-only work to the human as a `skill://wizard` checklist, then observe it. Onboard with `creds init`; run `doctor`. For file jobs, load the reviewed manifest using [ROUTES.md](ROUTES.md), then rerun `doctor` for mapping-specific access.
+Use [CREDENTIALS.md](CREDENTIALS.md) to read existing references, client/tenant IDs and route requirements without printing secrets. Credential files go in the credential directory (`migmate creds dir`); where to keep them is never a question. Ask only unresolved source-grant and delegation decisions. Hand tenant-only work to the human as a `skill://wizard` checklist, then observe it. Onboard with `creds init`; run `doctor`. For file jobs, load the reviewed manifest using [ROUTES.md](ROUTES.md), then rerun `doctor` for mapping-specific access.
 
 **Complete when:** credential onboarding and the applicable mapping/scope preflight pass after all human prerequisite actions have been observed.
 
